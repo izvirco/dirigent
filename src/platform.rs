@@ -1,0 +1,126 @@
+use std::{
+    env,
+    path::PathBuf,
+    process::{Child, Command},
+};
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn state_path() -> Result<PathBuf, String> {
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(data_home).join("dirigent/v0/state.json"));
+    }
+    let home = home_dir().ok_or_else(|| {
+        "HOME and XDG_DATA_HOME are unset; cannot persist Dirigent state".to_string()
+    })?;
+    Ok(home.join(".local/share/dirigent/v0/state.json"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn state_path() -> Result<PathBuf, String> {
+    let data_home = env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join("AppData/Roaming")))
+        .ok_or_else(|| {
+            "APPDATA and USERPROFILE are unset; cannot persist Dirigent state".to_string()
+        })?;
+    Ok(data_home.join("dirigent/v0/state.json"))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn cache_path() -> Result<PathBuf, String> {
+    if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
+        return Ok(PathBuf::from(cache_home).join("dirigent/v0/cache.sqlite3"));
+    }
+    let home = home_dir().ok_or_else(|| {
+        "HOME and XDG_CACHE_HOME are unset; cannot initialize the session cache".to_string()
+    })?;
+    Ok(home.join(".cache/dirigent/v0/cache.sqlite3"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn cache_path() -> Result<PathBuf, String> {
+    let cache_home = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join("AppData/Local")))
+        .ok_or_else(|| {
+            "LOCALAPPDATA and USERPROFILE are unset; cannot initialize the session cache"
+                .to_string()
+        })?;
+    Ok(cache_home.join("dirigent/v0/cache.sqlite3"))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = env::var_os("HOMEDRIVE")?;
+            let path = env::var_os("HOMEPATH")?;
+            Some(PathBuf::from(drive).join(path))
+        })
+        .or_else(|| env::var_os("HOME").map(PathBuf::from))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn pi_command(nix_enabled: bool) -> Result<Command, String> {
+    let command = if nix_enabled {
+        let mut command = Command::new("nix");
+        command.args(["develop", "--no-write-lock-file", "--command", "pi"]);
+        let nix_config = env::var("NIX_CONFIG").unwrap_or_default();
+        command.env("NIX_CONFIG", format!("{nix_config}\nwarn-dirty = false"));
+        command
+    } else {
+        Command::new("pi")
+    };
+    Ok(command)
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn pi_command(_nix_enabled: bool) -> Result<Command, String> {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let path = env::var_os("PATH").and_then(|path| {
+        env::split_paths(&path).find_map(|directory| {
+            ["pi.exe", "pi.cmd"]
+                .into_iter()
+                .map(|name| directory.join(name))
+                .find(|candidate| candidate.is_file())
+        })
+    });
+    let path = path.ok_or_else(|| {
+        "could not find pi.exe or pi.cmd on PATH; install pi before starting Dirigent".to_string()
+    })?;
+    let mut command = Command::new(path);
+    command.creation_flags(CREATE_NO_WINDOW);
+    Ok(command)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn stop_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn stop_child(child: &mut Child) {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = Command::new("taskkill.exe")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}

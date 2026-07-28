@@ -1,0 +1,15 @@
+pub(crate) const BG: u32 = 0x09090b;
+pub(crate) const SURFACE: u32 = 0x15181e;
+pub(crate) const SURFACE_HOVER: u32 = 0x1b1f27;
+pub(crate) const BORDER: u32 = 0x252a34;
+pub(crate) const TEXT: u32 = 0xe8eaf0;
+pub(crate) const MUTED: u32 = 0x858c9b;
+pub(crate) const THINKING_TEXT: u32 = 0xaeb4c0;
+pub(crate) const FAINT: u32 = 0x555d6c;
+pub(crate) const ACCENT: u32 = 0x77a7ff;
+pub(crate) const BLUE: u32 = 0x77a7ff;
+pub(crate) const ORANGE: u32 = 0xf09a4a;
+pub(crate) const GREEN: u32 = 0x7fd88f;
+pub(crate) const RED: u32 = 0xff7b72;
+pub(crate) const YELLOW: u32 = 0xf0c674;
+pub(crate) const PURPLE: u32 = 0xb48ef7;

@@ -1,0 +1,76 @@
+use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+
+use crate::{
+    app::{Dirigent, PathCompletionTarget},
+    theme::{BG, BLUE, TEXT},
+};
+
+impl Dirigent {
+    pub(super) fn render_add_project(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_8()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(620.0))
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .child("Create a project"),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .relative()
+                                    .min_w(px(0.0))
+                                    .flex_1()
+                                    .child(self.project_input.clone())
+                                    .when(
+                                        self.has_path_completion(PathCompletionTarget::Project),
+                                        |element| {
+                                            element.child(
+                                                div()
+                                                    .absolute()
+                                                    .top(px(46.0))
+                                                    .left_0()
+                                                    .right_0()
+                                                    .child(self.render_path_completion_menu(cx)),
+                                            )
+                                        },
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("create-project")
+                                    .h(px(42.0))
+                                    .px_4()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_lg()
+                                    .bg(rgb(BLUE))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_sm()
+                                    .text_color(rgb(BG))
+                                    .hover(|style| style.bg(rgb(0x94bbff)))
+                                    .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
+                                    .child("Create"),
+                            ),
+                    ),
+            )
+    }
+}
