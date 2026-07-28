@@ -16,8 +16,8 @@ use fff_search::{
 use gpui::{
     ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, Image,
     ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState, MouseButton,
-    ObjectFit, ScrollHandle, SharedString, StyledImage, Window, div, img, point, prelude::*,
-    profiler, px, rgb,
+    ObjectFit, ScrollHandle, SharedString, StyledImage, Window, WindowBackgroundAppearance, div,
+    img, point, prelude::*, profiler, px,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -29,7 +29,7 @@ use crate::{
     rpc::{PiProcess, RuntimeEvent, RuntimeTarget},
     storage,
     text_input::{AttachedImage, InputEvent, TextInput},
-    theme::{self, bg, border, muted, theme_text},
+    theme::{self, bg, border, muted, rgb, theme_text},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -285,6 +285,7 @@ pub(crate) struct Dirigent {
     pub(crate) banner: Option<String>,
     config_error: Option<String>,
     pub(crate) font: SharedString,
+    window_transparent: Option<bool>,
     pub(crate) conversation_list: ListState,
     conversation_list_message_count: usize,
     conversation_list_working: bool,
@@ -907,6 +908,7 @@ impl Dirigent {
             banner,
             config_error,
             font: appearance.font.into(),
+            window_transparent: None,
             conversation_list,
             conversation_list_message_count,
             conversation_list_working,
@@ -3569,6 +3571,16 @@ impl Dirigent {
 
 impl Render for Dirigent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let window_transparent = bg() & 0xff != 0xff;
+        if self.window_transparent != Some(window_transparent) {
+            window.set_background_appearance(if window_transparent {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            });
+            self.window_transparent = Some(window_transparent);
+        }
+
         self.frame_timing.collect_frames(Instant::now());
         let frame_timing_labels = self.frame_timing.labels();
         self.sync_path_completion_input(cx);

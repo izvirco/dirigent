@@ -5,10 +5,10 @@ use gpui::{
     EventEmitter, FocusHandle, Focusable, GlobalElementId, HighlightStyle, Image, IntoElement,
     KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
     Render, ScrollHandle, SharedString, StyledText, TextLayout, Window, div, fill, prelude::*, px,
-    relative, rgb, rgba, size,
+    relative, rgba, size,
 };
 
-use crate::theme::{accent, blue, border, faint, muted, surface, theme_text};
+use crate::theme::{accent, blue, border, faint, muted, rgb, surface, theme_text};
 
 pub(crate) enum InputEvent {
     Submit,

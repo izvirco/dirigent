@@ -1,8 +1,8 @@
-use gpui::{Context, IntoElement, deferred, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, deferred, div, prelude::*, px};
 
 use crate::{
     app::{Dirigent, KeyboardMenu},
-    theme::{border, faint, muted},
+    theme::{border, faint, muted, rgb},
 };
 
 const SPACE_ITEMS: &[(&str, &str)] = &[

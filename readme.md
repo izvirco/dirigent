@@ -6,6 +6,22 @@ Dirigent is a native desktop workspace for running and managing multiple [Pi cod
 
 On first launch, Dirigent creates `~/.config/dirigent/config.toml` and sample themes in `~/.config/dirigent/theme/`. Set `theme` in `config.toml` to a theme filename without `.toml`. Set `font` to any installed font family, for example `font = "Iosevka"`. Changes to the config or selected theme are reloaded automatically.
 
+Theme colors accept `#RRGGBB` (opaque) or `#RRGGBBAA`, with the final byte controlling opacity. For example, `surface = "#15181e80"` uses 50% opacity. The equivalent `0xRRGGBB` and `0xRRGGBBAA` forms are also accepted. When `background` has an alpha value below `ff`, Dirigent exposes a transparent window surface to the compositor.
+
+Niri can blur behind the transparent surface with a window rule:
+
+```kdl
+blur {
+    on
+}
+window-rule {
+    match app-id="^dirigent$"
+    background-effect {
+        blur true
+    }
+}
+```
+
 Dirigent follows `XDG_CONFIG_HOME` on Unix. On Windows, configuration is stored in `%APPDATA%\dirigent`.
 
 ## Linux (Nix)

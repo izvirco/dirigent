@@ -3,13 +3,15 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
-    canvas, div, img, list, prelude::*, px, relative, rgb,
+    canvas, div, img, list, prelude::*, px, relative,
 };
 
 use crate::{
     app::Dirigent,
     model::{HarnessStatus, Message, MessageRole},
-    theme::{blue, green, muted, orange, purple, surface_hover, theme_text, thinking_text, yellow},
+    theme::{
+        blue, green, muted, orange, purple, rgb, surface_hover, theme_text, thinking_text, yellow,
+    },
 };
 
 fn working_dot(delta: f32) -> usize {

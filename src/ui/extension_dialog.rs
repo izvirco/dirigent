@@ -1,8 +1,8 @@
-use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px};
 
 use crate::{
     app::{DialogKind, Dirigent},
-    theme::{accent, bg, border, muted, surface, surface_hover, theme_text},
+    theme::{accent, bg, border, muted, rgb, surface, surface_hover, theme_text},
 };
 
 impl Dirigent {

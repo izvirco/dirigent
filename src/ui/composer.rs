@@ -1,13 +1,13 @@
 use gpui::{
     AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement, ObjectFit, PathBuilder,
-    StyledImage, Window, canvas, div, img, point, prelude::*, px, rgb, rgba,
+    StyledImage, Window, canvas, div, img, point, prelude::*, px, rgba,
 };
 
 use crate::{
     app::{ComposerDropdown, Dirigent},
     model::{ContextUsage, HarnessStatus},
     text_input::TextInput,
-    theme::{bg, blue, border, muted, surface, surface_hover, theme_text},
+    theme::{bg, blue, border, muted, rgb, surface, surface_hover, theme_text},
 };
 
 fn format_context_usage(usage: ContextUsage) -> String {

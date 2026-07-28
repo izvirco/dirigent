@@ -41,13 +41,19 @@ impl<'de> Deserialize<'de> for Color {
             .strip_prefix('#')
             .or_else(|| value.strip_prefix("0x"))
             .unwrap_or(&value);
-        if digits.len() != 6 || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if !matches!(digits.len(), 6 | 8) || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(serde::de::Error::custom(format!(
-                "expected an RGB color such as \"#77a7ff\", got {value:?}"
+                "expected an RGB or RGBA color such as \"#77a7ff\" or \"#77a7ff80\", got {value:?}"
             )));
         }
         u32::from_str_radix(digits, 16)
-            .map(Self)
+            .map(|color| {
+                Self(if digits.len() == 6 {
+                    color << 8 | 0xff
+                } else {
+                    color
+                })
+            })
             .map_err(serde::de::Error::custom)
     }
 }
@@ -60,7 +66,7 @@ macro_rules! define_theme {
             $($field: Color,)+
         }
 
-        $(static $storage: AtomicU32 = AtomicU32::new($default);)+
+        $(static $storage: AtomicU32 = AtomicU32::new(($default << 8) | 0xff);)+
 
         $(pub(crate) fn $getter() -> u32 {
             $storage.load(Ordering::Relaxed)
@@ -70,6 +76,11 @@ macro_rules! define_theme {
             $($storage.store(theme.$field.0, Ordering::Relaxed);)+
         }
     };
+}
+
+/// Converts a packed `0xRRGGBBAA` theme color to GPUI's color type.
+pub(crate) fn rgb(color: u32) -> gpui::Rgba {
+    gpui::rgba(color)
 }
 
 define_theme!(
@@ -379,15 +390,19 @@ mod tests {
     }
 
     #[test]
-    fn parses_hash_and_hex_prefix_colors() {
-        let hash: Color = toml::from_str("value = \"#77a7ff\"")
+    fn parses_rgb_and_rgba_colors() {
+        let rgb: Color = toml::from_str("value = \"#77a7ff\"")
             .map(|value: toml::Value| value["value"].clone().try_into().unwrap())
             .unwrap();
-        let hex: Color = toml::from_str("value = \"0x77a7ff\"")
+        let prefixed: Color = toml::from_str("value = \"0x77a7ff\"")
             .map(|value: toml::Value| value["value"].clone().try_into().unwrap())
             .unwrap();
-        assert_eq!(hash.0, 0x77a7ff);
-        assert_eq!(hex.0, hash.0);
+        let rgba: Color = toml::from_str("value = \"#77a7ff80\"")
+            .map(|value: toml::Value| value["value"].clone().try_into().unwrap())
+            .unwrap();
+        assert_eq!(rgb.0, 0x77a7ffff);
+        assert_eq!(prefixed.0, rgb.0);
+        assert_eq!(rgba.0, 0x77a7ff80);
     }
 
     #[test]

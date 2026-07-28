@@ -1,8 +1,8 @@
-use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
+use gpui::{Context, IntoElement, div, prelude::*, px};
 
 use crate::{
     app::{Dirigent, PathCompletionTarget},
-    theme::{bg, blue, theme_text},
+    theme::{bg, blue, rgb, theme_text},
 };
 
 impl Dirigent {

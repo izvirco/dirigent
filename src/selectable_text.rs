@@ -4,10 +4,13 @@ use std::ops::Range;
 use gpui::ClipboardItem;
 use gpui::{
     AnyElement, Context, CursorStyle, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, StyledText, TextLayout, div, prelude::*, rgb,
+    MouseMoveEvent, MouseUpEvent, SharedString, StyledText, TextLayout, div, prelude::*,
 };
 
-use crate::app::{Dirigent, ThreadTextSelection};
+use crate::{
+    app::{Dirigent, ThreadTextSelection},
+    theme::rgb,
+};
 
 fn text_index(layout: &TextLayout, position: gpui::Point<gpui::Pixels>, len: usize) -> usize {
     layout

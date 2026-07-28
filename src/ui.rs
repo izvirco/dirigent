@@ -8,12 +8,12 @@ mod sidebar;
 
 use gpui::{
     AnyElement, Context, IntoElement, ScrollHandle, Window, deferred, div, prelude::*, px,
-    relative, rgb, rgba,
+    relative, rgba,
 };
 
 use crate::{
     app::{Dirigent, PathCompletionTarget},
-    theme::{bg, border, muted, orange, theme_text},
+    theme::{bg, border, muted, orange, rgb, theme_text},
 };
 
 impl Dirigent {

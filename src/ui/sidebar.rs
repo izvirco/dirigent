@@ -2,13 +2,15 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, IntoElement, PathBuilder, Pixels, Point,
-    Window, canvas, deferred, div, point, prelude::*, px, rgb,
+    Window, canvas, deferred, div, point, prelude::*, px,
 };
 
 use crate::{
     app::{Dirigent, KeyboardMode, SidebarMenu},
     model::{HarnessStatus, Id},
-    theme::{blue, border, faint, muted, orange, red, surface, surface_hover, theme_text, yellow},
+    theme::{
+        blue, border, faint, muted, orange, red, rgb, surface, surface_hover, theme_text, yellow,
+    },
 };
 
 #[derive(Clone)]
@@ -756,7 +758,6 @@ impl Dirigent {
                             .right(px(8.0))
                             .flex()
                             .items_center()
-                            .bg(rgb(crate::theme::sidebar_bg()))
                             .when(!menu_open, |controls| {
                                 controls
                                     .invisible()

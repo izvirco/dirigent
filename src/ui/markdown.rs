@@ -1,12 +1,12 @@
 use gpui::{
     AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
-    StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgb, rgba,
+    StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgba,
 };
 
 use crate::{
     app::Dirigent,
     markdown::{MarkdownBlock, MarkdownDocument, MarkdownTable, MarkdownText, TableAlignment},
-    theme::{accent, blue, border, muted, surface, surface_hover, theme_text},
+    theme::{accent, blue, border, muted, rgb, surface, surface_hover, theme_text},
 };
 
 impl Dirigent {
