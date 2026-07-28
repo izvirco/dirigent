@@ -3,6 +3,9 @@ name = "dirigent"
 version = "0.0.0"
 edition = "2024"
 
+[features]
+bundled-lilex = []
+
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "e191dd00c7e36cfcbbdccad2babca096067777c0", default-features = false, features = ["font-kit", "wayland"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e191dd00c7e36cfcbbdccad2babca096067777c0", features = ["font-kit", "wayland"] }
@@ -15,6 +18,9 @@ fff-search = "=0.10.1"
 pulldown-cmark = { version = "0.13", default-features = false }
 notify = "8"
 toml = "0.9"
+
+[build-dependencies]
+embed-resource = "3"
 
 [patch.crates-io]
 # Includes the unreleased fix for Rust's `pub_use_of_private_extern_crate` warning.

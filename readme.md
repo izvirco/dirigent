@@ -4,7 +4,7 @@ Dirigent is a native desktop workspace for running and managing multiple [Pi cod
 
 ## Configuration and themes
 
-On first launch, Dirigent creates `~/.config/dirigent/config.toml` and sample themes in `~/.config/dirigent/theme/`. Set `theme` in `config.toml` to a theme filename without `.toml`. Changes to the config or selected theme are reloaded automatically.
+On first launch, Dirigent creates `~/.config/dirigent/config.toml` and sample themes in `~/.config/dirigent/theme/`. Set `theme` in `config.toml` to a theme filename without `.toml`. Set `font` to any installed font family, for example `font = "Iosevka"`. Changes to the config or selected theme are reloaded automatically.
 
 Dirigent follows `XDG_CONFIG_HOME` on Unix. On Windows, configuration is stored in `%APPDATA%\dirigent`.
 
@@ -12,8 +12,17 @@ Dirigent follows `XDG_CONFIG_HOME` on Unix. On Windows, configuration is stored 
 
 ```
 nix develop
-cargo run --release
+cargo run
 ```
+
+To produce a release binary with Lilex embedded:
+
+```
+nix develop
+cargo build --release --features bundled-lilex
+```
+
+The Nix development shell sets `LILEX_FONT_DIR` for the build. Outside Nix, set it to a directory containing the static Lilex TTF files before enabling `bundled-lilex`. The font files are copied into Cargo's build output and embedded in the binary; they are not stored in this repository. Builds without the feature continue to use system fonts. Distribute `licenses/Lilex-OFL.txt` with bundled release artifacts.
 
 ## Run on M$ Windows
 

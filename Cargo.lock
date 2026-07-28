@@ -1279,6 +1279,7 @@ version = "0.0.0"
 dependencies = [
  "async-channel",
  "base64",
+ "embed-resource",
  "fff-search",
  "gpui",
  "gpui_platform",

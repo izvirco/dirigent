@@ -41,6 +41,7 @@
 
         env = {
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          LILEX_FONT_DIR = "${pkgs.lilex}/share/fonts/truetype";
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
             pkgs.fontconfig
             pkgs.freetype
