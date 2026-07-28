@@ -4,7 +4,7 @@ use std::ops::Range;
 use gpui::ClipboardItem;
 use gpui::{
     AnyElement, Context, CursorStyle, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, StyledText, TextLayout, div, prelude::*, rgb, rgba,
+    MouseMoveEvent, MouseUpEvent, SharedString, StyledText, TextLayout, div, prelude::*, rgb,
 };
 
 use crate::app::{Dirigent, ThreadTextSelection};
@@ -46,7 +46,8 @@ fn merged_highlights(
                 .as_ref()
                 .is_some_and(|selected| selected.contains(&range.start));
             if selected {
-                style.background_color = Some(rgba(0x477dca66).into());
+                style.background_color =
+                    Some(rgb(crate::theme::text_selection()).opacity(0.40).into());
             }
             (style != HighlightStyle::default()).then_some((range, style))
         })

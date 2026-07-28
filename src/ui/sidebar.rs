@@ -8,10 +8,8 @@ use gpui::{
 use crate::{
     app::{Dirigent, KeyboardMode, SidebarMenu},
     model::{HarnessStatus, Id},
-    theme::{BLUE, BORDER, FAINT, MUTED, ORANGE, RED, SURFACE, SURFACE_HOVER, TEXT, YELLOW},
+    theme::{blue, border, faint, muted, orange, red, surface, surface_hover, theme_text, yellow},
 };
-
-const SIDEBAR_BG: u32 = 0x040405;
 
 #[derive(Clone)]
 struct ProjectDrag {
@@ -33,10 +31,10 @@ impl Render for ProjectDrag {
             .items_center()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SURFACE))
+            .border_color(rgb(border()))
+            .bg(rgb(surface()))
             .text_sm()
-            .text_color(rgb(TEXT))
+            .text_color(rgb(theme_text()))
             .child(self.name.clone())
     }
 }
@@ -165,7 +163,7 @@ fn chevron_icon(expanded: bool) -> impl IntoElement {
         },
         |_, chevron, window, _| {
             if let Some(chevron) = chevron {
-                window.paint_path(chevron, rgb(MUTED));
+                window.paint_path(chevron, rgb(muted()));
             }
         },
     )
@@ -271,10 +269,10 @@ impl Dirigent {
             .items_center()
             .rounded_sm()
             .text_xs()
-            .text_color(rgb(if archive_enabled { MUTED } else { FAINT }))
+            .text_color(rgb(if archive_enabled { muted() } else { faint() }))
             .when(archive_enabled, |element| {
                 element
-                    .hover(|style| style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                    .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.set_harness_archived(id, !archived);
                         cx.stop_propagation();
@@ -295,8 +293,8 @@ impl Dirigent {
                 .flex_col()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(0x0d0e11))
+                .border_color(rgb(border()))
+                .bg(rgb(crate::theme::menu_bg()))
                 .shadow_lg()
                 .occlude()
                 .on_mouse_down(
@@ -313,8 +311,8 @@ impl Dirigent {
                         .items_center()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(rgb(MUTED))
-                        .hover(|style| style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                        .text_color(rgb(muted()))
+                        .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.begin_renaming_harness(id, cx);
                             cx.stop_propagation();
@@ -331,8 +329,8 @@ impl Dirigent {
                         .items_center()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(rgb(RED))
-                        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                        .text_color(rgb(red()))
+                        .hover(|style| style.bg(rgb(surface_hover())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.delete_harness(id);
                             cx.stop_propagation();
@@ -373,7 +371,11 @@ impl Dirigent {
         let group = format!("sidebar-harness-{id}");
         let archive_group = format!("quick-archive-thread-{id}");
         let menu_group = format!("thread-menu-trigger-{id}");
-        let row_background = if active { SURFACE } else { SIDEBAR_BG };
+        let row_background = if active {
+            surface()
+        } else {
+            crate::theme::sidebar_bg()
+        };
         let project_name = self
             .projects
             .iter()
@@ -383,21 +385,21 @@ impl Dirigent {
         let detailed = placement != ThreadPlacement::Project;
         let height = if detailed { 48.0 } else { 34.0 };
         let (state_label, state_color) = if placement == ThreadPlacement::Workpool {
-            (format_elapsed(harness.run_started_at), MUTED)
+            (format_elapsed(harness.run_started_at), muted())
         } else if attention_required {
-            ("Needs input".to_string(), ORANGE)
+            ("Needs input".to_string(), orange())
         } else {
             match status {
-                HarnessStatus::Failed => ("Failed".to_string(), RED),
-                HarnessStatus::Stopped => ("Stopped".to_string(), FAINT),
-                HarnessStatus::Starting => ("Starting".to_string(), MUTED),
-                HarnessStatus::Working => (format_elapsed(harness.run_started_at), MUTED),
+                HarnessStatus::Failed => ("Failed".to_string(), red()),
+                HarnessStatus::Stopped => ("Stopped".to_string(), faint()),
+                HarnessStatus::Starting => ("Starting".to_string(), muted()),
+                HarnessStatus::Working => (format_elapsed(harness.run_started_at), muted()),
                 HarnessStatus::Idle => (
                     harness.last_run_duration.map_or_else(
                         || "Finished".to_string(),
                         |duration| format!("Finished in {}", format_duration(duration)),
                     ),
-                    MUTED,
+                    muted(),
                 ),
             }
         };
@@ -411,8 +413,8 @@ impl Dirigent {
             .flex()
             .items_center()
             .rounded_md()
-            .when(active, |style| style.bg(rgb(SURFACE)))
-            .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+            .when(active, |style| style.bg(rgb(surface())))
+            .hover(|style| style.bg(rgb(surface_hover())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_harness(id);
                 this.sidebar_menu = None;
@@ -440,11 +442,11 @@ impl Dirigent {
                                 gpui::FontWeight::NORMAL
                             })
                             .text_color(rgb(if archived {
-                                MUTED
+                                muted()
                             } else if active {
-                                TEXT
+                                theme_text()
                             } else {
-                                MUTED
+                                muted()
                             }))
                             .when(renaming, |element| {
                                 element.child(self.thread_rename_input.clone())
@@ -460,7 +462,7 @@ impl Dirigent {
                                 .items_center()
                                 .whitespace_nowrap()
                                 .text_xs()
-                                .text_color(rgb(FAINT))
+                                .text_color(rgb(faint()))
                                 .child(
                                     div()
                                         .min_w(px(0.0))
@@ -489,7 +491,7 @@ impl Dirigent {
                         .flex()
                         .items_center()
                         .when(!show_notification, |controls| {
-                            controls.bg(rgb(SURFACE_HOVER))
+                            controls.bg(rgb(surface_hover()))
                         })
                         .when(!show_notification && !menu_open, |controls| {
                             controls
@@ -508,7 +510,7 @@ impl Dirigent {
                                     .justify_center()
                                     .when(show_notification, |archive| {
                                         archive.invisible().group_hover(group.clone(), |style| {
-                                            style.visible().bg(rgb(SURFACE_HOVER))
+                                            style.visible().bg(rgb(surface_hover()))
                                         })
                                     })
                                     .on_mouse_down(
@@ -521,8 +523,8 @@ impl Dirigent {
                                         cx.notify();
                                     }))
                                     .child(hover_icon(
-                                        archive_icon(MUTED),
-                                        archive_icon(BLUE),
+                                        archive_icon(muted()),
+                                        archive_icon(blue()),
                                         archive_group,
                                     )),
                             )
@@ -538,9 +540,9 @@ impl Dirigent {
                                     .justify_center()
                                     .bg(rgb(row_background))
                                     .group_hover(group.clone(), |style| {
-                                        style.bg(rgb(SURFACE_HOVER))
+                                        style.bg(rgb(surface_hover()))
                                     })
-                                    .child(div().size(px(7.0)).rounded_full().bg(rgb(BLUE))),
+                                    .child(div().size(px(7.0)).rounded_full().bg(rgb(blue()))),
                             )
                         })
                         .when(!has_unread, |controls| {
@@ -554,8 +556,8 @@ impl Dirigent {
                                     .items_center()
                                     .justify_center()
                                     .text_base()
-                                    .text_color(rgb(MUTED))
-                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .text_color(rgb(muted()))
+                                    .hover(|style| style.text_color(rgb(theme_text())))
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
                                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -566,8 +568,8 @@ impl Dirigent {
                                         cx.notify();
                                     }))
                                     .child(hover_icon(
-                                        ellipsis_vertical_icon(MUTED),
-                                        ellipsis_vertical_icon(BLUE),
+                                        ellipsis_vertical_icon(muted()),
+                                        ellipsis_vertical_icon(blue()),
                                         menu_group,
                                     )),
                             )
@@ -608,8 +610,8 @@ impl Dirigent {
                 .flex_col()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(0x0d0e11))
+                .border_color(rgb(border()))
+                .bg(rgb(crate::theme::menu_bg()))
                 .shadow_lg()
                 .occlude()
                 .on_mouse_down(
@@ -626,8 +628,8 @@ impl Dirigent {
                         .items_center()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(rgb(RED))
-                        .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                        .text_color(rgb(red()))
+                        .hover(|style| style.bg(rgb(surface_hover())))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.delete_project(id);
                             cx.stop_propagation();
@@ -680,7 +682,7 @@ impl Dirigent {
             .relative()
             .drag_over::<ProjectDrag>(move |style, dragged, _, _| {
                 if dragged.id != id {
-                    style.border_t_1().border_color(rgb(BLUE))
+                    style.border_t_1().border_color(rgb(blue()))
                 } else {
                     style
                 }
@@ -699,7 +701,11 @@ impl Dirigent {
                     .flex()
                     .items_center()
                     .text_sm()
-                    .text_color(rgb(if selected { TEXT } else { 0xc0c3ca }))
+                    .text_color(rgb(if selected {
+                        theme_text()
+                    } else {
+                        crate::theme::secondary_text()
+                    }))
                     .child(
                         div()
                             .id(("collapse-project", id as usize))
@@ -726,8 +732,8 @@ impl Dirigent {
                                     .flex()
                                     .items_center()
                                     .justify_center()
-                                    .text_color(rgb(FAINT))
-                                    .hover(|style| style.text_color(rgb(TEXT)))
+                                    .text_color(rgb(faint()))
+                                    .hover(|style| style.text_color(rgb(theme_text())))
                                     .child(chevron_icon(!collapsed)),
                             )
                             .child(
@@ -750,7 +756,7 @@ impl Dirigent {
                             .right(px(8.0))
                             .flex()
                             .items_center()
-                            .bg(rgb(SIDEBAR_BG))
+                            .bg(rgb(crate::theme::sidebar_bg()))
                             .when(!menu_open, |controls| {
                                 controls
                                     .invisible()
@@ -771,8 +777,8 @@ impl Dirigent {
                                         cx.new(|_| preview)
                                     })
                                     .child(hover_icon(
-                                        grip_vertical_icon(MUTED),
-                                        grip_vertical_icon(BLUE),
+                                        grip_vertical_icon(muted()),
+                                        grip_vertical_icon(blue()),
                                         grip_group,
                                     )),
                             )
@@ -785,7 +791,7 @@ impl Dirigent {
                                     .items_center()
                                     .justify_center()
                                     .rounded_md()
-                                    .hover(|style| style.shadow_sm().text_color(rgb(TEXT)))
+                                    .hover(|style| style.shadow_sm().text_color(rgb(theme_text())))
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
                                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -796,8 +802,8 @@ impl Dirigent {
                                         cx.notify();
                                     }))
                                     .child(hover_icon(
-                                        ellipsis_vertical_icon(MUTED),
-                                        ellipsis_vertical_icon(BLUE),
+                                        ellipsis_vertical_icon(muted()),
+                                        ellipsis_vertical_icon(blue()),
                                         menu_group,
                                     )),
                             )
@@ -810,8 +816,8 @@ impl Dirigent {
                                     .items_center()
                                     .justify_center()
                                     .rounded_md()
-                                    .text_color(rgb(FAINT))
-                                    .hover(|style| style.shadow_sm().text_color(rgb(TEXT)))
+                                    .text_color(rgb(faint()))
+                                    .hover(|style| style.shadow_sm().text_color(rgb(theme_text())))
                                     .on_mouse_down(
                                         gpui::MouseButton::Left,
                                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -823,8 +829,8 @@ impl Dirigent {
                                         cx.notify();
                                     }))
                                     .child(hover_icon(
-                                        plus_icon(MUTED),
-                                        plus_icon(BLUE),
+                                        plus_icon(muted()),
+                                        plus_icon(blue()),
                                         plus_group,
                                     )),
                             ),
@@ -852,7 +858,7 @@ impl Dirigent {
                                     .flex()
                                     .items_center()
                                     .text_xs()
-                                    .text_color(rgb(FAINT))
+                                    .text_color(rgb(faint()))
                                     .child("No archived threads"),
                             )
                         }),
@@ -874,8 +880,8 @@ impl Dirigent {
                 .flex_col()
                 .rounded_md()
                 .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(0x0d0e11))
+                .border_color(rgb(border()))
+                .bg(rgb(crate::theme::menu_bg()))
                 .shadow_lg()
                 .occlude()
                 .on_mouse_down(
@@ -892,8 +898,8 @@ impl Dirigent {
                         .items_center()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(rgb(MUTED))
-                        .hover(|style| style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                        .text_color(rgb(muted()))
+                        .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.begin_adding_project();
                             this.enter_input_mode(true);
@@ -955,8 +961,8 @@ impl Dirigent {
             .flex()
             .flex_col()
             .border_r_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SIDEBAR_BG))
+            .border_color(rgb(border()))
+            .bg(rgb(crate::theme::sidebar_bg()))
             .child(
                 div()
                     .id("project-scroll")
@@ -966,7 +972,7 @@ impl Dirigent {
                     .pt_3()
                     .when(!inbox_ids.is_empty(), |element| {
                         element
-                            .child(self.render_section_header("Inbox", inbox_ids.len(), YELLOW))
+                            .child(self.render_section_header("Inbox", inbox_ids.len(), yellow()))
                             .child(div().flex().flex_col().gap_1().children(
                                 inbox_ids.into_iter().map(|id| {
                                     self.render_sidebar_harness(id, ThreadPlacement::Inbox, cx)
@@ -976,7 +982,11 @@ impl Dirigent {
                     })
                     .when(!workpool_ids.is_empty(), |element| {
                         element
-                            .child(self.render_section_header("Workpool", workpool_ids.len(), BLUE))
+                            .child(self.render_section_header(
+                                "Workpool",
+                                workpool_ids.len(),
+                                blue(),
+                            ))
                             .child(div().flex().flex_col().gap_1().children(
                                 workpool_ids.into_iter().map(|id| {
                                     self.render_sidebar_harness(id, ThreadPlacement::Workpool, cx)
@@ -984,7 +994,7 @@ impl Dirigent {
                             ))
                             .child(div().h(px(14.0)))
                     })
-                    .child(self.render_section_header("Projects", 0, FAINT))
+                    .child(self.render_section_header("Projects", 0, faint()))
                     .child(
                         div().mt(px(-8.0)).children(
                             project_ids
@@ -1011,9 +1021,9 @@ impl Dirigent {
                             .mr_3()
                             .text_xs()
                             .text_color(rgb(if self.keyboard_mode == KeyboardMode::Input {
-                                BLUE
+                                blue()
                             } else {
-                                MUTED
+                                muted()
                             }))
                             .child(self.keyboard_mode.label()),
                     )
@@ -1036,8 +1046,8 @@ impl Dirigent {
                                 cx.notify();
                             }))
                             .child(hover_icon(
-                                ellipsis_vertical_icon(MUTED),
-                                ellipsis_vertical_icon(BLUE),
+                                ellipsis_vertical_icon(muted()),
+                                ellipsis_vertical_icon(blue()),
                                 "sidebar-bottom-menu-trigger".to_string(),
                             )),
                     ),
@@ -1051,7 +1061,7 @@ impl Dirigent {
                     .right(px(-3.0))
                     .w(px(7.0))
                     .cursor(CursorStyle::ResizeColumn)
-                    .hover(|style| style.bg(rgb(BLUE)))
+                    .hover(|style| style.bg(rgb(blue())))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
                         cx.listener(|_, _, _, cx| cx.stop_propagation()),

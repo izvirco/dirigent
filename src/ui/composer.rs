@@ -7,7 +7,7 @@ use crate::{
     app::{ComposerDropdown, Dirigent},
     model::{ContextUsage, HarnessStatus},
     text_input::TextInput,
-    theme::{BG, BLUE, BORDER, MUTED, SURFACE, SURFACE_HOVER, TEXT},
+    theme::{bg, blue, border, muted, surface, surface_hover, theme_text},
 };
 
 fn format_context_usage(usage: ContextUsage) -> String {
@@ -30,7 +30,7 @@ pub(super) fn dropdown_arrow(open: bool) -> impl IntoElement {
         },
         |_, chevron, window, _| {
             if let Some(chevron) = chevron {
-                window.paint_path(chevron, rgb(MUTED));
+                window.paint_path(chevron, rgb(muted()));
             }
         },
     )
@@ -60,18 +60,18 @@ impl Dirigent {
                     .gap_2()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(SURFACE))
+                    .border_color(rgb(border()))
+                    .bg(rgb(surface()))
                     .text_xs()
                     .cursor_pointer()
-                    .when(open, |style| style.border_color(rgb(BLUE)))
-                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                    .when(open, |style| style.border_color(rgb(blue())))
+                    .hover(|style| style.bg(rgb(surface_hover())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_composer_dropdown(ComposerDropdown::Project);
                         cx.notify();
                         cx.stop_propagation();
                     }))
-                    .child(div().text_color(rgb(MUTED)).child("Create thread in"))
+                    .child(div().text_color(rgb(muted())).child("Create thread in"))
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -80,7 +80,7 @@ impl Dirigent {
                             .overflow_hidden()
                             .text_ellipsis()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(theme_text()))
                             .child(selected_name),
                     )
                     .child(dropdown_arrow(open)),
@@ -99,8 +99,8 @@ impl Dirigent {
                         .overflow_y_scroll()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(0x1b1f27))
+                        .border_color(rgb(border()))
+                        .bg(rgb(surface_hover()))
                         .occlude()
                         .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
                         .children(self.projects.iter().enumerate().map(|(index, project)| {
@@ -120,9 +120,9 @@ impl Dirigent {
                                 .justify_center()
                                 .rounded_md()
                                 .cursor_pointer()
-                                .when(selected, |style| style.bg(rgb(0x21447a)))
+                                .when(selected, |style| style.bg(rgb(crate::theme::selection())))
                                 .when(!selected, |element| {
-                                    element.hover(|style| style.bg(rgb(BORDER)))
+                                    element.hover(|style| style.bg(rgb(border())))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if this.selected_project == Some(project_id) {
@@ -139,7 +139,7 @@ impl Dirigent {
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .text_xs()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(theme_text()))
                                         .child(name),
                                 )
                                 .child(
@@ -148,7 +148,7 @@ impl Dirigent {
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .text_xs()
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(muted()))
                                         .child(path),
                                 )
                         })),
@@ -177,11 +177,11 @@ impl Dirigent {
                     .gap_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(muted()))
                     .when(open, |style| {
-                        style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT))
+                        style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
-                    .hover(|style| style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                    .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_composer_dropdown(ComposerDropdown::Model);
                         cx.notify();
@@ -208,8 +208,8 @@ impl Dirigent {
                         .max_h(px(300.0))
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(0x1b1f27))
+                        .border_color(rgb(border()))
+                        .bg(rgb(surface_hover()))
                         .group("model-dropdown-scrollbar")
                         .occlude()
                         .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
@@ -229,7 +229,7 @@ impl Dirigent {
                                             .flex()
                                             .items_center()
                                             .text_xs()
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(muted()))
                                             .child("Loading models…"),
                                     )
                                 })
@@ -249,9 +249,11 @@ impl Dirigent {
                                             .flex()
                                             .items_center()
                                             .rounded_md()
-                                            .when(selected, |style| style.bg(rgb(0x21447a)))
+                                            .when(selected, |style| {
+                                                style.bg(rgb(crate::theme::selection()))
+                                            })
                                             .when(!selected, |element| {
-                                                element.hover(|style| style.bg(rgb(BORDER)))
+                                                element.hover(|style| style.bg(rgb(border())))
                                             })
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.select_model(
@@ -271,7 +273,7 @@ impl Dirigent {
                                                             .overflow_hidden()
                                                             .text_ellipsis()
                                                             .text_xs()
-                                                            .text_color(rgb(TEXT))
+                                                            .text_color(rgb(theme_text()))
                                                             .child(model.name),
                                                     )
                                                     .child(
@@ -280,7 +282,7 @@ impl Dirigent {
                                                             .overflow_hidden()
                                                             .text_ellipsis()
                                                             .text_xs()
-                                                            .text_color(rgb(MUTED))
+                                                            .text_color(rgb(muted()))
                                                             .child(format!(
                                                                 "{}/{}",
                                                                 model.provider, model.id
@@ -314,11 +316,11 @@ impl Dirigent {
                     .gap_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(muted()))
                     .when(open, |style| {
-                        style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT))
+                        style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
-                    .hover(|style| style.bg(rgb(SURFACE_HOVER)).text_color(rgb(TEXT)))
+                    .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_composer_dropdown(ComposerDropdown::Reasoning);
                         cx.notify();
@@ -337,8 +339,8 @@ impl Dirigent {
                         .p_1()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(0x1b1f27))
+                        .border_color(rgb(border()))
+                        .bg(rgb(surface_hover()))
                         .occlude()
                         .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
                         .children(self.reasoning_options().into_iter().enumerate().map(
@@ -355,10 +357,12 @@ impl Dirigent {
                                     .items_center()
                                     .rounded_md()
                                     .text_xs()
-                                    .text_color(rgb(TEXT))
-                                    .when(selected, |style| style.bg(rgb(0x21447a)))
+                                    .text_color(rgb(theme_text()))
+                                    .when(selected, |style| {
+                                        style.bg(rgb(crate::theme::selection()))
+                                    })
                                     .when(!selected, |element| {
-                                        element.hover(|style| style.bg(rgb(BORDER)))
+                                        element.hover(|style| style.bg(rgb(border())))
                                     })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.select_thinking(value.clone());
@@ -399,10 +403,11 @@ impl Dirigent {
             .rounded_xl()
             .border_1()
             .border_color(rgba(0x00000000))
-            .bg(rgb(SURFACE))
+            .bg(rgb(surface()))
             .when(focused, |element| {
-                element.border_color(rgb(BLUE).opacity(0.5)).shadow(vec![
-                    BoxShadow::new(px(0.0), px(0.0), rgba(0x77a7ff30).into()).blur_radius(px(5.0)),
+                element.border_color(rgb(blue()).opacity(0.5)).shadow(vec![
+                    BoxShadow::new(px(0.0), px(0.0), rgb(blue()).opacity(0.19).into())
+                        .blur_radius(px(5.0)),
                 ])
             })
             .when(!images.is_empty(), |element| {
@@ -438,7 +443,7 @@ impl Dirigent {
                                         .overflow_hidden()
                                         .rounded_md()
                                         .border_1()
-                                        .border_color(rgb(BORDER))
+                                        .border_color(rgb(border()))
                                         .child(
                                             img(attachment.image)
                                                 .size_full()
@@ -448,7 +453,7 @@ impl Dirigent {
                                 .child(
                                     div()
                                         .text_xs()
-                                        .text_color(rgb(BLUE))
+                                        .text_color(rgb(blue()))
                                         .whitespace_nowrap()
                                         .overflow_hidden()
                                         .text_ellipsis()
@@ -465,9 +470,9 @@ impl Dirigent {
                                         .items_center()
                                         .justify_center()
                                         .rounded_full()
-                                        .bg(rgb(0x252a34))
+                                        .bg(rgb(border()))
                                         .text_xs()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(theme_text()))
                                         .on_click(cx.listener(move |_, _, _, cx| {
                                             remove_input.update(cx, |input, cx| {
                                                 input.remove_image(&remove_label, cx)
@@ -497,7 +502,7 @@ impl Dirigent {
                                 .flex()
                                 .items_center()
                                 .text_xs()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .child(format_context_usage(usage)),
                         )
                     })
@@ -511,9 +516,11 @@ impl Dirigent {
                                 .items_center()
                                 .rounded_md()
                                 .text_xs()
-                                .text_color(rgb(if nix_enabled { BLUE } else { MUTED }))
-                                .when(nix_enabled, |style| style.bg(rgb(0x1d293d)))
-                                .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                                .text_color(rgb(if nix_enabled { blue() } else { muted() }))
+                                .when(nix_enabled, |style| {
+                                    style.bg(rgb(crate::theme::accent_surface()))
+                                })
+                                .hover(|style| style.bg(rgb(surface_hover())))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_nix();
                                     cx.notify();
@@ -532,8 +539,8 @@ impl Dirigent {
                                 .items_center()
                                 .rounded_lg()
                                 .text_xs()
-                                .text_color(rgb(0xff9999))
-                                .hover(|style| style.bg(rgb(0x2a1919)))
+                                .text_color(rgb(crate::theme::error_text()))
+                                .hover(|style| style.bg(rgb(crate::theme::error_bg())))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.abort_selected();
                                     cx.notify();
@@ -554,10 +561,10 @@ impl Dirigent {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(rgb(BLUE))
+                            .bg(rgb(blue()))
                             .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgb(BG))
-                            .hover(|style| style.bg(rgb(0x94bbff)))
+                            .text_color(rgb(bg()))
+                            .hover(|style| style.bg(rgb(crate::theme::accent_hover())))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if creating {
                                     this.create_harness(cx);

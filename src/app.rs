@@ -29,7 +29,7 @@ use crate::{
     rpc::{PiProcess, RuntimeEvent, RuntimeTarget},
     storage,
     text_input::{AttachedImage, InputEvent, TextInput},
-    theme::{BG, BORDER, MUTED, TEXT},
+    theme::{self, bg, border, muted, theme_text},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -283,6 +283,8 @@ pub(crate) struct Dirigent {
     pub(crate) extension_input: Entity<TextInput>,
     pub(crate) pending_dialog: Option<PendingDialog>,
     pub(crate) banner: Option<String>,
+    config_error: Option<String>,
+    pub(crate) font: SharedString,
     pub(crate) conversation_list: ListState,
     conversation_list_message_count: usize,
     conversation_list_working: bool,
@@ -311,6 +313,7 @@ pub(crate) struct Dirigent {
     pub(crate) keyboard_menu_activation: Option<KeyboardMenu>,
     focus_input: bool,
     focus_normal_mode: bool,
+    debug_panels_visible: bool,
     frame_timing: FrameTiming,
     next_id: Id,
     next_sidebar_order: u64,
@@ -493,6 +496,43 @@ fn conversation_list_splice(
 
 impl Dirigent {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        let (config_dir, appearance, mut config_error) = match theme::initialize() {
+            Ok((config_dir, appearance)) => (Some(config_dir), appearance, None),
+            Err(error) => (
+                platform::config_dir().ok(),
+                theme::default_appearance(),
+                Some(error),
+            ),
+        };
+        if let Some(config_dir) = config_dir {
+            let (config_tx, config_rx) = async_channel::unbounded();
+            if let Err(error) = theme::watch(config_dir.clone(), config_tx) {
+                config_error = Some(error);
+            } else {
+                cx.spawn(async move |this, cx| {
+                    while let Ok(event) = config_rx.recv().await {
+                        let appearance = event.and_then(|()| theme::reload(&config_dir));
+                        if this
+                            .update(cx, |this, cx| {
+                                match appearance {
+                                    Ok(appearance) => this.apply_appearance(appearance, cx),
+                                    Err(error) => {
+                                        this.config_error = Some(error.clone());
+                                        this.banner = Some(error);
+                                    }
+                                }
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .detach();
+            }
+        }
+
         let project_input = cx.new(|cx| TextInput::new(project_path_placeholder(), cx));
         let harness_input = cx.new(|cx| {
             TextInput::new("Send a message to pi…", cx)
@@ -624,6 +664,9 @@ impl Dirigent {
                 Some(error),
             ),
         };
+        if banner.is_none() {
+            banner = config_error.clone();
+        }
         let storage::LoadedState {
             projects,
             mut harnesses,
@@ -862,6 +905,8 @@ impl Dirigent {
             extension_input,
             pending_dialog: None,
             banner,
+            config_error,
+            font: appearance.font.into(),
             conversation_list,
             conversation_list_message_count,
             conversation_list_working,
@@ -889,6 +934,7 @@ impl Dirigent {
             keyboard_menu_activation: None,
             focus_input: false,
             focus_normal_mode: true,
+            debug_panels_visible: false,
             frame_timing: FrameTiming::new(Instant::now()),
             next_id,
             next_sidebar_order,
@@ -934,6 +980,36 @@ impl Dirigent {
         if self.banner.is_none() {
             self.banner = Some(error);
         }
+    }
+
+    fn apply_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
+        self.font = appearance.font.into();
+        for message in self
+            .harnesses
+            .iter_mut()
+            .flat_map(|harness| &mut harness.messages)
+        {
+            message.refresh_theme_colors();
+        }
+        let conversation_items =
+            self.conversation_list_message_count + usize::from(self.conversation_list_working);
+        self.conversation_list
+            .remeasure_items(0..conversation_items);
+
+        let inputs = self.composer_inputs.values().cloned().chain([
+            self.project_input.clone(),
+            self.harness_input.clone(),
+            self.thread_rename_input.clone(),
+            self.extension_input.clone(),
+        ]);
+        for input in inputs {
+            input.update(cx, |_, cx| cx.notify());
+        }
+
+        if self.banner.as_ref() == self.config_error.as_ref() {
+            self.banner = None;
+        }
+        self.config_error = None;
     }
 
     pub(crate) fn selected_composer_input(&self) -> Option<Entity<TextInput>> {
@@ -3327,7 +3403,7 @@ impl Dirigent {
         true
     }
 
-    fn perform_keyboard_menu_key(&mut self, key: &str, cx: &mut Context<Self>) {
+    fn perform_keyboard_menu_key(&mut self, key: &str, shift: bool, cx: &mut Context<Self>) {
         let Some(menu) = self.keyboard_menu.take() else {
             return;
         };
@@ -3346,6 +3422,9 @@ impl Dirigent {
                 self.toggle_composer_dropdown(ComposerDropdown::Reasoning)
             }
             (KeyboardMenu::Space, "b") => self.banner = None,
+            (KeyboardMenu::Space, "d") if shift => {
+                self.debug_panels_visible = !self.debug_panels_visible;
+            }
             (KeyboardMenu::Space, "y") => {
                 self.copy_thread_selection(cx);
             }
@@ -3423,7 +3502,7 @@ impl Dirigent {
         }
 
         if self.keyboard_menu.is_some() && !command && !modifiers.alt {
-            self.perform_keyboard_menu_key(key, cx);
+            self.perform_keyboard_menu_key(key, modifiers.shift, cx);
             cx.stop_propagation();
             cx.notify();
             return;
@@ -3527,10 +3606,10 @@ impl Render for Dirigent {
             .size_full()
             .flex()
             .overflow_hidden()
-            .bg(rgb(BG))
-            .font_family("Lilex Nerd Font Mono")
+            .bg(rgb(bg()))
+            .font_family(self.font.clone())
             .font_features(FontFeatures::disable_ligatures())
-            .text_color(rgb(TEXT))
+            .text_color(rgb(theme_text()))
             .track_focus(&self.thread_focus)
             .on_key_down(cx.listener(Self::on_root_key_down))
             .on_key_up(cx.listener(Self::on_root_key_up))
@@ -3610,31 +3689,34 @@ impl Render for Dirigent {
                         ),
                 )
             })
-            .when(self.keyboard_menu.is_none(), |element| {
-                element.child(
-                    div()
-                        .absolute()
-                        .right(px(8.0))
-                        .bottom(px(8.0))
-                        .px_2()
-                        .py_1()
-                        .flex()
-                        .flex_col()
-                        .items_end()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(gpui::rgba(0x09090bdd))
-                        .text_xs()
-                        .text_right()
-                        .text_color(rgb(MUTED))
-                        .children(
-                            frame_timing_labels
-                                .into_iter()
-                                .map(|label| div().w_full().child(label)),
-                        ),
-                )
-            })
+            .when(
+                self.debug_panels_visible && self.keyboard_menu.is_none(),
+                |element| {
+                    element.child(
+                        div()
+                            .absolute()
+                            .right(px(8.0))
+                            .bottom(px(8.0))
+                            .px_2()
+                            .py_1()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(border()))
+                            .bg(rgb(bg()).opacity(0.87))
+                            .text_xs()
+                            .text_right()
+                            .text_color(rgb(muted()))
+                            .children(
+                                frame_timing_labels
+                                    .into_iter()
+                                    .map(|label| div().w_full().child(label)),
+                            ),
+                    )
+                },
+            )
     }
 }
 

@@ -6,10 +6,8 @@ use gpui::{
 use crate::{
     app::Dirigent,
     markdown::{MarkdownBlock, MarkdownDocument, MarkdownTable, MarkdownText, TableAlignment},
-    theme::{ACCENT, BLUE, BORDER, MUTED, SURFACE, SURFACE_HOVER, TEXT},
+    theme::{accent, blue, border, muted, surface, surface_hover, theme_text},
 };
-
-const CODE_FONT: &str = "Lilex Nerd Font Mono";
 
 impl Dirigent {
     pub(super) fn render_markdown(
@@ -54,7 +52,7 @@ impl Dirigent {
                 .w_full()
                 .mt_1()
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(TEXT))
+                .text_color(rgb(theme_text()))
                 .when(*level == 1, |element| {
                     element.text_xl().line_height(px(30.0))
                 })
@@ -75,8 +73,8 @@ impl Dirigent {
                 .pl_3()
                 .py_1()
                 .border_l_2()
-                .border_color(rgb(MUTED))
-                .text_color(rgb(MUTED))
+                .border_color(rgb(muted()))
+                .text_color(rgb(muted()))
                 .child(self.render_markdown_blocks(blocks, &format!("{path}-quote"), cx))
                 .into_any_element(),
             MarkdownBlock::List { start, items } => {
@@ -99,7 +97,7 @@ impl Dirigent {
                                     .w(px(22.0))
                                     .flex_none()
                                     .text_right()
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(muted()))
                                     .child(marker),
                             )
                             .child(div().min_w(px(0.0)).flex_1().child(
@@ -125,7 +123,7 @@ impl Dirigent {
                 .w_full()
                 .my_2()
                 .h(px(1.0))
-                .bg(rgb(BORDER))
+                .bg(rgb(border()))
                 .into_any_element(),
             MarkdownBlock::Table(table) => self.render_markdown_table(path, table, cx),
         }
@@ -151,19 +149,19 @@ impl Dirigent {
             if span.style.strikethrough {
                 highlight.strikethrough = Some(StrikethroughStyle {
                     thickness: px(1.0),
-                    color: Some(rgb(MUTED).into()),
+                    color: Some(rgb(muted()).into()),
                 });
             }
             if span.style.code {
-                highlight.color = Some(rgb(TEXT).into());
+                highlight.color = Some(rgb(theme_text()).into());
                 highlight.background_color = Some(rgba(0xffffff0f).into());
-                font_overrides.push((span.range.clone(), SharedString::from(CODE_FONT)));
+                font_overrides.push((span.range.clone(), self.font.clone()));
             }
             if let Some(url) = span.style.link.as_ref() {
-                highlight.color = Some(rgb(ACCENT).into());
+                highlight.color = Some(rgb(accent()).into());
                 highlight.underline = Some(UnderlineStyle {
                     thickness: px(1.0),
-                    color: Some(rgb(ACCENT).into()),
+                    color: Some(rgb(accent()).into()),
                     wavy: false,
                 });
                 links.push((span.range.clone(), SharedString::from(url.clone())));
@@ -204,17 +202,17 @@ impl Dirigent {
             .overflow_hidden()
             .rounded_md()
             .border_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(SURFACE))
+            .border_color(rgb(border()))
+            .bg(rgb(surface()))
             .child(
                 div()
                     .w_full()
                     .min_w(px(0.0))
                     .p_2()
-                    .font_family(CODE_FONT)
+                    .font_family(self.font.clone())
                     .text_xs()
                     .line_height(px(19.0))
-                    .text_color(rgb(0xc7cbd4))
+                    .text_color(rgb(crate::theme::code_text()))
                     .child(self.render_selectable_text(
                         format!("{path}-code"),
                         SharedString::from(display_code.to_string()),
@@ -234,15 +232,15 @@ impl Dirigent {
                     .items_center()
                     .rounded_md()
                     .cursor_default()
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .text_xs()
-                    .text_color(rgb(if copied { BLUE } else { MUTED }))
+                    .text_color(rgb(if copied { blue() } else { muted() }))
                     .opacity(if copied { 1.0 } else { 0.0 })
-                    .when(copied, |element| element.bg(rgba(0x77a7ff26)))
+                    .when(copied, |element| element.bg(rgb(blue()).opacity(0.15)))
                     .when(!copied, |element| {
                         element
                             .group_hover(copy_group_id, |style| style.opacity(1.0))
-                            .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                            .hover(|style| style.bg(rgb(surface_hover())))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_text_with_feedback(clicked_id.clone(), copied_code.clone(), cx);
@@ -325,7 +323,7 @@ impl Dirigent {
                             .overflow_hidden()
                             .rounded_md()
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(border()))
                             .children(cells),
                     ),
             )
@@ -357,12 +355,12 @@ impl Dirigent {
             .py_2()
             .when(!last_column, |element| element.border_r_1())
             .when(!last_row, |element| element.border_b_1())
-            .border_color(rgb(BORDER))
+            .border_color(rgb(border()))
             .when(header, |element| {
                 element
-                    .bg(rgb(SURFACE))
+                    .bg(rgb(surface()))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(theme_text()))
             })
             .when(alignment == TableAlignment::Center, |element| {
                 element.text_center()

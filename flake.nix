@@ -36,7 +36,7 @@
         packages = [
           rustToolchain
           pkgs.cargo-edit
-          pkgs.nerd-fonts.lilex
+          pkgs.lilex
         ];
 
         env = {

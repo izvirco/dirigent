@@ -7,7 +7,7 @@ use std::{
 
 use gpui::{Image, ScrollHandle, SharedString};
 
-use crate::theme::{GREEN, RED};
+use crate::theme::{green, red};
 
 use crate::{
     markdown::{MarkdownDocument, parse_markdown},
@@ -176,6 +176,10 @@ impl Message {
             .then(|| parse_markdown(&self.text));
     }
 
+    pub(crate) fn refresh_theme_colors(&mut self) {
+        self.refresh_detail_cache();
+    }
+
     fn refresh_detail_cache(&mut self) {
         self.display_detail = self.detail.clone().map(Into::into);
         self.detail_colors.clear();
@@ -225,9 +229,9 @@ impl Message {
             }
 
             let color = match kind {
-                Some(b'+') => GREEN,
-                Some(b'-') => RED,
-                _ => 0x9ba3b2,
+                Some(b'+') => green(),
+                Some(b'-') => red(),
+                _ => crate::theme::detail_text(),
             };
             self.detail_colors
                 .push((offset..offset + line.len(), color));
@@ -250,8 +254,8 @@ fn add_inline_diff_colors(
     added_offset: usize,
     added_line: &str,
 ) {
-    colors.push((removed_offset..removed_offset + 1, RED));
-    colors.push((added_offset..added_offset + 1, GREEN));
+    colors.push((removed_offset..removed_offset + 1, red()));
+    colors.push((added_offset..added_offset + 1, green()));
 
     let removed_start = diff_source_start(removed_line);
     let added_start = diff_source_start(added_line);
@@ -263,13 +267,13 @@ fn add_inline_diff_colors(
         (
             removed_offset + removed_start + range.start
                 ..removed_offset + removed_start + range.end,
-            RED,
+            red(),
         )
     }));
     colors.extend(added_changes.into_iter().map(|range| {
         (
             added_offset + added_start + range.start..added_offset + added_start + range.end,
-            GREEN,
+            green(),
         )
     }));
 }
@@ -570,7 +574,7 @@ impl Harness {
 #[cfg(test)]
 mod tests {
     use super::{Harness, Message, MessageRole};
-    use crate::theme::{GREEN, RED};
+    use crate::theme::{green, red};
     use std::time::Instant;
 
     #[test]
@@ -618,7 +622,11 @@ mod tests {
         );
         assert_eq!(
             message.detail_colors,
-            vec![(0..9, 0x9ba3b2), (9..14, RED), (14..18, GREEN)]
+            vec![
+                (0..9, crate::theme::detail_text()),
+                (9..14, red()),
+                (14..18, green())
+            ]
         );
     }
 
@@ -636,8 +644,8 @@ mod tests {
                 .map(|(range, _)| &detail[range.clone()])
                 .collect::<Vec<_>>()
         };
-        assert_eq!(highlighted(RED), vec!["-", "old_name"]);
-        assert_eq!(highlighted(GREEN), vec!["+", "new_name"]);
+        assert_eq!(highlighted(red()), vec!["-", "old_name"]);
+        assert_eq!(highlighted(green()), vec!["+", "new_name"]);
     }
 
     #[test]
@@ -654,8 +662,8 @@ mod tests {
                 .map(|(range, _)| &detail[range.clone()])
                 .collect::<Vec<_>>()
         };
-        assert_eq!(highlighted(RED), vec!["-"]);
-        assert_eq!(highlighted(GREEN), vec!["+", "BLUE,"]);
+        assert_eq!(highlighted(red()), vec!["-"]);
+        assert_eq!(highlighted(green()), vec!["+", "BLUE,"]);
     }
 
     #[test]
@@ -666,7 +674,12 @@ mod tests {
 
         assert_eq!(
             message.detail_colors,
-            vec![(0..9, RED), (9..18, RED), (18..27, GREEN), (27..35, GREEN)]
+            vec![
+                (0..9, red()),
+                (9..18, red()),
+                (18..27, green()),
+                (27..35, green())
+            ]
         );
     }
 

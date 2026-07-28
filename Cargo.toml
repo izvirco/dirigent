@@ -13,6 +13,8 @@ base64 = "0.22"
 rusqlite = { version = "0.38", features = ["bundled"] }
 fff-search = "=0.10.1"
 pulldown-cmark = { version = "0.13", default-features = false }
+notify = "8"
+toml = "0.9"
 
 [patch.crates-io]
 # Includes the unreleased fix for Rust's `pub_use_of_private_extern_crate` warning.

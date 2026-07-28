@@ -5,6 +5,28 @@ use std::{
 };
 
 #[cfg(not(target_os = "windows"))]
+pub(crate) fn config_dir() -> Result<PathBuf, String> {
+    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(config_home).join("dirigent"));
+    }
+    let home = home_dir().ok_or_else(|| {
+        "HOME and XDG_CONFIG_HOME are unset; cannot load Dirigent configuration".to_string()
+    })?;
+    Ok(home.join(".config/dirigent"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn config_dir() -> Result<PathBuf, String> {
+    let config_home = env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join("AppData/Roaming")))
+        .ok_or_else(|| {
+            "APPDATA and USERPROFILE are unset; cannot load Dirigent configuration".to_string()
+        })?;
+    Ok(config_home.join("dirigent"))
+}
+
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn state_path() -> Result<PathBuf, String> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
         return Ok(PathBuf::from(data_home).join("dirigent/v0/state.json"));

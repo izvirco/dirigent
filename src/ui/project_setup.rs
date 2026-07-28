@@ -2,7 +2,7 @@ use gpui::{Context, IntoElement, div, prelude::*, px, rgb};
 
 use crate::{
     app::{Dirigent, PathCompletionTarget},
-    theme::{BG, BLUE, TEXT},
+    theme::{bg, blue, theme_text},
 };
 
 impl Dirigent {
@@ -24,7 +24,7 @@ impl Dirigent {
                         div()
                             .text_xl()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(theme_text()))
                             .child("Create a project"),
                     )
                     .child(
@@ -62,11 +62,11 @@ impl Dirigent {
                                     .flex()
                                     .items_center()
                                     .rounded_lg()
-                                    .bg(rgb(BLUE))
+                                    .bg(rgb(blue()))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_sm()
-                                    .text_color(rgb(BG))
-                                    .hover(|style| style.bg(rgb(0x94bbff)))
+                                    .text_color(rgb(bg()))
+                                    .hover(|style| style.bg(rgb(crate::theme::accent_hover())))
                                     .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
                                     .child("Create"),
                             ),

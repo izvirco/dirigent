@@ -2,6 +2,12 @@
 
 Dirigent is a native desktop workspace for running and managing multiple [Pi coding agent](https://github.com/earendil-works/pi) sessions across projects.
 
+## Configuration and themes
+
+On first launch, Dirigent creates `~/.config/dirigent/config.toml` and sample themes in `~/.config/dirigent/theme/`. Set `theme` in `config.toml` to a theme filename without `.toml`. Changes to the config or selected theme are reloaded automatically.
+
+Dirigent follows `XDG_CONFIG_HOME` on Unix. On Windows, configuration is stored in `%APPDATA%\dirigent`.
+
 ## Linux (Nix)
 
 ```

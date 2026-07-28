@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::{
     app::{Dirigent, PathCompletionTarget},
-    theme::{BG, BORDER, MUTED, ORANGE, TEXT},
+    theme::{bg, border, muted, orange, theme_text},
 };
 
 impl Dirigent {
@@ -36,8 +36,8 @@ impl Dirigent {
                 .overflow_hidden()
                 .rounded_lg()
                 .border_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(0x151920))
+                .border_color(rgb(border()))
+                .bg(rgb(crate::theme::popup_bg()))
                 .occlude()
                 .on_mouse_down(
                     gpui::MouseButton::Left,
@@ -60,9 +60,11 @@ impl Dirigent {
                                 .items_center()
                                 .when(index == 0, |element| element.rounded_t_lg())
                                 .when(index == last, |element| element.rounded_b_lg())
-                                .when(index == selected, |element| element.bg(rgb(0x21447a)))
+                                .when(index == selected, |element| {
+                                    element.bg(rgb(crate::theme::selection()))
+                                })
                                 .when(index != selected, |element| {
-                                    element.hover(|style| style.bg(rgb(BORDER)))
+                                    element.hover(|style| style.bg(rgb(border())))
                                 })
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.choose_path_completion(index, cx);
@@ -75,7 +77,7 @@ impl Dirigent {
                                         .overflow_hidden()
                                         .text_ellipsis()
                                         .text_xs()
-                                        .text_color(rgb(TEXT))
+                                        .text_color(rgb(theme_text()))
                                         .child(path),
                                 )
                         }),
@@ -123,8 +125,8 @@ impl Dirigent {
                         .min_h(px(10.0))
                         .w_full()
                         .rounded_full()
-                        .bg(rgb(MUTED))
-                        .group_hover(id, |style| style.bg(rgb(ORANGE))),
+                        .bg(rgb(muted()))
+                        .group_hover(id, |style| style.bg(rgb(orange()))),
                 )
             })
             .into_any_element()
@@ -168,8 +170,8 @@ impl Dirigent {
                         .min_w(px(10.0))
                         .h_full()
                         .rounded_full()
-                        .bg(rgb(MUTED))
-                        .group_hover(id, |style| style.bg(rgb(ORANGE))),
+                        .bg(rgb(muted()))
+                        .group_hover(id, |style| style.bg(rgb(orange()))),
                 )
             })
             .into_any_element()
@@ -183,7 +185,7 @@ impl Dirigent {
             .flex_1()
             .flex()
             .flex_col()
-            .bg(rgb(BG))
+            .bg(rgb(bg()))
             .when_some(self.banner.clone(), |element, banner| {
                 element.child(
                     div()
@@ -193,15 +195,15 @@ impl Dirigent {
                         .items_center()
                         .gap_3()
                         .border_b_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(0x2a2117))
+                        .border_color(rgb(border()))
+                        .bg(rgb(crate::theme::warning_bg()))
                         .text_xs()
-                        .text_color(rgb(0xffc978))
+                        .text_color(rgb(crate::theme::warning_text()))
                         .child(div().flex_1().child(banner))
                         .child(
                             div()
                                 .id("dismiss-banner")
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.banner = None;
                                     cx.notify();
@@ -234,7 +236,7 @@ impl Dirigent {
                             .flex_col()
                             .items_center()
                             .justify_center()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(muted()))
                             .child(
                                 div()
                                     .w_full()
@@ -249,7 +251,7 @@ impl Dirigent {
                                             .text_lg()
                                             .italic()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(rgb(TEXT))
+                                            .text_color(rgb(theme_text()))
                                             .child(
                                                 "“A computer can never be held accountable. \
                                                  Therefore a computer must never make a management \

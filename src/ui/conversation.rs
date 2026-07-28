@@ -3,13 +3,13 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
-    canvas, div, img, list, prelude::*, px, relative, rgb, rgba,
+    canvas, div, img, list, prelude::*, px, relative, rgb,
 };
 
 use crate::{
     app::Dirigent,
     model::{HarnessStatus, Message, MessageRole},
-    theme::{BLUE, GREEN, MUTED, ORANGE, PURPLE, SURFACE_HOVER, TEXT, THINKING_TEXT, YELLOW},
+    theme::{blue, green, muted, orange, purple, surface_hover, theme_text, thinking_text, yellow},
 };
 
 fn working_dot(delta: f32) -> usize {
@@ -23,10 +23,10 @@ fn working_dot(delta: f32) -> usize {
 
 fn tool_color(tool: &str) -> u32 {
     match tool {
-        "read" => GREEN,
-        "edit" | "write" => YELLOW,
-        "compact" => PURPLE,
-        _ => BLUE,
+        "read" => green(),
+        "edit" | "write" => yellow(),
+        "compact" => purple(),
+        _ => blue(),
     }
 }
 
@@ -54,14 +54,14 @@ impl Dirigent {
             .items_center()
             .rounded_md()
             .text_xs()
-            .text_color(rgb(if copied { BLUE } else { MUTED }))
+            .text_color(rgb(if copied { blue() } else { muted() }))
             .opacity(if shown { 1.0 } else { 0.0 })
-            .when(copied, |element| element.bg(rgba(0x77a7ff26)))
+            .when(copied, |element| element.bg(rgb(blue()).opacity(0.15)))
             .when(shown, |element| {
                 element
                     .cursor_default()
                     .when(!copied, |element| {
-                        element.hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                        element.hover(|style| style.bg(rgb(surface_hover())))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.copy_text_with_feedback(clicked_id.clone(), text.to_string(), cx);
@@ -99,7 +99,7 @@ impl Dirigent {
                     .track_scroll(scroll)
                     .text_xs()
                     .line_height(px(18.0))
-                    .text_color(rgb(0x9ba3b2))
+                    .text_color(rgb(crate::theme::detail_text()))
                     .child(self.render_selectable_text(
                         format!("tool-output-{index}"),
                         detail,
@@ -129,13 +129,13 @@ impl Dirigent {
                     .w_full()
                     .pr_3()
                     .border_r_4()
-                    .border_color(rgb(BLUE))
+                    .border_color(rgb(blue()))
                     .flex()
                     .items_start()
                     .gap_2()
                     .text_sm()
                     .line_height(px(21.0))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(theme_text()))
                     .on_hover(cx.listener(move |this, hovered, _, cx| {
                         let hovered = if *hovered { hover_key } else { None };
                         if hovered.is_some() || this.hovered_copy_message == hover_key {
@@ -167,7 +167,7 @@ impl Dirigent {
                                             .overflow_hidden()
                                             .rounded_md()
                                             .border_1()
-                                            .border_color(rgb(0x303744))
+                                            .border_color(rgb(crate::theme::border_emphasized()))
                                             .cursor_pointer()
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.open_image_preview(preview.clone());
@@ -195,7 +195,7 @@ impl Dirigent {
                 .w_full()
                 .text_sm()
                 .line_height(px(22.0))
-                .text_color(rgb(0xc7cbd4))
+                .text_color(rgb(crate::theme::code_text()))
                 .on_hover(cx.listener(move |this, hovered, _, cx| {
                     let hovered = if *hovered { hover_key } else { None };
                     if hovered.is_some() || this.hovered_copy_message == hover_key {
@@ -240,7 +240,7 @@ impl Dirigent {
                     .text_xs()
                     .line_height(px(18.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(rgb(THINKING_TEXT))
+                    .text_color(rgb(thinking_text()))
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -292,8 +292,10 @@ impl Dirigent {
                             .flex()
                             .items_start()
                             .text_xs()
-                            .text_color(rgb(MUTED))
-                            .hover(|style| style.text_color(rgb(TEXT)).bg(rgb(SURFACE_HOVER)))
+                            .text_color(rgb(muted()))
+                            .hover(|style| {
+                                style.text_color(rgb(theme_text())).bg(rgb(surface_hover()))
+                            })
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let text_selected = this
                                     .thread_text_selection
@@ -336,13 +338,21 @@ impl Dirigent {
                     .px_3()
                     .py_2()
                     .rounded_md()
-                    .bg(rgb(if error { 0x2a1919 } else { 0x171d24 }))
+                    .bg(rgb(if error {
+                        crate::theme::error_bg()
+                    } else {
+                        crate::theme::notice_bg()
+                    }))
                     .flex()
                     .items_start()
                     .gap_2()
                     .text_xs()
                     .line_height(px(18.0))
-                    .text_color(rgb(if error { 0xff9999 } else { MUTED }))
+                    .text_color(rgb(if error {
+                        crate::theme::error_text()
+                    } else {
+                        muted()
+                    }))
                     .on_hover(cx.listener(move |this, hovered, _, cx| {
                         let hovered = if *hovered { hover_key } else { None };
                         if hovered.is_some() || this.hovered_copy_message == hover_key {
@@ -427,14 +437,14 @@ impl Dirigent {
                             .w(px(14.0))
                             .mx_auto()
                             .flex_none()
-                            .bg(rgba(0xf09a4a99))
+                            .bg(rgb(orange()).opacity(0.60))
                     })),
             )
             .children(messages.iter().enumerate().filter_map(|(index, message)| {
                 let (color, is_compaction) = match message.role {
-                    MessageRole::User => (BLUE, false),
-                    MessageRole::Assistant => (0x9ba3b2, false),
-                    MessageRole::Tool if message.is_compaction() => (PURPLE, true),
+                    MessageRole::User => (blue(), false),
+                    MessageRole::Assistant => (crate::theme::detail_text(), false),
+                    MessageRole::Tool if message.is_compaction() => (purple(), true),
                     _ => return None,
                 };
                 Some(
@@ -460,8 +470,8 @@ impl Dirigent {
                     .min_h(px(5.0))
                     .border_t_1()
                     .border_b_1()
-                    .border_color(rgb(0xffb15e))
-                    .bg(rgba(0xf09a4a18)),
+                    .border_color(rgb(crate::theme::warning_border()))
+                    .bg(rgb(orange()).opacity(0.09)),
             )
             .child(
                 canvas(
@@ -578,7 +588,11 @@ impl Dirigent {
                             let active = working_dot(delta);
                             indicator.children((0..3).map(move |index| {
                                 div()
-                                    .text_color(rgb(if index == active { ORANGE } else { BLUE }))
+                                    .text_color(rgb(if index == active {
+                                        orange()
+                                    } else {
+                                        blue()
+                                    }))
                                     .child(".")
                             }))
                         },
@@ -625,7 +639,7 @@ impl Dirigent {
                                 .py_12()
                                 .text_center()
                                 .text_sm()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .child(empty_label),
                         )
                     }),
@@ -637,7 +651,7 @@ impl Dirigent {
 #[cfg(test)]
 mod tests {
     use super::{tool_color, working_dot};
-    use crate::theme::{PURPLE, YELLOW};
+    use crate::theme::{purple, yellow};
 
     #[test]
     fn working_dot_moves_forward_then_back() {
@@ -650,11 +664,11 @@ mod tests {
 
     #[test]
     fn compaction_tools_are_purple() {
-        assert_eq!(tool_color("compact"), PURPLE);
+        assert_eq!(tool_color("compact"), purple());
     }
 
     #[test]
     fn write_tools_are_yellow() {
-        assert_eq!(tool_color("write"), YELLOW);
+        assert_eq!(tool_color("write"), yellow());
     }
 }

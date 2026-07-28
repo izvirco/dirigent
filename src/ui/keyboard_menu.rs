@@ -2,7 +2,7 @@ use gpui::{Context, IntoElement, deferred, div, prelude::*, px, rgb};
 
 use crate::{
     app::{Dirigent, KeyboardMenu},
-    theme::{BORDER, FAINT, MUTED},
+    theme::{border, faint, muted},
 };
 
 const SPACE_ITEMS: &[(&str, &str)] = &[
@@ -18,6 +18,7 @@ const SPACE_ITEMS: &[(&str, &str)] = &[
     ("e", "choose reasoning level"),
     ("y", "copy thread selection"),
     ("b", "dismiss banner"),
+    ("D", "toggle debug panels"),
 ];
 
 const THREAD_ITEMS: &[(&str, &str)] = &[
@@ -92,8 +93,8 @@ impl Dirigent {
                         .gap_1()
                         .rounded_lg()
                         .border_1()
-                        .border_color(rgb(BORDER))
-                        .bg(rgb(0x040405))
+                        .border_color(rgb(border()))
+                        .bg(rgb(crate::theme::sidebar_bg()))
                         .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                             this.close_keyboard_menu();
                             cx.notify();
@@ -113,10 +114,10 @@ impl Dirigent {
                                     div()
                                         .w(px(38.0))
                                         .flex_none()
-                                        .text_color(rgb(MUTED))
+                                        .text_color(rgb(muted()))
                                         .child(*shortcut),
                                 )
-                                .child(div().text_color(rgb(FAINT)).child(*description))
+                                .child(div().text_color(rgb(faint())).child(*description))
                         })),
                 )
                 .priority(1),
@@ -131,6 +132,7 @@ mod tests {
     #[test]
     fn keyboard_menus_offer_real_navigation_sets() {
         assert!(SPACE_ITEMS.len() >= 10);
+        assert!(SPACE_ITEMS.contains(&("D", "toggle debug panels")));
         assert!(GOTO_ITEMS.len() >= 10);
         assert!(THREAD_ITEMS.len() >= 8);
         assert!(PROJECT_ITEMS.len() >= 5);

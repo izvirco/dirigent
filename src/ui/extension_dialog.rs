@@ -2,7 +2,7 @@ use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px, rgb};
 
 use crate::{
     app::{DialogKind, Dirigent},
-    theme::{ACCENT, BG, BORDER, MUTED, SURFACE, SURFACE_HOVER, TEXT},
+    theme::{accent, bg, border, muted, surface, surface_hover, theme_text},
 };
 
 impl Dirigent {
@@ -32,13 +32,13 @@ impl Dirigent {
                     .gap_4()
                     .rounded_xl()
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .bg(rgb(SURFACE))
+                    .border_color(rgb(border()))
+                    .bg(rgb(surface()))
                     .child(
                         div()
                             .text_lg()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(theme_text()))
                             .child(title),
                     )
                     .when_some(message, |element, message| {
@@ -46,7 +46,7 @@ impl Dirigent {
                             div()
                                 .text_sm()
                                 .line_height(px(20.0))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(muted()))
                                 .child(message),
                         )
                     })
@@ -62,10 +62,10 @@ impl Dirigent {
                                     .items_center()
                                     .rounded_lg()
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(border()))
                                     .text_sm()
-                                    .text_color(rgb(TEXT))
-                                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                                    .text_color(rgb(theme_text()))
+                                    .hover(|style| style.bg(rgb(surface_hover())))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.respond_extension_value(response.clone());
                                         cx.notify();
@@ -93,10 +93,10 @@ impl Dirigent {
                                     .items_center()
                                     .rounded_lg()
                                     .border_1()
-                                    .border_color(rgb(BORDER))
+                                    .border_color(rgb(border()))
                                     .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .hover(|style| style.bg(rgb(SURFACE_HOVER)))
+                                    .text_color(rgb(muted()))
+                                    .hover(|style| style.bg(rgb(surface_hover())))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.cancel_extension_dialog();
                                         cx.notify();
@@ -119,10 +119,10 @@ impl Dirigent {
                                             .flex()
                                             .items_center()
                                             .rounded_lg()
-                                            .bg(rgb(ACCENT))
+                                            .bg(rgb(accent()))
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_xs()
-                                            .text_color(rgb(BG))
+                                            .text_color(rgb(bg()))
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.submit_extension_dialog(cx)
                                             }))
@@ -143,10 +143,10 @@ fn confirm_button(label: &'static str, confirmed: bool, cx: &mut Context<Dirigen
         .flex()
         .items_center()
         .rounded_lg()
-        .bg(rgb(if confirmed { ACCENT } else { SURFACE_HOVER }))
+        .bg(rgb(if confirmed { accent() } else { surface_hover() }))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_xs()
-        .text_color(rgb(if confirmed { BG } else { TEXT }))
+        .text_color(rgb(if confirmed { bg() } else { theme_text() }))
         .on_click(cx.listener(move |this, _, _, cx| {
             this.respond_extension_confirmation(confirmed);
             cx.notify();

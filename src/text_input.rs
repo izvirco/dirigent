@@ -8,7 +8,7 @@ use gpui::{
     relative, rgb, rgba, size,
 };
 
-use crate::theme::{ACCENT, BLUE, BORDER, FAINT, MUTED, SURFACE, TEXT};
+use crate::theme::{accent, blue, border, faint, muted, surface, theme_text};
 
 pub(crate) enum InputEvent {
     Submit,
@@ -585,7 +585,7 @@ impl Element for TextInputElement {
         {
             window.paint_quad(fill(
                 Bounds::new(position, size(px(1.5), self.layout.line_height())),
-                rgb(BLUE),
+                rgb(blue()),
             ));
         }
     }
@@ -633,8 +633,9 @@ impl Render for TextInput {
                 (selected || image_marker).then_some((
                     range,
                     HighlightStyle {
-                        color: image_marker.then_some(rgb(BLUE).into()),
-                        background_color: selected.then_some(rgba(0x477dca55).into()),
+                        color: image_marker.then_some(rgb(blue()).into()),
+                        background_color: selected
+                            .then_some(rgb(crate::theme::text_selection()).opacity(0.33).into()),
                         ..Default::default()
                     },
                 ))
@@ -684,8 +685,8 @@ impl Render for TextInput {
                 element
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(if focused { ACCENT } else { BORDER }))
-                    .bg(rgb(SURFACE))
+                    .border_color(rgb(if focused { accent() } else { border() }))
+                    .bg(rgb(surface()))
             })
             .track_focus(&self.focus)
             .cursor(CursorStyle::IBeam)
@@ -695,7 +696,11 @@ impl Render for TextInput {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .text_sm()
-            .text_color(rgb(if show_placeholder { FAINT } else { TEXT }))
+            .text_color(rgb(if show_placeholder {
+                faint()
+            } else {
+                theme_text()
+            }))
             .child(
                 div()
                     .id(("text-input-scroll", cx.entity_id()))
@@ -736,7 +741,7 @@ impl Render for TextInput {
                                 .min_h(px(10.0))
                                 .w_full()
                                 .rounded_full()
-                                .bg(rgb(MUTED)),
+                                .bg(rgb(muted())),
                         ),
                 )
             })
