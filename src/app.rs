@@ -32,6 +32,9 @@ use crate::{
     theme::{self, bg, border, muted, rgb, theme_text},
 };
 
+const STARTUP_MODEL_REQUEST_ID: &str = "dirigent-startup-model";
+const STARTUP_THINKING_REQUEST_ID: &str = "dirigent-startup-thinking";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogKind {
     Select,
@@ -2071,8 +2074,14 @@ impl Dirigent {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
+        if let Some(initial_prompt) = initial_prompt {
+            self.harnesses[index].pending_initial_prompt = Some(initial_prompt);
+            self.harnesses[index].status = HarnessStatus::Starting;
+        }
         if self.harnesses[index].process.is_some() {
-            if let Some((prompt, images)) = initial_prompt {
+            if !self.harnesses[index].startup_settings_pending
+                && let Some((prompt, images)) = self.harnesses[index].pending_initial_prompt.take()
+            {
                 self.send_prompt_command(index, prompt, images);
             }
             return;
@@ -2092,9 +2101,6 @@ impl Dirigent {
         let project_path = project.path.clone();
         let session_file = self.harnesses[index].session_file.clone();
         let title = self.harnesses[index].title.clone();
-        if initial_prompt.is_some() {
-            self.harnesses[index].status = HarnessStatus::Starting;
-        }
         self.harnesses[index].error = None;
         self.harnesses[index].process_generation += 1;
         let process_generation = self.harnesses[index].process_generation;
@@ -2111,32 +2117,61 @@ impl Dirigent {
             Ok(process) => {
                 self.harnesses[index].process = Some(process);
                 if self.harnesses[index].startup_settings_pending {
-                    if let Some((provider, model_id)) =
-                        self.harnesses[index].model.clone().and_then(|model| {
-                            let (provider, model_id) = model.split_once('/')?;
-                            Some((provider.to_string(), model_id.to_string()))
-                        })
-                    {
-                        self.send_value(
-                            index,
-                            json!({"type":"set_model", "provider":provider, "modelId":model_id}),
-                        );
-                    }
-                    if let Some(level) = self.harnesses[index].thinking_level.clone() {
-                        self.send_value(index, json!({"type":"set_thinking_level", "level":level}));
-                    }
-                    self.harnesses[index].startup_settings_pending = false;
-                }
-                self.send_value(index, json!({"id":"dirigent-state","type":"get_state"}));
-                self.request_context_usage(index);
-                if !self.harnesses[index].loaded_messages {
-                    self.request_entries(index);
-                }
-                if let Some((prompt, images)) = initial_prompt {
-                    self.send_prompt_command(index, prompt, images);
+                    self.send_startup_model(index);
+                } else {
+                    self.finish_harness_startup(index);
                 }
             }
             Err(error) => self.fail_harness(index, error),
+        }
+    }
+
+    // Pi dispatches RPC input lines concurrently, so startup settings must be
+    // chained from their responses before the initial prompt is sent.
+    fn send_startup_model(&mut self, index: usize) {
+        let model = self.harnesses[index].model.clone().and_then(|model| {
+            let (provider, model_id) = model.split_once('/')?;
+            Some((provider.to_string(), model_id.to_string()))
+        });
+        if let Some((provider, model_id)) = model {
+            self.send_value(
+                index,
+                json!({
+                    "id": STARTUP_MODEL_REQUEST_ID,
+                    "type":"set_model",
+                    "provider":provider,
+                    "modelId":model_id
+                }),
+            );
+        } else {
+            self.send_startup_thinking_level(index);
+        }
+    }
+
+    fn send_startup_thinking_level(&mut self, index: usize) {
+        if let Some(level) = self.harnesses[index].thinking_level.clone() {
+            self.send_value(
+                index,
+                json!({
+                    "id": STARTUP_THINKING_REQUEST_ID,
+                    "type":"set_thinking_level",
+                    "level":level
+                }),
+            );
+        } else {
+            self.finish_harness_startup(index);
+        }
+    }
+
+    fn finish_harness_startup(&mut self, index: usize) {
+        self.harnesses[index].startup_settings_pending = false;
+        self.send_value(index, json!({"id":"dirigent-state","type":"get_state"}));
+        self.request_context_usage(index);
+        if !self.harnesses[index].loaded_messages {
+            self.request_entries(index);
+        }
+        if let Some((prompt, images)) = self.harnesses[index].pending_initial_prompt.take() {
+            self.send_prompt_command(index, prompt, images);
         }
     }
 
@@ -2247,7 +2282,8 @@ impl Dirigent {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
-        if self.harnesses[index].process.is_none() {
+        if self.harnesses[index].process.is_none() || self.harnesses[index].startup_settings_pending
+        {
             return;
         }
         let images = input.read(cx).images();
@@ -2377,9 +2413,15 @@ impl Dirigent {
         let Some(id) = self.selected_harness else {
             return;
         };
-        self.start_harness(id, None);
-        if let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) {
-            self.harnesses[index].model = Some(format!("{provider}/{model_id}"));
+        let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
+            return;
+        };
+        self.harnesses[index].model = Some(format!("{provider}/{model_id}"));
+        if self.harnesses[index].process.is_none() {
+            self.start_harness(id, None);
+        } else if self.harnesses[index].startup_settings_pending {
+            self.send_startup_model(index);
+        } else {
             self.send_value(
                 index,
                 json!({"type":"set_model", "provider":provider, "modelId":model_id}),
@@ -3053,8 +3095,28 @@ impl Dirigent {
     }
 
     fn handle_response(&mut self, index: usize, value: &Value) {
+        let command = value.get("command").and_then(Value::as_str);
+        let request_id = value.get("id").and_then(Value::as_str);
+        let startup_request = self.harnesses[index].startup_settings_pending
+            && matches!(
+                (request_id, command),
+                (Some(STARTUP_MODEL_REQUEST_ID), Some("set_model"))
+                    | (
+                        Some(STARTUP_THINKING_REQUEST_ID),
+                        Some("set_thinking_level")
+                    )
+            );
         if value.get("success").and_then(Value::as_bool) == Some(false) {
-            let command = value.get("command").and_then(Value::as_str);
+            if startup_request {
+                self.harnesses[index].process.take();
+                let error = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pi rejected a startup setting.")
+                    .to_string();
+                self.fail_harness(index, error);
+                return;
+            }
             if command == Some("prompt")
                 && let Some(message) = self.harnesses[index]
                     .messages
@@ -3083,7 +3145,15 @@ impl Dirigent {
             self.harnesses[index].messages.push(Message::error(error));
             return;
         }
-        match value.get("command").and_then(Value::as_str) {
+        if startup_request {
+            match command {
+                Some("set_model") => self.send_startup_thinking_level(index),
+                Some("set_thinking_level") => self.finish_harness_startup(index),
+                _ => {}
+            }
+            return;
+        }
+        match command {
             Some("get_state") => {
                 let data = value.get("data").unwrap_or(&Value::Null);
                 self.harnesses[index].session_file = data

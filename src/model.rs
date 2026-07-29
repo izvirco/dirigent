@@ -498,6 +498,7 @@ pub(crate) struct Harness {
     pub(crate) cached_entries: Option<Vec<serde_json::Value>>,
     pub(crate) cached_leaf_id: Option<String>,
     pub(crate) startup_settings_pending: bool,
+    pub(crate) pending_initial_prompt: Option<(String, Vec<AttachedImage>)>,
     pub(crate) nix_enabled: bool,
     pub(crate) nix_restart_pending: bool,
 }
@@ -529,6 +530,7 @@ impl Harness {
             cached_entries: None,
             cached_leaf_id: None,
             startup_settings_pending: true,
+            pending_initial_prompt: None,
             steering_queue: Vec::new(),
             follow_up_queue: Vec::new(),
             retry_status: None,
@@ -582,6 +584,7 @@ impl Harness {
             cached_entries: None,
             cached_leaf_id: None,
             startup_settings_pending: false,
+            pending_initial_prompt: None,
             steering_queue: Vec::new(),
             follow_up_queue: Vec::new(),
             retry_status: None,
