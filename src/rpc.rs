@@ -37,11 +37,13 @@ pub(crate) struct PiProcess {
 }
 
 impl PiProcess {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         target: RuntimeTarget,
         cwd: &Path,
         session_file: Option<&Path>,
         session_name: &str,
+        bridge_extension: Option<&Path>,
         nix_enabled: bool,
         ephemeral: bool,
         events: Sender<RuntimeEvent>,
@@ -57,6 +59,9 @@ impl PiProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        if let Some(extension) = bridge_extension {
+            command.arg("--extension").arg(extension);
+        }
         if ephemeral {
             command.arg("--no-session");
         } else if let Some(session_file) = session_file {

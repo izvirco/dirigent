@@ -7,7 +7,7 @@ use gpui::{
 };
 
 use crate::{
-    app::Dirigent,
+    app::{ComposerDropdown, Dirigent},
     model::{HarnessStatus, Message, MessageRole, RetryStatus},
     theme::{
         blue, green, muted, orange, purple, rgb, surface_hover, theme_text, thinking_text, yellow,
@@ -48,18 +48,20 @@ fn tool_color(tool: &str) -> u32 {
 }
 
 impl Dirigent {
-    fn render_copy_button(
+    fn render_message_action(
         &self,
-        id: impl Into<String>,
+        id: String,
+        label: &'static str,
         text: SharedString,
+        index: usize,
         visible: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let id = id.into();
-        let copied = self
-            .copied_button
-            .as_ref()
-            .is_some_and(|(button_id, _)| button_id == &id);
+        let copied = label == "Copy"
+            && self
+                .copied_button
+                .as_ref()
+                .is_some_and(|(button_id, _)| button_id == &id);
         let shown = visible || copied;
         let clicked_id = id.clone();
         div()
@@ -76,16 +78,297 @@ impl Dirigent {
             .when(copied, |element| element.bg(rgb(blue()).opacity(0.15)))
             .when(shown, |element| {
                 element
-                    .cursor_default()
+                    .cursor_pointer()
                     .when(!copied, |element| {
                         element.hover(|style| style.bg(rgb(surface_hover())))
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.copy_text_with_feedback(clicked_id.clone(), text.to_string(), cx);
+                        match label {
+                            "Copy" => this.copy_text_with_feedback(
+                                clicked_id.clone(),
+                                text.to_string(),
+                                cx,
+                            ),
+                            "Fork" => this.begin_message_fork(index, cx),
+                            "Edit" => this.begin_message_edit(index, cx),
+                            _ => {}
+                        }
                         cx.stop_propagation();
                     }))
             })
-            .child("Copy")
+            .child(label)
+            .into_any_element()
+    }
+
+    fn render_message_actions(
+        &self,
+        message: &Message,
+        index: usize,
+        visible: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let stable =
+            self.session_actions_available() && message.entry_id.is_some() && !message.queued;
+        let idle = self.selected_harness.is_some_and(|id| {
+            self.harnesses
+                .iter()
+                .find(|harness| harness.id == id)
+                .is_some_and(|harness| harness.status != HarnessStatus::Working)
+        });
+        let labels: &[&str] = match message.role {
+            MessageRole::User if stable && idle => &["Copy", "Fork", "Edit"],
+            MessageRole::Assistant if stable && idle => &["Copy", "Fork"],
+            MessageRole::User
+            | MessageRole::Assistant
+            | MessageRole::Thinking
+            | MessageRole::Tool
+            | MessageRole::Notice
+            | MessageRole::Error => &["Copy"],
+        };
+        let estimated_lines = message
+            .display_text
+            .lines()
+            .map(|line| line.chars().count().max(1).div_ceil(88))
+            .sum::<usize>()
+            .max(1);
+        let line_height = if message.role == MessageRole::Assistant {
+            22
+        } else {
+            21
+        };
+        let estimated_height = estimated_lines * line_height
+            + usize::from(!message.images.is_empty()) * 36
+            + usize::from(message.display_detail.is_some()) * 40;
+        let required_height = labels.len() * 22 + labels.len().saturating_sub(1) * 4;
+        let vertical = labels.len() > 1 && estimated_height >= required_height;
+        let copy_text = message.copy_text.clone();
+        let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
+        div()
+            .id(("message-actions", index))
+            .absolute()
+            .top_0()
+            .left(relative(1.0))
+            .ml_2()
+            .w(px(132.0))
+            .flex()
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                let hovered = if *hovered { hover_key } else { None };
+                if hovered.is_some() || this.hovered_copy_message == hover_key {
+                    this.hovered_copy_message = hovered;
+                    cx.notify();
+                }
+            }))
+            .when(vertical, |element| element.flex_col())
+            .gap(px(4.0))
+            .children(labels.iter().map(|label| {
+                self.render_message_action(
+                    format!("{}-message-{index}", label.to_ascii_lowercase()),
+                    label,
+                    copy_text.clone(),
+                    index,
+                    visible,
+                    cx,
+                )
+            }))
+            .into_any_element()
+    }
+
+    pub(super) fn render_message_edit_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let edit = self.editing_message.as_ref().expect("edit must exist");
+        let index = edit.message_index;
+        let input = edit.input.clone();
+        let model = edit.model.clone();
+        let thinking = edit.thinking.clone();
+        let submitting = edit.submitting;
+        let model_open = self.composer_dropdown == Some(ComposerDropdown::EditModel);
+        let thinking_open = self.composer_dropdown == Some(ComposerDropdown::EditReasoning);
+        let model_label = model
+            .split_once('/')
+            .map_or(model.as_str(), |(_, model)| model)
+            .to_string();
+        let model_picker = div()
+            .relative()
+            .child(
+                div()
+                    .id(("edit-model-picker", index))
+                    .h(px(26.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(muted()))
+                    .hover(|style| style.bg(rgb(surface_hover())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_composer_dropdown(ComposerDropdown::EditModel);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }))
+                    .child(model_label),
+            )
+            .when(model_open, |element| {
+                element.child(
+                    div()
+                        .id(("edit-model-dropdown", index))
+                        .absolute()
+                        .bottom(px(30.0))
+                        .left_0()
+                        .min_w(px(260.0))
+                        .max_h(px(260.0))
+                        .p_1()
+                        .overflow_y_scroll()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(crate::theme::border()))
+                        .bg(rgb(crate::theme::popup_bg()))
+                        .occlude()
+                        .children(self.available_models.iter().enumerate().map(
+                            |(option, item)| {
+                                let value = format!("{}/{}", item.provider, item.id);
+                                div()
+                                    .id(("edit-model-option", option))
+                                    .h(px(28.0))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .text_color(rgb(theme_text()))
+                                    .hover(|style| style.bg(rgb(surface_hover())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.select_edit_model(value.clone());
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(item.name.clone())
+                            },
+                        )),
+                )
+            });
+        let thinking_picker = div()
+            .relative()
+            .child(
+                div()
+                    .id(("edit-thinking-picker", index))
+                    .h(px(26.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .text_xs()
+                    .text_color(rgb(muted()))
+                    .hover(|style| style.bg(rgb(surface_hover())))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.toggle_composer_dropdown(ComposerDropdown::EditReasoning);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }))
+                    .child(thinking.clone()),
+            )
+            .when(thinking_open, |element| {
+                element.child(
+                    div()
+                        .absolute()
+                        .bottom(px(30.0))
+                        .left_0()
+                        .p_1()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(crate::theme::border()))
+                        .bg(rgb(crate::theme::popup_bg()))
+                        .occlude()
+                        .children(
+                            self.edit_reasoning_options(&model)
+                                .into_iter()
+                                .enumerate()
+                                .map(|(option, level)| {
+                                    let value = level.clone();
+                                    div()
+                                        .id(("edit-thinking-option", option))
+                                        .h(px(28.0))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(theme_text()))
+                                        .hover(|style| style.bg(rgb(surface_hover())))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.select_edit_thinking(value.clone());
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                        }))
+                                        .child(level)
+                                }),
+                        ),
+                )
+            });
+        div()
+            .w_full()
+            .max_w(px(820.0))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(blue()).opacity(0.55))
+            .bg(rgb(crate::theme::surface()))
+            .child(
+                div()
+                    .px_1()
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(blue()))
+                    .child("Editing an earlier message"),
+            )
+            .child(input)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(model_picker)
+                    .child(thinking_picker)
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .id(("cancel-message-edit", index))
+                            .h(px(28.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .text_xs()
+                            .text_color(rgb(muted()))
+                            .when(!submitting, |element| {
+                                element
+                                    .hover(|style| style.bg(rgb(surface_hover())))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.cancel_message_edit(cx)),
+                                    )
+                            })
+                            .child("Cancel"),
+                    )
+                    .child(
+                        div()
+                            .id(("submit-message-edit", index))
+                            .h(px(28.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .bg(rgb(blue()))
+                            .text_xs()
+                            .text_color(rgb(crate::theme::bg()))
+                            .when(!submitting, |element| {
+                                element.on_click(
+                                    cx.listener(|this, _, _, cx| this.submit_message_edit(cx)),
+                                )
+                            })
+                            .child(if submitting { "Branching…" } else { "Send" }),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -134,9 +417,8 @@ impl Dirigent {
         index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let copy_text = message.copy_text.clone();
         let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
-        let copy_button_visible = self.hovered_copy_message == hover_key;
+        let actions_visible = self.hovered_copy_message == hover_key;
         match message.role {
             MessageRole::User => {
                 let images = message.images.clone();
@@ -199,18 +481,15 @@ impl Dirigent {
                                 ))
                             }),
                     )
-                    .child(self.render_copy_button(
-                        format!("copy-user-{index}"),
-                        copy_text,
-                        copy_button_visible,
-                        cx,
-                    ))
+                    .child(self.render_message_actions(message, index, actions_visible, cx))
                     .into_any_element()
             }
             MessageRole::Assistant => div()
                 .id(("assistant-message", index))
                 .relative()
                 .w_full()
+                .flex()
+                .items_start()
                 .text_sm()
                 .line_height(px(22.0))
                 .text_color(rgb(crate::theme::code_text()))
@@ -221,7 +500,7 @@ impl Dirigent {
                         cx.notify();
                     }
                 }))
-                .child(div().w_full().min_w(px(0.0)).child(
+                .child(div().w_full().min_w(px(0.0)).flex_1().child(
                     if let Some(markdown) = message.markdown.as_ref() {
                         self.render_markdown(markdown, index, cx)
                     } else {
@@ -233,26 +512,23 @@ impl Dirigent {
                         )
                     },
                 ))
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .child(self.render_copy_button(
-                            format!("copy-assistant-{index}"),
-                            copy_text,
-                            copy_button_visible,
-                            cx,
-                        )),
-                )
+                .child(self.render_message_actions(message, index, actions_visible, cx))
                 .into_any_element(),
             MessageRole::Thinking => {
                 let text = message.display_text.clone();
                 div()
                     .id(("thinking-message", index))
+                    .relative()
                     .w_full()
                     .min_h(px(18.0))
                     .flex()
+                    .on_hover(cx.listener(move |this, hovered, _, cx| {
+                        let hovered = if *hovered { hover_key } else { None };
+                        if hovered.is_some() || this.hovered_copy_message == hover_key {
+                            this.hovered_copy_message = hovered;
+                            cx.notify();
+                        }
+                    }))
                     .items_start()
                     .gap_2()
                     .text_xs()
@@ -270,6 +546,7 @@ impl Dirigent {
                                 cx,
                             )),
                     )
+                    .child(self.render_message_actions(message, index, actions_visible, cx))
                     .into_any_element()
             }
             MessageRole::Tool => {
@@ -299,9 +576,17 @@ impl Dirigent {
                 };
                 div()
                     .id(("tool-message", index))
+                    .relative()
                     .w_full()
                     .flex()
                     .flex_col()
+                    .on_hover(cx.listener(move |this, hovered, _, cx| {
+                        let hovered = if *hovered { hover_key } else { None };
+                        if hovered.is_some() || this.hovered_copy_message == hover_key {
+                            this.hovered_copy_message = hovered;
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         div()
                             .id(("toggle-tool", index))
@@ -333,7 +618,13 @@ impl Dirigent {
                                     cx.notify();
                                 }
                             }))
-                            .child(div().min_w(px(0.0)).flex_1().child(label)),
+                            .child(div().min_w(px(0.0)).flex_1().child(label))
+                            .child(self.render_message_actions(
+                                message,
+                                index,
+                                actions_visible,
+                                cx,
+                            )),
                     )
                     .when(expanded, |element| {
                         element.when_some(message.display_detail.clone(), |element, detail| {
@@ -352,6 +643,7 @@ impl Dirigent {
                 let error = message.role == MessageRole::Error;
                 div()
                     .id(("notice-message", index))
+                    .relative()
                     .w_full()
                     .px_3()
                     .py_2()
@@ -389,12 +681,7 @@ impl Dirigent {
                                 cx,
                             )),
                     )
-                    .child(self.render_copy_button(
-                        format!("copy-notice-{index}"),
-                        copy_text,
-                        copy_button_visible,
-                        cx,
-                    ))
+                    .child(self.render_message_actions(message, index, actions_visible, cx))
                     .into_any_element()
             }
         }

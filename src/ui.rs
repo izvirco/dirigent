@@ -223,6 +223,18 @@ impl Dirigent {
                 |element| {
                     element
                         .child(self.render_conversation(cx))
+                        .when(self.editing_message.is_some(), |element| {
+                            element.child(
+                                div()
+                                    .w_full()
+                                    .px_6()
+                                    .pt_2()
+                                    .flex_none()
+                                    .flex()
+                                    .justify_center()
+                                    .child(self.render_message_edit_composer(cx)),
+                            )
+                        })
                         .child(self.render_composer(window, cx))
                 },
             )

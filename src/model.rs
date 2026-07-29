@@ -44,6 +44,7 @@ pub(crate) enum MessageRole {
 
 pub(crate) struct Message {
     pub(crate) role: MessageRole,
+    pub(crate) entry_id: Option<String>,
     pub(crate) text: String,
     pub(crate) queued: bool,
     pub(crate) display_text: SharedString,
@@ -64,6 +65,7 @@ impl Message {
         let text = text.into();
         let mut message = Self {
             role,
+            entry_id: None,
             text,
             queued: false,
             display_text: SharedString::default(),
@@ -109,6 +111,11 @@ impl Message {
         let mut message = Self::tool(text, None, running, false);
         message.set_detail(summary.map(str::to_string));
         message
+    }
+
+    pub(crate) fn with_entry_id(mut self, entry_id: Option<&str>) -> Self {
+        self.entry_id = entry_id.map(str::to_string);
+        self
     }
 
     pub(crate) fn is_compaction(&self) -> bool {

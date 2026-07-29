@@ -48,6 +48,8 @@ pub(crate) enum ComposerDropdown {
     Project,
     Model,
     Reasoning,
+    EditModel,
+    EditReasoning,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +125,31 @@ pub(crate) struct ThreadTextSelection {
     pub(crate) head: usize,
     pub(crate) range: Range<usize>,
     pub(crate) selecting: bool,
+}
+
+pub(crate) struct MessageEdit {
+    pub(crate) harness_id: Id,
+    pub(crate) message_index: usize,
+    pub(crate) entry_id: String,
+    pub(crate) input: Entity<TextInput>,
+    pub(crate) model: String,
+    pub(crate) thinking: String,
+    pub(crate) submitting: bool,
+}
+
+struct PendingEditSubmit {
+    harness_id: Id,
+    entry_id: String,
+    text: String,
+    images: Vec<AttachedImage>,
+    model: String,
+    thinking: String,
+}
+
+struct PendingFork {
+    source_harness_id: Id,
+    entry_id: String,
+    position: &'static str,
 }
 
 pub(crate) struct PendingDialog {
@@ -296,6 +323,9 @@ pub(crate) struct Dirigent {
     pub(crate) conversation_scroll_dragging: bool,
     pub(crate) model_picker_scroll: ScrollHandle,
     pub(crate) composer_dropdown: Option<ComposerDropdown>,
+    pub(crate) editing_message: Option<MessageEdit>,
+    pending_edit_submit: Option<PendingEditSubmit>,
+    pending_forks: HashMap<Id, PendingFork>,
     pub(crate) path_completion: Option<PathCompletion>,
     project_file_pickers: HashMap<Id, SharedFilePicker>,
     fuzzy_index_events: Sender<FuzzyIndexReady>,
@@ -308,6 +338,7 @@ pub(crate) struct Dirigent {
     pub(crate) draft_nix_enabled: bool,
     // Loads project-local pi defaults before the project's first harness exists.
     project_probe: Option<(Id, PiProcess)>,
+    pi_bridge_extension: Option<PathBuf>,
     pub(crate) thread_text_selection: Option<ThreadTextSelection>,
     pub(crate) hovered_copy_message: Option<(Id, usize)>,
     pub(crate) copied_button: Option<(String, Instant)>,
@@ -672,6 +703,15 @@ impl Dirigent {
         if banner.is_none() {
             banner = config_error.clone();
         }
+        let pi_bridge_extension = match platform::materialize_pi_bridge() {
+            Ok(path) => Some(path),
+            Err(error) => {
+                if banner.is_none() {
+                    banner = Some(error);
+                }
+                None
+            }
+        };
         let storage::LoadedState {
             projects,
             mut harnesses,
@@ -923,6 +963,9 @@ impl Dirigent {
             conversation_scroll_dragging: false,
             model_picker_scroll: ScrollHandle::new(),
             composer_dropdown: None,
+            editing_message: None,
+            pending_edit_submit: None,
+            pending_forks: HashMap::new(),
             path_completion: None,
             project_file_pickers,
             fuzzy_index_events: fuzzy_index_tx,
@@ -934,6 +977,7 @@ impl Dirigent {
             draft_thinking_level: None,
             draft_nix_enabled: true,
             project_probe: None,
+            pi_bridge_extension,
             thread_text_selection: None,
             hovered_copy_message: None,
             copied_button: None,
@@ -1023,6 +1067,10 @@ impl Dirigent {
             self.banner = None;
         }
         self.config_error = None;
+    }
+
+    pub(crate) fn session_actions_available(&self) -> bool {
+        self.pi_bridge_extension.is_some()
     }
 
     pub(crate) fn selected_composer_input(&self) -> Option<Entity<TextInput>> {
@@ -1980,6 +2028,8 @@ impl Dirigent {
         self.selected_harness = Some(id);
         self.last_used_harness = Some(id);
         self.thread_text_selection = None;
+        self.editing_message = None;
+        self.pending_edit_submit = None;
         self.adding_project = false;
         self.creating_harness = false;
         self.composer_dropdown = None;
@@ -2015,6 +2065,8 @@ impl Dirigent {
         self.selected_harness = None;
         self.adding_project = false;
         self.creating_harness = true;
+        self.editing_message = None;
+        self.pending_edit_submit = None;
         self.composer_dropdown = None;
         self.path_completion = None;
         self.draft_model = model;
@@ -2067,6 +2119,7 @@ impl Dirigent {
             &project_path,
             None,
             &session_name,
+            self.pi_bridge_extension.as_deref(),
             nix_enabled,
             true,
             self.runtime_events.clone(),
@@ -2153,6 +2206,7 @@ impl Dirigent {
             &project_path,
             session_file.as_deref(),
             &title,
+            self.pi_bridge_extension.as_deref(),
             self.harnesses[index].nix_enabled && project_has_devshell(&project_path),
             false,
             self.runtime_events.clone(),
@@ -2299,6 +2353,315 @@ impl Dirigent {
         }
     }
 
+    pub(crate) fn begin_message_edit(&mut self, message_index: usize, cx: &mut Context<Self>) {
+        if self.pi_bridge_extension.is_none() {
+            self.banner = Some("The bundled Pi session bridge is unavailable.".into());
+            return;
+        }
+        let Some(harness_id) = self.selected_harness else {
+            return;
+        };
+        let Some(index) = self
+            .harnesses
+            .iter()
+            .position(|harness| harness.id == harness_id)
+        else {
+            return;
+        };
+        if self.harnesses[index].status == HarnessStatus::Working {
+            self.banner = Some("Wait for Pi to finish before editing an earlier message.".into());
+            return;
+        }
+        let Some(message) = self.harnesses[index].messages.get(message_index) else {
+            return;
+        };
+        if message.role != MessageRole::User || message.queued {
+            return;
+        }
+        let Some(entry_id) = message.entry_id.clone() else {
+            self.banner = Some("This message is not saved in Pi yet.".into());
+            return;
+        };
+        let text = message.text.clone();
+        let images = message
+            .images
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(image_index, image)| AttachedImage {
+                label: format!("image-{}", image_index + 1),
+                image,
+            })
+            .collect::<Vec<_>>();
+        let fallback_model = self.harnesses[index].model.clone().unwrap_or_default();
+        let fallback_thinking = self.harnesses[index]
+            .thinking_level
+            .clone()
+            .unwrap_or_else(|| "off".into());
+        let (model, thinking) = effective_settings_before_entry(
+            self.harnesses[index]
+                .cached_entries
+                .as_deref()
+                .unwrap_or_default(),
+            &entry_id,
+            fallback_model,
+            fallback_thinking,
+        );
+        let input = cx.new(move |cx| {
+            let mut input = TextInput::new("Edit message…", cx).borderless().multiline();
+            input.restore_draft(text, images, cx);
+            input
+        });
+        cx.subscribe(&input, |this, _, event, cx| match event {
+            InputEvent::Submit => this.submit_message_edit(cx),
+            InputEvent::Escape => this.cancel_message_edit(cx),
+            InputEvent::Focused => {
+                this.enter_input_mode(false);
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        self.editing_message = Some(MessageEdit {
+            harness_id,
+            message_index,
+            entry_id,
+            input,
+            model,
+            thinking,
+            submitting: false,
+        });
+        self.composer_dropdown = None;
+        self.focus_input = true;
+        self.keyboard_mode = KeyboardMode::Input;
+        self.conversation_list
+            .remeasure_items(message_index..message_index + 1);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_message_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.editing_message.take() else {
+            return;
+        };
+        if edit.submitting {
+            self.editing_message = Some(edit);
+            return;
+        }
+        self.composer_dropdown = None;
+        self.conversation_list
+            .remeasure_items(edit.message_index..edit.message_index + 1);
+        cx.notify();
+    }
+
+    pub(crate) fn select_edit_model(&mut self, model: String) {
+        if let Some(edit) = self.editing_message.as_mut() {
+            edit.model = model;
+        }
+        self.composer_dropdown = None;
+    }
+
+    pub(crate) fn select_edit_thinking(&mut self, thinking: String) {
+        if let Some(edit) = self.editing_message.as_mut() {
+            edit.thinking = thinking;
+        }
+        self.composer_dropdown = None;
+    }
+
+    pub(crate) fn edit_reasoning_options(&self, model: &str) -> Vec<String> {
+        reasoning_options_for_model(
+            self.selected_project,
+            model,
+            &self.available_models,
+            &self.available_thinking_levels,
+        )
+    }
+
+    pub(crate) fn submit_message_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(edit) = self.editing_message.as_ref() else {
+            return;
+        };
+        if edit.submitting {
+            return;
+        }
+        let text = edit.input.read(cx).text().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let pending = PendingEditSubmit {
+            harness_id: edit.harness_id,
+            entry_id: edit.entry_id.clone(),
+            text,
+            images: edit.input.read(cx).images(),
+            model: edit.model.clone(),
+            thinking: edit.thinking.clone(),
+        };
+        let Some(index) = self
+            .harnesses
+            .iter()
+            .position(|harness| harness.id == pending.harness_id)
+        else {
+            return;
+        };
+        self.start_harness(pending.harness_id, None);
+        if self.harnesses[index].process.is_none() || self.harnesses[index].startup_settings_pending
+        {
+            self.banner = Some("Pi is still starting; try the edit again in a moment.".into());
+            return;
+        }
+        if let Some(edit) = self.editing_message.as_mut() {
+            edit.submitting = true;
+        }
+        let command = format!("/dirigent-navigate {}", pending.entry_id);
+        self.pending_edit_submit = Some(pending);
+        self.send_value(
+            index,
+            json!({"id":"dirigent-edit-navigate","type":"prompt","message":command}),
+        );
+        cx.notify();
+    }
+
+    pub(crate) fn begin_message_fork(&mut self, message_index: usize, cx: &mut Context<Self>) {
+        if self.pi_bridge_extension.is_none() {
+            self.banner = Some("The bundled Pi session bridge is unavailable.".into());
+            return;
+        }
+        let Some(source_harness_id) = self.selected_harness else {
+            return;
+        };
+        let Some(source_index) = self
+            .harnesses
+            .iter()
+            .position(|harness| harness.id == source_harness_id)
+        else {
+            return;
+        };
+        if self.harnesses[source_index].status == HarnessStatus::Working {
+            self.banner = Some("Wait for Pi to finish before forking this thread.".into());
+            return;
+        }
+        let Some(message) = self.harnesses[source_index].messages.get(message_index) else {
+            return;
+        };
+        let Some(entry_id) = message.entry_id.clone() else {
+            self.banner = Some("This message is not saved in Pi yet.".into());
+            return;
+        };
+        let position = match message.role {
+            MessageRole::User if !message.queued => "before",
+            MessageRole::Assistant => "at",
+            _ => return,
+        };
+        let Some(source_session_file) = self.harnesses[source_index].session_file.clone() else {
+            self.banner = Some("Pi has not persisted this thread yet.".into());
+            return;
+        };
+        if !source_session_file.is_file() {
+            self.banner = Some("Pi has not finished saving this thread yet.".into());
+            return;
+        }
+        let prefill = (message.role == MessageRole::User).then(|| {
+            let images = message
+                .images
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(image_index, image)| AttachedImage {
+                    label: format!("image-{}", image_index + 1),
+                    image,
+                })
+                .collect::<Vec<_>>();
+            (message.text.clone(), images)
+        });
+        let root_user_fork = position == "before"
+            && self.harnesses[source_index]
+                .cached_entries
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id.as_str()))
+                .is_some_and(|entry| entry.get("parentId").is_none_or(Value::is_null));
+        let project_id = self.harnesses[source_index].project_id;
+        let title = format!("{} (fork)", self.harnesses[source_index].title);
+        let nix_enabled = self.harnesses[source_index].nix_enabled;
+        let model = self.harnesses[source_index].model.clone();
+        let thinking = self.harnesses[source_index].thinking_level.clone();
+        let id = self.allocate_id();
+        let sidebar_order = self.allocate_sidebar_order();
+        let mut harness = if root_user_fork {
+            Harness::new(id, project_id, title, sidebar_order)
+        } else {
+            Harness::restored(
+                id,
+                project_id,
+                title,
+                Some(source_session_file),
+                nix_enabled,
+                false,
+                sidebar_order,
+            )
+        };
+        harness.status = if root_user_fork {
+            HarnessStatus::Stopped
+        } else {
+            HarnessStatus::Starting
+        };
+        harness.nix_enabled = nix_enabled;
+        harness.model = model;
+        harness.thinking_level = thinking;
+        self.harnesses.push(harness);
+        self.add_composer_input(id, cx);
+        if let Some((text, images)) = prefill
+            && let Some(input) = self.composer_inputs.get(&id)
+        {
+            input.update(cx, |input, cx| input.restore_draft(text, images, cx));
+        }
+        if !root_user_fork {
+            self.pending_forks.insert(
+                id,
+                PendingFork {
+                    source_harness_id,
+                    entry_id,
+                    position,
+                },
+            );
+        }
+        self.selected_project = Some(project_id);
+        self.selected_harness = Some(id);
+        self.last_used_harness = Some(id);
+        self.adding_project = false;
+        self.creating_harness = false;
+        self.editing_message = None;
+        self.composer_dropdown = None;
+        self.reset_conversation_list(self.harnesses.len() - 1);
+        self.focus_input = true;
+        self.keyboard_mode = KeyboardMode::Input;
+        self.persist();
+        if root_user_fork {
+            cx.notify();
+            return;
+        }
+        self.start_harness(source_harness_id, None);
+        if self.harnesses[source_index].process.is_none()
+            || self.harnesses[source_index].startup_settings_pending
+        {
+            self.fail_pending_fork(
+                id,
+                "Pi is still starting; try the fork again in a moment.".into(),
+            );
+            cx.notify();
+            return;
+        }
+        let command = format!(
+            "/dirigent-fork {position} {}",
+            self.pending_forks[&id].entry_id
+        );
+        self.send_value(
+            source_index,
+            json!({"id":"dirigent-fork-command","type":"prompt","message":command}),
+        );
+        cx.notify();
+    }
+
     pub(crate) fn send_composer(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.selected_harness else {
             return;
@@ -2306,6 +2669,11 @@ impl Dirigent {
         let Some(input) = self.composer_inputs.get(&id).cloned() else {
             return;
         };
+        if self.pending_forks.contains_key(&id) {
+            self.banner = Some("The fork is still being created.".into());
+            cx.notify();
+            return;
+        }
         let message = input.read(cx).text().trim().to_string();
         if message.is_empty() {
             return;
@@ -2322,11 +2690,26 @@ impl Dirigent {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
-        if self.harnesses[index].process.is_none() || self.harnesses[index].startup_settings_pending
-        {
+        if self.harnesses[index].process.is_none() {
             return;
         }
         let images = input.read(cx).images();
+        if self.harnesses[index].startup_settings_pending {
+            self.harnesses[index].pending_initial_prompt = Some((message.clone(), images.clone()));
+            self.harnesses[index]
+                .messages
+                .push(Message::user_with_images(
+                    message,
+                    images.iter().map(|image| image.image.clone()).collect(),
+                ));
+            self.mark_harness_working(index);
+            input.update(cx, |input, cx| input.clear(cx));
+            self.harnesses[index].composer_draft.clear();
+            self.harnesses[index].composer_draft_images.clear();
+            self.cache_harness_draft(index, true);
+            cx.notify();
+            return;
+        }
         let steering = self.harnesses[index].status == HarnessStatus::Working;
         let mut user_message = Message::user_with_images(
             message.clone(),
@@ -2401,7 +2784,12 @@ impl Dirigent {
             return;
         }
         self.composer_dropdown = Some(dropdown);
-        if dropdown == ComposerDropdown::Project {
+        if matches!(
+            dropdown,
+            ComposerDropdown::Project
+                | ComposerDropdown::EditModel
+                | ComposerDropdown::EditReasoning
+        ) {
             return;
         }
         if self.creating_harness
@@ -2421,7 +2809,9 @@ impl Dirigent {
                         json!({"type":"get_available_thinking_levels"}),
                     );
                 }
-                ComposerDropdown::Project => return,
+                ComposerDropdown::Project
+                | ComposerDropdown::EditModel
+                | ComposerDropdown::EditReasoning => return,
             }
             return;
         }
@@ -2435,7 +2825,9 @@ impl Dirigent {
                     self.send_value(index, json!({"type":"get_available_models"}));
                 }
                 ComposerDropdown::Reasoning => self.request_thinking_levels(index),
-                ComposerDropdown::Project => {}
+                ComposerDropdown::Project
+                | ComposerDropdown::EditModel
+                | ComposerDropdown::EditReasoning => {}
             }
         }
     }
@@ -2503,35 +2895,12 @@ impl Dirigent {
                     .and_then(|harness| harness.model.as_deref())
             })
         };
-        if let (Some(project_id), Some(current_model)) = (self.selected_project, current_model)
-            && let Some(levels) = self
-                .available_thinking_levels
-                .get(&(project_id, current_model.to_string()))
-        {
-            return levels.clone();
-        }
-        let model = current_model.and_then(|current| {
-            self.available_models
-                .iter()
-                .find(|model| current == format!("{}/{}", model.provider, model.id))
-        });
-        if model.is_some_and(|model| !model.reasoning) {
-            return vec!["off".into()];
-        }
-        let mut levels = vec![
-            "off".into(),
-            "minimal".into(),
-            "low".into(),
-            "medium".into(),
-            "high".into(),
-        ];
-        if model.is_some_and(|model| model.supports_xhigh) {
-            levels.push("xhigh".into());
-        }
-        if model.is_some_and(|model| model.supports_max) {
-            levels.push("max".into());
-        }
-        levels
+        reasoning_options_for_model(
+            self.selected_project,
+            current_model.unwrap_or_default(),
+            &self.available_models,
+            &self.available_thinking_levels,
+        )
     }
 
     fn fail_harness(&mut self, index: usize, error: String) {
@@ -3164,6 +3533,34 @@ impl Dirigent {
                 self.fail_harness(index, error);
                 return;
             }
+            if matches!(
+                request_id,
+                Some("dirigent-edit-navigate" | "dirigent-edit-model" | "dirigent-edit-thinking")
+            ) {
+                let error = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pi rejected the edited branch operation.")
+                    .to_string();
+                self.fail_pending_edit(error);
+                return;
+            }
+            if request_id == Some("dirigent-fork-command") {
+                let source_harness_id = self.harnesses[index].id;
+                let target_harness_id =
+                    self.pending_forks.iter().find_map(|(target_id, pending)| {
+                        (pending.source_harness_id == source_harness_id).then_some(*target_id)
+                    });
+                let error = value
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Pi rejected the fork operation.")
+                    .to_string();
+                if let Some(target_harness_id) = target_harness_id {
+                    self.fail_pending_fork(target_harness_id, error);
+                }
+                return;
+            }
             if command == Some("prompt") {
                 self.harnesses[index].queued_messages.pop();
             }
@@ -3198,6 +3595,14 @@ impl Dirigent {
                 Some("set_thinking_level") => self.finish_harness_startup(index),
                 _ => {}
             }
+            return;
+        }
+        if request_id == Some("dirigent-edit-model") {
+            self.send_pending_edit_thinking(index);
+            return;
+        }
+        if request_id == Some("dirigent-edit-thinking") {
+            self.finish_pending_edit(index);
             return;
         }
         match command {
@@ -3459,6 +3864,252 @@ impl Dirigent {
         }
     }
 
+    fn fail_pending_edit(&mut self, message: String) {
+        self.banner = Some(message);
+        self.pending_edit_submit = None;
+        if let Some(edit) = self.editing_message.as_mut() {
+            edit.submitting = false;
+        }
+    }
+
+    fn send_pending_edit_model(&mut self, index: usize) {
+        let Some(pending) = self.pending_edit_submit.as_ref() else {
+            return;
+        };
+        let Some((provider, model_id)) = pending.model.split_once('/') else {
+            self.fail_pending_edit("The selected model has an invalid identifier.".into());
+            return;
+        };
+        self.send_value(
+            index,
+            json!({
+                "id":"dirigent-edit-model",
+                "type":"set_model",
+                "provider":provider,
+                "modelId":model_id,
+            }),
+        );
+    }
+
+    fn send_pending_edit_thinking(&mut self, index: usize) {
+        let Some(thinking) = self
+            .pending_edit_submit
+            .as_ref()
+            .map(|pending| pending.thinking.clone())
+        else {
+            return;
+        };
+        self.send_value(
+            index,
+            json!({
+                "id":"dirigent-edit-thinking",
+                "type":"set_thinking_level",
+                "level":thinking,
+            }),
+        );
+    }
+
+    fn finish_pending_edit(&mut self, index: usize) {
+        let Some(pending) = self.pending_edit_submit.take() else {
+            return;
+        };
+        if self.harnesses[index].id != pending.harness_id {
+            return;
+        }
+        self.harnesses[index].model = Some(pending.model);
+        self.harnesses[index].thinking_level = Some(pending.thinking);
+        self.cache_harness_state(index);
+        let image_previews = pending
+            .images
+            .iter()
+            .map(|image| image.image.clone())
+            .collect();
+        self.harnesses[index]
+            .messages
+            .push(Message::user_with_images(
+                pending.text.clone(),
+                image_previews,
+            ));
+        self.editing_message = None;
+        self.composer_dropdown = None;
+        self.send_prompt_command(index, pending.text, pending.images, false);
+        self.sync_conversation_list(index, None);
+    }
+
+    fn fail_pending_fork(&mut self, harness_id: Id, message: String) {
+        let source_harness_id = self
+            .pending_forks
+            .remove(&harness_id)
+            .map(|pending| pending.source_harness_id);
+        if let Some(index) = self
+            .harnesses
+            .iter()
+            .position(|harness| harness.id == harness_id)
+        {
+            self.harnesses.remove(index);
+        }
+        self.composer_inputs.remove(&harness_id);
+        self.banner = Some(message);
+        if let Some(source_harness_id) = source_harness_id
+            && let Some(source_index) = self
+                .harnesses
+                .iter()
+                .position(|harness| harness.id == source_harness_id)
+        {
+            self.selected_project = Some(self.harnesses[source_index].project_id);
+            self.selected_harness = Some(source_harness_id);
+            self.last_used_harness = Some(source_harness_id);
+            self.reset_conversation_list(source_index);
+        }
+        self.persist();
+    }
+
+    fn handle_bridge_status(
+        &mut self,
+        index: usize,
+        status_text: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Ok(result) = serde_json::from_str::<Value>(status_text) else {
+            return false;
+        };
+        let operation = result
+            .get("operation")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let success = result.get("success").and_then(Value::as_bool) == Some(true);
+        let error = result
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or(
+                if result.get("cancelled").and_then(Value::as_bool) == Some(true) {
+                    "The operation was cancelled by a Pi extension."
+                } else {
+                    "Pi could not complete the operation."
+                },
+            )
+            .to_string();
+        match operation {
+            "navigate" => {
+                let Some(pending) = self.pending_edit_submit.as_ref() else {
+                    return true;
+                };
+                if self.harnesses[index].id != pending.harness_id {
+                    return true;
+                }
+                if !success {
+                    self.fail_pending_edit(error);
+                    return true;
+                }
+                let parent_id = self.harnesses[index]
+                    .cached_entries
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .find(|entry| {
+                        entry.get("id").and_then(Value::as_str) == Some(pending.entry_id.as_str())
+                    })
+                    .and_then(|entry| entry.get("parentId").and_then(Value::as_str))
+                    .map(str::to_string);
+                self.harnesses[index].cached_leaf_id = parent_id;
+                self.harnesses[index].messages = parse_entries(
+                    self.harnesses[index]
+                        .cached_entries
+                        .as_deref()
+                        .unwrap_or_default(),
+                    self.harnesses[index].cached_leaf_id.as_deref(),
+                );
+                self.request_entries(index);
+                self.send_pending_edit_model(index);
+                true
+            }
+            "fork" => {
+                let source_harness_id = self.harnesses[index].id;
+                let Some(target_harness_id) =
+                    self.pending_forks.iter().find_map(|(target_id, pending)| {
+                        (pending.source_harness_id == source_harness_id).then_some(*target_id)
+                    })
+                else {
+                    return true;
+                };
+                if !success {
+                    self.fail_pending_fork(target_harness_id, error);
+                    return true;
+                }
+                let Some(session_file) = result
+                    .get("sessionFile")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from)
+                else {
+                    self.fail_pending_fork(
+                        target_harness_id,
+                        "Pi did not report the forked session file.".into(),
+                    );
+                    return true;
+                };
+                let pending = self
+                    .pending_forks
+                    .remove(&target_harness_id)
+                    .expect("pending fork must exist");
+                let leaf_id = if pending.position == "at" {
+                    Some(pending.entry_id)
+                } else {
+                    self.harnesses[index]
+                        .cached_entries
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .find(|entry| {
+                            entry.get("id").and_then(Value::as_str)
+                                == Some(pending.entry_id.as_str())
+                        })
+                        .and_then(|entry| entry.get("parentId").and_then(Value::as_str))
+                        .map(str::to_string)
+                };
+                let entries = entries_through_leaf(
+                    self.harnesses[index]
+                        .cached_entries
+                        .as_deref()
+                        .unwrap_or_default(),
+                    leaf_id.as_deref(),
+                );
+                self.harnesses[index].process.take();
+                self.harnesses[index].status = HarnessStatus::Stopped;
+                self.harnesses[index].run_started_at = None;
+                let Some(target_index) = self
+                    .harnesses
+                    .iter()
+                    .position(|harness| harness.id == target_harness_id)
+                else {
+                    return true;
+                };
+                self.harnesses[target_index].session_file = Some(session_file);
+                self.harnesses[target_index].cached_entries = Some(entries);
+                self.harnesses[target_index].cached_leaf_id = leaf_id;
+                self.harnesses[target_index].messages = parse_entries(
+                    self.harnesses[target_index]
+                        .cached_entries
+                        .as_deref()
+                        .unwrap_or_default(),
+                    self.harnesses[target_index].cached_leaf_id.as_deref(),
+                );
+                self.harnesses[target_index].loaded_messages = true;
+                self.harnesses[target_index].status = HarnessStatus::Stopped;
+                self.selected_project = Some(self.harnesses[target_index].project_id);
+                self.selected_harness = Some(target_harness_id);
+                self.last_used_harness = Some(target_harness_id);
+                self.focus_input = true;
+                self.keyboard_mode = KeyboardMode::Input;
+                self.persist_composer_draft(target_harness_id, cx);
+                self.cache_harness_entries(target_index);
+                self.reset_conversation_list(target_index);
+                self.persist();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn handle_extension_ui(&mut self, index: usize, value: &Value, cx: &mut Context<Self>) {
         let method = value
             .get("method")
@@ -3476,6 +4127,12 @@ impl Dirigent {
                 }
             }
             "setStatus" => {
+                if value.get("statusKey").and_then(Value::as_str) == Some("__dirigent_bridge__")
+                    && let Some(message) = value.get("statusText").and_then(Value::as_str)
+                    && self.handle_bridge_status(index, message, cx)
+                {
+                    return;
+                }
                 if let Some(message) = value.get("statusText").and_then(Value::as_str) {
                     self.harnesses[index]
                         .messages
@@ -3839,6 +4496,8 @@ impl Render for Dirigent {
                 Some(self.thread_rename_input.clone())
             } else if self.pending_dialog.is_some() {
                 Some(self.extension_input.clone())
+            } else if let Some(edit) = self.editing_message.as_ref() {
+                Some(edit.input.clone())
             } else if self.adding_project {
                 Some(self.project_input.clone())
             } else if self.creating_harness {
@@ -3973,6 +4632,87 @@ impl Render for Dirigent {
                 },
             )
     }
+}
+
+fn reasoning_options_for_model(
+    project_id: Option<Id>,
+    current_model: &str,
+    available_models: &[AvailableModel],
+    available_thinking_levels: &HashMap<(Id, String), Vec<String>>,
+) -> Vec<String> {
+    if let Some(project_id) = project_id
+        && let Some(levels) =
+            available_thinking_levels.get(&(project_id, current_model.to_string()))
+    {
+        return levels.clone();
+    }
+    let model = available_models
+        .iter()
+        .find(|model| current_model == format!("{}/{}", model.provider, model.id));
+    if model.is_some_and(|model| !model.reasoning) {
+        return vec!["off".into()];
+    }
+    let mut levels = vec![
+        "off".into(),
+        "minimal".into(),
+        "low".into(),
+        "medium".into(),
+        "high".into(),
+    ];
+    if model.is_some_and(|model| model.supports_xhigh) {
+        levels.push("xhigh".into());
+    }
+    if model.is_some_and(|model| model.supports_max) {
+        levels.push("max".into());
+    }
+    levels
+}
+
+fn effective_settings_before_entry(
+    entries: &[Value],
+    target_id: &str,
+    mut model: String,
+    mut thinking: String,
+) -> (String, String) {
+    let by_id = entries
+        .iter()
+        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
+        .collect::<HashMap<_, _>>();
+    let mut branch = Vec::new();
+    let mut current = by_id
+        .get(target_id)
+        .and_then(|entry| entry.get("parentId").and_then(Value::as_str));
+    let mut visited = HashSet::new();
+    while let Some(id) = current {
+        if !visited.insert(id) {
+            break;
+        }
+        let Some(entry) = by_id.get(id).copied() else {
+            break;
+        };
+        branch.push(entry);
+        current = entry.get("parentId").and_then(Value::as_str);
+    }
+    branch.reverse();
+    for entry in branch {
+        match entry.get("type").and_then(Value::as_str) {
+            Some("model_change") => {
+                if let (Some(provider), Some(model_id)) = (
+                    entry.get("provider").and_then(Value::as_str),
+                    entry.get("modelId").and_then(Value::as_str),
+                ) {
+                    model = format!("{provider}/{model_id}");
+                }
+            }
+            Some("thinking_level_change") => {
+                if let Some(level) = entry.get("thinkingLevel").and_then(Value::as_str) {
+                    thinking = level.to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    (model, thinking)
 }
 
 fn parse_cached_draft_images(bytes: &[u8]) -> Result<Vec<AttachedImage>, String> {
@@ -4159,18 +4899,48 @@ fn content_images(value: &Value) -> Vec<Arc<Image>> {
         .collect()
 }
 
-fn push_assistant_block(messages: &mut Vec<Message>, role: MessageRole, text: &str) {
+fn push_assistant_block(
+    messages: &mut Vec<Message>,
+    role: MessageRole,
+    text: &str,
+    entry_id: Option<&str>,
+) {
     if text.is_empty() {
         return;
     }
-    if let Some(message) = messages.last_mut().filter(|message| message.role == role) {
+    if let Some(message) = messages
+        .last_mut()
+        .filter(|message| message.role == role && message.entry_id.as_deref() == entry_id)
+    {
         if !message.text.is_empty() {
             message.append_text("\n");
         }
         message.append_text(text);
         return;
     }
-    messages.push(Message::new(role, text));
+    messages.push(Message::new(role, text).with_entry_id(entry_id));
+}
+
+fn entries_through_leaf(values: &[Value], leaf_id: Option<&str>) -> Vec<Value> {
+    let by_id = values
+        .iter()
+        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
+        .collect::<HashMap<_, _>>();
+    let mut entries = Vec::new();
+    let mut current_id = leaf_id;
+    let mut visited = HashSet::new();
+    while let Some(id) = current_id {
+        if !visited.insert(id) {
+            break;
+        }
+        let Some(entry) = by_id.get(id).copied() else {
+            break;
+        };
+        entries.push(entry.clone());
+        current_id = entry.get("parentId").and_then(Value::as_str);
+    }
+    entries.reverse();
+    entries
 }
 
 fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Message> {
@@ -4198,7 +4968,11 @@ fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Message> {
         match entry.get("type").and_then(Value::as_str) {
             Some("message") => {
                 if let Some(message) = entry.get("message") {
-                    push_parsed_message(&mut messages, message);
+                    push_parsed_message(
+                        &mut messages,
+                        message,
+                        entry.get("id").and_then(Value::as_str),
+                    );
                 }
             }
             Some("compaction") => {
@@ -4206,7 +4980,10 @@ fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Message> {
                     .get("summary")
                     .and_then(Value::as_str)
                     .map(truncate_output);
-                messages.push(Message::compaction(None, summary.as_deref(), false));
+                messages.push(
+                    Message::compaction(None, summary.as_deref(), false)
+                        .with_entry_id(entry.get("id").and_then(Value::as_str)),
+                );
             }
             _ => {}
         }
@@ -4217,7 +4994,7 @@ fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Message> {
 fn parse_messages(values: &[Value]) -> Vec<Message> {
     let mut messages = Vec::new();
     for value in values {
-        push_parsed_message(&mut messages, value);
+        push_parsed_message(&mut messages, value, None);
     }
     messages
 }
@@ -4287,7 +5064,7 @@ fn assistant_failure(value: &Value) -> Option<String> {
     }
 }
 
-fn push_parsed_message(messages: &mut Vec<Message>, value: &Value) {
+fn push_parsed_message(messages: &mut Vec<Message>, value: &Value, entry_id: Option<&str>) {
     if value.get("role").and_then(Value::as_str) == Some("assistant") {
         if let Some(blocks) = value.get("content").and_then(Value::as_array) {
             for block in blocks {
@@ -4299,6 +5076,7 @@ fn push_parsed_message(messages: &mut Vec<Message>, value: &Value) {
                             .get("text")
                             .and_then(Value::as_str)
                             .unwrap_or_default(),
+                        entry_id,
                     ),
                     Some("thinking") => push_assistant_block(
                         messages,
@@ -4307,24 +5085,28 @@ fn push_parsed_message(messages: &mut Vec<Message>, value: &Value) {
                             .get("thinking")
                             .and_then(Value::as_str)
                             .unwrap_or_default(),
+                        entry_id,
                     ),
                     Some("toolCall") => {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                        messages.push(tool_message(
-                            name,
-                            block.get("arguments").unwrap_or(&Value::Null),
-                            block.get("id").and_then(Value::as_str).map(str::to_string),
-                            false,
-                        ));
+                        messages.push(
+                            tool_message(
+                                name,
+                                block.get("arguments").unwrap_or(&Value::Null),
+                                block.get("id").and_then(Value::as_str).map(str::to_string),
+                                false,
+                            )
+                            .with_entry_id(entry_id),
+                        );
                     }
                     _ => {}
                 }
             }
         } else if let Some(message) = parse_message(value) {
-            messages.push(message);
+            messages.push(message.with_entry_id(entry_id));
         }
         if let Some(error) = assistant_failure(value) {
-            messages.push(Message::error(error));
+            messages.push(Message::error(error).with_entry_id(entry_id));
         }
     } else if value.get("role").and_then(Value::as_str) == Some("toolResult") {
         let tool_call_id = value.get("toolCallId").and_then(Value::as_str);
@@ -4343,10 +5125,10 @@ fn push_parsed_message(messages: &mut Vec<Message>, value: &Value) {
                 message.set_detail(detail);
             }
         } else if let Some(message) = parse_message(value) {
-            messages.push(message);
+            messages.push(message.with_entry_id(entry_id));
         }
     } else if let Some(message) = parse_message(value) {
-        messages.push(message);
+        messages.push(message.with_entry_id(entry_id));
     }
 }
 
@@ -4407,10 +5189,11 @@ fn parse_message(value: &Value) -> Option<Message> {
 mod tests {
     use super::{
         FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
-        conversation_list_splice, directory_path_query, parse_available_model,
-        parse_cached_draft_images, parse_context_usage, parse_entries, parse_message,
-        parse_messages, reconcile_queued_messages, resolve_tilde_path, rpc_string_array,
-        tool_expanded, tool_label, tool_result_detail, truncate_output, write_detail,
+        conversation_list_splice, directory_path_query, effective_settings_before_entry,
+        entries_through_leaf, parse_available_model, parse_cached_draft_images,
+        parse_context_usage, parse_entries, parse_message, parse_messages,
+        reconcile_queued_messages, resolve_tilde_path, rpc_string_array, tool_expanded, tool_label,
+        tool_result_detail, truncate_output, write_detail,
     };
     use crate::model::{Message, MessageRole};
     use serde_json::json;
@@ -4833,6 +5616,96 @@ mod tests {
             messages
                 .iter()
                 .all(|message| message.text != "abandoned prompt")
+        );
+    }
+
+    #[test]
+    fn extracts_only_the_branch_written_to_a_forked_session() {
+        let entries = vec![
+            json!({"type":"message", "id":"root", "parentId":null}),
+            json!({"type":"message", "id":"active", "parentId":"root"}),
+            json!({"type":"message", "id":"abandoned", "parentId":"root"}),
+        ];
+
+        assert_eq!(
+            entries_through_leaf(&entries, Some("active"))
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(|id| id.as_str()))
+                .collect::<Vec<_>>(),
+            ["root", "active"]
+        );
+        assert!(entries_through_leaf(&entries, None).is_empty());
+    }
+
+    #[test]
+    fn canonical_messages_keep_their_pi_entry_ids() {
+        let entries = vec![
+            json!({
+                "type":"message", "id":"user-1", "parentId":null,
+                "message":{"role":"user","content":"prompt"}
+            }),
+            json!({
+                "type":"message", "id":"assistant-1", "parentId":"user-1",
+                "message":{"role":"assistant","content":[
+                    {"type":"thinking","thinking":"plan"},
+                    {"type":"text","text":"answer"}
+                ]}
+            }),
+        ];
+
+        let messages = parse_entries(&entries, Some("assistant-1"));
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].entry_id.as_deref(), Some("user-1"));
+        assert_eq!(messages[1].entry_id.as_deref(), Some("assistant-1"));
+        assert_eq!(messages[2].entry_id.as_deref(), Some("assistant-1"));
+    }
+
+    #[test]
+    fn assistant_text_from_separate_entries_stays_separate() {
+        let entries = vec![
+            json!({
+                "type":"message", "id":"assistant-1", "parentId":null,
+                "message":{"role":"assistant","content":[{"type":"text","text":"first"}]}
+            }),
+            json!({
+                "type":"message", "id":"assistant-2", "parentId":"assistant-1",
+                "message":{"role":"assistant","content":[{"type":"text","text":"second"}]}
+            }),
+        ];
+
+        let messages = parse_entries(&entries, Some("assistant-2"));
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "first");
+        assert_eq!(messages[1].text, "second");
+    }
+
+    #[test]
+    fn restores_model_and_thinking_effective_before_edited_message() {
+        let entries = vec![
+            json!({
+                "type":"model_change", "id":"model-1", "parentId":null,
+                "provider":"openai", "modelId":"gpt-5"
+            }),
+            json!({
+                "type":"thinking_level_change", "id":"thinking-1", "parentId":"model-1",
+                "thinkingLevel":"high"
+            }),
+            json!({
+                "type":"message", "id":"user-1", "parentId":"thinking-1",
+                "message":{"role":"user","content":"prompt"}
+            }),
+        ];
+
+        assert_eq!(
+            effective_settings_before_entry(
+                &entries,
+                "user-1",
+                "fallback/model".into(),
+                "off".into(),
+            ),
+            ("openai/gpt-5".into(), "high".into())
         );
     }
 

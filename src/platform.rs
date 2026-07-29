@@ -1,8 +1,10 @@
 use std::{
-    env,
+    env, fs,
     path::PathBuf,
     process::{Child, Command},
 };
+
+const PI_BRIDGE_EXTENSION: &str = include_str!("../asset/dirigent-bridge.ts");
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn config_dir() -> Result<PathBuf, String> {
@@ -69,6 +71,24 @@ pub(crate) fn cache_path() -> Result<PathBuf, String> {
                 .to_string()
         })?;
     Ok(cache_home.join("dirigent/v0/cache.sqlite3"))
+}
+
+pub(crate) fn materialize_pi_bridge() -> Result<PathBuf, String> {
+    let state = state_path()?;
+    let directory = state
+        .parent()
+        .ok_or_else(|| "Dirigent state path has no parent directory".to_string())?;
+    fs::create_dir_all(directory)
+        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
+    let path = directory.join("pi-bridge.ts");
+    if fs::read_to_string(&path).ok().as_deref() != Some(PI_BRIDGE_EXTENSION) {
+        let temporary = directory.join("pi-bridge.ts.tmp");
+        fs::write(&temporary, PI_BRIDGE_EXTENSION)
+            .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+        fs::rename(&temporary, &path)
+            .map_err(|error| format!("could not replace {}: {error}", path.display()))?;
+    }
+    Ok(path)
 }
 
 #[cfg(not(target_os = "windows"))]
