@@ -1920,6 +1920,8 @@ impl Dirigent {
         harness.nix_enabled = self.draft_nix_enabled && self.project_has_devshell(project_id);
         harness.model = self.draft_model.take();
         harness.thinking_level = self.draft_thinking_level.take();
+        harness.status = HarnessStatus::Working;
+        harness.run_started_at = Some(Instant::now());
         harness.messages.push(Message::user_with_images(
             prompt.clone(),
             images.iter().map(|image| image.image.clone()).collect(),
@@ -2070,19 +2072,34 @@ impl Dirigent {
         }
     }
 
+    fn mark_harness_working(&mut self, index: usize) {
+        let started_run = self.harnesses[index].run_started_at.is_none();
+        self.harnesses[index].status = HarnessStatus::Working;
+        self.harnesses[index].attention_required = false;
+        if started_run {
+            self.harnesses[index].run_started_at = Some(Instant::now());
+            self.harnesses[index].last_run_duration = None;
+            self.refresh_harness_order(index);
+            self.persist();
+        }
+        self.sync_conversation_list(index, None);
+    }
+
     fn start_harness(&mut self, id: Id, initial_prompt: Option<(String, Vec<AttachedImage>)>) {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
         if let Some(initial_prompt) = initial_prompt {
             self.harnesses[index].pending_initial_prompt = Some(initial_prompt);
-            self.harnesses[index].status = HarnessStatus::Starting;
+        }
+        if self.harnesses[index].pending_initial_prompt.is_some() {
+            self.mark_harness_working(index);
         }
         if self.harnesses[index].process.is_some() {
             if !self.harnesses[index].startup_settings_pending
                 && let Some((prompt, images)) = self.harnesses[index].pending_initial_prompt.take()
             {
-                self.send_prompt_command(index, prompt, images);
+                self.send_prompt_command(index, prompt, images, false);
             }
             return;
         }
@@ -2171,7 +2188,7 @@ impl Dirigent {
             self.request_entries(index);
         }
         if let Some((prompt, images)) = self.harnesses[index].pending_initial_prompt.take() {
-            self.send_prompt_command(index, prompt, images);
+            self.send_prompt_command(index, prompt, images, false);
         }
     }
 
@@ -2227,7 +2244,13 @@ impl Dirigent {
         }
     }
 
-    fn send_prompt_command(&mut self, index: usize, prompt: String, images: Vec<AttachedImage>) {
+    fn send_prompt_command(
+        &mut self,
+        index: usize,
+        prompt: String,
+        images: Vec<AttachedImage>,
+        steer_if_working: bool,
+    ) {
         let images = images
             .into_iter()
             .map(|attachment| {
@@ -2242,20 +2265,11 @@ impl Dirigent {
         if !images.is_empty() {
             command["images"] = Value::Array(images);
         }
-        if self.harnesses[index].status == HarnessStatus::Working {
+        if steer_if_working && self.harnesses[index].status == HarnessStatus::Working {
             command["streamingBehavior"] = Value::String("steer".into());
         }
         if self.send_value(index, command) {
-            let started_run = self.harnesses[index].run_started_at.is_none();
-            self.harnesses[index].status = HarnessStatus::Working;
-            self.harnesses[index].attention_required = false;
-            if started_run {
-                self.harnesses[index].run_started_at = Some(Instant::now());
-                self.harnesses[index].last_run_duration = None;
-                self.refresh_harness_order(index);
-                self.persist();
-            }
-            self.sync_conversation_list(index, None);
+            self.mark_harness_working(index);
         }
     }
 
@@ -2296,7 +2310,7 @@ impl Dirigent {
         self.sync_conversation_list(index, None);
         self.conversation_list.scroll_to_end();
         self.composer_dropdown = None;
-        self.send_prompt_command(index, message, images);
+        self.send_prompt_command(index, message, images, true);
         input.update(cx, |input, cx| input.clear(cx));
         self.harnesses[index].composer_draft.clear();
         self.harnesses[index].composer_draft_images.clear();
@@ -2310,6 +2324,8 @@ impl Dirigent {
             .and_then(|id| self.harnesses.iter().position(|harness| harness.id == id))
             && self.send_value(index, json!({"type":"abort"}))
         {
+            self.harnesses[index].startup_settings_pending = false;
+            self.harnesses[index].pending_initial_prompt = None;
             self.harnesses[index].status = HarnessStatus::Idle;
             self.harnesses[index].run_started_at = None;
             self.harnesses[index].attention_required = false;
