@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 
 use crate::{
     cache::SessionCache,
-    model::{ContextUsage, Harness, HarnessStatus, Id, Message, MessageRole, Project},
+    model::{ContextUsage, Harness, HarnessStatus, Id, Message, MessageRole, Project, RetryStatus},
     platform,
     rpc::{PiProcess, RuntimeEvent, RuntimeTarget},
     storage,
@@ -2251,12 +2251,12 @@ impl Dirigent {
             return;
         }
         let images = input.read(cx).images();
-        self.harnesses[index]
-            .messages
-            .push(Message::user_with_images(
-                message.clone(),
-                images.iter().map(|image| image.image.clone()).collect(),
-            ));
+        let mut user_message = Message::user_with_images(
+            message.clone(),
+            images.iter().map(|image| image.image.clone()).collect(),
+        );
+        user_message.queued = self.harnesses[index].status == HarnessStatus::Working;
+        self.harnesses[index].messages.push(user_message);
         self.sync_conversation_list(index, None);
         self.conversation_list.scroll_to_end();
         self.composer_dropdown = None;
@@ -2502,6 +2502,12 @@ impl Dirigent {
             self.pending_dialog = None;
         }
         self.harnesses[index].process.take();
+        self.harnesses[index].retry_status = None;
+        self.harnesses[index].steering_queue.clear();
+        self.harnesses[index].follow_up_queue.clear();
+        for message in &mut self.harnesses[index].messages {
+            message.queued = false;
+        }
         let transitioned = self.harnesses[index].status != HarnessStatus::Stopped
             || self.harnesses[index].run_started_at.is_some()
             || self.harnesses[index].attention_required;
@@ -2556,6 +2562,10 @@ impl Dirigent {
         let changed_message = match event_type {
             "agent_start" => {
                 self.harnesses[index].status = HarnessStatus::Working;
+                if let Some(retry) = self.harnesses[index].retry_status.as_mut() {
+                    retry.waiting = false;
+                    self.remeasure_working_indicator(index);
+                }
                 if self.harnesses[index].run_started_at.is_none() {
                     self.harnesses[index].run_started_at = Some(Instant::now());
                     self.harnesses[index].last_run_duration = None;
@@ -2580,8 +2590,9 @@ impl Dirigent {
                 changed_message
             }
             "message_end" => {
+                let changed_message = self.handle_message_end(index, &value);
                 self.request_context_usage(index);
-                None
+                changed_message
             }
             "message_update" => self.handle_message_update(index, &value),
             "tool_execution_start" => {
@@ -2590,6 +2601,15 @@ impl Dirigent {
             }
             "tool_execution_update" => self.handle_tool_update(index, &value),
             "tool_execution_end" => self.handle_tool_end(index, &value),
+            "queue_update" => {
+                self.handle_queue_update(index, &value);
+                None
+            }
+            "auto_retry_start" => {
+                self.handle_auto_retry_start(index, &value);
+                None
+            }
+            "auto_retry_end" => self.handle_auto_retry_end(index, &value),
             "response" => {
                 self.handle_response(index, &value);
                 None
@@ -2651,6 +2671,84 @@ impl Dirigent {
             }
         }
         Some(message_index)
+    }
+
+    fn remeasure_working_indicator(&mut self, index: usize) {
+        if self.selected_harness == Some(self.harnesses[index].id)
+            && self.harnesses[index].status == HarnessStatus::Working
+        {
+            let indicator = self.harnesses[index].messages.len();
+            self.conversation_list
+                .remeasure_items(indicator..indicator + 1);
+        }
+    }
+
+    fn handle_queue_update(&mut self, index: usize, value: &Value) {
+        let steering = rpc_string_array(value, "steering");
+        let follow_up = rpc_string_array(value, "followUp");
+        let harness = &mut self.harnesses[index];
+        reconcile_queued_messages(&mut harness.messages, &steering);
+        harness.steering_queue = steering;
+        harness.follow_up_queue = follow_up;
+        if self.selected_harness == Some(harness.id) {
+            self.conversation_list
+                .remeasure_items(0..harness.messages.len());
+        }
+    }
+
+    fn handle_auto_retry_start(&mut self, index: usize, value: &Value) {
+        self.harnesses[index].retry_status = Some(RetryStatus {
+            attempt: value.get("attempt").and_then(Value::as_u64).unwrap_or(1),
+            max_attempts: value
+                .get("maxAttempts")
+                .and_then(Value::as_u64)
+                .unwrap_or(1),
+            delay_ms: value.get("delayMs").and_then(Value::as_u64).unwrap_or(0),
+            error_message: value
+                .get("errorMessage")
+                .and_then(Value::as_str)
+                .unwrap_or("Transient provider error")
+                .to_string(),
+            waiting: true,
+        });
+        self.remeasure_working_indicator(index);
+    }
+
+    fn handle_auto_retry_end(&mut self, index: usize, value: &Value) -> Option<usize> {
+        let previous = self.harnesses[index].retry_status.take();
+        self.remeasure_working_indicator(index);
+        if value.get("success").and_then(Value::as_bool) != Some(false) {
+            return None;
+        }
+        let attempt = value
+            .get("attempt")
+            .and_then(Value::as_u64)
+            .or_else(|| previous.as_ref().map(|retry| retry.attempt))
+            .unwrap_or(1);
+        let error = value
+            .get("finalError")
+            .and_then(Value::as_str)
+            .unwrap_or("Unknown error");
+        let message = format!("Automatic retry failed after {attempt} attempt(s): {error}");
+        self.harnesses[index].status = HarnessStatus::Failed;
+        self.harnesses[index].error = Some(message.clone());
+        self.harnesses[index].messages.push(Message::error(message));
+        self.harnesses[index].messages.len().checked_sub(1)
+    }
+
+    fn handle_message_end(&mut self, index: usize, value: &Value) -> Option<usize> {
+        let message = value.get("message").unwrap_or(&Value::Null);
+        let error = assistant_failure(message)?;
+        if self.harnesses[index]
+            .messages
+            .last()
+            .is_some_and(|last| last.role == MessageRole::Error && last.text == error)
+        {
+            return self.harnesses[index].messages.len().checked_sub(1);
+        }
+        self.harnesses[index].error = Some(error.clone());
+        self.harnesses[index].messages.push(Message::error(error));
+        self.harnesses[index].messages.len().checked_sub(1)
     }
 
     fn handle_message_update(&mut self, index: usize, value: &Value) -> Option<usize> {
@@ -2716,7 +2814,15 @@ impl Dirigent {
     }
 
     fn settle_harness(&mut self, index: usize) -> Option<usize> {
-        self.harnesses[index].status = HarnessStatus::Idle;
+        if self.harnesses[index].status != HarnessStatus::Failed {
+            self.harnesses[index].status = HarnessStatus::Idle;
+        }
+        self.harnesses[index].retry_status = None;
+        self.harnesses[index].steering_queue.clear();
+        self.harnesses[index].follow_up_queue.clear();
+        for message in &mut self.harnesses[index].messages {
+            message.queued = false;
+        }
         let run_duration = self.harnesses[index]
             .run_started_at
             .take()
@@ -2948,7 +3054,17 @@ impl Dirigent {
 
     fn handle_response(&mut self, index: usize, value: &Value) {
         if value.get("success").and_then(Value::as_bool) == Some(false) {
-            if value.get("command").and_then(Value::as_str) == Some("get_entries")
+            let command = value.get("command").and_then(Value::as_str);
+            if command == Some("prompt")
+                && let Some(message) = self.harnesses[index]
+                    .messages
+                    .iter_mut()
+                    .rev()
+                    .find(|message| message.role == MessageRole::User && message.queued)
+            {
+                message.queued = false;
+            }
+            if command == Some("get_entries")
                 && value.get("id").and_then(Value::as_str) == Some("dirigent-entries-incremental")
             {
                 self.send_value(
@@ -2957,7 +3073,6 @@ impl Dirigent {
                 );
                 return;
             }
-            let command = value.get("command").and_then(Value::as_str);
             if matches!(command, Some("set_model" | "set_thinking_level")) {
                 self.send_value(index, json!({"id":"dirigent-state","type":"get_state"}));
             }
@@ -3990,6 +4105,62 @@ fn parse_messages(values: &[Value]) -> Vec<Message> {
     messages
 }
 
+fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn reconcile_queued_messages(messages: &mut [Message], steering: &[String]) {
+    let mut pending = steering
+        .iter()
+        .fold(HashMap::new(), |mut pending, message| {
+            *pending.entry(message.as_str()).or_insert(0_usize) += 1;
+            pending
+        });
+    for message in messages
+        .iter_mut()
+        .rev()
+        .filter(|message| message.role == MessageRole::User && message.queued)
+    {
+        let count = pending.entry(message.text.as_str()).or_default();
+        if *count > 0 {
+            *count -= 1;
+        } else {
+            message.queued = false;
+        }
+    }
+}
+
+fn assistant_failure(value: &Value) -> Option<String> {
+    if value.get("role").and_then(Value::as_str) != Some("assistant") {
+        return None;
+    }
+    let error = value
+        .get("errorMessage")
+        .and_then(Value::as_str)
+        .filter(|error| !error.trim().is_empty());
+    match value.get("stopReason").and_then(Value::as_str) {
+        Some("error") => Some(error.unwrap_or("Pi's model request failed.").to_string()),
+        Some("length") => Some(
+            "The model reached its maximum output token limit; the response may be incomplete."
+                .into(),
+        ),
+        Some("aborted") => Some(
+            error
+                .filter(|error| *error != "Request was aborted")
+                .unwrap_or("Operation aborted.")
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 fn push_parsed_message(messages: &mut Vec<Message>, value: &Value) {
     if value.get("role").and_then(Value::as_str) == Some("assistant") {
         if let Some(blocks) = value.get("content").and_then(Value::as_array) {
@@ -4025,6 +4196,9 @@ fn push_parsed_message(messages: &mut Vec<Message>, value: &Value) {
             }
         } else if let Some(message) = parse_message(value) {
             messages.push(message);
+        }
+        if let Some(error) = assistant_failure(value) {
+            messages.push(Message::error(error));
         }
     } else if value.get("role").and_then(Value::as_str) == Some("toolResult") {
         let tool_call_id = value.get("toolCallId").and_then(Value::as_str);
@@ -4106,13 +4280,13 @@ fn parse_message(value: &Value) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FrameTiming, FrameTimingSample, composer_path_query, content_text,
+        FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
         conversation_list_splice, directory_path_query, parse_available_model,
         parse_cached_draft_images, parse_context_usage, parse_entries, parse_message,
-        parse_messages, resolve_tilde_path, tool_expanded, tool_label, tool_result_detail,
-        truncate_output, write_detail,
+        parse_messages, reconcile_queued_messages, resolve_tilde_path, rpc_string_array,
+        tool_expanded, tool_label, tool_result_detail, truncate_output, write_detail,
     };
-    use crate::model::MessageRole;
+    use crate::model::{Message, MessageRole};
     use serde_json::json;
     use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
@@ -4341,6 +4515,69 @@ mod tests {
         assert_eq!(model.id, "gpt-5.6-sol");
         assert!(model.supports_xhigh);
         assert!(model.supports_max);
+    }
+
+    #[test]
+    fn tracks_rpc_queue_state_and_clears_delivered_messages() {
+        let value = json!({
+            "type":"queue_update",
+            "steering":["second"],
+            "followUp":["later"]
+        });
+        assert_eq!(rpc_string_array(&value, "steering"), ["second"]);
+        assert_eq!(rpc_string_array(&value, "followUp"), ["later"]);
+
+        let mut first = Message::new(MessageRole::User, "first");
+        first.queued = true;
+        let mut second = Message::new(MessageRole::User, "second");
+        second.queued = true;
+        let mut messages = vec![first, second];
+        reconcile_queued_messages(&mut messages, &["second".into()]);
+
+        assert!(!messages[0].queued);
+        assert!(messages[1].queued);
+
+        let mut older = Message::new(MessageRole::User, "duplicate");
+        older.queued = true;
+        let mut newer = Message::new(MessageRole::User, "duplicate");
+        newer.queued = true;
+        let mut duplicates = vec![older, newer];
+        reconcile_queued_messages(&mut duplicates, &["duplicate".into()]);
+        assert!(!duplicates[0].queued);
+        assert!(duplicates[1].queued);
+    }
+
+    #[test]
+    fn surfaces_assistant_failures_from_pi_messages() {
+        let messages = parse_messages(&[json!({
+            "role":"assistant",
+            "content":[],
+            "stopReason":"error",
+            "errorMessage":"This model does not support image input"
+        })]);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::Error);
+        assert_eq!(messages[0].text, "This model does not support image input");
+    }
+
+    #[test]
+    fn reports_output_limit_and_aborted_assistant_messages() {
+        assert_eq!(
+            assistant_failure(&json!({"role":"assistant", "stopReason":"length"})).as_deref(),
+            Some(
+                "The model reached its maximum output token limit; the response may be incomplete."
+            )
+        );
+        assert_eq!(
+            assistant_failure(&json!({
+                "role":"assistant",
+                "stopReason":"aborted",
+                "errorMessage":"Request was aborted"
+            }))
+            .as_deref(),
+            Some("Operation aborted.")
+        );
     }
 
     #[test]

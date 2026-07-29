@@ -7,13 +7,27 @@ use crate::{
     app::{ComposerDropdown, Dirigent},
     model::{ContextUsage, HarnessStatus},
     text_input::TextInput,
-    theme::{bg, blue, border, muted, rgb, surface, surface_hover, theme_text},
+    theme::{bg, blue, border, muted, orange, rgb, surface, surface_hover, theme_text},
 };
 
 fn format_context_usage(usage: ContextUsage) -> String {
     let used = usage.used_tokens / 1_000;
     let total = usage.context_window / 1_000;
     format!("{used}k/{total}k")
+}
+
+fn format_queue_state(steering: usize, follow_up: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    if steering > 0 {
+        parts.push(format!("{steering} steering"));
+    }
+    if follow_up > 0 {
+        parts.push(format!(
+            "{follow_up} follow-up{}",
+            if follow_up == 1 { "" } else { "s" }
+        ));
+    }
+    (!parts.is_empty()).then(|| format!("{} queued", parts.join(" · ")))
 }
 
 pub(super) fn dropdown_arrow(open: bool) -> impl IntoElement {
@@ -383,6 +397,7 @@ impl Dirigent {
         model: &str,
         thinking: &str,
         context_usage: Option<ContextUsage>,
+        queue_state: Option<String>,
         working: bool,
         creating: bool,
         nix_available: bool,
@@ -506,6 +521,20 @@ impl Dirigent {
                                 .child(format_context_usage(usage)),
                         )
                     })
+                    .when_some(queue_state, |element, queue_state| {
+                        element.child(
+                            div()
+                                .h(px(26.0))
+                                .px_2()
+                                .flex()
+                                .items_center()
+                                .rounded_md()
+                                .bg(rgb(orange()).opacity(0.10))
+                                .text_xs()
+                                .text_color(rgb(orange()))
+                                .child(queue_state),
+                        )
+                    })
                     .when(nix_available, |element| {
                         element.child(
                             div()
@@ -597,6 +626,9 @@ impl Dirigent {
             .and_then(|harness| harness.thinking_level.clone())
             .unwrap_or_else(|| "loading".into());
         let context_usage = harness.and_then(|harness| harness.context_usage);
+        let queue_state = harness.and_then(|harness| {
+            format_queue_state(harness.steering_queue.len(), harness.follow_up_queue.len())
+        });
         let nix_available =
             harness.is_some_and(|harness| self.project_has_devshell(harness.project_id));
         let nix_enabled = harness.is_some_and(|harness| harness.nix_enabled);
@@ -614,6 +646,7 @@ impl Dirigent {
                 &model,
                 &thinking,
                 context_usage,
+                queue_state,
                 working,
                 false,
                 nix_available,
@@ -664,6 +697,7 @@ impl Dirigent {
                         &model,
                         &thinking,
                         None,
+                        None,
                         false,
                         true,
                         nix_available,
@@ -677,8 +711,21 @@ impl Dirigent {
 
 #[cfg(test)]
 mod tests {
-    use super::format_context_usage;
+    use super::{format_context_usage, format_queue_state};
     use crate::model::ContextUsage;
+
+    #[test]
+    fn formats_queue_counts() {
+        assert_eq!(
+            format_queue_state(1, 0).as_deref(),
+            Some("1 steering queued")
+        );
+        assert_eq!(
+            format_queue_state(2, 1).as_deref(),
+            Some("2 steering · 1 follow-up queued")
+        );
+        assert_eq!(format_queue_state(0, 0), None);
+    }
 
     #[test]
     fn formats_used_and_total_context_in_thousands() {

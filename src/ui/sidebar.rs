@@ -488,6 +488,7 @@ impl Dirigent {
                     .right(px(2.0))
                     .flex()
                     .items_center()
+                    .rounded_r_md()
                     .bg(rgb(surface_hover()))
                     .when(!menu_open, |controls| {
                         controls

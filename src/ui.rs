@@ -240,7 +240,7 @@ impl Dirigent {
                             .child(
                                 div()
                                     .w_full()
-                                    .max_w(px(560.))
+                                    .max_w(px(680.))
                                     .mx_auto()
                                     .text_left()
                                     .flex()
@@ -252,11 +252,12 @@ impl Dirigent {
                                             .italic()
                                             .font_weight(gpui::FontWeight::SEMIBOLD)
                                             .text_color(rgb(theme_text()))
-                                            .child(
-                                                "“A computer can never be held accountable. \
-                                                 Therefore a computer must never make a management \
-                                                 decision.”",
-                                            ),
+                                            .child(div().child(
+                                                "“A computer can never be held accountable.",
+                                            ))
+                                            .child(div().child(
+                                                "Therefore a computer must never make a management decision.”",
+                                            )),
                                     )
                                     .child("IBM, 1979"),
                             ),

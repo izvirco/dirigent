@@ -45,6 +45,7 @@ pub(crate) enum MessageRole {
 pub(crate) struct Message {
     pub(crate) role: MessageRole,
     pub(crate) text: String,
+    pub(crate) queued: bool,
     pub(crate) display_text: SharedString,
     pub(crate) copy_text: SharedString,
     pub(crate) markdown: Option<MarkdownDocument>,
@@ -64,6 +65,7 @@ impl Message {
         let mut message = Self {
             role,
             text,
+            queued: false,
             display_text: SharedString::default(),
             copy_text: SharedString::default(),
             markdown: None,
@@ -453,6 +455,15 @@ fn diff_source_start(line: &str) -> usize {
     offset
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct RetryStatus {
+    pub(crate) attempt: u64,
+    pub(crate) max_attempts: u64,
+    pub(crate) delay_ms: u64,
+    pub(crate) error_message: String,
+    pub(crate) waiting: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ContextUsage {
     pub(crate) used_tokens: u64,
@@ -477,6 +488,9 @@ pub(crate) struct Harness {
     pub(crate) composer_draft: String,
     pub(crate) composer_draft_images: Vec<AttachedImage>,
     pub(crate) context_usage: Option<ContextUsage>,
+    pub(crate) steering_queue: Vec<String>,
+    pub(crate) follow_up_queue: Vec<String>,
+    pub(crate) retry_status: Option<RetryStatus>,
     pub(crate) error: Option<String>,
     pub(crate) process: Option<PiProcess>,
     pub(crate) process_generation: u64,
@@ -515,6 +529,9 @@ impl Harness {
             cached_entries: None,
             cached_leaf_id: None,
             startup_settings_pending: true,
+            steering_queue: Vec::new(),
+            follow_up_queue: Vec::new(),
+            retry_status: None,
             nix_enabled: false,
             nix_restart_pending: false,
         }
@@ -565,6 +582,9 @@ impl Harness {
             cached_entries: None,
             cached_leaf_id: None,
             startup_settings_pending: false,
+            steering_queue: Vec::new(),
+            follow_up_queue: Vec::new(),
+            retry_status: None,
             nix_enabled,
             nix_restart_pending: false,
         }

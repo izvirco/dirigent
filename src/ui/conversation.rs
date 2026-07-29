@@ -8,7 +8,7 @@ use gpui::{
 
 use crate::{
     app::Dirigent,
-    model::{HarnessStatus, Message, MessageRole},
+    model::{HarnessStatus, Message, MessageRole, RetryStatus},
     theme::{
         blue, green, muted, orange, purple, rgb, surface_hover, theme_text, thinking_text, yellow,
     },
@@ -21,6 +21,21 @@ fn working_dot(delta: f32) -> usize {
         (1.0 - delta) * 4.0
     };
     (position.round() as usize).min(2)
+}
+
+fn format_retry_status(retry: &RetryStatus) -> String {
+    if retry.waiting {
+        let seconds = retry.delay_ms as f64 / 1_000.0;
+        format!(
+            "Automatic retry {}/{} in {seconds:.1}s",
+            retry.attempt, retry.max_attempts
+        )
+    } else {
+        format!(
+            "Automatic retry {}/{} running",
+            retry.attempt, retry.max_attempts
+        )
+    }
 }
 
 fn tool_color(tool: &str) -> u32 {
@@ -125,6 +140,7 @@ impl Dirigent {
         match message.role {
             MessageRole::User => {
                 let images = message.images.clone();
+                let queued = message.queued;
                 div()
                     .id(("user-message", index))
                     .relative()
@@ -183,12 +199,34 @@ impl Dirigent {
                                 ))
                             }),
                     )
-                    .child(self.render_copy_button(
-                        format!("copy-user-{index}"),
-                        copy_text,
-                        copy_button_visible,
-                        cx,
-                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .when(queued, |element| {
+                                element.child(
+                                    div()
+                                        .h(px(22.0))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .bg(rgb(orange()).opacity(0.12))
+                                        .text_xs()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(orange()))
+                                        .child("QUEUED"),
+                                )
+                            })
+                            .child(self.render_copy_button(
+                                format!("copy-user-{index}"),
+                                copy_text,
+                                copy_button_visible,
+                                cx,
+                            )),
+                    )
                     .into_any_element()
             }
             MessageRole::Assistant => div()
@@ -571,6 +609,40 @@ impl Dirigent {
             return div().into_any_element();
         }
 
+        if let Some(retry) = harness.retry_status.as_ref() {
+            return div()
+                .w_full()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(820.0))
+                        .mx_auto()
+                        .px_7()
+                        .mt_4()
+                        .child(
+                            div()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .rounded_md()
+                                .bg(rgb(orange()).opacity(0.10))
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .text_xs()
+                                .line_height(px(18.0))
+                                .text_color(rgb(orange()))
+                                .child(format_retry_status(retry))
+                                .child(
+                                    div()
+                                        .text_color(rgb(muted()))
+                                        .child(retry.error_message.clone()),
+                                ),
+                        ),
+                )
+                .into_any_element();
+        }
+
         div()
             .w_full()
             .child(
@@ -652,8 +724,25 @@ impl Dirigent {
 
 #[cfg(test)]
 mod tests {
-    use super::{tool_color, working_dot};
-    use crate::theme::{purple, yellow};
+    use super::{format_retry_status, tool_color, working_dot};
+    use crate::{
+        model::RetryStatus,
+        theme::{purple, yellow},
+    };
+
+    #[test]
+    fn formats_waiting_and_running_retry_status() {
+        let mut retry = RetryStatus {
+            attempt: 2,
+            max_attempts: 3,
+            delay_ms: 2_500,
+            error_message: "overloaded".into(),
+            waiting: true,
+        };
+        assert_eq!(format_retry_status(&retry), "Automatic retry 2/3 in 2.5s");
+        retry.waiting = false;
+        assert_eq!(format_retry_status(&retry), "Automatic retry 2/3 running");
+    }
 
     #[test]
     fn working_dot_moves_forward_then_back() {
