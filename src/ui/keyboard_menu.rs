@@ -12,7 +12,8 @@ const SPACE_ITEMS: &[(&str, &str)] = &[
     ("t", "thread commands…"),
     ("p", "project commands…"),
     ("x", "stop agent"),
-    ("r", "restart agent"),
+    ("r", "rename selected thread"),
+    ("R", "restart agent"),
     ("n", "toggle nix environment"),
     ("m", "choose model"),
     ("e", "choose reasoning level"),
@@ -31,7 +32,7 @@ const THREAD_ITEMS: &[(&str, &str)] = &[
     ("u", "next unread thread"),
     ("i", "focus composer"),
     ("x", "stop agent"),
-    ("r", "restart agent"),
+    ("R", "restart agent"),
 ];
 
 const PROJECT_ITEMS: &[(&str, &str)] = &[
@@ -132,6 +133,8 @@ mod tests {
     #[test]
     fn keyboard_menus_offer_real_navigation_sets() {
         assert!(SPACE_ITEMS.len() >= 10);
+        assert!(SPACE_ITEMS.contains(&("r", "rename selected thread")));
+        assert!(SPACE_ITEMS.contains(&("R", "restart agent")));
         assert!(SPACE_ITEMS.contains(&("D", "toggle debug panels")));
         assert!(GOTO_ITEMS.len() >= 10);
         assert!(THREAD_ITEMS.len() >= 8);

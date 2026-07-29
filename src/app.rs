@@ -1528,8 +1528,10 @@ impl Dirigent {
         else {
             return;
         };
-        self.thread_rename_input
-            .update(cx, |input, cx| input.set_text(title, cx));
+        self.thread_rename_input.update(cx, |input, cx| {
+            input.set_text(title, cx);
+            input.select_all(cx);
+        });
         self.renaming_harness = Some(harness_id);
         self.sidebar_menu = None;
         self.enter_input_mode(true);
@@ -3417,7 +3419,12 @@ impl Dirigent {
             (KeyboardMenu::Space, "t") => self.keyboard_menu = Some(KeyboardMenu::Threads),
             (KeyboardMenu::Space, "p") => self.keyboard_menu = Some(KeyboardMenu::Projects),
             (KeyboardMenu::Space, "x") => self.abort_selected(),
-            (KeyboardMenu::Space, "r") => self.restart_selected(),
+            (KeyboardMenu::Space, "r") if shift => self.restart_selected(),
+            (KeyboardMenu::Space, "r") => {
+                if let Some(id) = self.selected_harness {
+                    self.begin_renaming_harness(id, cx);
+                }
+            }
             (KeyboardMenu::Space, "n") => self.toggle_nix(),
             (KeyboardMenu::Space, "m") => self.toggle_composer_dropdown(ComposerDropdown::Model),
             (KeyboardMenu::Space, "e") => {
@@ -3443,7 +3450,7 @@ impl Dirigent {
                 self.select_matching_harness(|harness| harness.has_unread_completion)
             }
             (KeyboardMenu::Threads, "x") => self.abort_selected(),
-            (KeyboardMenu::Threads, "r") => self.restart_selected(),
+            (KeyboardMenu::Threads, "r") if shift => self.restart_selected(),
             (KeyboardMenu::Threads, "i") => self.enter_input_mode(true),
 
             (KeyboardMenu::Projects, "a") => self.begin_adding_project(),

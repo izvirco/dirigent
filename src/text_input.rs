@@ -234,6 +234,14 @@ impl TextInput {
         cx.notify();
     }
 
+    pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.selection_anchor = 0;
+        self.cursor = self.content.len();
+        self.selection = 0..self.cursor;
+        self.preferred_cursor_x = None;
+        cx.notify();
+    }
+
     fn collapse_selection(&mut self, offset: usize) {
         self.cursor = offset;
         self.selection = offset..offset;
