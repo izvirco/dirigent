@@ -147,7 +147,7 @@ impl Dirigent {
                     .w_full()
                     .pr_3()
                     .border_r_4()
-                    .border_color(rgb(blue()))
+                    .border_color(rgb(if queued { orange() } else { blue() }))
                     .flex()
                     .items_start()
                     .gap_2()
@@ -199,34 +199,12 @@ impl Dirigent {
                                 ))
                             }),
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .when(queued, |element| {
-                                element.child(
-                                    div()
-                                        .h(px(22.0))
-                                        .px_2()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_md()
-                                        .bg(rgb(orange()).opacity(0.12))
-                                        .text_xs()
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgb(orange()))
-                                        .child("QUEUED"),
-                                )
-                            })
-                            .child(self.render_copy_button(
-                                format!("copy-user-{index}"),
-                                copy_text,
-                                copy_button_visible,
-                                cx,
-                            )),
-                    )
+                    .child(self.render_copy_button(
+                        format!("copy-user-{index}"),
+                        copy_text,
+                        copy_button_visible,
+                        cx,
+                    ))
                     .into_any_element()
             }
             MessageRole::Assistant => div()
@@ -605,11 +583,42 @@ impl Dirigent {
                 .into_any_element();
         }
 
-        if index != harness.messages.len() || harness.status != HarnessStatus::Working {
-            return div().into_any_element();
-        }
+        let working = harness.status == HarnessStatus::Working;
+        if working && index == harness.messages.len() {
+            if let Some(retry) = harness.retry_status.as_ref() {
+                return div()
+                    .w_full()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(820.0))
+                            .mx_auto()
+                            .px_7()
+                            .mt_4()
+                            .child(
+                                div()
+                                    .w_full()
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .bg(rgb(orange()).opacity(0.10))
+                                    .flex()
+                                    .flex_col()
+                                    .gap_1()
+                                    .text_xs()
+                                    .line_height(px(18.0))
+                                    .text_color(rgb(orange()))
+                                    .child(format_retry_status(retry))
+                                    .child(
+                                        div()
+                                            .text_color(rgb(muted()))
+                                            .child(retry.error_message.clone()),
+                                    ),
+                            ),
+                    )
+                    .into_any_element();
+            }
 
-        if let Some(retry) = harness.retry_status.as_ref() {
             return div()
                 .w_full()
                 .child(
@@ -619,60 +628,49 @@ impl Dirigent {
                         .mx_auto()
                         .px_7()
                         .mt_4()
-                        .child(
-                            div()
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .rounded_md()
-                                .bg(rgb(orange()).opacity(0.10))
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .text_xs()
-                                .line_height(px(18.0))
-                                .text_color(rgb(orange()))
-                                .child(format_retry_status(retry))
-                                .child(
+                        .flex()
+                        .text_sm()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .with_animation(
+                            "working-indicator",
+                            Animation::new(Duration::from_secs(3)).repeat(),
+                            |indicator, delta| {
+                                let active = working_dot(delta);
+                                indicator.children((0..3).map(move |index| {
                                     div()
-                                        .text_color(rgb(muted()))
-                                        .child(retry.error_message.clone()),
-                                ),
+                                        .text_color(rgb(if index == active {
+                                            orange()
+                                        } else {
+                                            blue()
+                                        }))
+                                        .child(".")
+                                }))
+                            },
                         ),
                 )
                 .into_any_element();
         }
 
-        div()
-            .w_full()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(820.0))
-                    .mx_auto()
-                    .px_7()
-                    .mt_4()
-                    .flex()
-                    .text_sm()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .with_animation(
-                        "working-indicator",
-                        Animation::new(Duration::from_secs(3)).repeat(),
-                        |indicator, delta| {
-                            let active = working_dot(delta);
-                            indicator.children((0..3).map(move |index| {
-                                div()
-                                    .text_color(rgb(if index == active {
-                                        orange()
-                                    } else {
-                                        blue()
-                                    }))
-                                    .child(".")
-                            }))
-                        },
-                    ),
-            )
-            .into_any_element()
+        let queued_start = harness.messages.len() + usize::from(working);
+        if let Some(message) = index
+            .checked_sub(queued_start)
+            .and_then(|queued_index| harness.queued_messages.get(queued_index))
+        {
+            return div()
+                .w_full()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(820.0))
+                        .mx_auto()
+                        .px_7()
+                        .mt_2()
+                        .child(self.render_message(message, index, cx)),
+                )
+                .into_any_element();
+        }
+
+        div().into_any_element()
     }
 
     pub(super) fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -680,7 +678,7 @@ impl Dirigent {
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
             .expect("selected harness must exist");
-        let empty = harness.messages.is_empty();
+        let empty = harness.messages.is_empty() && harness.queued_messages.is_empty();
         let empty_label = if harness.loaded_messages || harness.cached_entries.is_some() {
             "This pi session has no messages yet."
         } else {

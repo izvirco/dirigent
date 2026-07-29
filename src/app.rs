@@ -291,6 +291,7 @@ pub(crate) struct Dirigent {
     window_transparent: Option<bool>,
     pub(crate) conversation_list: ListState,
     conversation_list_message_count: usize,
+    conversation_list_queued_count: usize,
     conversation_list_working: bool,
     pub(crate) conversation_scroll_dragging: bool,
     pub(crate) model_picker_scroll: ScrollHandle,
@@ -827,10 +828,13 @@ impl Dirigent {
             selected_harness.and_then(|id| harnesses.iter().find(|harness| harness.id == id));
         let conversation_list_message_count =
             selected_conversation.map_or(0, |harness| harness.messages.len());
+        let conversation_list_queued_count =
+            selected_conversation.map_or(0, |harness| harness.queued_messages.len());
         let conversation_list_working =
             selected_conversation.is_some_and(|harness| harness.status == HarnessStatus::Working);
-        let conversation_item_count =
-            conversation_list_message_count + usize::from(conversation_list_working);
+        let conversation_item_count = conversation_list_message_count
+            + conversation_list_queued_count
+            + usize::from(conversation_list_working);
         let conversation_list =
             ListState::new(conversation_item_count, ListAlignment::Bottom, px(1_000.0))
                 .with_uniform_item_height(px(48.0));
@@ -914,6 +918,7 @@ impl Dirigent {
             window_transparent: None,
             conversation_list,
             conversation_list_message_count,
+            conversation_list_queued_count,
             conversation_list_working,
             conversation_scroll_dragging: false,
             model_picker_scroll: ScrollHandle::new(),
@@ -989,15 +994,18 @@ impl Dirigent {
 
     fn apply_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
         self.font = appearance.font.into();
-        for message in self
-            .harnesses
-            .iter_mut()
-            .flat_map(|harness| &mut harness.messages)
-        {
-            message.refresh_theme_colors();
+        for harness in &mut self.harnesses {
+            for message in harness
+                .messages
+                .iter_mut()
+                .chain(harness.queued_messages.iter_mut())
+            {
+                message.refresh_theme_colors();
+            }
         }
-        let conversation_items =
-            self.conversation_list_message_count + usize::from(self.conversation_list_working);
+        let conversation_items = self.conversation_list_message_count
+            + self.conversation_list_queued_count
+            + usize::from(self.conversation_list_working);
         self.conversation_list
             .remeasure_items(0..conversation_items);
 
@@ -1379,9 +1387,11 @@ impl Dirigent {
     fn reset_conversation_list(&mut self, harness_index: usize) {
         let harness = &self.harnesses[harness_index];
         self.conversation_list_message_count = harness.messages.len();
+        self.conversation_list_queued_count = harness.queued_messages.len();
         self.conversation_list_working = harness.status == HarnessStatus::Working;
-        let item_count =
-            self.conversation_list_message_count + usize::from(self.conversation_list_working);
+        let item_count = self.conversation_list_message_count
+            + self.conversation_list_queued_count
+            + usize::from(self.conversation_list_working);
         self.conversation_list
             .reset_with_uniform_height(item_count, px(48.0));
         self.conversation_list.set_follow_mode(FollowMode::Tail);
@@ -1393,8 +1403,23 @@ impl Dirigent {
         }
         let harness = &self.harnesses[harness_index];
         let new_message_count = harness.messages.len();
+        let new_queued_count = harness.queued_messages.len();
         let new_working = harness.status == HarnessStatus::Working;
-        if self.conversation_list_message_count != new_message_count
+        if (self.conversation_list_queued_count > 0 || new_queued_count > 0)
+            && (self.conversation_list_message_count != new_message_count
+                || self.conversation_list_queued_count != new_queued_count
+                || self.conversation_list_working != new_working)
+        {
+            let old_item_count = self.conversation_list_message_count
+                + self.conversation_list_queued_count
+                + usize::from(self.conversation_list_working);
+            let new_item_count = new_message_count + new_queued_count + usize::from(new_working);
+            self.conversation_list
+                .splice(0..old_item_count, new_item_count);
+            self.conversation_list_message_count = new_message_count;
+            self.conversation_list_queued_count = new_queued_count;
+            self.conversation_list_working = new_working;
+        } else if self.conversation_list_message_count != new_message_count
             || self.conversation_list_working != new_working
         {
             let (old_range, new_item_count) = conversation_list_splice(
@@ -1410,6 +1435,7 @@ impl Dirigent {
                 self.conversation_list.remeasure_items(0..new_message_count);
             }
             self.conversation_list_message_count = new_message_count;
+            self.conversation_list_queued_count = new_queued_count;
             self.conversation_list_working = new_working;
         }
         if let Some(index) = changed_message.filter(|index| *index < new_message_count) {
@@ -2301,12 +2327,17 @@ impl Dirigent {
             return;
         }
         let images = input.read(cx).images();
+        let steering = self.harnesses[index].status == HarnessStatus::Working;
         let mut user_message = Message::user_with_images(
             message.clone(),
             images.iter().map(|image| image.image.clone()).collect(),
         );
-        user_message.queued = self.harnesses[index].status == HarnessStatus::Working;
-        self.harnesses[index].messages.push(user_message);
+        user_message.queued = steering;
+        if steering {
+            self.harnesses[index].queued_messages.push(user_message);
+        } else {
+            self.harnesses[index].messages.push(user_message);
+        }
         self.sync_conversation_list(index, None);
         self.conversation_list.scroll_to_end();
         self.composer_dropdown = None;
@@ -2563,8 +2594,9 @@ impl Dirigent {
         self.harnesses[index].retry_status = None;
         self.harnesses[index].steering_queue.clear();
         self.harnesses[index].follow_up_queue.clear();
-        for message in &mut self.harnesses[index].messages {
+        for mut message in std::mem::take(&mut self.harnesses[index].queued_messages) {
             message.queued = false;
+            self.harnesses[index].messages.push(message);
         }
         let transitioned = self.harnesses[index].status != HarnessStatus::Stopped
             || self.harnesses[index].run_started_at.is_some()
@@ -2578,6 +2610,7 @@ impl Dirigent {
             self.refresh_harness_order(index);
             self.persist();
         }
+        self.sync_conversation_list(index, None);
     }
 
     fn handle_runtime_event(&mut self, event: RuntimeEvent, cx: &mut Context<Self>) {
@@ -2745,13 +2778,10 @@ impl Dirigent {
         let steering = rpc_string_array(value, "steering");
         let follow_up = rpc_string_array(value, "followUp");
         let harness = &mut self.harnesses[index];
-        reconcile_queued_messages(&mut harness.messages, &steering);
+        let accepted = reconcile_queued_messages(&mut harness.queued_messages, &steering);
+        harness.messages.extend(accepted);
         harness.steering_queue = steering;
         harness.follow_up_queue = follow_up;
-        if self.selected_harness == Some(harness.id) {
-            self.conversation_list
-                .remeasure_items(0..harness.messages.len());
-        }
     }
 
     fn handle_auto_retry_start(&mut self, index: usize, value: &Value) {
@@ -2878,8 +2908,9 @@ impl Dirigent {
         self.harnesses[index].retry_status = None;
         self.harnesses[index].steering_queue.clear();
         self.harnesses[index].follow_up_queue.clear();
-        for message in &mut self.harnesses[index].messages {
+        for mut message in std::mem::take(&mut self.harnesses[index].queued_messages) {
             message.queued = false;
+            self.harnesses[index].messages.push(message);
         }
         let run_duration = self.harnesses[index]
             .run_started_at
@@ -3133,14 +3164,8 @@ impl Dirigent {
                 self.fail_harness(index, error);
                 return;
             }
-            if command == Some("prompt")
-                && let Some(message) = self.harnesses[index]
-                    .messages
-                    .iter_mut()
-                    .rev()
-                    .find(|message| message.role == MessageRole::User && message.queued)
-            {
-                message.queued = false;
+            if command == Some("prompt") {
+                self.harnesses[index].queued_messages.pop();
             }
             if command == Some("get_entries")
                 && value.get("id").and_then(Value::as_str) == Some("dirigent-entries-incremental")
@@ -3160,6 +3185,12 @@ impl Dirigent {
                 .unwrap_or("Pi rejected a command.");
             self.harnesses[index].messages.push(Message::error(error));
             return;
+        }
+        if command == Some("prompt") {
+            let steering = self.harnesses[index].steering_queue.clone();
+            let accepted =
+                reconcile_queued_messages(&mut self.harnesses[index].queued_messages, &steering);
+            self.harnesses[index].messages.extend(accepted);
         }
         if startup_request {
             match command {
@@ -4202,25 +4233,34 @@ fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-fn reconcile_queued_messages(messages: &mut [Message], steering: &[String]) {
+fn reconcile_queued_messages(messages: &mut Vec<Message>, steering: &[String]) -> Vec<Message> {
     let mut pending = steering
         .iter()
         .fold(HashMap::new(), |mut pending, message| {
             *pending.entry(message.as_str()).or_insert(0_usize) += 1;
             pending
         });
-    for message in messages
-        .iter_mut()
-        .rev()
-        .filter(|message| message.role == MessageRole::User && message.queued)
-    {
+    let mut retained = vec![false; messages.len()];
+    for (index, message) in messages.iter().enumerate().rev() {
         let count = pending.entry(message.text.as_str()).or_default();
         if *count > 0 {
             *count -= 1;
-        } else {
-            message.queued = false;
+            retained[index] = true;
         }
     }
+
+    let mut still_queued = Vec::new();
+    let mut accepted = Vec::new();
+    for (index, mut message) in std::mem::take(messages).into_iter().enumerate() {
+        if retained[index] {
+            still_queued.push(message);
+        } else {
+            message.queued = false;
+            accepted.push(message);
+        }
+    }
+    *messages = still_queued;
+    accepted
 }
 
 fn assistant_failure(value: &Value) -> Option<String> {
@@ -4618,19 +4658,25 @@ mod tests {
         let mut second = Message::new(MessageRole::User, "second");
         second.queued = true;
         let mut messages = vec![first, second];
-        reconcile_queued_messages(&mut messages, &["second".into()]);
+        let accepted = reconcile_queued_messages(&mut messages, &["second".into()]);
 
-        assert!(!messages[0].queued);
-        assert!(messages[1].queued);
+        assert_eq!(accepted.len(), 1);
+        assert_eq!(accepted[0].text, "first");
+        assert!(!accepted[0].queued);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].text, "second");
+        assert!(messages[0].queued);
 
         let mut older = Message::new(MessageRole::User, "duplicate");
         older.queued = true;
         let mut newer = Message::new(MessageRole::User, "duplicate");
         newer.queued = true;
         let mut duplicates = vec![older, newer];
-        reconcile_queued_messages(&mut duplicates, &["duplicate".into()]);
-        assert!(!duplicates[0].queued);
-        assert!(duplicates[1].queued);
+        let accepted = reconcile_queued_messages(&mut duplicates, &["duplicate".into()]);
+        assert_eq!(accepted.len(), 1);
+        assert!(!accepted[0].queued);
+        assert_eq!(duplicates.len(), 1);
+        assert!(duplicates[0].queued);
     }
 
     #[test]
