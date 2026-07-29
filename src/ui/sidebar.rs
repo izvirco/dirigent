@@ -367,17 +367,11 @@ impl Dirigent {
         let attention_required = harness.attention_required;
         let archived = harness.archived;
         let quick_archive = !archived && self.can_archive_harness(id);
-        let show_notification = has_unread && placement != ThreadPlacement::Workpool;
         let menu_open = self.sidebar_menu == Some(SidebarMenu::Thread(id));
         let renaming = self.renaming_harness == Some(id);
         let group = format!("sidebar-harness-{id}");
         let archive_group = format!("quick-archive-thread-{id}");
         let menu_group = format!("thread-menu-trigger-{id}");
-        let row_background = if active {
-            surface()
-        } else {
-            crate::theme::sidebar_bg()
-        };
         let project_name = self
             .projects
             .iter()
@@ -416,6 +410,7 @@ impl Dirigent {
             .items_center()
             .rounded_md()
             .when(active, |style| style.bg(rgb(surface())))
+            .when(menu_open, |style| style.bg(rgb(surface_hover())))
             .hover(|style| style.bg(rgb(surface_hover())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.select_harness(id);
@@ -445,6 +440,8 @@ impl Dirigent {
                             })
                             .text_color(rgb(if archived {
                                 muted()
+                            } else if has_unread {
+                                blue()
                             } else if active {
                                 theme_text()
                             } else {
@@ -482,103 +479,76 @@ impl Dirigent {
                         )
                     }),
             )
-            .when(show_notification || !has_unread, |element| {
-                element.child(
-                    div()
-                        .id(("thread-hover-controls", id as usize))
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right(px(2.0))
-                        .flex()
-                        .items_center()
-                        .when(!show_notification, |controls| {
-                            controls.bg(rgb(surface_hover()))
-                        })
-                        .when(!show_notification && !menu_open, |controls| {
-                            controls
-                                .invisible()
-                                .group_hover(group.clone(), |style| style.visible())
-                        })
-                        .when(quick_archive, |controls| {
-                            controls.child(
-                                div()
-                                    .id(("quick-archive-thread", id as usize))
-                                    .group(archive_group.clone())
-                                    .w(px(26.0))
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .when(show_notification, |archive| {
-                                        archive.invisible().group_hover(group.clone(), |style| {
-                                            style.visible().bg(rgb(surface_hover()))
-                                        })
-                                    })
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_harness_archived(id, true);
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }))
-                                    .child(hover_icon(
-                                        archive_icon(muted()),
-                                        archive_icon(blue()),
-                                        archive_group,
-                                    )),
+            .child(
+                div()
+                    .id(("thread-hover-controls", id as usize))
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right(px(2.0))
+                    .flex()
+                    .items_center()
+                    .bg(rgb(surface_hover()))
+                    .when(!menu_open, |controls| {
+                        controls
+                            .invisible()
+                            .group_hover(group.clone(), |style| style.visible())
+                    })
+                    .when(quick_archive, |controls| {
+                        controls.child(
+                            div()
+                                .id(("quick-archive-thread", id as usize))
+                                .group(archive_group.clone())
+                                .w(px(26.0))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_harness_archived(id, true);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                                .child(hover_icon(
+                                    archive_icon(muted()),
+                                    archive_icon(blue()),
+                                    archive_group,
+                                )),
+                        )
+                    })
+                    .child(
+                        div()
+                            .id(("thread-menu-trigger", id as usize))
+                            .group(menu_group.clone())
+                            .w(px(26.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_base()
+                            .text_color(rgb(muted()))
+                            .hover(|style| style.text_color(rgb(theme_text())))
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
-                        })
-                        .when(show_notification, |controls| {
-                            controls.child(
-                                div()
-                                    .id(("thread-unread-indicator", id as usize))
-                                    .w(px(26.0))
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .bg(rgb(row_background))
-                                    .group_hover(group.clone(), |style| {
-                                        style.bg(rgb(surface_hover()))
-                                    })
-                                    .child(div().size(px(7.0)).rounded_full().bg(rgb(blue()))),
-                            )
-                        })
-                        .when(!has_unread, |controls| {
-                            controls.child(
-                                div()
-                                    .id(("thread-menu-trigger", id as usize))
-                                    .group(menu_group.clone())
-                                    .w(px(26.0))
-                                    .h_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_base()
-                                    .text_color(rgb(muted()))
-                                    .hover(|style| style.text_color(rgb(theme_text())))
-                                    .on_mouse_down(
-                                        gpui::MouseButton::Left,
-                                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_thread_menu(id);
-                                        cx.stop_propagation();
-                                        cx.notify();
-                                    }))
-                                    .child(hover_icon(
-                                        ellipsis_vertical_icon(muted()),
-                                        ellipsis_vertical_icon(blue()),
-                                        menu_group,
-                                    )),
-                            )
-                        }),
-                )
-            })
-            .when(menu_open && !has_unread, |element| {
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_thread_menu(id);
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .child(hover_icon(
+                                ellipsis_vertical_icon(if menu_open { blue() } else { muted() }),
+                                ellipsis_vertical_icon(blue()),
+                                menu_group,
+                            )),
+                    ),
+            )
+            .when(menu_open, |element| {
                 element.child(self.render_thread_dropdown(id, archived, height - 2.0, cx))
             })
             .into_any_element()
