@@ -3636,6 +3636,10 @@ impl Render for Dirigent {
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
                     let mut changed = false;
+                    if this.keyboard_mode == KeyboardMode::Input {
+                        this.enter_normal_mode();
+                        changed = true;
+                    }
                     if this.keyboard_menu.is_some() {
                         this.close_keyboard_menu();
                         changed = true;
