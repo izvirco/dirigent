@@ -6,6 +6,8 @@ use gpui::{
     canvas, div, img, list, prelude::*, px, relative,
 };
 
+use super::composer::dropdown_arrow;
+
 use crate::{
     app::{ComposerDropdown, Dirigent},
     model::{HarnessStatus, Message, MessageRole, RetryStatus},
@@ -116,7 +118,7 @@ impl Dirigent {
                 .is_some_and(|harness| harness.status != HarnessStatus::Working)
         });
         let labels: &[&str] = match message.role {
-            MessageRole::User if stable && idle => &["Copy", "Fork", "Edit"],
+            MessageRole::User if stable && idle => &["Copy", "Edit", "Fork"],
             MessageRole::Assistant if stable && idle => &["Copy", "Fork"],
             MessageRole::User
             | MessageRole::Assistant
@@ -139,7 +141,7 @@ impl Dirigent {
         let estimated_height = estimated_lines * line_height
             + usize::from(!message.images.is_empty()) * 36
             + usize::from(message.display_detail.is_some()) * 40;
-        let required_height = labels.len() * 22 + labels.len().saturating_sub(1) * 4;
+        let required_height = labels.len() * 22;
         let vertical = labels.len() > 1 && estimated_height >= required_height;
         let copy_text = message.copy_text.clone();
         let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
@@ -148,8 +150,8 @@ impl Dirigent {
             .absolute()
             .top_0()
             .left(relative(1.0))
-            .ml_2()
-            .w(px(132.0))
+            .pl_2()
+            .w(px(140.0))
             .flex()
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 let hovered = if *hovered { hover_key } else { None };
@@ -158,8 +160,8 @@ impl Dirigent {
                     cx.notify();
                 }
             }))
-            .when(vertical, |element| element.flex_col())
-            .gap(px(4.0))
+            .when(vertical, |element| element.flex_col().items_start())
+            .gap(px(0.0))
             .children(labels.iter().map(|label| {
                 self.render_message_action(
                     format!("{}-message-{index}", label.to_ascii_lowercase()),
@@ -192,55 +194,100 @@ impl Dirigent {
                 div()
                     .id(("edit-model-picker", index))
                     .h(px(26.0))
+                    .max_w(px(260.0))
                     .px_2()
                     .flex()
                     .items_center()
+                    .gap_1()
                     .rounded_md()
                     .text_xs()
                     .text_color(rgb(muted()))
-                    .hover(|style| style.bg(rgb(surface_hover())))
+                    .when(model_open, |style| {
+                        style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
+                    })
+                    .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_composer_dropdown(ComposerDropdown::EditModel);
                         cx.notify();
                         cx.stop_propagation();
                     }))
-                    .child(model_label),
+                    .child(
+                        div()
+                            .min_w(px(0.0))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(model_label),
+                    )
+                    .child(dropdown_arrow(model_open)),
             )
             .when(model_open, |element| {
                 element.child(
                     div()
                         .id(("edit-model-dropdown", index))
                         .absolute()
-                        .bottom(px(30.0))
+                        .bottom(px(36.0))
                         .left_0()
-                        .min_w(px(260.0))
-                        .max_h(px(260.0))
+                        .max_w(px(300.0))
+                        .max_h(px(300.0))
                         .p_1()
                         .overflow_y_scroll()
                         .rounded_lg()
                         .border_1()
                         .border_color(rgb(crate::theme::border()))
-                        .bg(rgb(crate::theme::popup_bg()))
+                        .bg(rgb(surface_hover()))
                         .occlude()
                         .children(self.available_models.iter().enumerate().map(
                             |(option, item)| {
-                                let value = format!("{}/{}", item.provider, item.id);
+                                let selected = model == format!("{}/{}", item.provider, item.id);
+                                let provider = item.provider.clone();
+                                let model_id = item.id.clone();
+                                let value = format!("{provider}/{model_id}");
                                 div()
                                     .id(("edit-model-option", option))
-                                    .h(px(28.0))
-                                    .px_2()
+                                    .min_h(px(34.0))
+                                    .mt(px(2.0))
+                                    .mb(px(2.0))
+                                    .px_3()
+                                    .py_1()
                                     .flex()
                                     .items_center()
                                     .rounded_md()
-                                    .text_xs()
-                                    .text_color(rgb(theme_text()))
-                                    .hover(|style| style.bg(rgb(surface_hover())))
+                                    .when(selected, |style| {
+                                        style.bg(rgb(crate::theme::selection()))
+                                    })
+                                    .when(!selected, |element| {
+                                        element.hover(|style| style.bg(rgb(crate::theme::border())))
+                                    })
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.select_edit_model(value.clone());
                                         cx.notify();
                                         cx.stop_propagation();
                                     }))
-                                    .child(item.name.clone())
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex()
+                                            .flex_col()
+                                            .child(
+                                                div()
+                                                    .whitespace_nowrap()
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .text_xs()
+                                                    .text_color(rgb(theme_text()))
+                                                    .child(item.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .whitespace_nowrap()
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .text_xs()
+                                                    .text_color(rgb(muted()))
+                                                    .child(format!("{provider}/{model_id}")),
+                                            ),
+                                    )
                             },
                         )),
                 )
@@ -254,45 +301,60 @@ impl Dirigent {
                     .px_2()
                     .flex()
                     .items_center()
+                    .gap_1()
                     .rounded_md()
                     .text_xs()
                     .text_color(rgb(muted()))
-                    .hover(|style| style.bg(rgb(surface_hover())))
+                    .when(thinking_open, |style| {
+                        style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
+                    })
+                    .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.toggle_composer_dropdown(ComposerDropdown::EditReasoning);
                         cx.notify();
                         cx.stop_propagation();
                     }))
-                    .child(thinking.clone()),
+                    .child(thinking.clone())
+                    .child(dropdown_arrow(thinking_open)),
             )
             .when(thinking_open, |element| {
                 element.child(
                     div()
                         .absolute()
-                        .bottom(px(30.0))
+                        .bottom(px(36.0))
                         .left_0()
                         .p_1()
                         .rounded_lg()
                         .border_1()
                         .border_color(rgb(crate::theme::border()))
-                        .bg(rgb(crate::theme::popup_bg()))
+                        .bg(rgb(surface_hover()))
                         .occlude()
                         .children(
                             self.edit_reasoning_options(&model)
                                 .into_iter()
                                 .enumerate()
                                 .map(|(option, level)| {
+                                    let selected = thinking == level;
                                     let value = level.clone();
                                     div()
                                         .id(("edit-thinking-option", option))
-                                        .h(px(28.0))
-                                        .px_2()
+                                        .h(px(26.0))
+                                        .mt(px(2.0))
+                                        .mb(px(2.0))
+                                        .px_3()
                                         .flex()
                                         .items_center()
                                         .rounded_md()
                                         .text_xs()
                                         .text_color(rgb(theme_text()))
-                                        .hover(|style| style.bg(rgb(surface_hover())))
+                                        .when(selected, |style| {
+                                            style.bg(rgb(crate::theme::selection()))
+                                        })
+                                        .when(!selected, |element| {
+                                            element.hover(|style| {
+                                                style.bg(rgb(crate::theme::border()))
+                                            })
+                                        })
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             this.select_edit_thinking(value.clone());
                                             cx.notify();
@@ -314,14 +376,6 @@ impl Dirigent {
             .border_1()
             .border_color(rgb(blue()).opacity(0.55))
             .bg(rgb(crate::theme::surface()))
-            .child(
-                div()
-                    .px_1()
-                    .text_xs()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(rgb(blue()))
-                    .child("Editing an earlier message"),
-            )
             .child(input)
             .child(
                 div()
@@ -353,20 +407,22 @@ impl Dirigent {
                     .child(
                         div()
                             .id(("submit-message-edit", index))
-                            .h(px(28.0))
-                            .px_3()
+                            .size(px(30.0))
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .rounded_md()
+                            .justify_center()
+                            .rounded_full()
                             .bg(rgb(blue()))
-                            .text_xs()
+                            .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(crate::theme::bg()))
+                            .hover(|style| style.bg(rgb(crate::theme::accent_hover())))
                             .when(!submitting, |element| {
                                 element.on_click(
                                     cx.listener(|this, _, _, cx| this.submit_message_edit(cx)),
                                 )
                             })
-                            .child(if submitting { "Branching…" } else { "Send" }),
+                            .child(if submitting { "…" } else { "↑" }),
                     ),
             )
             .into_any_element()
@@ -417,6 +473,12 @@ impl Dirigent {
         index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.editing_message.as_ref().is_some_and(|edit| {
+            edit.harness_id == self.selected_harness.unwrap_or_default()
+                && edit.message_index == index
+        }) {
+            return self.render_message_edit_composer(cx);
+        }
         let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
         let actions_visible = self.hovered_copy_message == hover_key;
         match message.role {
