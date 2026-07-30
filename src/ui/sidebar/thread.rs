@@ -139,6 +139,7 @@ impl Dirigent {
             .iter()
             .find(|harness| harness.id == id)
             .unwrap();
+        let has_workspace = self.workspace_for_harness(id).is_some();
         let active = self.selected_harness == Some(id)
             && !self.adding_project
             && self.project_settings.is_none();
@@ -165,6 +166,15 @@ impl Dirigent {
             .unwrap_or("Unknown project");
         let detailed = placement != ThreadPlacement::Project;
         let height = if detailed { 48.0 } else { 34.0 };
+        let title_color = if archived {
+            muted()
+        } else if has_unread {
+            blue()
+        } else if active {
+            theme_text()
+        } else {
+            muted()
+        };
         let (state_label, state_color) = if placement == ThreadPlacement::Workpool {
             (format_elapsed(harness.run_started_at), muted())
         } else if attention_required {
@@ -212,30 +222,36 @@ impl Dirigent {
                     .child(
                         div()
                             .h(px(if detailed { 21.0 } else { 34.0 }))
+                            .flex()
+                            .items_center()
+                            .gap_1()
                             .line_height(px(if detailed { 21.0 } else { 34.0 }))
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .text_ellipsis()
-                            .line_clamp(1)
                             .text_sm()
                             .font_weight(if active || has_unread {
                                 gpui::FontWeight::SEMIBOLD
                             } else {
                                 gpui::FontWeight::NORMAL
                             })
-                            .text_color(rgb(if archived {
-                                muted()
-                            } else if has_unread {
-                                blue()
-                            } else if active {
-                                theme_text()
-                            } else {
-                                muted()
-                            }))
+                            .text_color(rgb(title_color))
+                            .when(has_workspace, |element| {
+                                element.child(git_branch_icon(title_color))
+                            })
                             .when(renaming, |element| {
                                 element.child(self.thread_rename_input.clone())
                             })
-                            .when(!renaming, |element| element.child(title)),
+                            .when(!renaming, |element| {
+                                element.child(
+                                    div()
+                                        .min_w(px(0.0))
+                                        .flex_1()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .line_clamp(1)
+                                        .child(title),
+                                )
+                            }),
                     )
                     .when(detailed && !renaming, |element| {
                         element.child(

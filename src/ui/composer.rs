@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement, ObjectFit, PathBuilder,
-    StyledImage, Window, canvas, deferred, div, img, point, prelude::*, px, rgba,
+    AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement, ObjectFit, StyledImage,
+    Transformation, Window, deferred, div, img, prelude::*, px, radians, rgba, svg,
 };
 
 use crate::{
@@ -31,25 +31,17 @@ fn format_queue_state(steering: usize, follow_up: usize) -> Option<String> {
 }
 
 pub(super) fn dropdown_arrow(open: bool) -> impl IntoElement {
-    canvas(
-        move |bounds, _, _| {
-            let center = bounds.center();
-            let endpoint_y = center.y + px(if open { 1.75 } else { -1.75 });
-            let tip_y = center.y + px(if open { -1.75 } else { 1.75 });
-            let mut chevron = PathBuilder::stroke(px(1.25));
-            chevron.move_to(point(center.x - px(3.0), endpoint_y));
-            chevron.line_to(point(center.x, tip_y));
-            chevron.line_to(point(center.x + px(3.0), endpoint_y));
-            chevron.build().ok()
-        },
-        |_, chevron, window, _| {
-            if let Some(chevron) = chevron {
-                window.paint_path(chevron, rgb(muted()));
-            }
-        },
-    )
-    .size(px(12.0))
-    .flex_none()
+    let icon = svg()
+        .path("icon/chevron-down.svg")
+        .size(px(12.0))
+        .text_color(rgb(muted()))
+        .flex_none();
+
+    if open {
+        icon.with_transformation(Transformation::rotate(radians(std::f32::consts::PI)))
+    } else {
+        icon
+    }
 }
 
 impl Dirigent {

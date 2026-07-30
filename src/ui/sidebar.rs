@@ -4,8 +4,8 @@ mod thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, IntoElement, PathBuilder, Pixels, Point,
-    Window, canvas, deferred, div, point, prelude::*, px,
+    AnyElement, Context, CursorStyle, DragMoveEvent, IntoElement, Pixels, Point, Transformation,
+    Window, deferred, div, prelude::*, px, radians, svg,
 };
 
 use crate::{
@@ -37,160 +37,48 @@ enum ThreadPlacement {
     Project,
 }
 
-fn add_icon_dot(path: &mut PathBuilder, center: Point<Pixels>) {
-    let radius = px(1.25);
-    path.move_to(point(center.x + radius, center.y));
-    path.arc_to(
-        point(radius, radius),
-        px(0.0),
-        false,
-        true,
-        point(center.x - radius, center.y),
-    );
-    path.arc_to(
-        point(radius, radius),
-        px(0.0),
-        false,
-        true,
-        point(center.x + radius, center.y),
-    );
-    path.close();
+fn sidebar_icon(path: &'static str, color: u32) -> impl IntoElement {
+    svg()
+        .path(path)
+        .size(px(16.0))
+        .text_color(rgb(color))
+        .flex_none()
 }
 
 fn ellipsis_vertical_icon(color: u32) -> impl IntoElement {
-    canvas(
-        |bounds, _, _| {
-            let center = bounds.center();
-            let mut dots = PathBuilder::fill();
-            for offset in [-px(4.67), px(0.0), px(4.67)] {
-                add_icon_dot(&mut dots, point(center.x, center.y + offset));
-            }
-            dots.build().ok()
-        },
-        move |_, dots, window, _| {
-            if let Some(dots) = dots {
-                window.paint_path(dots, rgb(color));
-            }
-        },
-    )
-    .size(px(16.0))
-    .flex_none()
+    sidebar_icon("icon/ellipsis-vertical.svg", color)
 }
 
 fn grip_vertical_icon(color: u32) -> impl IntoElement {
-    canvas(
-        |bounds, _, _| {
-            let center = bounds.center();
-            let mut dots = PathBuilder::fill();
-            for x in [-px(2.0), px(2.0)] {
-                for y in [-px(4.67), px(0.0), px(4.67)] {
-                    add_icon_dot(&mut dots, point(center.x + x, center.y + y));
-                }
-            }
-            dots.build().ok()
-        },
-        move |_, dots, window, _| {
-            if let Some(dots) = dots {
-                window.paint_path(dots, rgb(color));
-            }
-        },
-    )
-    .size(px(16.0))
-    .flex_none()
+    sidebar_icon("icon/grip-vertical.svg", color)
+}
+
+fn git_branch_icon(color: u32) -> impl IntoElement {
+    sidebar_icon("icon/git-branch.svg", color)
 }
 
 fn plus_icon(color: u32) -> impl IntoElement {
-    canvas(
-        |bounds, _, _| {
-            let center = bounds.center();
-            let radius = px(4.67);
-            let mut plus = PathBuilder::stroke(px(1.33));
-            plus.move_to(point(center.x - radius, center.y));
-            plus.line_to(point(center.x + radius, center.y));
-            plus.move_to(point(center.x, center.y - radius));
-            plus.line_to(point(center.x, center.y + radius));
-            plus.build().ok()
-        },
-        move |_, plus, window, _| {
-            if let Some(plus) = plus {
-                window.paint_path(plus, rgb(color));
-            }
-        },
-    )
-    .size(px(16.0))
-    .flex_none()
+    sidebar_icon("icon/plus.svg", color)
 }
 
 fn chevron_icon(expanded: bool) -> impl IntoElement {
-    canvas(
-        move |bounds, _, _| {
-            let center = bounds.center();
-            let center_x = center.x - px(4.0);
-            let mut chevron = PathBuilder::stroke(px(1.33));
-            if expanded {
-                chevron.move_to(point(center_x - px(4.0), center.y - px(2.0)));
-                chevron.line_to(point(center_x, center.y + px(2.0)));
-                chevron.line_to(point(center_x + px(4.0), center.y - px(2.0)));
-            } else {
-                chevron.move_to(point(center_x - px(2.0), center.y - px(4.0)));
-                chevron.line_to(point(center_x + px(2.0), center.y));
-                chevron.line_to(point(center_x - px(2.0), center.y + px(4.0)));
-            }
-            chevron.build().ok()
-        },
-        |_, chevron, window, _| {
-            if let Some(chevron) = chevron {
-                window.paint_path(chevron, rgb(muted()));
-            }
-        },
-    )
-    .size(px(16.0))
-    .flex_none()
+    let icon = svg()
+        .path("icon/chevron-down.svg")
+        .size(px(16.0))
+        .text_color(rgb(muted()))
+        .flex_none();
+
+    if expanded {
+        icon
+    } else {
+        icon.with_transformation(Transformation::rotate(radians(
+            -std::f32::consts::FRAC_PI_2,
+        )))
+    }
 }
 
 fn archive_icon(color: u32) -> impl IntoElement {
-    canvas(
-        |bounds, _, _| {
-            let center = bounds.center();
-            let mut archive = PathBuilder::stroke(px(1.33));
-
-            archive.move_to(point(center.x - px(6.67), center.y - px(6.0)));
-            archive.line_to(point(center.x + px(6.67), center.y - px(6.0)));
-            archive.line_to(point(center.x + px(6.67), center.y - px(2.67)));
-            archive.line_to(point(center.x - px(6.67), center.y - px(2.67)));
-            archive.close();
-
-            archive.move_to(point(center.x - px(5.33), center.y - px(2.67)));
-            archive.line_to(point(center.x - px(5.33), center.y + px(4.67)));
-            archive.arc_to(
-                point(px(1.33), px(1.33)),
-                px(0.0),
-                false,
-                false,
-                point(center.x - px(4.0), center.y + px(6.0)),
-            );
-            archive.line_to(point(center.x + px(4.0), center.y + px(6.0)));
-            archive.arc_to(
-                point(px(1.33), px(1.33)),
-                px(0.0),
-                false,
-                false,
-                point(center.x + px(5.33), center.y + px(4.67)),
-            );
-            archive.line_to(point(center.x + px(5.33), center.y - px(2.67)));
-
-            archive.move_to(point(center.x - px(1.33), center.y));
-            archive.line_to(point(center.x + px(1.33), center.y));
-            archive.build().ok()
-        },
-        move |_, archive, window, _| {
-            if let Some(archive) = archive {
-                window.paint_path(archive, rgb(color));
-            }
-        },
-    )
-    .size(px(16.0))
-    .flex_none()
+    sidebar_icon("icon/archive.svg", color)
 }
 
 fn hover_icon(

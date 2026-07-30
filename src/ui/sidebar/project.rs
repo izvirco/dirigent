@@ -169,6 +169,7 @@ impl Dirigent {
                             .flex_1()
                             .flex()
                             .items_center()
+                            .gap_1()
                             .rounded_md()
                             .on_mouse_down(
                                 gpui::MouseButton::Left,

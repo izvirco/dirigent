@@ -4,6 +4,7 @@
 )]
 
 mod app;
+mod assets;
 mod cache;
 mod markdown;
 mod model;
@@ -17,6 +18,7 @@ mod ui;
 mod vcs;
 
 use app::Dirigent;
+use assets::Assets;
 use gpui::{
     App, Bounds, CursorHideMode, SharedString, TitlebarOptions, WindowBounds, WindowOptions,
     prelude::*, px, size,
@@ -44,7 +46,7 @@ fn load_bundled_fonts(cx: &App) {
 }
 
 fn main() {
-    application().run(|cx: &mut App| {
+    application().with_assets(Assets).run(|cx: &mut App| {
         cx.set_app_identity("dirigent", "Dirigent");
         cx.set_cursor_hide_mode(CursorHideMode::Never);
 
