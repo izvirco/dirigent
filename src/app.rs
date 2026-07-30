@@ -341,6 +341,8 @@ pub(crate) struct Dirigent {
     pi_bridge_extension: Option<PathBuf>,
     pub(crate) thread_text_selection: Option<ThreadTextSelection>,
     pub(crate) hovered_copy_message: Option<(Id, usize)>,
+    pub(crate) hovered_action_message: Option<(Id, usize)>,
+    pub(crate) hovered_tool_detail_message: Option<(Id, usize)>,
     pub(crate) copied_button: Option<(String, Instant)>,
     pub(crate) preview_image: Option<Arc<Image>>,
     pub(crate) thread_focus: FocusHandle,
@@ -980,6 +982,8 @@ impl Dirigent {
             pi_bridge_extension,
             thread_text_selection: None,
             hovered_copy_message: None,
+            hovered_action_message: None,
+            hovered_tool_detail_message: None,
             copied_button: None,
             preview_image: None,
             thread_focus: cx.focus_handle(),
@@ -2028,6 +2032,9 @@ impl Dirigent {
         self.selected_harness = Some(id);
         self.last_used_harness = Some(id);
         self.thread_text_selection = None;
+        self.hovered_copy_message = None;
+        self.hovered_action_message = None;
+        self.hovered_tool_detail_message = None;
         self.editing_message = None;
         self.pending_edit_submit = None;
         self.adding_project = false;
@@ -2422,6 +2429,9 @@ impl Dirigent {
             _ => {}
         })
         .detach();
+        self.hovered_copy_message = None;
+        self.hovered_action_message = None;
+        self.hovered_tool_detail_message = None;
         self.editing_message = Some(MessageEdit {
             harness_id,
             message_index,

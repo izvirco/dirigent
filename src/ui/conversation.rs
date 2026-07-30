@@ -149,14 +149,15 @@ impl Dirigent {
             .id(("message-actions", index))
             .absolute()
             .top_0()
+            .bottom_0()
             .left(relative(1.0))
             .pl_2()
             .w(px(140.0))
             .flex()
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 let hovered = if *hovered { hover_key } else { None };
-                if hovered.is_some() || this.hovered_copy_message == hover_key {
-                    this.hovered_copy_message = hovered;
+                if hovered.is_some() || this.hovered_action_message == hover_key {
+                    this.hovered_action_message = hovered;
                     cx.notify();
                 }
             }))
@@ -437,12 +438,21 @@ impl Dirigent {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let scrollbar_id = format!("tool-scrollbar-{index}");
+        let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
         div()
+            .id(("tool-detail-hover", index))
             .relative()
             .group(scrollbar_id.clone())
             .ml_5()
             .pb_2()
             .max_h(px(260.0))
+            .on_hover(cx.listener(move |this, hovered, _, cx| {
+                let hovered = if *hovered { hover_key } else { None };
+                if hovered.is_some() || this.hovered_tool_detail_message == hover_key {
+                    this.hovered_tool_detail_message = hovered;
+                    cx.notify();
+                }
+            }))
             // Keep the list hitbox behind this nested scroll area from handling the same wheel event.
             .occlude()
             .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
@@ -480,7 +490,9 @@ impl Dirigent {
             return self.render_message_edit_composer(cx);
         }
         let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
-        let actions_visible = self.hovered_copy_message == hover_key;
+        let actions_visible = self.hovered_copy_message == hover_key
+            || self.hovered_action_message == hover_key
+            || self.hovered_tool_detail_message == hover_key;
         match message.role {
             MessageRole::User => {
                 let images = message.images.clone();
