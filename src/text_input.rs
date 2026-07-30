@@ -602,7 +602,7 @@ impl Element for TextInputElement {
 impl Render for TextInput {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let focused = self.focus.is_focused(window);
-        let show_placeholder = self.content.is_empty() && !focused;
+        let show_placeholder = self.content.is_empty();
         let display = if show_placeholder {
             self.placeholder.to_string()
         } else {
