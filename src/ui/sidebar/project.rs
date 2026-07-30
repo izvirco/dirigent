@@ -246,7 +246,11 @@ impl Dirigent {
                                         cx.listener(|_, _, _, cx| cx.stop_propagation()),
                                     )
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_project_menu(id);
+                                        if menu_open {
+                                            this.sidebar_menu = None;
+                                        } else {
+                                            this.toggle_project_menu(id);
+                                        }
                                         cx.stop_propagation();
                                         cx.notify();
                                     }))

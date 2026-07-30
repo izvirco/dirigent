@@ -1,6 +1,6 @@
 use gpui::{
     AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement, ObjectFit, PathBuilder,
-    StyledImage, Window, canvas, div, img, point, prelude::*, px, rgba,
+    StyledImage, Window, canvas, deferred, div, img, point, prelude::*, px, rgba,
 };
 
 use crate::{
@@ -80,8 +80,12 @@ impl Dirigent {
                     .cursor_pointer()
                     .when(open, |style| style.border_color(rgb(blue())))
                     .hover(|style| style.bg(rgb(surface_hover())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_composer_dropdown(ComposerDropdown::Project);
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if open {
+                            this.composer_dropdown = None;
+                        } else {
+                            this.toggle_composer_dropdown(ComposerDropdown::Project);
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     }))
@@ -101,71 +105,76 @@ impl Dirigent {
             )
             .when(open, |element| {
                 element.child(
-                    div()
-                        .id("new-harness-project-dropdown")
-                        .absolute()
-                        .bottom(px(38.0))
-                        .left_0()
-                        .min_w(px(320.0))
-                        .max_w(px(420.0))
-                        .max_h(px(280.0))
-                        .p_1()
-                        .overflow_y_scroll()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(border()))
-                        .bg(rgb(surface_hover()))
-                        .occlude()
-                        .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                        .children(self.projects.iter().enumerate().map(|(index, project)| {
-                            let project_id = project.id;
-                            let selected = self.selected_project == Some(project_id);
-                            let name = project.name.clone();
-                            let path = project.path.display().to_string();
-                            div()
-                                .id(("new-harness-project-option", index))
-                                .min_h(px(42.0))
-                                .mt(px(2.0))
-                                .mb(px(2.0))
-                                .px_3()
-                                .py_1()
-                                .flex()
-                                .flex_col()
-                                .justify_center()
-                                .rounded_md()
-                                .cursor_pointer()
-                                .when(selected, |style| style.bg(rgb(crate::theme::selection())))
-                                .when(!selected, |element| {
-                                    element.hover(|style| style.bg(rgb(border())))
-                                })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if this.selected_project == Some(project_id) {
-                                        this.composer_dropdown = None;
-                                    } else {
-                                        this.start_new_harness(project_id);
-                                    }
-                                    cx.notify();
-                                    cx.stop_propagation();
-                                }))
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .text_xs()
-                                        .text_color(rgb(theme_text()))
-                                        .child(name),
-                                )
-                                .child(
-                                    div()
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .text_xs()
-                                        .text_color(rgb(muted()))
-                                        .child(path),
-                                )
-                        })),
+                    deferred(
+                        div()
+                            .id("new-harness-project-dropdown")
+                            .absolute()
+                            .bottom(px(38.0))
+                            .left_0()
+                            .min_w(px(320.0))
+                            .max_w(px(420.0))
+                            .max_h(px(280.0))
+                            .p_1()
+                            .overflow_y_scroll()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(border()))
+                            .bg(rgb(surface_hover()))
+                            .occlude()
+                            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                            .children(self.projects.iter().enumerate().map(|(index, project)| {
+                                let project_id = project.id;
+                                let selected = self.selected_project == Some(project_id);
+                                let name = project.name.clone();
+                                let path = project.path.display().to_string();
+                                div()
+                                    .id(("new-harness-project-option", index))
+                                    .min_h(px(42.0))
+                                    .mt(px(2.0))
+                                    .mb(px(2.0))
+                                    .px_3()
+                                    .py_1()
+                                    .flex()
+                                    .flex_col()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .cursor_pointer()
+                                    .when(selected, |style| {
+                                        style.bg(rgb(crate::theme::selection()))
+                                    })
+                                    .when(!selected, |element| {
+                                        element.hover(|style| style.bg(rgb(border())))
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.selected_project == Some(project_id) {
+                                            this.composer_dropdown = None;
+                                        } else {
+                                            this.start_new_harness(project_id);
+                                        }
+                                        cx.notify();
+                                        cx.stop_propagation();
+                                    }))
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_xs()
+                                            .text_color(rgb(theme_text()))
+                                            .child(name),
+                                    )
+                                    .child(
+                                        div()
+                                            .whitespace_nowrap()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .text_xs()
+                                            .text_color(rgb(muted()))
+                                            .child(path),
+                                    )
+                            })),
+                    )
+                    .priority(2),
                 )
             })
             .into_any_element()
@@ -196,8 +205,12 @@ impl Dirigent {
                         style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_composer_dropdown(ComposerDropdown::Model);
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if open {
+                            this.composer_dropdown = None;
+                        } else {
+                            this.toggle_composer_dropdown(ComposerDropdown::Model);
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     }))
@@ -213,103 +226,109 @@ impl Dirigent {
             )
             .when(open, |element| {
                 element.child(
-                    div()
-                        .id("model-dropdown")
-                        .absolute()
-                        .bottom(px(36.0))
-                        .left_0()
-                        .max_w(px(300.0))
-                        .max_h(px(300.0))
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(border()))
-                        .bg(rgb(surface_hover()))
-                        .group("model-dropdown-scrollbar")
-                        .occlude()
-                        .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                        .child(
-                            div()
-                                .id("model-dropdown-content")
-                                .max_h(px(298.0))
-                                .overflow_y_scroll()
-                                .track_scroll(&self.model_picker_scroll)
-                                .p_1()
-                                .pr_2()
-                                .when(self.available_models.is_empty(), |element| {
-                                    element.child(
-                                        div()
-                                            .h(px(38.0))
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .text_xs()
-                                            .text_color(rgb(muted()))
-                                            .child("Loading models…"),
-                                    )
-                                })
-                                .children(self.available_models.iter().cloned().enumerate().map(
-                                    |(index, model)| {
-                                        let selected =
-                                            current == format!("{}/{}", model.provider, model.id);
-                                        let provider = model.provider.clone();
-                                        let model_id = model.id.clone();
-                                        div()
-                                            .id(("model-option", index))
-                                            .min_h(px(34.0))
-                                            .mt(px(2.0))
-                                            .mb(px(2.0))
-                                            .px_3()
-                                            .py_1()
-                                            .flex()
-                                            .items_center()
-                                            .rounded_md()
-                                            .when(selected, |style| {
-                                                style.bg(rgb(crate::theme::selection()))
-                                            })
-                                            .when(!selected, |element| {
-                                                element.hover(|style| style.bg(rgb(border())))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.select_model(
-                                                    provider.clone(),
-                                                    model_id.clone(),
-                                                );
-                                                cx.notify();
-                                            }))
-                                            .child(
+                    deferred(
+                        div()
+                            .id("model-dropdown")
+                            .absolute()
+                            .bottom(px(36.0))
+                            .left_0()
+                            .max_w(px(300.0))
+                            .max_h(px(300.0))
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(border()))
+                            .bg(rgb(surface_hover()))
+                            .group("model-dropdown-scrollbar")
+                            .occlude()
+                            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                            .child(
+                                div()
+                                    .id("model-dropdown-content")
+                                    .max_h(px(298.0))
+                                    .overflow_y_scroll()
+                                    .track_scroll(&self.model_picker_scroll)
+                                    .p_1()
+                                    .pr_2()
+                                    .when(self.available_models.is_empty(), |element| {
+                                        element.child(
+                                            div()
+                                                .h(px(38.0))
+                                                .px_3()
+                                                .flex()
+                                                .items_center()
+                                                .text_xs()
+                                                .text_color(rgb(muted()))
+                                                .child("Loading models…"),
+                                        )
+                                    })
+                                    .children(
+                                        self.available_models.iter().cloned().enumerate().map(
+                                            |(index, model)| {
+                                                let selected = current
+                                                    == format!("{}/{}", model.provider, model.id);
+                                                let provider = model.provider.clone();
+                                                let model_id = model.id.clone();
                                                 div()
-                                                    .min_w(px(0.0))
+                                                    .id(("model-option", index))
+                                                    .min_h(px(34.0))
+                                                    .mt(px(2.0))
+                                                    .mb(px(2.0))
+                                                    .px_3()
+                                                    .py_1()
                                                     .flex()
-                                                    .flex_col()
+                                                    .items_center()
+                                                    .rounded_md()
+                                                    .when(selected, |style| {
+                                                        style.bg(rgb(crate::theme::selection()))
+                                                    })
+                                                    .when(!selected, |element| {
+                                                        element
+                                                            .hover(|style| style.bg(rgb(border())))
+                                                    })
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.select_model(
+                                                            provider.clone(),
+                                                            model_id.clone(),
+                                                        );
+                                                        cx.notify();
+                                                    }))
                                                     .child(
                                                         div()
-                                                            .whitespace_nowrap()
-                                                            .overflow_hidden()
-                                                            .text_ellipsis()
-                                                            .text_xs()
-                                                            .text_color(rgb(theme_text()))
-                                                            .child(model.name),
+                                                            .min_w(px(0.0))
+                                                            .flex()
+                                                            .flex_col()
+                                                            .child(
+                                                                div()
+                                                                    .whitespace_nowrap()
+                                                                    .overflow_hidden()
+                                                                    .text_ellipsis()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(theme_text()))
+                                                                    .child(model.name),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .whitespace_nowrap()
+                                                                    .overflow_hidden()
+                                                                    .text_ellipsis()
+                                                                    .text_xs()
+                                                                    .text_color(rgb(muted()))
+                                                                    .child(format!(
+                                                                        "{}/{}",
+                                                                        model.provider, model.id
+                                                                    )),
+                                                            ),
                                                     )
-                                                    .child(
-                                                        div()
-                                                            .whitespace_nowrap()
-                                                            .overflow_hidden()
-                                                            .text_ellipsis()
-                                                            .text_xs()
-                                                            .text_color(rgb(muted()))
-                                                            .child(format!(
-                                                                "{}/{}",
-                                                                model.provider, model.id
-                                                            )),
-                                                    ),
-                                            )
-                                    },
-                                )),
-                        )
-                        .child(self.render_thin_scrollbar(
-                            "model-dropdown-scrollbar",
-                            &self.model_picker_scroll,
-                        )),
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(self.render_thin_scrollbar(
+                                "model-dropdown-scrollbar",
+                                &self.model_picker_scroll,
+                            )),
+                    )
+                    .priority(2),
                 )
             })
             .into_any_element()
@@ -335,8 +354,12 @@ impl Dirigent {
                         style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_composer_dropdown(ComposerDropdown::Reasoning);
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if open {
+                            this.composer_dropdown = None;
+                        } else {
+                            this.toggle_composer_dropdown(ComposerDropdown::Reasoning);
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     }))
@@ -345,46 +368,49 @@ impl Dirigent {
             )
             .when(open, |element| {
                 element.child(
-                    div()
-                        .id("reasoning-dropdown")
-                        .absolute()
-                        .bottom(px(36.0))
-                        .left_0()
-                        .p_1()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(border()))
-                        .bg(rgb(surface_hover()))
-                        .occlude()
-                        .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                        .children(self.reasoning_options().into_iter().enumerate().map(
-                            |(index, level)| {
-                                let selected = current == level;
-                                let value = level.to_string();
-                                div()
-                                    .id(("reasoning-option", index))
-                                    .h(px(26.0))
-                                    .mt(px(2.0))
-                                    .mb(px(2.0))
-                                    .px_3()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .text_xs()
-                                    .text_color(rgb(theme_text()))
-                                    .when(selected, |style| {
-                                        style.bg(rgb(crate::theme::selection()))
-                                    })
-                                    .when(!selected, |element| {
-                                        element.hover(|style| style.bg(rgb(border())))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_thinking(value.clone());
-                                        cx.notify();
-                                    }))
-                                    .child(level)
-                            },
-                        )),
+                    deferred(
+                        div()
+                            .id("reasoning-dropdown")
+                            .absolute()
+                            .bottom(px(36.0))
+                            .left_0()
+                            .p_1()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(border()))
+                            .bg(rgb(surface_hover()))
+                            .occlude()
+                            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                            .children(self.reasoning_options().into_iter().enumerate().map(
+                                |(index, level)| {
+                                    let selected = current == level;
+                                    let value = level.to_string();
+                                    div()
+                                        .id(("reasoning-option", index))
+                                        .h(px(26.0))
+                                        .mt(px(2.0))
+                                        .mb(px(2.0))
+                                        .px_3()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .text_xs()
+                                        .text_color(rgb(theme_text()))
+                                        .when(selected, |style| {
+                                            style.bg(rgb(crate::theme::selection()))
+                                        })
+                                        .when(!selected, |element| {
+                                            element.hover(|style| style.bg(rgb(border())))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.select_thinking(value.clone());
+                                            cx.notify();
+                                        }))
+                                        .child(level)
+                                },
+                            )),
+                    )
+                    .priority(2),
                 )
             })
             .into_any_element()
@@ -395,7 +421,7 @@ impl Dirigent {
         let pending = self.pending_workspace_source();
         let repository = self.repository_snapshot_for_composer();
         let Some((label, backend)) = workspace
-            .map(|workspace| (workspace.id.clone(), workspace.backend))
+            .map(|workspace| (format!("{} workspace", workspace.id), workspace.backend))
             .or_else(|| {
                 pending.map(|source| {
                     let label = match source.backend {
@@ -415,13 +441,6 @@ impl Dirigent {
         };
         let open = self.composer_dropdown == Some(ComposerDropdown::Workspace);
         let managed_path = workspace.map(|workspace| workspace.working_directory.clone());
-        let managed_identity = workspace.map(|workspace| match workspace.backend {
-            WorkspaceBackend::Jj => format!("JJ workspace {}", workspace.id),
-            WorkspaceBackend::Git => format!(
-                "Git branch {}",
-                workspace.git_branch.as_deref().unwrap_or(&workspace.id)
-            ),
-        });
         let provenance = workspace.map(|workspace| match workspace.backend {
             WorkspaceBackend::Jj => {
                 format!("Workspace alongside {}", workspace.source_label)
@@ -433,17 +452,11 @@ impl Dirigent {
             WorkspaceState::Failed(error) => Some(error.clone()),
             WorkspaceState::Ready => None,
         });
-        let repository_metadata = workspace.is_none().then(|| {
-            let source = pending
-                .or(repository)
-                .expect("repository source is available");
-            match source.backend {
-                WorkspaceBackend::Jj => format!("JJ change {}", source.source_label),
-                WorkspaceBackend::Git => format!("Git branch {}", source.source_label),
-            }
-        });
         let source = pending.or(repository);
-        let dirty = source.is_some_and(|source| source.dirty);
+        let dirty_warning = source
+            .is_some_and(|source| source.backend == WorkspaceBackend::Git && source.dirty)
+            .then(|| "Uncommitted changes will not be included".to_string());
+        let has_metadata = workspace.is_some() || dirty_warning.is_some();
         let can_create = workspace.is_none()
             && self.selected_harness.is_none_or(|id| {
                 self.harnesses
@@ -470,8 +483,12 @@ impl Dirigent {
                         style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_workspace_dropdown();
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if open {
+                            this.composer_dropdown = None;
+                        } else {
+                            this.toggle_workspace_dropdown();
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     }))
@@ -487,134 +504,128 @@ impl Dirigent {
             )
             .when(open, |element| {
                 element.child(
-                    div()
-                        .id("workspace-dropdown")
-                        .absolute()
-                        .bottom(px(36.0))
-                        .left_0()
-                        .w_auto()
-                        .min_w(px(330.0))
-                        .py_1()
-                        .flex()
-                        .flex_col()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(border()))
-                        .bg(rgb(surface_hover()))
-                        .occlude()
-                        .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                        .child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .whitespace_nowrap()
-                                .text_xs()
-                                .text_color(rgb(muted()))
-                                .when_some(managed_path.clone(), |metadata, path| {
-                                    metadata.child(path.display().to_string())
-                                })
-                                .when_some(managed_identity, |metadata, identity| {
-                                    metadata.child(identity)
-                                })
-                                .when_some(provenance, |metadata, provenance| {
-                                    metadata.child(provenance)
-                                })
-                                .when_some(repository_metadata, |metadata, repository| {
-                                    metadata.child(repository)
-                                })
-                                .when_some(workspace_status, |metadata, status| {
-                                    metadata.child(status)
-                                }),
-                        )
-                        .child(div().h(px(1.0)).mx_2().my_1().bg(rgb(border())))
-                        .when_some(managed_path, |menu, path| {
-                            let copy_path = path.display().to_string();
-                            menu.child(
-                                div()
-                                    .id("copy-workspace-path")
-                                    .h(px(30.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .whitespace_nowrap()
-                                    .text_xs()
-                                    .text_color(rgb(theme_text()))
-                                    .hover(|style| style.bg(rgb(border())))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.copy_text(copy_path.clone(), cx);
-                                        this.composer_dropdown = None;
-                                        cx.notify();
-                                    }))
-                                    .child("Copy path"),
-                            )
-                        })
-                        .when(workspace.is_none() && pending.is_some(), |menu| {
-                            menu.child(
-                                div()
-                                    .id("use-project-directory")
-                                    .h(px(30.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .whitespace_nowrap()
-                                    .text_xs()
-                                    .text_color(rgb(theme_text()))
-                                    .hover(|style| style.bg(rgb(border())))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.use_project_directory();
-                                        cx.notify();
-                                    }))
-                                    .child("Use project directory"),
-                            )
-                        })
-                        .when(
-                            workspace.is_none() && pending.is_none() && can_create,
-                            |menu| {
-                                let source_label = source
-                                    .map(|source| source.source_label.clone())
-                                    .unwrap_or_default();
-                                let action = match backend {
-                                    WorkspaceBackend::Jj => {
-                                        format!("New workspace alongside {source_label}")
-                                    }
-                                    WorkspaceBackend::Git => {
-                                        format!("New workspace from {source_label}")
-                                    }
-                                };
+                    deferred(
+                        div()
+                            .id("workspace-dropdown")
+                            .absolute()
+                            .bottom(px(36.0))
+                            .left_0()
+                            .w_auto()
+                            .p_1()
+                            .flex()
+                            .flex_col()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(border()))
+                            .bg(rgb(surface_hover()))
+                            .occlude()
+                            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                            .when(has_metadata, |menu| {
                                 menu.child(
                                     div()
-                                        .id("create-workspace-on-send")
-                                        .min_h(px(34.0))
-                                        .px_2()
+                                        .px_1()
                                         .py_1()
                                         .flex()
                                         .flex_col()
-                                        .justify_center()
+                                        .gap_1()
+                                        .whitespace_nowrap()
+                                        .text_xs()
+                                        .text_color(rgb(muted()))
+                                        .when_some(managed_path.clone(), |metadata, path| {
+                                            metadata.child(path.display().to_string())
+                                        })
+                                        .when_some(provenance, |metadata, provenance| {
+                                            metadata.child(provenance)
+                                        })
+                                        .when_some(workspace_status, |metadata, status| {
+                                            metadata.child(status)
+                                        })
+                                        .when_some(dirty_warning, |metadata, warning| {
+                                            metadata.child(
+                                                div().text_color(rgb(orange())).child(warning),
+                                            )
+                                        }),
+                                )
+                                .child(div().h(px(1.0)).mx_1().my_1().bg(rgb(border())))
+                            })
+                            .when_some(managed_path, |menu, path| {
+                                let copy_path = path.display().to_string();
+                                menu.child(
+                                    div()
+                                        .id("copy-workspace-path")
+                                        .h(px(26.0))
+                                        .px_1()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .whitespace_nowrap()
+                                        .text_xs()
+                                        .text_color(rgb(theme_text()))
+                                        .hover(|style| style.bg(rgb(border())))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.copy_text(copy_path.clone(), cx);
+                                            this.composer_dropdown = None;
+                                            cx.notify();
+                                        }))
+                                        .child("Copy path"),
+                                )
+                            })
+                            .when(workspace.is_none() && pending.is_some(), |menu| {
+                                menu.child(
+                                    div()
+                                        .id("use-project-directory")
+                                        .h(px(26.0))
+                                        .px_1()
+                                        .flex()
+                                        .items_center()
                                         .rounded_md()
                                         .whitespace_nowrap()
                                         .text_xs()
                                         .text_color(rgb(theme_text()))
                                         .hover(|style| style.bg(rgb(border())))
                                         .on_click(cx.listener(|this, _, _, cx| {
-                                            this.choose_new_workspace();
+                                            this.use_project_directory();
                                             cx.notify();
                                         }))
-                                        .child(action)
-                                        .when(dirty && backend == WorkspaceBackend::Git, |item| {
-                                            item.child(
-                                                div().text_color(rgb(orange())).child(
-                                                    "Uncommitted changes will not be included",
-                                                ),
-                                            )
-                                        }),
+                                        .child("Use project directory"),
                                 )
-                            },
-                        ),
+                            })
+                            .when(
+                                workspace.is_none() && pending.is_none() && can_create,
+                                |menu| {
+                                    let source_label = source
+                                        .map(|source| source.source_label.clone())
+                                        .unwrap_or_default();
+                                    let action = match backend {
+                                        WorkspaceBackend::Jj => {
+                                            format!("New workspace alongside {source_label}")
+                                        }
+                                        WorkspaceBackend::Git => {
+                                            format!("New workspace from {source_label}")
+                                        }
+                                    };
+                                    menu.child(
+                                        div()
+                                            .id("create-workspace-on-send")
+                                            .h(px(26.0))
+                                            .px_1()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_md()
+                                            .whitespace_nowrap()
+                                            .text_xs()
+                                            .text_color(rgb(theme_text()))
+                                            .hover(|style| style.bg(rgb(border())))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.choose_new_workspace();
+                                                cx.notify();
+                                            }))
+                                            .child(action),
+                                    )
+                                },
+                            ),
+                    )
+                    .priority(2),
                 )
             })
             .into_any_element()

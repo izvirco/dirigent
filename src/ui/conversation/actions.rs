@@ -156,8 +156,12 @@ impl Dirigent {
                         style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_composer_dropdown(ComposerDropdown::EditModel);
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if model_open {
+                            this.composer_dropdown = None;
+                        } else {
+                            this.toggle_composer_dropdown(ComposerDropdown::EditModel);
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     }))
@@ -173,73 +177,79 @@ impl Dirigent {
             )
             .when(model_open, |element| {
                 element.child(
-                    div()
-                        .id(("edit-model-dropdown", index))
-                        .absolute()
-                        .bottom(px(36.0))
-                        .left_0()
-                        .max_w(px(300.0))
-                        .max_h(px(300.0))
-                        .p_1()
-                        .overflow_y_scroll()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(crate::theme::border()))
-                        .bg(rgb(surface_hover()))
-                        .occlude()
-                        .children(self.available_models.iter().enumerate().map(
-                            |(option, item)| {
-                                let selected = model == format!("{}/{}", item.provider, item.id);
-                                let provider = item.provider.clone();
-                                let model_id = item.id.clone();
-                                let value = format!("{provider}/{model_id}");
-                                div()
-                                    .id(("edit-model-option", option))
-                                    .min_h(px(34.0))
-                                    .mt(px(2.0))
-                                    .mb(px(2.0))
-                                    .px_3()
-                                    .py_1()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .when(selected, |style| {
-                                        style.bg(rgb(crate::theme::selection()))
-                                    })
-                                    .when(!selected, |element| {
-                                        element.hover(|style| style.bg(rgb(crate::theme::border())))
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.select_edit_model(value.clone());
-                                        cx.notify();
-                                        cx.stop_propagation();
-                                    }))
-                                    .child(
-                                        div()
-                                            .min_w(px(0.0))
-                                            .flex()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .whitespace_nowrap()
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .text_xs()
-                                                    .text_color(rgb(theme_text()))
-                                                    .child(item.name.clone()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .whitespace_nowrap()
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .text_xs()
-                                                    .text_color(rgb(muted()))
-                                                    .child(format!("{provider}/{model_id}")),
-                                            ),
-                                    )
-                            },
-                        )),
+                    deferred(
+                        div()
+                            .id(("edit-model-dropdown", index))
+                            .absolute()
+                            .bottom(px(36.0))
+                            .left_0()
+                            .max_w(px(300.0))
+                            .max_h(px(300.0))
+                            .p_1()
+                            .overflow_y_scroll()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(crate::theme::border()))
+                            .bg(rgb(surface_hover()))
+                            .occlude()
+                            .children(self.available_models.iter().enumerate().map(
+                                |(option, item)| {
+                                    let selected =
+                                        model == format!("{}/{}", item.provider, item.id);
+                                    let provider = item.provider.clone();
+                                    let model_id = item.id.clone();
+                                    let value = format!("{provider}/{model_id}");
+                                    div()
+                                        .id(("edit-model-option", option))
+                                        .min_h(px(34.0))
+                                        .mt(px(2.0))
+                                        .mb(px(2.0))
+                                        .px_3()
+                                        .py_1()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .when(selected, |style| {
+                                            style.bg(rgb(crate::theme::selection()))
+                                        })
+                                        .when(!selected, |element| {
+                                            element.hover(|style| {
+                                                style.bg(rgb(crate::theme::border()))
+                                            })
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.select_edit_model(value.clone());
+                                            cx.notify();
+                                            cx.stop_propagation();
+                                        }))
+                                        .child(
+                                            div()
+                                                .min_w(px(0.0))
+                                                .flex()
+                                                .flex_col()
+                                                .child(
+                                                    div()
+                                                        .whitespace_nowrap()
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .text_xs()
+                                                        .text_color(rgb(theme_text()))
+                                                        .child(item.name.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .whitespace_nowrap()
+                                                        .overflow_hidden()
+                                                        .text_ellipsis()
+                                                        .text_xs()
+                                                        .text_color(rgb(muted()))
+                                                        .child(format!("{provider}/{model_id}")),
+                                                ),
+                                        )
+                                },
+                            )),
+                    )
+                    .priority(2),
                 )
             });
         let thinking_picker = div()
@@ -259,8 +269,12 @@ impl Dirigent {
                         style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.toggle_composer_dropdown(ComposerDropdown::EditReasoning);
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if thinking_open {
+                            this.composer_dropdown = None;
+                        } else {
+                            this.toggle_composer_dropdown(ComposerDropdown::EditReasoning);
+                        }
                         cx.notify();
                         cx.stop_propagation();
                     }))
@@ -269,50 +283,53 @@ impl Dirigent {
             )
             .when(thinking_open, |element| {
                 element.child(
-                    div()
-                        .absolute()
-                        .bottom(px(36.0))
-                        .left_0()
-                        .p_1()
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(rgb(crate::theme::border()))
-                        .bg(rgb(surface_hover()))
-                        .occlude()
-                        .children(
-                            self.edit_reasoning_options(&model)
-                                .into_iter()
-                                .enumerate()
-                                .map(|(option, level)| {
-                                    let selected = thinking == level;
-                                    let value = level.clone();
-                                    div()
-                                        .id(("edit-thinking-option", option))
-                                        .h(px(26.0))
-                                        .mt(px(2.0))
-                                        .mb(px(2.0))
-                                        .px_3()
-                                        .flex()
-                                        .items_center()
-                                        .rounded_md()
-                                        .text_xs()
-                                        .text_color(rgb(theme_text()))
-                                        .when(selected, |style| {
-                                            style.bg(rgb(crate::theme::selection()))
-                                        })
-                                        .when(!selected, |element| {
-                                            element.hover(|style| {
-                                                style.bg(rgb(crate::theme::border()))
+                    deferred(
+                        div()
+                            .absolute()
+                            .bottom(px(36.0))
+                            .left_0()
+                            .p_1()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(crate::theme::border()))
+                            .bg(rgb(surface_hover()))
+                            .occlude()
+                            .children(
+                                self.edit_reasoning_options(&model)
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(option, level)| {
+                                        let selected = thinking == level;
+                                        let value = level.clone();
+                                        div()
+                                            .id(("edit-thinking-option", option))
+                                            .h(px(26.0))
+                                            .mt(px(2.0))
+                                            .mb(px(2.0))
+                                            .px_3()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_md()
+                                            .text_xs()
+                                            .text_color(rgb(theme_text()))
+                                            .when(selected, |style| {
+                                                style.bg(rgb(crate::theme::selection()))
                                             })
-                                        })
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.select_edit_thinking(value.clone());
-                                            cx.notify();
-                                            cx.stop_propagation();
-                                        }))
-                                        .child(level)
-                                }),
-                        ),
+                                            .when(!selected, |element| {
+                                                element.hover(|style| {
+                                                    style.bg(rgb(crate::theme::border()))
+                                                })
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.select_edit_thinking(value.clone());
+                                                cx.notify();
+                                                cx.stop_propagation();
+                                            }))
+                                            .child(level)
+                                    }),
+                            ),
+                    )
+                    .priority(2),
                 )
             });
         div()

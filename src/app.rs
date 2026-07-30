@@ -27,8 +27,8 @@ use fff_search::{
 use gpui::{
     ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, Image,
     ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState, MouseButton,
-    ObjectFit, ScrollHandle, SharedString, StyledImage, Window, WindowBackgroundAppearance, div,
-    img, point, prelude::*, profiler, px,
+    ObjectFit, ScrollHandle, SharedString, StyledImage, Window, WindowBackgroundAppearance,
+    deferred, div, img, point, prelude::*, profiler, px,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1125,6 +1125,31 @@ impl Render for Dirigent {
                     cx.notify();
                 }
             }))
+            .when(
+                self.composer_dropdown.is_some()
+                    || self.sidebar_menu.is_some()
+                    || self.path_completion.is_some(),
+                |element| {
+                    element.child(
+                        deferred(
+                            div()
+                                .id("dropdown-dismiss-backdrop")
+                                .absolute()
+                                .inset_0()
+                                .size_full()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    let changed = this.composer_dropdown.take().is_some()
+                                        | this.sidebar_menu.take().is_some()
+                                        | this.path_completion.take().is_some();
+                                    if changed {
+                                        cx.notify();
+                                    }
+                                })),
+                        )
+                        .priority(1),
+                    )
+                },
+            )
             .child(self.render_sidebar(window, cx))
             .child(self.render_center(window, cx))
             .when_some(path_completion_anchor, |element, anchor| {

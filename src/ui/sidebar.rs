@@ -417,8 +417,12 @@ impl Dirigent {
                                 gpui::MouseButton::Left,
                                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_bottom_sidebar_menu();
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if bottom_menu_open {
+                                    this.sidebar_menu = None;
+                                } else {
+                                    this.toggle_bottom_sidebar_menu();
+                                }
                                 cx.stop_propagation();
                                 cx.notify();
                             }))

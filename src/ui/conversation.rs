@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
-    canvas, div, img, list, prelude::*, px, relative,
+    canvas, deferred, div, img, list, prelude::*, px, relative,
 };
 
 use super::composer::dropdown_arrow;
