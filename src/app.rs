@@ -463,7 +463,11 @@ impl Dirigent {
             }
         }
 
-        let project_input = cx.new(|cx| TextInput::new(project_path_placeholder(), cx));
+        let project_input = cx.new(|cx| {
+            TextInput::new(project_path_placeholder(), cx)
+                .borderless()
+                .compact()
+        });
         let harness_input = cx.new(|cx| {
             TextInput::new("Send a message to pi…", cx)
                 .borderless()

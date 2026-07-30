@@ -29,6 +29,7 @@ impl Dirigent {
                     )
                     .child(
                         div()
+                            .h(px(28.0))
                             .w_full()
                             .flex()
                             .items_center()
@@ -36,6 +37,7 @@ impl Dirigent {
                             .child(
                                 div()
                                     .relative()
+                                    .h_full()
                                     .min_w(px(0.0))
                                     .flex_1()
                                     .child(self.project_input.clone())
@@ -45,7 +47,7 @@ impl Dirigent {
                                             element.child(
                                                 div()
                                                     .absolute()
-                                                    .top(px(46.0))
+                                                    .top(px(32.0))
                                                     .left_0()
                                                     .right_0()
                                                     .child(self.render_path_completion_menu(cx)),
@@ -56,15 +58,16 @@ impl Dirigent {
                             .child(
                                 div()
                                     .id("create-project")
-                                    .h(px(42.0))
-                                    .px_4()
+                                    .h(px(28.0))
+                                    .px_2()
+                                    .py_1()
                                     .flex_none()
                                     .flex()
                                     .items_center()
-                                    .rounded_lg()
+                                    .rounded_md()
                                     .bg(rgb(blue()))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_sm()
+                                    .text_xs()
                                     .text_color(rgb(bg()))
                                     .hover(|style| style.bg(rgb(crate::theme::accent_hover())))
                                     .on_click(cx.listener(|this, _, _, cx| this.add_project(cx)))
