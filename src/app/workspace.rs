@@ -1,0 +1,542 @@
+use super::*;
+
+impl Dirigent {
+    pub(crate) fn resize_sidebar(&mut self, width: f32) {
+        let width = width.clamp(200.0, 520.0);
+        if self.sidebar_width == width {
+            return;
+        }
+        self.sidebar_width = width;
+        self.persist();
+    }
+    pub(crate) fn toggle_project_collapsed(&mut self, project_id: Id) {
+        if !self.collapsed_projects.remove(&project_id) {
+            self.collapsed_projects.insert(project_id);
+        }
+        self.sidebar_menu = None;
+        self.persist();
+    }
+    pub(crate) fn reorder_project(&mut self, source: Id, target: Id) {
+        if source == target {
+            return;
+        }
+        let Some(source_index) = self
+            .projects
+            .iter()
+            .position(|project| project.id == source)
+        else {
+            return;
+        };
+        let Some(target_index) = self
+            .projects
+            .iter()
+            .position(|project| project.id == target)
+        else {
+            return;
+        };
+        let project = self.projects.remove(source_index);
+        self.projects
+            .insert(target_index.min(self.projects.len()), project);
+        self.persist();
+    }
+    pub(crate) fn toggle_thread_menu(&mut self, harness_id: Id) {
+        let menu = SidebarMenu::Thread(harness_id);
+        self.sidebar_menu = (self.sidebar_menu != Some(menu)).then_some(menu);
+    }
+    pub(crate) fn toggle_project_menu(&mut self, project_id: Id) {
+        let menu = SidebarMenu::Project(project_id);
+        self.sidebar_menu = (self.sidebar_menu != Some(menu)).then_some(menu);
+    }
+    pub(crate) fn toggle_bottom_sidebar_menu(&mut self) {
+        self.sidebar_menu =
+            (self.sidebar_menu != Some(SidebarMenu::Bottom)).then_some(SidebarMenu::Bottom);
+    }
+    pub(crate) fn begin_renaming_harness(&mut self, harness_id: Id, cx: &mut Context<Self>) {
+        let Some(title) = self
+            .harnesses
+            .iter()
+            .find(|harness| harness.id == harness_id)
+            .map(|harness| {
+                harness
+                    .title
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+        else {
+            return;
+        };
+        self.thread_rename_input.update(cx, |input, cx| {
+            input.set_text(title, cx);
+            input.select_all(cx);
+        });
+        self.renaming_harness = Some(harness_id);
+        self.sidebar_menu = None;
+        self.enter_input_mode(true);
+    }
+    pub(super) fn finish_renaming_harness(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming_harness else {
+            return;
+        };
+        let title = self.thread_rename_input.read(cx).text().trim().to_string();
+        if title.is_empty() {
+            self.banner = Some("Thread names cannot be empty.".into());
+            cx.notify();
+            return;
+        }
+        if let Some(harness) = self.harnesses.iter_mut().find(|harness| harness.id == id) {
+            harness.title = title;
+            self.persist();
+        }
+        self.renaming_harness = None;
+        self.enter_normal_mode();
+        cx.notify();
+    }
+    pub(super) fn select_after_harness_hidden(&mut self, project_id: Id) {
+        let replacement = self.harness_navigation_ids().into_iter().next();
+        if let Some(id) = replacement {
+            self.select_harness(id);
+        } else {
+            self.selected_harness = None;
+            self.last_used_harness = None;
+            self.selected_project = self
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .or_else(|| self.projects.first())
+                .map(|project| project.id);
+            self.creating_harness = false;
+        }
+    }
+    pub(crate) fn can_archive_harness(&self, id: Id) -> bool {
+        self.harnesses.iter().any(|harness| {
+            harness.id == id
+                && !matches!(
+                    harness.status,
+                    HarnessStatus::Starting | HarnessStatus::Working
+                )
+        })
+    }
+    pub(crate) fn set_harness_archived(&mut self, id: Id, archived: bool) {
+        let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
+            return;
+        };
+        if archived && !self.can_archive_harness(id) {
+            return;
+        }
+        let project_id = self.harnesses[index].project_id;
+        self.harnesses[index].archived = archived;
+        self.harnesses[index].attention_required = false;
+        self.harnesses[index].run_started_at = None;
+        if archived {
+            self.harnesses[index].has_unread_completion = false;
+            self.harnesses[index].process.take();
+            self.harnesses[index].status = HarnessStatus::Stopped;
+        }
+        self.refresh_harness_order(index);
+        self.sidebar_menu = None;
+        if archived && self.selected_harness == Some(id) {
+            self.select_after_harness_hidden(project_id);
+        }
+        self.persist();
+    }
+    pub(crate) fn delete_harness(&mut self, id: Id) {
+        let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
+            return;
+        };
+        let project_id = self.harnesses[index].project_id;
+        self.harnesses.remove(index);
+        self.composer_inputs.remove(&id);
+        self.sidebar_menu = None;
+        if self.renaming_harness == Some(id) {
+            self.renaming_harness = None;
+        }
+        if self.selected_harness == Some(id) {
+            self.select_after_harness_hidden(project_id);
+        }
+        self.persist();
+    }
+    pub(crate) fn delete_project(&mut self, id: Id) {
+        let Some(index) = self.projects.iter().position(|project| project.id == id) else {
+            return;
+        };
+        let removed_harnesses = self
+            .harnesses
+            .iter()
+            .filter(|harness| harness.project_id == id)
+            .map(|harness| harness.id)
+            .collect::<HashSet<_>>();
+        let deleting_selection = self.selected_project == Some(id);
+        let was_adding_project = self.adding_project;
+
+        self.projects.remove(index);
+        self.harnesses.retain(|harness| harness.project_id != id);
+        self.composer_inputs
+            .retain(|harness_id, _| !removed_harnesses.contains(harness_id));
+        self.collapsed_projects.remove(&id);
+        self.project_file_pickers.remove(&id);
+        self.available_models_by_project.remove(&id);
+        self.available_thinking_levels
+            .retain(|(project_id, _), _| *project_id != id);
+        if self
+            .project_probe
+            .as_ref()
+            .is_some_and(|(project_id, _)| *project_id == id)
+        {
+            self.project_probe.take();
+        }
+        if self
+            .renaming_harness
+            .is_some_and(|harness_id| removed_harnesses.contains(&harness_id))
+        {
+            self.renaming_harness = None;
+        }
+        if self
+            .pending_dialog
+            .as_ref()
+            .is_some_and(|dialog| removed_harnesses.contains(&dialog.harness_id))
+        {
+            self.pending_dialog = None;
+        }
+        if self
+            .last_used_harness
+            .is_some_and(|harness_id| removed_harnesses.contains(&harness_id))
+        {
+            self.last_used_harness = None;
+        }
+        self.sidebar_menu = None;
+
+        if deleting_selection {
+            self.selected_harness = None;
+            self.thread_text_selection = None;
+            self.creating_harness = false;
+            self.composer_dropdown = None;
+            self.path_completion = None;
+            self.draft_model = None;
+            self.draft_thinking_level = None;
+
+            if !was_adding_project
+                && let Some(harness_id) = self.harness_navigation_ids().into_iter().next()
+            {
+                self.select_harness(harness_id);
+            } else {
+                self.selected_project = self.projects.first().map(|project| project.id);
+                self.adding_project = was_adding_project || self.projects.is_empty();
+                if let Some(project_id) = self.selected_project {
+                    self.show_cached_models(project_id);
+                } else {
+                    self.available_models.clear();
+                }
+            }
+        }
+        self.persist();
+    }
+    pub(crate) fn begin_adding_project(&mut self) {
+        self.project_probe.take();
+        self.path_completion = None;
+        self.adding_project = true;
+        self.creating_harness = false;
+        self.sidebar_menu = None;
+        self.banner = None;
+    }
+    pub(super) fn start_new_selected_project(&mut self) {
+        if let Some(project_id) = self
+            .selected_project
+            .or_else(|| self.projects.first().map(|p| p.id))
+        {
+            self.start_new_harness(project_id);
+        } else {
+            self.begin_adding_project();
+        }
+        self.enter_input_mode(true);
+    }
+    pub(super) fn harness_navigation_ids(&self) -> Vec<Id> {
+        let mut inbox = self
+            .harnesses
+            .iter()
+            .filter(|harness| harness.is_in_inbox())
+            .collect::<Vec<_>>();
+        let mut workpool = self
+            .harnesses
+            .iter()
+            .filter(|harness| harness.is_in_workpool())
+            .collect::<Vec<_>>();
+        inbox.sort_by_key(|harness| std::cmp::Reverse(harness.sidebar_order));
+        workpool.sort_by_key(|harness| std::cmp::Reverse(harness.sidebar_order));
+        inbox
+            .into_iter()
+            .chain(workpool)
+            .map(|harness| harness.id)
+            .collect()
+    }
+    pub(super) fn select_relative_harness(&mut self, delta: isize) {
+        let ids = self.harness_navigation_ids();
+        if ids.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_harness
+            .and_then(|id| ids.iter().position(|candidate| *candidate == id))
+            .unwrap_or(0) as isize;
+        let target = (current + delta).rem_euclid(ids.len() as isize) as usize;
+        self.select_harness(ids[target]);
+    }
+    pub(super) fn select_edge_harness(&mut self, newest: bool) {
+        let ids = self.harness_navigation_ids();
+        let target = if newest { ids.first() } else { ids.last() };
+        if let Some(id) = target {
+            self.select_harness(*id);
+        }
+    }
+    pub(super) fn select_matching_harness(&mut self, matches: impl Fn(&Harness) -> bool) {
+        let ids = self
+            .harnesses
+            .iter()
+            .rev()
+            .filter(|harness| !harness.archived && matches(harness))
+            .map(|harness| harness.id)
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            return;
+        }
+        let target = self
+            .selected_harness
+            .and_then(|id| ids.iter().position(|candidate| *candidate == id))
+            .map_or(0, |index| (index + 1) % ids.len());
+        self.select_harness(ids[target]);
+    }
+    pub(super) fn open_project(&mut self, project_id: Id) {
+        if let Some(id) = self
+            .harnesses
+            .iter()
+            .filter(|harness| harness.project_id == project_id && harness.archived)
+            .max_by_key(|harness| harness.sidebar_order)
+            .map(|harness| harness.id)
+        {
+            self.select_harness(id);
+        } else {
+            self.start_new_harness(project_id);
+        }
+    }
+    pub(super) fn select_relative_project(&mut self, delta: isize) {
+        if self.projects.is_empty() {
+            return;
+        }
+        let current = self
+            .selected_project
+            .and_then(|id| self.projects.iter().position(|project| project.id == id))
+            .unwrap_or(0) as isize;
+        let target = (current + delta).rem_euclid(self.projects.len() as isize) as usize;
+        self.open_project(self.projects[target].id);
+    }
+    pub(super) fn select_edge_project(&mut self, first: bool) {
+        let project_id = if first {
+            self.projects.first().map(|project| project.id)
+        } else {
+            self.projects.last().map(|project| project.id)
+        };
+        if let Some(project_id) = project_id {
+            self.open_project(project_id);
+        }
+    }
+    pub(crate) fn add_project(&mut self, cx: &mut Context<Self>) {
+        let raw_path = self.project_input.read(cx).text().trim().to_string();
+        if raw_path.is_empty() {
+            self.banner = Some("Enter the full path to a project.".into());
+            cx.notify();
+            return;
+        }
+        let path = platform::home_dir()
+            .and_then(|home| resolve_tilde_path(&raw_path, &home))
+            .unwrap_or_else(|| PathBuf::from(&raw_path));
+        if !path.is_absolute() {
+            self.banner = Some("Project paths must be absolute or start with ~.".into());
+            cx.notify();
+            return;
+        }
+        let path = match fs::canonicalize(&path) {
+            Ok(path) if path.is_dir() => path,
+            Ok(_) => {
+                self.banner = Some(format!("{} is not a directory.", path.display()));
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.banner = Some(format!("Cannot open {}: {error}", path.display()));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(project_id) = self
+            .projects
+            .iter()
+            .find(|project| project.path == path)
+            .map(|project| project.id)
+        {
+            self.start_new_harness(project_id);
+            self.banner = Some("That project is already connected.".into());
+            cx.notify();
+            return;
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("project")
+            .to_string();
+        let id = self.allocate_id();
+        self.projects.push(Project {
+            id,
+            name,
+            path: path.clone(),
+        });
+        match start_fuzzy_index(
+            &path,
+            true,
+            FuzzyIndexReady::Project(id),
+            self.fuzzy_index_events.clone(),
+        ) {
+            Ok(picker) => {
+                self.project_file_pickers.insert(id, picker);
+            }
+            Err(error) => self.banner = Some(error),
+        }
+        self.collapsed_projects.insert(id);
+        self.selected_project = Some(id);
+        self.show_cached_models(id);
+        self.selected_harness = None;
+        self.adding_project = false;
+        self.creating_harness = true;
+        self.draft_model = None;
+        self.draft_thinking_level = None;
+        self.draft_nix_enabled = true;
+        self.banner = None;
+        self.project_input.update(cx, |input, cx| input.clear(cx));
+        self.persist();
+        self.start_project_probe(id);
+        cx.notify();
+    }
+    pub(crate) fn create_harness(&mut self, cx: &mut Context<Self>) {
+        let prompt = self.harness_input.read(cx).text().trim().to_string();
+        let images = self.harness_input.read(cx).images();
+        let Some(project_id) = self.selected_project else {
+            self.banner = Some("Connect a project before starting a harness.".into());
+            cx.notify();
+            return;
+        };
+        if prompt.is_empty() {
+            self.banner = Some("Describe a task before starting pi.".into());
+            cx.notify();
+            return;
+        }
+        let title = prompt.chars().take(54).collect::<String>();
+        self.project_probe.take();
+        let id = self.allocate_id();
+        let sidebar_order = self.allocate_sidebar_order();
+        let mut harness = Harness::new(id, project_id, title, sidebar_order);
+        harness.nix_enabled = self.draft_nix_enabled && self.project_has_devshell(project_id);
+        harness.model = self.draft_model.take();
+        harness.thinking_level = self.draft_thinking_level.take();
+        harness.status = HarnessStatus::Working;
+        harness.run_started_at = Some(Instant::now());
+        harness.messages.push(Message::user_with_images(
+            prompt.clone(),
+            images.iter().map(|image| image.image.clone()).collect(),
+        ));
+        self.harnesses.push(harness);
+        self.selected_harness = Some(id);
+        self.last_used_harness = Some(id);
+        self.add_composer_input(id, cx);
+        self.reset_conversation_list(self.harnesses.len() - 1);
+        self.composer_dropdown = None;
+        self.path_completion = None;
+        self.keyboard_mode = KeyboardMode::Input;
+        self.focus_input = true;
+        self.creating_harness = false;
+        self.banner = None;
+        self.harness_input.update(cx, |input, cx| input.clear(cx));
+        self.persist();
+        self.start_harness(id, Some((prompt, images)));
+        cx.notify();
+    }
+    pub(crate) fn select_harness(&mut self, id: Id) {
+        let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
+            return;
+        };
+        self.project_probe.take();
+        self.harnesses[index].has_unread_completion = false;
+        self.selected_project = Some(self.harnesses[index].project_id);
+        self.show_cached_models(self.harnesses[index].project_id);
+        self.selected_harness = Some(id);
+        self.last_used_harness = Some(id);
+        self.thread_text_selection = None;
+        self.hovered_copy_message = None;
+        self.hovered_action_message = None;
+        self.hovered_tool_detail_message = None;
+        self.editing_message = None;
+        self.pending_edit_submit = None;
+        self.adding_project = false;
+        self.creating_harness = false;
+        self.composer_dropdown = None;
+        self.path_completion = None;
+        self.draft_model = None;
+        self.draft_thinking_level = None;
+        self.reset_conversation_list(index);
+        self.persist();
+        self.start_harness(id, None);
+    }
+    pub(crate) fn start_new_harness(&mut self, project_id: Id) {
+        let source_id = self
+            .selected_harness
+            .filter(|id| {
+                self.harnesses.iter().any(|harness| {
+                    harness.id == *id && harness.project_id == project_id && !harness.archived
+                })
+            })
+            .or_else(|| {
+                self.harnesses
+                    .iter()
+                    .find(|harness| harness.project_id == project_id && !harness.archived)
+                    .map(|harness| harness.id)
+            });
+        let (model, thinking_level) = source_id
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+            .map(|harness| (harness.model.clone(), harness.thinking_level.clone()))
+            .unwrap_or_default();
+
+        self.selected_project = Some(project_id);
+        self.show_cached_models(project_id);
+        self.selected_harness = None;
+        self.adding_project = false;
+        self.creating_harness = true;
+        self.editing_message = None;
+        self.pending_edit_submit = None;
+        self.composer_dropdown = None;
+        self.path_completion = None;
+        self.draft_model = model;
+        self.draft_thinking_level = thinking_level;
+        self.draft_nix_enabled = true;
+        self.banner = None;
+        self.project_probe.take();
+
+        if let Some(id) = source_id {
+            if self.draft_model.is_none()
+                || self.draft_thinking_level.is_none()
+                || self.available_models.is_empty()
+            {
+                self.start_harness(id, None);
+                if let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) {
+                    if self.draft_model.is_none() || self.draft_thinking_level.is_none() {
+                        self.send_value(index, json!({"id":"dirigent-state","type":"get_state"}));
+                    }
+                    if self.available_models.is_empty() {
+                        self.send_value(index, json!({"type":"get_available_models"}));
+                    }
+                }
+            }
+        } else {
+            self.start_project_probe(project_id);
+        }
+    }
+}
