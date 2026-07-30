@@ -95,6 +95,14 @@ enum FuzzyIndexReady {
 pub(crate) enum WorkspaceEvent {
     Created(String),
     Failed(String, String),
+    Removed {
+        workspace_id: String,
+        harness_id: Id,
+    },
+    RemoveFailed {
+        harness_id: Id,
+        error: String,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -362,6 +370,8 @@ pub(crate) struct Dirigent {
     repository_snapshots: HashMap<Id, RepositorySnapshot>,
     pub(crate) draft_workspace_source: Option<RepositorySnapshot>,
     pending_workspace_sources: HashMap<Id, RepositorySnapshot>,
+    pub(crate) pending_workspace_deletion: Option<Id>,
+    deleting_workspace_harnesses: HashSet<Id>,
     pub(crate) available_models: Vec<AvailableModel>,
     available_models_by_project: HashMap<Id, Vec<AvailableModel>>,
     available_thinking_levels: HashMap<(Id, String), Vec<String>>,
@@ -919,6 +929,8 @@ impl Dirigent {
             repository_snapshots: HashMap::new(),
             draft_workspace_source: None,
             pending_workspace_sources: HashMap::new(),
+            pending_workspace_deletion: None,
+            deleting_workspace_harnesses: HashSet::new(),
             available_models,
             available_models_by_project,
             available_thinking_levels,
@@ -1166,6 +1178,9 @@ impl Render for Dirigent {
                         .w(px(width))
                         .child(self.render_path_completion_menu(cx)),
                 )
+            })
+            .when_some(self.pending_workspace_deletion, |element, harness_id| {
+                element.child(self.render_workspace_delete_dialog(harness_id, cx))
             })
             .when_some(self.preview_image.clone(), |element, image| {
                 element.child(

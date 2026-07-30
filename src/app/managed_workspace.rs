@@ -97,6 +97,101 @@ impl Dirigent {
         self.composer_dropdown = None;
     }
 
+    pub(crate) fn workspace_for_harness(&self, harness_id: Id) -> Option<&ManagedWorkspace> {
+        let workspace_id = self
+            .harnesses
+            .iter()
+            .find(|harness| harness.id == harness_id)?
+            .workspace_id
+            .as_deref()?;
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+    }
+
+    pub(crate) fn can_delete_workspace_for_harness(&self, harness_id: Id) -> bool {
+        let Some(workspace) = self.workspace_for_harness(harness_id) else {
+            return false;
+        };
+        workspace.state != WorkspaceState::Provisioning
+            && self
+                .harnesses
+                .iter()
+                .filter(|harness| harness.workspace_id.as_deref() == Some(workspace.id.as_str()))
+                .count()
+                == 1
+            && !self.deleting_workspace_harnesses.contains(&harness_id)
+    }
+
+    pub(crate) fn begin_delete_thread_and_workspace(&mut self, harness_id: Id) {
+        if !self.can_delete_workspace_for_harness(harness_id) {
+            self.banner = Some(
+                "This workspace cannot be deleted while it is being created or shared by another thread."
+                    .into(),
+            );
+            self.sidebar_menu = None;
+            return;
+        }
+        self.pending_workspace_deletion = Some(harness_id);
+        self.sidebar_menu = None;
+        self.composer_dropdown = None;
+    }
+
+    pub(crate) fn cancel_workspace_deletion(&mut self) {
+        self.pending_workspace_deletion = None;
+    }
+
+    pub(crate) fn confirm_workspace_deletion(&mut self) {
+        let Some(harness_id) = self.pending_workspace_deletion.take() else {
+            return;
+        };
+        if !self.can_delete_workspace_for_harness(harness_id) {
+            self.banner = Some(
+                "This workspace is now being created, deleted, or used by another thread.".into(),
+            );
+            return;
+        }
+        let Some(workspace) = self.workspace_for_harness(harness_id).cloned() else {
+            return;
+        };
+        if let Some(harness) = self
+            .harnesses
+            .iter_mut()
+            .find(|harness| harness.id == harness_id)
+        {
+            if let Some(process) = harness.process.take() {
+                process.stop();
+            }
+            harness.status = HarnessStatus::Stopped;
+            harness.run_started_at = None;
+        }
+        self.deleting_workspace_harnesses.insert(harness_id);
+        self.persist();
+
+        let workspace_id = workspace.id.clone();
+        let events = self.workspace_events.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name(format!("remove-workspace-{workspace_id}"))
+            .spawn(move || {
+                let event = match vcs::remove_workspace(&workspace) {
+                    Ok(()) => WorkspaceEvent::Removed {
+                        workspace_id: workspace.id,
+                        harness_id,
+                    },
+                    Err(error) => WorkspaceEvent::RemoveFailed { harness_id, error },
+                };
+                let _ = events.send_blocking(event);
+            })
+        {
+            self.deleting_workspace_harnesses.remove(&harness_id);
+            self.banner = Some(format!("could not start workspace removal: {error}"));
+        }
+    }
+
+    pub(crate) fn workspace_deletion_pending(&self, harness_id: Id) -> bool {
+        self.deleting_workspace_harnesses.contains(&harness_id)
+    }
+
     fn allocate_workspace_id(&self, parent: &std::path::Path) -> Result<String, String> {
         for _ in 0..128 {
             let id = (0..8)
@@ -261,6 +356,24 @@ impl Dirigent {
                 for index in indexes {
                     self.fail_harness(index, error.clone());
                 }
+                self.persist();
+            }
+            WorkspaceEvent::Removed {
+                workspace_id,
+                harness_id,
+            } => {
+                self.deleting_workspace_harnesses.remove(&harness_id);
+                if let Some(picker) = self.workspace_file_pickers.remove(&workspace_id) {
+                    picker.cancel();
+                }
+                self.workspaces
+                    .retain(|workspace| workspace.id != workspace_id);
+                self.delete_harness(harness_id);
+                self.persist();
+            }
+            WorkspaceEvent::RemoveFailed { harness_id, error } => {
+                self.deleting_workspace_harnesses.remove(&harness_id);
+                self.banner = Some(error);
                 self.persist();
             }
         }

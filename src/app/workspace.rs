@@ -148,6 +148,10 @@ impl Dirigent {
         self.harnesses.remove(index);
         self.composer_inputs.remove(&id);
         self.pending_workspace_sources.remove(&id);
+        self.deleting_workspace_harnesses.remove(&id);
+        if self.pending_workspace_deletion == Some(id) {
+            self.pending_workspace_deletion = None;
+        }
         self.sidebar_menu = None;
         if self.renaming_harness == Some(id) {
             self.renaming_harness = None;

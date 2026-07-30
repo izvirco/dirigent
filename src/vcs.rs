@@ -308,6 +308,73 @@ pub(crate) fn create_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
     validate_workspace(workspace)
 }
 
+pub(crate) fn remove_workspace(workspace: &ManagedWorkspace) -> Result<(), String> {
+    if workspace.root.file_name().and_then(|name| name.to_str()) != Some(workspace.id.as_str()) {
+        return Err(format!(
+            "refusing to remove unexpected workspace path: {}",
+            workspace.root.display()
+        ));
+    }
+
+    match workspace.backend {
+        WorkspaceBackend::Git => {
+            if !workspace.root.exists() {
+                if workspace.source_repository.is_dir() {
+                    let mut command = Command::new("git");
+                    command
+                        .arg("-C")
+                        .arg(&workspace.source_repository)
+                        .arg("worktree")
+                        .arg("prune");
+                    successful_text(
+                        command_output(command, "prune the missing Git worktree")?,
+                        "prune the missing Git worktree",
+                    )?;
+                }
+                return Ok(());
+            }
+            let command_root = if workspace.source_repository.is_dir() {
+                &workspace.source_repository
+            } else {
+                &workspace.root
+            };
+            let mut command = Command::new("git");
+            command
+                .arg("-C")
+                .arg(command_root)
+                .arg("worktree")
+                .arg("remove")
+                .arg(&workspace.root);
+            successful_text(
+                command_output(command, "remove the Git worktree")?,
+                "remove the Git worktree",
+            )?;
+        }
+        WorkspaceBackend::Jj => {
+            if !workspace.root.exists() {
+                return Ok(());
+            }
+            let mut snapshot = jj_command(&workspace.root);
+            snapshot.arg("status");
+            successful_text(
+                command_output(snapshot, "snapshot the JJ workspace")?,
+                "snapshot the JJ workspace",
+            )?;
+
+            let mut forget = jj_command(&workspace.root);
+            forget.arg("workspace").arg("forget").arg(&workspace.id);
+            successful_text(
+                command_output(forget, "forget the JJ workspace")?,
+                "forget the JJ workspace",
+            )?;
+            std::fs::remove_dir_all(&workspace.root).map_err(|error| {
+                format!("could not remove {}: {error}", workspace.root.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn project_slug(name: &str) -> String {
     let mut slug = String::new();
     let mut separated = false;

@@ -168,6 +168,7 @@ impl Dirigent {
 
         if key == "escape" {
             self.preview_image = None;
+            self.pending_workspace_deletion = None;
             self.enter_normal_mode();
             cx.stop_propagation();
             cx.notify();

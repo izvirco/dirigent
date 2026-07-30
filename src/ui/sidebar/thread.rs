@@ -10,6 +10,9 @@ impl Dirigent {
     ) -> AnyElement {
         let archive_label = if archived { "Restore" } else { "Archive" };
         let archive_enabled = archived || self.can_archive_harness(id);
+        let has_workspace = self.workspace_for_harness(id).is_some();
+        let can_delete_workspace = self.can_delete_workspace_for_harness(id);
+        let deleting_workspace = self.workspace_deletion_pending(id);
         let archive_item = div()
             .id(("archive-thread", id as usize))
             .h(px(30.0))
@@ -36,7 +39,7 @@ impl Dirigent {
                 .absolute()
                 .top(px(top))
                 .right(px(2.0))
-                .w(px(132.0))
+                .w(px(if has_workspace { 220.0 } else { 132.0 }))
                 .p_1()
                 .flex()
                 .flex_col()
@@ -78,15 +81,45 @@ impl Dirigent {
                         .items_center()
                         .rounded_sm()
                         .text_xs()
-                        .text_color(rgb(red()))
-                        .hover(|style| style.bg(rgb(surface_hover())))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.delete_harness(id);
-                            cx.stop_propagation();
-                            cx.notify();
-                        }))
+                        .text_color(rgb(if deleting_workspace { faint() } else { red() }))
+                        .when(!deleting_workspace, |element| {
+                            element
+                                .hover(|style| style.bg(rgb(surface_hover())))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.delete_harness(id);
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }))
+                        })
                         .child("Delete"),
-                ),
+                )
+                .when(has_workspace, |menu| {
+                    menu.child(
+                        div()
+                            .id(("delete-thread-and-workspace", id as usize))
+                            .h(px(30.0))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_sm()
+                            .text_xs()
+                            .text_color(rgb(if can_delete_workspace { red() } else { faint() }))
+                            .when(can_delete_workspace, |element| {
+                                element
+                                    .hover(|style| style.bg(rgb(surface_hover())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.begin_delete_thread_and_workspace(id);
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(if deleting_workspace {
+                                "Deleting workspace…"
+                            } else {
+                                "Delete thread and workspace"
+                            }),
+                    )
+                }),
         )
         .priority(2)
         .into_any_element()

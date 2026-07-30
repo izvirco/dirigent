@@ -6,6 +6,7 @@ mod markdown;
 mod project_settings;
 mod project_setup;
 mod sidebar;
+mod workspace_delete_dialog;
 
 use gpui::{
     AnyElement, Context, IntoElement, ScrollHandle, Window, deferred, div, prelude::*, px,
