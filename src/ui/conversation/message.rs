@@ -299,19 +299,10 @@ impl Dirigent {
                     .id(("notice-message", index))
                     .relative()
                     .w_full()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(if error {
-                        crate::theme::error_bg()
-                    } else {
-                        crate::theme::notice_bg()
-                    }))
+                    .min_h(px(22.0))
                     .flex()
                     .items_start()
-                    .gap_2()
                     .text_xs()
-                    .line_height(px(18.0))
                     .text_color(rgb(if error {
                         crate::theme::error_text()
                     } else {

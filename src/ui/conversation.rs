@@ -266,22 +266,13 @@ impl Dirigent {
                             .child(
                                 div()
                                     .w_full()
-                                    .px_3()
-                                    .py_2()
-                                    .rounded_md()
-                                    .bg(rgb(orange()).opacity(0.10))
+                                    .min_h(px(22.0))
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
                                     .text_xs()
-                                    .line_height(px(18.0))
                                     .text_color(rgb(orange()))
                                     .child(format_retry_status(retry))
-                                    .child(
-                                        div()
-                                            .text_color(rgb(muted()))
-                                            .child(retry.error_message.clone()),
-                                    ),
+                                    .child(retry.error_message.clone()),
                             ),
                     )
                     .into_any_element();
