@@ -3,7 +3,7 @@ use gpui::{Context, IntoElement, div, prelude::*, px};
 use crate::{
     app::Dirigent,
     model::Id,
-    theme::{blue, border, muted, rgb, surface, surface_hover, theme_text},
+    theme::{blue, border, muted, rgb, surface_hover, theme_text},
 };
 
 impl Dirigent {
@@ -19,13 +19,14 @@ impl Dirigent {
         let name = project
             .map(|project| project.name.clone())
             .unwrap_or_else(|| "Project".into());
-        let custom = project
-            .and_then(|project| project.workspace_root.as_ref())
-            .is_some();
         let default_path = self
             .default_workspace_path_for_project(project_id)
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "Unavailable".into());
+        let current_path = project
+            .and_then(|project| project.workspace_root.as_ref())
+            .map(|path| path.display().to_string())
+            .unwrap_or(default_path);
 
         div()
             .id("project-settings-scroll")
@@ -56,7 +57,7 @@ impl Dirigent {
                                 div()
                                     .id("close-project-settings")
                                     .h(px(32.0))
-                                    .px_3()
+                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .rounded_md()
@@ -83,92 +84,112 @@ impl Dirigent {
                                     .text_color(rgb(theme_text()))
                                     .child("Workspace location"),
                             )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(muted()))
-                                    .child("Changing this location affects new workspaces only."),
-                            )
-                            .child(
-                                div()
-                                    .p_4()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_2()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(rgb(if custom { border() } else { blue() }))
-                                    .bg(rgb(surface()))
-                                    .child(
-                                        div()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_sm()
-                                            .child("Default location"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(muted()))
-                                            .child(default_path),
-                                    )
-                                    .child(
-                                        div()
-                                            .id("use-default-workspace-root")
-                                            .h(px(30.0))
-                                            .self_start()
-                                            .px_3()
-                                            .flex()
-                                            .items_center()
-                                            .rounded_md()
-                                            .text_xs()
-                                            .text_color(rgb(if custom { muted() } else { blue() }))
-                                            .hover(|style| style.bg(rgb(surface_hover())))
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.use_default_workspace_root(cx);
-                                                cx.notify();
-                                            }))
-                                            .child(if custom { "Use default" } else { "In use" }),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .p_4()
-                                    .flex()
-                                    .flex_col()
-                                    .gap_3()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(rgb(if custom { blue() } else { border() }))
-                                    .bg(rgb(surface()))
-                                    .child(
-                                        div()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_sm()
-                                            .child("Custom location"),
-                                    )
-                                    .child(self.workspace_settings_input.clone())
-                                    .child(
-                                        div()
-                                            .id("save-custom-workspace-root")
-                                            .h(px(32.0))
-                                            .self_start()
-                                            .px_4()
-                                            .flex()
-                                            .items_center()
-                                            .rounded_md()
-                                            .bg(rgb(blue()))
-                                            .text_xs()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .text_color(rgb(crate::theme::bg()))
-                                            .hover(|style| {
-                                                style.bg(rgb(crate::theme::accent_hover()))
-                                            })
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.save_custom_workspace_root(cx)
-                                            }))
-                                            .child("Save custom location"),
-                                    ),
-                            ),
+                            .when(!self.workspace_settings_editing, |element| {
+                                element.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.0))
+                                                .whitespace_nowrap()
+                                                .overflow_hidden()
+                                                .text_ellipsis_middle()
+                                                .text_sm()
+                                                .text_color(rgb(theme_text()))
+                                                .child(current_path),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("edit-workspace-root")
+                                                .h(px(28.0))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .text_xs()
+                                                .text_color(rgb(blue()))
+                                                .hover(|style| style.bg(rgb(surface_hover())))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.begin_workspace_root_edit(cx);
+                                                    cx.notify();
+                                                }))
+                                                .child("Edit"),
+                                        ),
+                                )
+                            })
+                            .when(self.workspace_settings_editing, |element| {
+                                element.child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w(px(0.0))
+                                                .child(self.workspace_settings_input.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("save-workspace-root")
+                                                .h(px(32.0))
+                                                .px_3()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .bg(rgb(blue()))
+                                                .text_xs()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgb(crate::theme::bg()))
+                                                .hover(|style| {
+                                                    style.bg(rgb(crate::theme::accent_hover()))
+                                                })
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.save_custom_workspace_root(cx)
+                                                }))
+                                                .child("Save"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("cancel-workspace-root-edit")
+                                                .h(px(32.0))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .text_xs()
+                                                .text_color(rgb(muted()))
+                                                .hover(|style| style.bg(rgb(surface_hover())))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_workspace_root_edit(cx);
+                                                    cx.notify();
+                                                }))
+                                                .child("Cancel"),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("reset-workspace-root")
+                                                .h(px(32.0))
+                                                .px_2()
+                                                .flex()
+                                                .items_center()
+                                                .rounded_md()
+                                                .border_1()
+                                                .border_color(rgb(border()))
+                                                .text_xs()
+                                                .text_color(rgb(muted()))
+                                                .hover(|style| style.bg(rgb(surface_hover())))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.use_default_workspace_root(cx);
+                                                    cx.notify();
+                                                }))
+                                                .child("Reset"),
+                                        ),
+                                )
+                            }),
                     ),
             )
     }

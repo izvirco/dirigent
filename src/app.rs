@@ -338,6 +338,7 @@ pub(crate) struct Dirigent {
     pub(crate) adding_project: bool,
     pub(crate) creating_harness: bool,
     pub(crate) project_settings: Option<Id>,
+    pub(crate) workspace_settings_editing: bool,
     pub(crate) sidebar_width: f32,
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) expanded_archived_projects: HashSet<Id>,
@@ -541,8 +542,7 @@ impl Dirigent {
                     cx.notify();
                 }
                 InputEvent::Escape => {
-                    this.close_project_settings();
-                    this.enter_normal_mode();
+                    this.cancel_workspace_root_edit(cx);
                     cx.notify();
                 }
                 InputEvent::Changed => {}
@@ -898,6 +898,7 @@ impl Dirigent {
             adding_project,
             creating_harness: false,
             project_settings: None,
+            workspace_settings_editing: false,
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
             collapsed_projects,
             expanded_archived_projects: HashSet::new(),
@@ -1084,7 +1085,7 @@ impl Render for Dirigent {
                 Some(self.extension_input.clone())
             } else if let Some(edit) = self.editing_message.as_ref() {
                 Some(edit.input.clone())
-            } else if self.project_settings.is_some() {
+            } else if self.project_settings.is_some() && self.workspace_settings_editing {
                 Some(self.workspace_settings_input.clone())
             } else if self.adding_project {
                 Some(self.project_input.clone())

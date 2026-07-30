@@ -429,11 +429,16 @@ impl Dirigent {
             .workspace_root
             .as_ref()
             .map(|path| path.display().to_string())
+            .or_else(|| {
+                self.default_workspace_path_for_project(project_id)
+                    .map(|path| path.display().to_string())
+            })
             .unwrap_or_default();
         self.workspace_settings_input
             .update(cx, |input, cx| input.set_text(value, cx));
         self.selected_project = Some(project_id);
         self.project_settings = Some(project_id);
+        self.workspace_settings_editing = false;
         self.adding_project = false;
         self.creating_harness = false;
         self.sidebar_menu = None;
@@ -444,6 +449,7 @@ impl Dirigent {
 
     pub(crate) fn close_project_settings(&mut self) {
         self.project_settings = None;
+        self.workspace_settings_editing = false;
         if let Some(project_id) = self.selected_harness.and_then(|harness_id| {
             self.harnesses
                 .iter()
@@ -466,6 +472,50 @@ impl Dirigent {
             .map(|root| root.join(vcs::project_slug(&project.name)))
     }
 
+    pub(crate) fn begin_workspace_root_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(project_id) = self.project_settings else {
+            return;
+        };
+        let value = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.workspace_root.as_ref())
+            .map(|path| path.display().to_string())
+            .or_else(|| {
+                self.default_workspace_path_for_project(project_id)
+                    .map(|path| path.display().to_string())
+            })
+            .unwrap_or_default();
+        self.workspace_settings_input.update(cx, |input, cx| {
+            input.set_text(value, cx);
+            input.select_all(cx);
+        });
+        self.workspace_settings_editing = true;
+        self.enter_input_mode(true);
+    }
+
+    pub(crate) fn cancel_workspace_root_edit(&mut self, cx: &mut Context<Self>) {
+        self.workspace_settings_editing = false;
+        self.enter_input_mode(false);
+        let Some(project_id) = self.project_settings else {
+            return;
+        };
+        let value = self
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .and_then(|project| project.workspace_root.as_ref())
+            .map(|path| path.display().to_string())
+            .or_else(|| {
+                self.default_workspace_path_for_project(project_id)
+                    .map(|path| path.display().to_string())
+            })
+            .unwrap_or_default();
+        self.workspace_settings_input
+            .update(cx, |input, cx| input.set_text(value, cx));
+    }
+
     pub(crate) fn use_default_workspace_root(&mut self, cx: &mut Context<Self>) {
         let Some(project_id) = self.project_settings else {
             return;
@@ -478,6 +528,8 @@ impl Dirigent {
             project.workspace_root = None;
             self.workspace_settings_input
                 .update(cx, |input, cx| input.clear(cx));
+            self.workspace_settings_editing = false;
+            self.enter_input_mode(false);
             self.persist();
         }
     }
@@ -544,6 +596,8 @@ impl Dirigent {
                 input.set_text(path.display().to_string(), cx)
             });
             self.banner = None;
+            self.workspace_settings_editing = false;
+            self.enter_input_mode(false);
             self.persist();
         }
         cx.notify();
