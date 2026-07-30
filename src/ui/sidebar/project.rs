@@ -113,6 +113,9 @@ impl Dirigent {
                     .sidebar_order,
             )
         });
+        const ARCHIVED_THREAD_LIMIT: usize = 8;
+        let hidden_thread_count = harness_ids.len().saturating_sub(ARCHIVED_THREAD_LIMIT);
+        let archived_threads_expanded = self.expanded_archived_projects.contains(&id);
         let selected = self.selected_project == Some(id)
             && (!self.adding_project || self.project_settings == Some(id));
         let menu_open = self.sidebar_menu == Some(SidebarMenu::Project(id));
@@ -300,9 +303,58 @@ impl Dirigent {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .children(harness_ids.iter().copied().map(|harness_id| {
-                            self.render_sidebar_harness(harness_id, ThreadPlacement::Project, cx)
-                        }))
+                        .children(harness_ids.iter().take(ARCHIVED_THREAD_LIMIT).copied().map(
+                            |harness_id| {
+                                self.render_sidebar_harness(
+                                    harness_id,
+                                    ThreadPlacement::Project,
+                                    cx,
+                                )
+                            },
+                        ))
+                        .when(hidden_thread_count > 0, |element| {
+                            element.child(
+                                div()
+                                    .id(("toggle-archived-threads", id as usize))
+                                    .h(px(34.0))
+                                    .px_2()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .text_sm()
+                                    .text_color(rgb(blue()))
+                                    .hover(|style| style.bg(rgb(surface_hover())))
+                                    .on_mouse_down(
+                                        gpui::MouseButton::Left,
+                                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if !this.expanded_archived_projects.remove(&id) {
+                                            this.expanded_archived_projects.insert(id);
+                                        }
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }))
+                                    .child(if archived_threads_expanded {
+                                        format!("Hide {hidden_thread_count} threads")
+                                    } else {
+                                        format!("Show {hidden_thread_count} more")
+                                    }),
+                            )
+                        })
+                        .when(archived_threads_expanded, |element| {
+                            element.children(
+                                harness_ids.iter().skip(ARCHIVED_THREAD_LIMIT).copied().map(
+                                    |harness_id| {
+                                        self.render_sidebar_harness(
+                                            harness_id,
+                                            ThreadPlacement::Project,
+                                            cx,
+                                        )
+                                    },
+                                ),
+                            )
+                        })
                         .when(harness_ids.is_empty(), |element| {
                             element.child(
                                 div()

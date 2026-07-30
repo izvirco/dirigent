@@ -179,6 +179,7 @@ impl Dirigent {
         self.composer_inputs
             .retain(|harness_id, _| !removed_harnesses.contains(harness_id));
         self.collapsed_projects.remove(&id);
+        self.expanded_archived_projects.remove(&id);
         self.project_file_pickers.remove(&id);
         self.repository_snapshots.remove(&id);
         self.available_models_by_project.remove(&id);
