@@ -33,6 +33,8 @@ impl Dirigent {
             .justify_center()
             .p_8()
             .bg(gpui::rgba(0x000000aa))
+            .occlude()
+            .cursor_default()
             .on_click(cx.listener(|this, _, _, cx| {
                 this.cancel_workspace_deletion();
                 cx.notify();
