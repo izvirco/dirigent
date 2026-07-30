@@ -394,20 +394,8 @@ impl Dirigent {
         let workspace = self.selected_managed_workspace();
         let pending = self.pending_workspace_source();
         let repository = self.repository_snapshot_for_composer();
-        let Some((label, backend, active)) = workspace
-            .map(|workspace| {
-                let label = match (&workspace.state, workspace.backend) {
-                    (WorkspaceState::Provisioning, _) => "Creating workspace…".to_string(),
-                    (WorkspaceState::Failed(_), _) => "Workspace unavailable".to_string(),
-                    (_, WorkspaceBackend::Jj) => {
-                        format!("Workspace alongside {}", workspace.source_label)
-                    }
-                    (_, WorkspaceBackend::Git) => {
-                        format!("Workspace from {}", workspace.source_label)
-                    }
-                };
-                (label, workspace.backend, true)
-            })
+        let Some((label, backend)) = workspace
+            .map(|workspace| (workspace.id.clone(), workspace.backend))
             .or_else(|| {
                 pending.map(|source| {
                     let label = match source.backend {
@@ -418,22 +406,41 @@ impl Dirigent {
                             format!("New workspace from {}", source.source_label)
                         }
                     };
-                    (label, source.backend, false)
+                    (label, source.backend)
                 })
             })
-            .or_else(|| {
-                repository.map(|source| (source.source_label.clone(), source.backend, false))
-            })
+            .or_else(|| repository.map(|source| (source.source_label.clone(), source.backend)))
         else {
             return div().into_any_element();
         };
         let open = self.composer_dropdown == Some(ComposerDropdown::Workspace);
         let managed_path = workspace.map(|workspace| workspace.working_directory.clone());
-        let managed_identity = workspace.map(|workspace| {
-            workspace
-                .git_branch
-                .clone()
-                .unwrap_or_else(|| workspace.id.clone())
+        let managed_identity = workspace.map(|workspace| match workspace.backend {
+            WorkspaceBackend::Jj => format!("JJ workspace {}", workspace.id),
+            WorkspaceBackend::Git => format!(
+                "Git branch {}",
+                workspace.git_branch.as_deref().unwrap_or(&workspace.id)
+            ),
+        });
+        let provenance = workspace.map(|workspace| match workspace.backend {
+            WorkspaceBackend::Jj => {
+                format!("Workspace alongside {}", workspace.source_label)
+            }
+            WorkspaceBackend::Git => format!("Workspace from {}", workspace.source_label),
+        });
+        let workspace_status = workspace.and_then(|workspace| match &workspace.state {
+            WorkspaceState::Provisioning => Some("Creating workspace…".to_string()),
+            WorkspaceState::Failed(error) => Some(error.clone()),
+            WorkspaceState::Ready => None,
+        });
+        let repository_metadata = workspace.is_none().then(|| {
+            let source = pending
+                .or(repository)
+                .expect("repository source is available");
+            match source.backend {
+                WorkspaceBackend::Jj => format!("JJ change {}", source.source_label),
+                WorkspaceBackend::Git => format!("Git branch {}", source.source_label),
+            }
         });
         let source = pending.or(repository);
         let dirty = source.is_some_and(|source| source.dirty);
@@ -458,11 +465,8 @@ impl Dirigent {
                     .gap_1()
                     .rounded_md()
                     .text_xs()
-                    .text_color(rgb(if active { blue() } else { muted() }))
-                    .when(active, |style| {
-                        style.bg(rgb(crate::theme::accent_surface()))
-                    })
-                    .when(open && !active, |style| {
+                    .text_color(rgb(muted()))
+                    .when(open, |style| {
                         style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
                     })
                     .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
@@ -488,8 +492,9 @@ impl Dirigent {
                         .absolute()
                         .bottom(px(36.0))
                         .left_0()
-                        .w(px(330.0))
-                        .p_1()
+                        .w_auto()
+                        .min_w(px(330.0))
+                        .py_1()
                         .flex()
                         .flex_col()
                         .rounded_lg()
@@ -498,24 +503,44 @@ impl Dirigent {
                         .bg(rgb(surface_hover()))
                         .occlude()
                         .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                        .child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .whitespace_nowrap()
+                                .text_xs()
+                                .text_color(rgb(muted()))
+                                .when_some(managed_path.clone(), |metadata, path| {
+                                    metadata.child(path.display().to_string())
+                                })
+                                .when_some(managed_identity, |metadata, identity| {
+                                    metadata.child(identity)
+                                })
+                                .when_some(provenance, |metadata, provenance| {
+                                    metadata.child(provenance)
+                                })
+                                .when_some(repository_metadata, |metadata, repository| {
+                                    metadata.child(repository)
+                                })
+                                .when_some(workspace_status, |metadata, status| {
+                                    metadata.child(status)
+                                }),
+                        )
+                        .child(div().h(px(1.0)).mx_2().my_1().bg(rgb(border())))
                         .when_some(managed_path, |menu, path| {
                             let copy_path = path.display().to_string();
                             menu.child(
                                 div()
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .text_color(rgb(muted()))
-                                    .child(copy_path.clone()),
-                            )
-                            .child(
-                                div()
                                     .id("copy-workspace-path")
                                     .h(px(30.0))
-                                    .px_3()
+                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .rounded_md()
+                                    .whitespace_nowrap()
                                     .text_xs()
                                     .text_color(rgb(theme_text()))
                                     .hover(|style| style.bg(rgb(border())))
@@ -527,30 +552,16 @@ impl Dirigent {
                                     .child("Copy path"),
                             )
                         })
-                        .when_some(managed_identity, |menu, identity| {
-                            menu.child(
-                                div()
-                                    .px_3()
-                                    .py_2()
-                                    .text_xs()
-                                    .text_color(rgb(muted()))
-                                    .child(match backend {
-                                        WorkspaceBackend::Jj => {
-                                            format!("JJ workspace {identity}")
-                                        }
-                                        WorkspaceBackend::Git => identity,
-                                    }),
-                            )
-                        })
                         .when(workspace.is_none() && pending.is_some(), |menu| {
                             menu.child(
                                 div()
                                     .id("use-project-directory")
                                     .h(px(30.0))
-                                    .px_3()
+                                    .px_2()
                                     .flex()
                                     .items_center()
                                     .rounded_md()
+                                    .whitespace_nowrap()
                                     .text_xs()
                                     .text_color(rgb(theme_text()))
                                     .hover(|style| style.bg(rgb(border())))
@@ -579,12 +590,13 @@ impl Dirigent {
                                     div()
                                         .id("create-workspace-on-send")
                                         .min_h(px(34.0))
-                                        .px_3()
+                                        .px_2()
                                         .py_1()
                                         .flex()
                                         .flex_col()
                                         .justify_center()
                                         .rounded_md()
+                                        .whitespace_nowrap()
                                         .text_xs()
                                         .text_color(rgb(theme_text()))
                                         .hover(|style| style.bg(rgb(border())))
