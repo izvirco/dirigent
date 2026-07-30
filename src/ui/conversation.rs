@@ -16,13 +16,44 @@ use crate::{
     },
 };
 
-fn working_dot(delta: f32) -> usize {
-    let position = if delta <= 0.5 {
-        delta * 4.0
+fn format_working_duration(duration: Duration) -> String {
+    let elapsed = duration.as_secs();
+    if elapsed < 60 {
+        format!("{elapsed}s")
+    } else if elapsed < 3_600 {
+        format!("{}m {:02}s", elapsed / 60, elapsed % 60)
     } else {
-        (1.0 - delta) * 4.0
-    };
-    (position.round() as usize).min(2)
+        format!("{}h {:02}m", elapsed / 3_600, (elapsed % 3_600) / 60)
+    }
+}
+
+fn working_character(delta: f32, text: &str) -> usize {
+    let character_count = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .count();
+    let active = ((delta * character_count as f32) as usize).min(character_count.saturating_sub(1));
+    text.chars()
+        .enumerate()
+        .filter(|(_, character)| !character.is_whitespace())
+        .nth(active)
+        .map_or(0, |(index, _)| index)
+}
+
+fn trailing_working_character(text: &str, active: usize) -> Option<usize> {
+    text.chars()
+        .enumerate()
+        .take(active)
+        .filter(|(_, character)| !character.is_whitespace())
+        .map(|(index, _)| index)
+        .last()
+}
+
+fn blend_colors(first: u32, second: u32) -> u32 {
+    [24, 16, 8, 0].into_iter().fold(0, |blended, shift| {
+        let channel = (((first >> shift) & 0xff) + ((second >> shift) & 0xff)) / 2;
+        blended | (channel << shift)
+    })
 }
 
 fn format_retry_status(retry: &RetryStatus) -> String {
@@ -980,6 +1011,7 @@ impl Dirigent {
                     .into_any_element();
             }
 
+            let run_started_at = harness.run_started_at;
             return div()
                 .w_full()
                 .child(
@@ -990,22 +1022,31 @@ impl Dirigent {
                         .px_7()
                         .mt_4()
                         .flex()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::BOLD)
+                        .text_xs()
                         .with_animation(
                             "working-indicator",
-                            Animation::new(Duration::from_secs(3)).repeat(),
-                            |indicator, delta| {
-                                let active = working_dot(delta);
-                                indicator.children((0..3).map(move |index| {
-                                    div()
-                                        .text_color(rgb(if index == active {
+                            Animation::new(Duration::from_millis(6_660)).repeat(),
+                            move |indicator, delta| {
+                                let elapsed = run_started_at
+                                    .map(|started_at| started_at.elapsed())
+                                    .unwrap_or_default();
+                                let label =
+                                    format!("Working for {}", format_working_duration(elapsed));
+                                let active = working_character(delta, &label);
+                                let trailing = trailing_working_character(&label, active);
+                                let trailing_color = blend_colors(orange(), blue());
+                                indicator.children(label.chars().enumerate().map(
+                                    move |(index, character)| {
+                                        let color = if index == active {
                                             orange()
+                                        } else if Some(index) == trailing {
+                                            trailing_color
                                         } else {
                                             blue()
-                                        }))
-                                        .child(".")
-                                }))
+                                        };
+                                        div().text_color(rgb(color)).child(character.to_string())
+                                    },
+                                ))
                             },
                         ),
                 )
@@ -1083,7 +1124,12 @@ impl Dirigent {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_retry_status, tool_color, working_dot};
+    use std::time::Duration;
+
+    use super::{
+        blend_colors, format_retry_status, format_working_duration, tool_color,
+        trailing_working_character, working_character,
+    };
     use crate::{
         model::RetryStatus,
         theme::{purple, yellow},
@@ -1104,12 +1150,34 @@ mod tests {
     }
 
     #[test]
-    fn working_dot_moves_forward_then_back() {
-        assert_eq!(working_dot(0.0), 0);
-        assert_eq!(working_dot(0.25), 1);
-        assert_eq!(working_dot(0.5), 2);
-        assert_eq!(working_dot(0.75), 1);
-        assert_eq!(working_dot(1.0), 0);
+    fn formats_working_duration() {
+        assert_eq!(format_working_duration(Duration::from_secs(5)), "5s");
+        assert_eq!(format_working_duration(Duration::from_secs(65)), "1m 05s");
+        assert_eq!(
+            format_working_duration(Duration::from_secs(3_661)),
+            "1h 01m"
+        );
+    }
+
+    #[test]
+    fn working_character_moves_across_the_visible_text() {
+        assert_eq!(working_character(0.0, "ab cd"), 0);
+        assert_eq!(working_character(0.25, "ab cd"), 1);
+        assert_eq!(working_character(0.5, "ab cd"), 3);
+        assert_eq!(working_character(0.75, "ab cd"), 4);
+        assert_eq!(working_character(1.0, "ab cd"), 4);
+    }
+
+    #[test]
+    fn trailing_working_character_skips_spaces() {
+        assert_eq!(trailing_working_character("ab cd", 0), None);
+        assert_eq!(trailing_working_character("ab cd", 3), Some(1));
+        assert_eq!(trailing_working_character("ab cd", 4), Some(3));
+    }
+
+    #[test]
+    fn blends_each_color_channel_evenly() {
+        assert_eq!(blend_colors(0xff0000ff, 0x0000ffff), 0x7f007fff);
     }
 
     #[test]
