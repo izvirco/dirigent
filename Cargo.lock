@@ -1280,6 +1280,7 @@ dependencies = [
  "async-channel",
  "base64",
  "embed-resource",
+ "fastrand",
  "fff-search",
  "gpui",
  "gpui_platform",

@@ -3,7 +3,7 @@ use std::{collections::HashSet, fs, path::PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::{Harness, Id, Project},
+    model::{Harness, Id, ManagedWorkspace, Project, WorkspaceBackend, WorkspaceState},
     platform,
 };
 
@@ -15,6 +15,8 @@ struct StoredState {
     next_sidebar_order: u64,
     projects: Vec<StoredProject>,
     harnesses: Vec<StoredHarness>,
+    #[serde(default)]
+    workspaces: Vec<StoredWorkspace>,
     last_used_harness: Option<Id>,
     collapsed_projects: Vec<Id>,
     #[serde(default = "default_sidebar_width")]
@@ -30,6 +32,8 @@ struct StoredProject {
     id: Id,
     name: String,
     path: PathBuf,
+    #[serde(default)]
+    workspace_root: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -39,13 +43,33 @@ struct StoredHarness {
     title: String,
     session_file: Option<PathBuf>,
     nix_enabled: bool,
+    #[serde(default)]
+    workspace_id: Option<String>,
     archived: bool,
     sidebar_order: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredWorkspace {
+    id: String,
+    project_id: Id,
+    backend: WorkspaceBackend,
+    root: PathBuf,
+    working_directory: PathBuf,
+    source_repository: PathBuf,
+    source_id: String,
+    source_label: String,
+    source_revision: String,
+    #[serde(default)]
+    jj_parent_revisions: Vec<String>,
+    git_branch: Option<String>,
+    state: WorkspaceState,
 }
 
 pub(crate) struct LoadedState {
     pub(crate) projects: Vec<Project>,
     pub(crate) harnesses: Vec<Harness>,
+    pub(crate) workspaces: Vec<ManagedWorkspace>,
     pub(crate) next_id: Id,
     pub(crate) next_sidebar_order: u64,
     pub(crate) last_used_harness: Option<Id>,
@@ -59,6 +83,7 @@ pub(crate) fn load() -> Result<LoadedState, String> {
         return Ok(LoadedState {
             projects: Vec::new(),
             harnesses: Vec::new(),
+            workspaces: Vec::new(),
             next_id: 1,
             next_sidebar_order: 1,
             last_used_harness: None,
@@ -77,6 +102,7 @@ pub(crate) fn load() -> Result<LoadedState, String> {
             id: project.id,
             name: project.name,
             path: project.path,
+            workspace_root: project.workspace_root,
         })
         .collect();
     let harnesses = state
@@ -89,14 +115,34 @@ pub(crate) fn load() -> Result<LoadedState, String> {
                 harness.title,
                 harness.session_file,
                 harness.nix_enabled,
+                harness.workspace_id,
                 harness.archived,
                 harness.sidebar_order,
             )
         })
         .collect();
+    let workspaces = state
+        .workspaces
+        .into_iter()
+        .map(|workspace| ManagedWorkspace {
+            id: workspace.id,
+            project_id: workspace.project_id,
+            backend: workspace.backend,
+            root: workspace.root,
+            working_directory: workspace.working_directory,
+            source_repository: workspace.source_repository,
+            source_id: workspace.source_id,
+            source_label: workspace.source_label,
+            source_revision: workspace.source_revision,
+            jj_parent_revisions: workspace.jj_parent_revisions,
+            git_branch: workspace.git_branch,
+            state: workspace.state,
+        })
+        .collect();
     Ok(LoadedState {
         projects,
         harnesses,
+        workspaces,
         next_id: state.next_id.max(1),
         next_sidebar_order: state.next_sidebar_order.max(1),
         last_used_harness: state.last_used_harness,
@@ -105,9 +151,11 @@ pub(crate) fn load() -> Result<LoadedState, String> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn save(
     projects: &[Project],
     harnesses: &[Harness],
+    workspaces: &[ManagedWorkspace],
     next_id: Id,
     next_sidebar_order: u64,
     last_used_harness: Option<Id>,
@@ -130,6 +178,7 @@ pub(crate) fn save(
                 id: project.id,
                 name: project.name.clone(),
                 path: project.path.clone(),
+                workspace_root: project.workspace_root.clone(),
             })
             .collect(),
         harnesses: harnesses
@@ -140,8 +189,26 @@ pub(crate) fn save(
                 title: harness.title.clone(),
                 session_file: harness.session_file.clone(),
                 nix_enabled: harness.nix_enabled,
+                workspace_id: harness.workspace_id.clone(),
                 archived: harness.archived,
                 sidebar_order: harness.sidebar_order,
+            })
+            .collect(),
+        workspaces: workspaces
+            .iter()
+            .map(|workspace| StoredWorkspace {
+                id: workspace.id.clone(),
+                project_id: workspace.project_id,
+                backend: workspace.backend,
+                root: workspace.root.clone(),
+                working_directory: workspace.working_directory.clone(),
+                source_repository: workspace.source_repository.clone(),
+                source_id: workspace.source_id.clone(),
+                source_label: workspace.source_label.clone(),
+                source_revision: workspace.source_revision.clone(),
+                jj_parent_revisions: workspace.jj_parent_revisions.clone(),
+                git_branch: workspace.git_branch.clone(),
+                state: workspace.state.clone(),
             })
             .collect(),
         last_used_harness,

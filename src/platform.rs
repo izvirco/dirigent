@@ -51,6 +51,28 @@ pub(crate) fn state_path() -> Result<PathBuf, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
+pub(crate) fn workspace_root() -> Result<PathBuf, String> {
+    if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
+        return Ok(PathBuf::from(data_home).join("dirigent/workspace"));
+    }
+    let home = home_dir().ok_or_else(|| {
+        "HOME and XDG_DATA_HOME are unset; cannot create managed workspaces".to_string()
+    })?;
+    Ok(home.join(".local/share/dirigent/workspace"))
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn workspace_root() -> Result<PathBuf, String> {
+    let data_home = env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home_dir().map(|home| home.join("AppData/Local")))
+        .ok_or_else(|| {
+            "LOCALAPPDATA and USERPROFILE are unset; cannot create managed workspaces".to_string()
+        })?;
+    Ok(data_home.join("dirigent/workspace"))
+}
+
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn cache_path() -> Result<PathBuf, String> {
     if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
         return Ok(PathBuf::from(cache_home).join("dirigent/v0/cache.sqlite3"));

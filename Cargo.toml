@@ -18,6 +18,7 @@ fff-search = "=0.10.1"
 pulldown-cmark = { version = "0.13", default-features = false }
 notify = "8"
 toml = "0.9"
+fastrand = "2.5"
 
 [build-dependencies]
 embed-resource = "3"

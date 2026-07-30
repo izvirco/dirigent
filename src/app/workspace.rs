@@ -147,6 +147,7 @@ impl Dirigent {
         let project_id = self.harnesses[index].project_id;
         self.harnesses.remove(index);
         self.composer_inputs.remove(&id);
+        self.pending_workspace_sources.remove(&id);
         self.sidebar_menu = None;
         if self.renaming_harness == Some(id) {
             self.renaming_harness = None;
@@ -175,6 +176,7 @@ impl Dirigent {
             .retain(|harness_id, _| !removed_harnesses.contains(harness_id));
         self.collapsed_projects.remove(&id);
         self.project_file_pickers.remove(&id);
+        self.repository_snapshots.remove(&id);
         self.available_models_by_project.remove(&id);
         self.available_thinking_levels
             .retain(|(project_id, _), _| *project_id != id);
@@ -205,6 +207,9 @@ impl Dirigent {
             self.last_used_harness = None;
         }
         self.sidebar_menu = None;
+        if self.project_settings == Some(id) {
+            self.project_settings = None;
+        }
 
         if deleting_selection {
             self.selected_harness = None;
@@ -214,6 +219,7 @@ impl Dirigent {
             self.path_completion = None;
             self.draft_model = None;
             self.draft_thinking_level = None;
+            self.draft_workspace_source = None;
 
             if !was_adding_project
                 && let Some(harness_id) = self.harness_navigation_ids().into_iter().next()
@@ -236,6 +242,7 @@ impl Dirigent {
         self.path_completion = None;
         self.adding_project = true;
         self.creating_harness = false;
+        self.project_settings = None;
         self.sidebar_menu = None;
         self.banner = None;
     }
@@ -390,6 +397,7 @@ impl Dirigent {
             id,
             name,
             path: path.clone(),
+            workspace_root: None,
         });
         match start_fuzzy_index(
             &path,
@@ -408,12 +416,14 @@ impl Dirigent {
         self.selected_harness = None;
         self.adding_project = false;
         self.creating_harness = true;
+        self.project_settings = None;
         self.draft_model = None;
         self.draft_thinking_level = None;
         self.draft_nix_enabled = true;
         self.banner = None;
         self.project_input.update(cx, |input, cx| input.clear(cx));
         self.persist();
+        self.refresh_repository(id);
         self.start_project_probe(id);
         cx.notify();
     }
@@ -432,14 +442,20 @@ impl Dirigent {
         }
         let title = prompt.chars().take(54).collect::<String>();
         self.project_probe.take();
+        let workspace_source = self.draft_workspace_source.take();
         let id = self.allocate_id();
         let sidebar_order = self.allocate_sidebar_order();
         let mut harness = Harness::new(id, project_id, title, sidebar_order);
         harness.nix_enabled = self.draft_nix_enabled && self.project_has_devshell(project_id);
         harness.model = self.draft_model.take();
         harness.thinking_level = self.draft_thinking_level.take();
-        harness.status = HarnessStatus::Working;
-        harness.run_started_at = Some(Instant::now());
+        if workspace_source.is_some() {
+            harness.status = HarnessStatus::Starting;
+            harness.pending_initial_prompt = Some((prompt.clone(), images.clone()));
+        } else {
+            harness.status = HarnessStatus::Working;
+            harness.run_started_at = Some(Instant::now());
+        }
         harness.messages.push(Message::user_with_images(
             prompt.clone(),
             images.iter().map(|image| image.image.clone()).collect(),
@@ -454,10 +470,15 @@ impl Dirigent {
         self.keyboard_mode = KeyboardMode::Input;
         self.focus_input = true;
         self.creating_harness = false;
+        self.project_settings = None;
         self.banner = None;
         self.harness_input.update(cx, |input, cx| input.clear(cx));
         self.persist();
-        self.start_harness(id, Some((prompt, images)));
+        if let Some(source) = workspace_source {
+            self.provision_harness_workspace(id, source);
+        } else {
+            self.start_harness(id, Some((prompt, images)));
+        }
         cx.notify();
     }
     pub(crate) fn select_harness(&mut self, id: Id) {
@@ -478,12 +499,14 @@ impl Dirigent {
         self.pending_edit_submit = None;
         self.adding_project = false;
         self.creating_harness = false;
+        self.project_settings = None;
         self.composer_dropdown = None;
         self.path_completion = None;
         self.draft_model = None;
         self.draft_thinking_level = None;
         self.reset_conversation_list(index);
         self.persist();
+        self.refresh_repository(self.harnesses[index].project_id);
         self.start_harness(id, None);
     }
     pub(crate) fn start_new_harness(&mut self, project_id: Id) {
@@ -510,6 +533,7 @@ impl Dirigent {
         self.selected_harness = None;
         self.adding_project = false;
         self.creating_harness = true;
+        self.project_settings = None;
         self.editing_message = None;
         self.pending_edit_submit = None;
         self.composer_dropdown = None;
@@ -517,8 +541,10 @@ impl Dirigent {
         self.draft_model = model;
         self.draft_thinking_level = thinking_level;
         self.draft_nix_enabled = true;
+        self.draft_workspace_source = None;
         self.banner = None;
         self.project_probe.take();
+        self.refresh_repository(project_id);
 
         if let Some(id) = source_id {
             if self.draft_model.is_none()

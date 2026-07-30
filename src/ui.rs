@@ -3,6 +3,7 @@ mod conversation;
 mod extension_dialog;
 mod keyboard_menu;
 mod markdown;
+mod project_settings;
 mod project_setup;
 mod sidebar;
 
@@ -212,14 +213,20 @@ impl Dirigent {
                         ),
                 )
             })
-            .when(self.adding_project, |element| {
+            .when_some(self.project_settings, |element, project_id| {
+                element.child(self.render_project_settings(project_id, cx))
+            })
+            .when(self.project_settings.is_none() && self.adding_project, |element| {
                 element.child(self.render_add_project(cx))
             })
-            .when(!self.adding_project && self.creating_harness, |element| {
+            .when(self.project_settings.is_none() && !self.adding_project && self.creating_harness, |element| {
                 element.child(self.render_new_harness(window, cx))
             })
             .when(
-                !self.adding_project && !self.creating_harness && self.selected_harness.is_some(),
+                self.project_settings.is_none()
+                    && !self.adding_project
+                    && !self.creating_harness
+                    && self.selected_harness.is_some(),
                 |element| {
                     element
                         .child(self.render_conversation(cx))
@@ -227,7 +234,10 @@ impl Dirigent {
                 },
             )
             .when(
-                !self.adding_project && !self.creating_harness && self.selected_harness.is_none(),
+                self.project_settings.is_none()
+                    && !self.adding_project
+                    && !self.creating_harness
+                    && self.selected_harness.is_none(),
                 |element| {
                     element.child(
                         div()

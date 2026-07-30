@@ -6,6 +6,7 @@ use std::{
 };
 
 use gpui::{Image, ScrollHandle, SharedString};
+use serde::{Deserialize, Serialize};
 
 use crate::theme::{green, red};
 
@@ -21,6 +22,36 @@ pub(crate) struct Project {
     pub(crate) id: Id,
     pub(crate) name: String,
     pub(crate) path: PathBuf,
+    pub(crate) workspace_root: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum WorkspaceBackend {
+    Jj,
+    Git,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum WorkspaceState {
+    Provisioning,
+    Ready,
+    Failed(String),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct ManagedWorkspace {
+    pub(crate) id: String,
+    pub(crate) project_id: Id,
+    pub(crate) backend: WorkspaceBackend,
+    pub(crate) root: PathBuf,
+    pub(crate) working_directory: PathBuf,
+    pub(crate) source_repository: PathBuf,
+    pub(crate) source_id: String,
+    pub(crate) source_label: String,
+    pub(crate) source_revision: String,
+    pub(crate) jj_parent_revisions: Vec<String>,
+    pub(crate) git_branch: Option<String>,
+    pub(crate) state: WorkspaceState,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -509,6 +540,7 @@ pub(crate) struct Harness {
     pub(crate) pending_initial_prompt: Option<(String, Vec<AttachedImage>)>,
     pub(crate) nix_enabled: bool,
     pub(crate) nix_restart_pending: bool,
+    pub(crate) workspace_id: Option<String>,
 }
 
 impl Harness {
@@ -545,6 +577,7 @@ impl Harness {
             retry_status: None,
             nix_enabled: false,
             nix_restart_pending: false,
+            workspace_id: None,
         }
     }
 
@@ -559,12 +592,14 @@ impl Harness {
         !self.archived && !self.is_in_workpool()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restored(
         id: Id,
         project_id: Id,
         title: String,
         session_file: Option<PathBuf>,
         nix_enabled: bool,
+        workspace_id: Option<String>,
         archived: bool,
         sidebar_order: u64,
     ) -> Self {
@@ -600,6 +635,7 @@ impl Harness {
             retry_status: None,
             nix_enabled,
             nix_restart_pending: false,
+            workspace_id,
         }
     }
 }

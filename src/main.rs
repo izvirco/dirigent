@@ -14,6 +14,7 @@ mod storage;
 mod text_input;
 mod theme;
 mod ui;
+mod vcs;
 
 use app::Dirigent;
 use gpui::{

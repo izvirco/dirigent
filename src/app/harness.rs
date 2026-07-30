@@ -403,19 +403,13 @@ impl Dirigent {
             }
             return;
         }
-        let project_id = self.harnesses[index].project_id;
-        let Some(project) = self
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-        else {
-            self.fail_harness(
-                index,
-                "The project for this harness no longer exists.".into(),
-            );
-            return;
+        let project_path = match self.working_directory_for_harness(id) {
+            Ok(path) => path,
+            Err(error) => {
+                self.fail_harness(index, error);
+                return;
+            }
         };
-        let project_path = project.path.clone();
         let session_file = self.harnesses[index].session_file.clone();
         let title = self.harnesses[index].title.clone();
         self.harnesses[index].error = None;
@@ -573,6 +567,17 @@ impl Dirigent {
         let Some(input) = self.composer_inputs.get(&id).cloned() else {
             return;
         };
+        if let Some(workspace) = self.selected_managed_workspace()
+            && workspace.state != WorkspaceState::Ready
+        {
+            self.banner = Some(match &workspace.state {
+                WorkspaceState::Provisioning => "The workspace is still being created.".into(),
+                WorkspaceState::Failed(error) => error.clone(),
+                WorkspaceState::Ready => unreachable!(),
+            });
+            cx.notify();
+            return;
+        }
         if self.pending_forks.contains_key(&id) {
             self.banner = Some("The fork is still being created.".into());
             cx.notify();
@@ -589,6 +594,28 @@ impl Dirigent {
             .is_some_and(|harness| harness.archived)
         {
             self.set_harness_archived(id, false);
+        }
+        if let Some(source) = self.pending_workspace_sources.remove(&id) {
+            let images = input.read(cx).images();
+            let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
+                return;
+            };
+            self.harnesses[index].pending_initial_prompt = Some((message.clone(), images.clone()));
+            self.harnesses[index]
+                .messages
+                .push(Message::user_with_images(
+                    message,
+                    images.iter().map(|image| image.image.clone()).collect(),
+                ));
+            self.sync_conversation_list(index, None);
+            input.update(cx, |input, cx| input.clear(cx));
+            self.harnesses[index].composer_draft.clear();
+            self.harnesses[index].composer_draft_images.clear();
+            self.cache_harness_draft(index, true);
+            self.composer_dropdown = None;
+            self.provision_harness_workspace(id, source);
+            cx.notify();
+            return;
         }
         self.start_harness(id, None);
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
@@ -689,6 +716,7 @@ impl Dirigent {
             ComposerDropdown::Project
                 | ComposerDropdown::EditModel
                 | ComposerDropdown::EditReasoning
+                | ComposerDropdown::Workspace
         ) {
             return;
         }
@@ -711,7 +739,8 @@ impl Dirigent {
                 }
                 ComposerDropdown::Project
                 | ComposerDropdown::EditModel
-                | ComposerDropdown::EditReasoning => return,
+                | ComposerDropdown::EditReasoning
+                | ComposerDropdown::Workspace => return,
             }
             return;
         }
@@ -727,7 +756,8 @@ impl Dirigent {
                 ComposerDropdown::Reasoning => self.request_thinking_levels(index),
                 ComposerDropdown::Project
                 | ComposerDropdown::EditModel
-                | ComposerDropdown::EditReasoning => {}
+                | ComposerDropdown::EditReasoning
+                | ComposerDropdown::Workspace => {}
             }
         }
     }
@@ -824,7 +854,7 @@ impl Dirigent {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
-        if !self.project_has_devshell(self.harnesses[index].project_id) {
+        if !self.harness_has_devshell(id) {
             return;
         }
         self.harnesses[index].nix_enabled = !self.harnesses[index].nix_enabled;

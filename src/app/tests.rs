@@ -1,4 +1,3 @@
-
 use super::{
     FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
     conversation_list_splice, directory_path_query, effective_settings_before_entry,

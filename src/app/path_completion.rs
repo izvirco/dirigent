@@ -155,7 +155,9 @@ impl Dirigent {
             .path_completion
             .as_ref()
             .map(|completion| completion.target);
-        let visible = if self.adding_project {
+        let visible = if self.project_settings.is_some() {
+            None
+        } else if self.adding_project {
             Some(PathCompletionTarget::Project)
         } else if self.creating_harness {
             Some(PathCompletionTarget::NewHarness)
@@ -197,8 +199,17 @@ impl Dirigent {
                 .map(|harness| harness.project_id),
             PathCompletionTarget::Project => None,
         };
-        let items = project_id
-            .and_then(|id| self.project_file_pickers.get(&id))
+        let workspace_picker = match target {
+            PathCompletionTarget::Harness(id) => self
+                .harnesses
+                .iter()
+                .find(|harness| harness.id == id)
+                .and_then(|harness| harness.workspace_id.as_deref())
+                .and_then(|workspace_id| self.workspace_file_pickers.get(workspace_id)),
+            _ => None,
+        };
+        let items = workspace_picker
+            .or_else(|| project_id.and_then(|id| self.project_file_pickers.get(&id)))
             .map_or_else(Vec::new, |picker| fuzzy_file_results(picker, &query));
         let active = !items.is_empty();
         self.path_completion = active.then_some(PathCompletion {
@@ -248,6 +259,20 @@ impl Dirigent {
                             .map(|_| PathCompletionTarget::Harness(id))
                     })
                 };
+                if let Some(target) = target {
+                    self.refresh_composer_path_completion(target, cx);
+                }
+            }
+            FuzzyIndexReady::Workspace(workspace_id) => {
+                let target = self.selected_harness.and_then(|id| {
+                    self.harnesses
+                        .iter()
+                        .find(|harness| {
+                            harness.id == id
+                                && harness.workspace_id.as_deref() == Some(workspace_id.as_str())
+                        })
+                        .map(|_| PathCompletionTarget::Harness(id))
+                });
                 if let Some(target) = target {
                     self.refresh_composer_path_completion(target, cx);
                 }

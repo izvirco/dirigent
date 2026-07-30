@@ -53,6 +53,24 @@ impl Dirigent {
                 .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
                 .child(
                     div()
+                        .id(("project-settings", id as usize))
+                        .h(px(30.0))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(rgb(theme_text()))
+                        .hover(|style| style.bg(rgb(surface_hover())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_project_settings(id, cx);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .child("Settings"),
+                )
+                .child(
+                    div()
                         .id(("delete-project", id as usize))
                         .h(px(30.0))
                         .px_2()
@@ -95,7 +113,8 @@ impl Dirigent {
                     .sidebar_order,
             )
         });
-        let selected = self.selected_project == Some(id) && !self.adding_project;
+        let selected = self.selected_project == Some(id)
+            && (!self.adding_project || self.project_settings == Some(id));
         let menu_open = self.sidebar_menu == Some(SidebarMenu::Project(id));
         let name = project.name.clone();
         let group = format!("sidebar-project-{id}");

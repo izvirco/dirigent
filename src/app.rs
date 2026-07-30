@@ -1,6 +1,7 @@
 mod branching;
 mod harness;
 mod keyboard;
+mod managed_workspace;
 mod message_parsing;
 mod path_completion;
 mod runtime;
@@ -38,12 +39,16 @@ use branching::*;
 
 use crate::{
     cache::SessionCache,
-    model::{ContextUsage, Harness, HarnessStatus, Id, Message, MessageRole, Project, RetryStatus},
+    model::{
+        ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace, Message, MessageRole, Project,
+        RetryStatus, WorkspaceState,
+    },
     platform,
     rpc::{PiProcess, RuntimeEvent, RuntimeTarget},
     storage,
     text_input::{AttachedImage, InputEvent, TextInput},
     theme::{self, bg, border, muted, rgb, theme_text},
+    vcs::RepositorySnapshot,
 };
 
 const STARTUP_MODEL_REQUEST_ID: &str = "dirigent-startup-model";
@@ -64,6 +69,7 @@ pub(crate) enum ComposerDropdown {
     Reasoning,
     EditModel,
     EditReasoning,
+    Workspace,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,6 +89,12 @@ pub(crate) struct PathCompletion {
 #[derive(Clone, Debug)]
 enum FuzzyIndexReady {
     Project(Id),
+    Workspace(String),
+}
+
+pub(crate) enum WorkspaceEvent {
+    Created(String),
+    Failed(String, String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -311,11 +323,13 @@ impl FrameTiming {
 pub(crate) struct Dirigent {
     pub(crate) projects: Vec<Project>,
     pub(crate) harnesses: Vec<Harness>,
+    pub(crate) workspaces: Vec<ManagedWorkspace>,
     pub(crate) selected_project: Option<Id>,
     pub(crate) selected_harness: Option<Id>,
     pub(crate) last_used_harness: Option<Id>,
     pub(crate) adding_project: bool,
     pub(crate) creating_harness: bool,
+    pub(crate) project_settings: Option<Id>,
     pub(crate) sidebar_width: f32,
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) sidebar_menu: Option<SidebarMenu>,
@@ -323,6 +337,7 @@ pub(crate) struct Dirigent {
     pub(crate) project_input: Entity<TextInput>,
     pub(crate) harness_input: Entity<TextInput>,
     pub(crate) thread_rename_input: Entity<TextInput>,
+    pub(crate) workspace_settings_input: Entity<TextInput>,
     composer_inputs: HashMap<Id, Entity<TextInput>>,
     pub(crate) extension_input: Entity<TextInput>,
     pub(crate) pending_dialog: Option<PendingDialog>,
@@ -342,7 +357,11 @@ pub(crate) struct Dirigent {
     pending_forks: HashMap<Id, PendingFork>,
     pub(crate) path_completion: Option<PathCompletion>,
     project_file_pickers: HashMap<Id, SharedFilePicker>,
+    workspace_file_pickers: HashMap<String, SharedFilePicker>,
     fuzzy_index_events: Sender<FuzzyIndexReady>,
+    repository_snapshots: HashMap<Id, RepositorySnapshot>,
+    pub(crate) draft_workspace_source: Option<RepositorySnapshot>,
+    pending_workspace_sources: HashMap<Id, RepositorySnapshot>,
     pub(crate) available_models: Vec<AvailableModel>,
     available_models_by_project: HashMap<Id, Vec<AvailableModel>>,
     available_thinking_levels: HashMap<(Id, String), Vec<String>>,
@@ -370,6 +389,7 @@ pub(crate) struct Dirigent {
     next_id: Id,
     next_sidebar_order: u64,
     runtime_events: Sender<RuntimeEvent>,
+    workspace_events: Sender<WorkspaceEvent>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -440,6 +460,7 @@ impl Dirigent {
         let extension_input = cx.new(|cx| TextInput::new("Enter a value…", cx));
         let thread_rename_input =
             cx.new(|cx| TextInput::new("Thread name", cx).borderless().compact());
+        let workspace_settings_input = cx.new(|cx| TextInput::new("/path/to/workspaces", cx));
 
         cx.subscribe(&project_input, |this, _, event, cx| match event {
             InputEvent::Submit => this.add_project(cx),
@@ -500,6 +521,24 @@ impl Dirigent {
             _ => {}
         })
         .detach();
+        cx.subscribe(
+            &workspace_settings_input,
+            |this, _, event, cx| match event {
+                InputEvent::Submit => this.save_custom_workspace_root(cx),
+                InputEvent::Focused => {
+                    this.enter_input_mode(false);
+                    cx.notify();
+                }
+                InputEvent::Escape => {
+                    this.close_project_settings();
+                    this.enter_normal_mode();
+                    cx.notify();
+                }
+                InputEvent::Changed => {}
+                _ => {}
+            },
+        )
+        .detach();
         cx.subscribe(&extension_input, |this, _, event, cx| match event {
             InputEvent::Submit => this.submit_extension_dialog(cx),
             InputEvent::Focused => {
@@ -521,6 +560,22 @@ impl Dirigent {
                 if this
                     .update(cx, |this, cx| {
                         this.handle_fuzzy_index_ready(event, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let (workspace_event_tx, workspace_event_rx) = async_channel::unbounded();
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = workspace_event_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.handle_workspace_event(event, cx);
                         cx.notify();
                     })
                     .is_err()
@@ -553,6 +608,7 @@ impl Dirigent {
                 storage::LoadedState {
                     projects: Vec::new(),
                     harnesses: Vec::new(),
+                    workspaces: Vec::new(),
                     next_id: 1,
                     next_sidebar_order: 1,
                     last_used_harness: None,
@@ -577,12 +633,19 @@ impl Dirigent {
         let storage::LoadedState {
             projects,
             mut harnesses,
+            mut workspaces,
             next_id,
             next_sidebar_order,
             last_used_harness,
             collapsed_projects,
             sidebar_width,
         } = loaded;
+        for workspace in &mut workspaces {
+            workspace.state = match crate::vcs::validate_workspace(workspace) {
+                Ok(()) => WorkspaceState::Ready,
+                Err(error) => WorkspaceState::Failed(error),
+            };
+        }
         let session_cache = match SessionCache::open() {
             Ok(cache) => Some(cache),
             Err(error) => {
@@ -694,6 +757,24 @@ impl Dirigent {
                 Err(_) => {}
             }
         }
+        let mut workspace_file_pickers = HashMap::new();
+        for workspace in &workspaces {
+            if workspace.state != WorkspaceState::Ready {
+                continue;
+            }
+            match start_fuzzy_index(
+                &workspace.working_directory,
+                true,
+                FuzzyIndexReady::Workspace(workspace.id.clone()),
+                fuzzy_index_tx.clone(),
+            ) {
+                Ok(picker) => {
+                    workspace_file_pickers.insert(workspace.id.clone(), picker);
+                }
+                Err(error) if banner.is_none() => banner = Some(error),
+                Err(_) => {}
+            }
+        }
 
         let fallback_project = projects.first().map(|project| project.id);
         let selected_harness = last_used_harness
@@ -799,11 +880,13 @@ impl Dirigent {
         let mut this = Self {
             projects,
             harnesses,
+            workspaces,
             selected_project,
             selected_harness,
             last_used_harness: selected_harness,
             adding_project,
             creating_harness: false,
+            project_settings: None,
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
             collapsed_projects,
             sidebar_menu: None,
@@ -811,6 +894,7 @@ impl Dirigent {
             project_input,
             harness_input,
             thread_rename_input,
+            workspace_settings_input,
             composer_inputs,
             extension_input,
             pending_dialog: None,
@@ -830,7 +914,11 @@ impl Dirigent {
             pending_forks: HashMap::new(),
             path_completion: None,
             project_file_pickers,
+            workspace_file_pickers,
             fuzzy_index_events: fuzzy_index_tx,
+            repository_snapshots: HashMap::new(),
+            draft_workspace_source: None,
+            pending_workspace_sources: HashMap::new(),
             available_models,
             available_models_by_project,
             available_thinking_levels,
@@ -857,7 +945,11 @@ impl Dirigent {
             next_id,
             next_sidebar_order,
             runtime_events: event_tx,
+            workspace_events: workspace_event_tx,
         };
+        if let Some(project_id) = selected_project {
+            this.refresh_repository(project_id);
+        }
         if let Some(harness_id) = selected_harness {
             this.start_harness(harness_id, None);
         }
@@ -884,6 +976,7 @@ impl Dirigent {
         if let Err(error) = storage::save(
             &self.projects,
             &self.harnesses,
+            &self.workspaces,
             self.next_id,
             self.next_sidebar_order,
             self.last_used_harness,
@@ -921,6 +1014,7 @@ impl Dirigent {
             self.project_input.clone(),
             self.harness_input.clone(),
             self.thread_rename_input.clone(),
+            self.workspace_settings_input.clone(),
             self.extension_input.clone(),
         ]);
         for input in inputs {
@@ -976,6 +1070,8 @@ impl Render for Dirigent {
                 Some(self.extension_input.clone())
             } else if let Some(edit) = self.editing_message.as_ref() {
                 Some(edit.input.clone())
+            } else if self.project_settings.is_some() {
+                Some(self.workspace_settings_input.clone())
             } else if self.adding_project {
                 Some(self.project_input.clone())
             } else if self.creating_harness {

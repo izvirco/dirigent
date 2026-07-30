@@ -102,7 +102,9 @@ impl Dirigent {
             .iter()
             .find(|harness| harness.id == id)
             .unwrap();
-        let active = self.selected_harness == Some(id) && !self.adding_project;
+        let active = self.selected_harness == Some(id)
+            && !self.adding_project
+            && self.project_settings.is_none();
         let title = harness
             .title
             .split_whitespace()

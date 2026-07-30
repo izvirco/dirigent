@@ -26,6 +26,12 @@ window-rule {
 
 Dirigent follows `XDG_CONFIG_HOME` on Unix. On Windows, configuration is stored in `%APPDATA%\dirigent`.
 
+## Managed workspaces
+
+The composer shows the current JJ change ID or Git branch. New threads can create an isolated JJ workspace alongside the current change or a Git worktree on a generated `dirigent/<id>` branch. Dirigent starts Pi, file indexing, and any enabled Nix development shell from the managed workspace.
+
+Managed workspaces are stored under `${XDG_DATA_HOME:-~/.local/share}/dirigent/workspace` on Unix and `%LOCALAPPDATA%\dirigent\workspace` on Windows. A project-specific parent directory can be selected from the project's **Settings** menu.
+
 ## Linux (Nix)
 
 ```
