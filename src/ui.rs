@@ -30,11 +30,11 @@ impl Dirigent {
             return div().into_any_element();
         };
         let selected = completion.selected;
-        let last = completion.items.len().saturating_sub(1);
         deferred(
             div()
                 .id("path-completion-menu")
                 .w_full()
+                .p_1()
                 .overflow_hidden()
                 .rounded_lg()
                 .border_1()
@@ -55,13 +55,12 @@ impl Dirigent {
                         .map(|(index, path)| {
                             div()
                                 .id(("path-completion", index))
-                                .h(px(24.0))
+                                .h(px(26.0))
                                 .w_full()
-                                .px_2()
+                                .px_1()
                                 .flex()
                                 .items_center()
-                                .when(index == 0, |element| element.rounded_t_lg())
-                                .when(index == last, |element| element.rounded_b_lg())
+                                .rounded_md()
                                 .when(index == selected, |element| {
                                     element.bg(rgb(crate::theme::selection()))
                                 })

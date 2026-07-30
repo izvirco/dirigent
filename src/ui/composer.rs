@@ -67,11 +67,11 @@ impl Dirigent {
             .child(
                 div()
                     .id("new-harness-project-picker")
-                    .h(px(32.0))
-                    .px_3()
+                    .h(px(26.0))
+                    .px_2()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .rounded_md()
                     .border_1()
                     .border_color(rgb(border()))
@@ -109,10 +109,9 @@ impl Dirigent {
                         div()
                             .id("new-harness-project-dropdown")
                             .absolute()
-                            .bottom(px(38.0))
+                            .bottom(px(36.0))
                             .left_0()
-                            .min_w(px(320.0))
-                            .max_w(px(420.0))
+                            .w_auto()
                             .max_h(px(280.0))
                             .p_1()
                             .overflow_y_scroll()
@@ -129,15 +128,14 @@ impl Dirigent {
                                 let path = project.path.display().to_string();
                                 div()
                                     .id(("new-harness-project-option", index))
-                                    .min_h(px(42.0))
-                                    .mt(px(2.0))
-                                    .mb(px(2.0))
-                                    .px_3()
-                                    .py_1()
+                                    .h(px(26.0))
+                                    .px_1()
                                     .flex()
-                                    .flex_col()
-                                    .justify_center()
+                                    .items_center()
+                                    .gap_2()
                                     .rounded_md()
+                                    .whitespace_nowrap()
+                                    .text_xs()
                                     .cursor_pointer()
                                     .when(selected, |style| {
                                         style.bg(rgb(crate::theme::selection()))
@@ -154,24 +152,8 @@ impl Dirigent {
                                         cx.notify();
                                         cx.stop_propagation();
                                     }))
-                                    .child(
-                                        div()
-                                            .whitespace_nowrap()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .text_xs()
-                                            .text_color(rgb(theme_text()))
-                                            .child(name),
-                                    )
-                                    .child(
-                                        div()
-                                            .whitespace_nowrap()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .text_xs()
-                                            .text_color(rgb(muted()))
-                                            .child(path),
-                                    )
+                                    .child(div().text_color(rgb(theme_text())).child(name))
+                                    .child(div().text_color(rgb(muted())).child(path))
                             })),
                     )
                     .priority(2),
@@ -232,8 +214,9 @@ impl Dirigent {
                             .absolute()
                             .bottom(px(36.0))
                             .left_0()
-                            .max_w(px(300.0))
+                            .w_auto()
                             .max_h(px(300.0))
+                            .p_1()
                             .rounded_lg()
                             .border_1()
                             .border_color(rgb(border()))
@@ -244,16 +227,14 @@ impl Dirigent {
                             .child(
                                 div()
                                     .id("model-dropdown-content")
-                                    .max_h(px(298.0))
+                                    .max_h(px(290.0))
                                     .overflow_y_scroll()
                                     .track_scroll(&self.model_picker_scroll)
-                                    .p_1()
-                                    .pr_2()
                                     .when(self.available_models.is_empty(), |element| {
                                         element.child(
                                             div()
-                                                .h(px(38.0))
-                                                .px_3()
+                                                .h(px(26.0))
+                                                .px_1()
                                                 .flex()
                                                 .items_center()
                                                 .text_xs()
@@ -270,14 +251,14 @@ impl Dirigent {
                                                 let model_id = model.id.clone();
                                                 div()
                                                     .id(("model-option", index))
-                                                    .min_h(px(34.0))
-                                                    .mt(px(2.0))
-                                                    .mb(px(2.0))
-                                                    .px_3()
-                                                    .py_1()
+                                                    .h(px(26.0))
+                                                    .px_1()
                                                     .flex()
                                                     .items_center()
+                                                    .gap_2()
                                                     .rounded_md()
+                                                    .whitespace_nowrap()
+                                                    .text_xs()
                                                     .when(selected, |style| {
                                                         style.bg(rgb(crate::theme::selection()))
                                                     })
@@ -294,31 +275,12 @@ impl Dirigent {
                                                     }))
                                                     .child(
                                                         div()
-                                                            .min_w(px(0.0))
-                                                            .flex()
-                                                            .flex_col()
-                                                            .child(
-                                                                div()
-                                                                    .whitespace_nowrap()
-                                                                    .overflow_hidden()
-                                                                    .text_ellipsis()
-                                                                    .text_xs()
-                                                                    .text_color(rgb(theme_text()))
-                                                                    .child(model.name),
-                                                            )
-                                                            .child(
-                                                                div()
-                                                                    .whitespace_nowrap()
-                                                                    .overflow_hidden()
-                                                                    .text_ellipsis()
-                                                                    .text_xs()
-                                                                    .text_color(rgb(muted()))
-                                                                    .child(format!(
-                                                                        "{}/{}",
-                                                                        model.provider, model.id
-                                                                    )),
-                                                            ),
+                                                            .text_color(rgb(theme_text()))
+                                                            .child(model.name),
                                                     )
+                                                    .child(div().text_color(rgb(muted())).child(
+                                                        format!("{}/{}", model.provider, model.id),
+                                                    ))
                                             },
                                         ),
                                     ),
@@ -374,6 +336,7 @@ impl Dirigent {
                             .absolute()
                             .bottom(px(36.0))
                             .left_0()
+                            .w_auto()
                             .p_1()
                             .rounded_lg()
                             .border_1()
@@ -388,12 +351,11 @@ impl Dirigent {
                                     div()
                                         .id(("reasoning-option", index))
                                         .h(px(26.0))
-                                        .mt(px(2.0))
-                                        .mb(px(2.0))
-                                        .px_3()
+                                        .px_1()
                                         .flex()
                                         .items_center()
                                         .rounded_md()
+                                        .whitespace_nowrap()
                                         .text_xs()
                                         .text_color(rgb(theme_text()))
                                         .when(selected, |style| {

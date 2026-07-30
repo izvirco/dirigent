@@ -183,7 +183,7 @@ impl Dirigent {
                             .absolute()
                             .bottom(px(36.0))
                             .left_0()
-                            .max_w(px(300.0))
+                            .w_auto()
                             .max_h(px(300.0))
                             .p_1()
                             .overflow_y_scroll()
@@ -201,14 +201,14 @@ impl Dirigent {
                                     let value = format!("{provider}/{model_id}");
                                     div()
                                         .id(("edit-model-option", option))
-                                        .min_h(px(34.0))
-                                        .mt(px(2.0))
-                                        .mb(px(2.0))
-                                        .px_3()
-                                        .py_1()
+                                        .h(px(26.0))
+                                        .px_1()
                                         .flex()
                                         .items_center()
+                                        .gap_2()
                                         .rounded_md()
+                                        .whitespace_nowrap()
+                                        .text_xs()
                                         .when(selected, |style| {
                                             style.bg(rgb(crate::theme::selection()))
                                         })
@@ -224,27 +224,13 @@ impl Dirigent {
                                         }))
                                         .child(
                                             div()
-                                                .min_w(px(0.0))
-                                                .flex()
-                                                .flex_col()
-                                                .child(
-                                                    div()
-                                                        .whitespace_nowrap()
-                                                        .overflow_hidden()
-                                                        .text_ellipsis()
-                                                        .text_xs()
-                                                        .text_color(rgb(theme_text()))
-                                                        .child(item.name.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .whitespace_nowrap()
-                                                        .overflow_hidden()
-                                                        .text_ellipsis()
-                                                        .text_xs()
-                                                        .text_color(rgb(muted()))
-                                                        .child(format!("{provider}/{model_id}")),
-                                                ),
+                                                .text_color(rgb(theme_text()))
+                                                .child(item.name.clone()),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_color(rgb(muted()))
+                                                .child(format!("{provider}/{model_id}")),
                                         )
                                 },
                             )),
@@ -288,6 +274,7 @@ impl Dirigent {
                             .absolute()
                             .bottom(px(36.0))
                             .left_0()
+                            .w_auto()
                             .p_1()
                             .rounded_lg()
                             .border_1()
@@ -304,12 +291,11 @@ impl Dirigent {
                                         div()
                                             .id(("edit-thinking-option", option))
                                             .h(px(26.0))
-                                            .mt(px(2.0))
-                                            .mb(px(2.0))
-                                            .px_3()
+                                            .px_1()
                                             .flex()
                                             .items_center()
                                             .rounded_md()
+                                            .whitespace_nowrap()
                                             .text_xs()
                                             .text_color(rgb(theme_text()))
                                             .when(selected, |style| {
