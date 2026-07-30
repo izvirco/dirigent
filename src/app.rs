@@ -472,7 +472,11 @@ impl Dirigent {
         let extension_input = cx.new(|cx| TextInput::new("Enter a value…", cx));
         let thread_rename_input =
             cx.new(|cx| TextInput::new("Thread name", cx).borderless().compact());
-        let workspace_settings_input = cx.new(|cx| TextInput::new("/path/to/workspaces", cx));
+        let workspace_settings_input = cx.new(|cx| {
+            TextInput::new("/path/to/workspaces", cx)
+                .borderless()
+                .compact()
+        });
 
         cx.subscribe(&project_input, |this, _, event, cx| match event {
             InputEvent::Submit => this.add_project(cx),

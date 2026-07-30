@@ -58,6 +58,7 @@ impl Dirigent {
                                     .id("close-project-settings")
                                     .h(px(32.0))
                                     .px_2()
+                                    .py_1()
                                     .flex()
                                     .items_center()
                                     .rounded_md()
@@ -87,6 +88,7 @@ impl Dirigent {
                             .when(!self.workspace_settings_editing, |element| {
                                 element.child(
                                     div()
+                                        .h(px(28.0))
                                         .flex()
                                         .items_center()
                                         .gap_2()
@@ -123,11 +125,13 @@ impl Dirigent {
                             .when(self.workspace_settings_editing, |element| {
                                 element.child(
                                     div()
+                                        .h(px(28.0))
                                         .flex()
                                         .items_center()
                                         .gap_2()
                                         .child(
                                             div()
+                                                .h_full()
                                                 .flex_1()
                                                 .min_w(px(0.0))
                                                 .child(self.workspace_settings_input.clone()),
@@ -135,8 +139,8 @@ impl Dirigent {
                                         .child(
                                             div()
                                                 .id("save-workspace-root")
-                                                .h(px(32.0))
-                                                .px_3()
+                                                .h(px(28.0))
+                                                .px_2()
                                                 .flex()
                                                 .items_center()
                                                 .rounded_md()
@@ -155,7 +159,7 @@ impl Dirigent {
                                         .child(
                                             div()
                                                 .id("cancel-workspace-root-edit")
-                                                .h(px(32.0))
+                                                .h(px(28.0))
                                                 .px_2()
                                                 .flex()
                                                 .items_center()
@@ -172,7 +176,7 @@ impl Dirigent {
                                         .child(
                                             div()
                                                 .id("reset-workspace-root")
-                                                .h(px(32.0))
+                                                .h(px(28.0))
                                                 .px_2()
                                                 .flex()
                                                 .items_center()
