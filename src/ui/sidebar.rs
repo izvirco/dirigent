@@ -64,7 +64,7 @@ fn plus_icon(color: u32) -> impl IntoElement {
 fn chevron_icon(expanded: bool) -> impl IntoElement {
     let icon = svg()
         .path("icon/chevron-down.svg")
-        .size(px(16.0))
+        .size(px(12.0))
         .text_color(rgb(muted()))
         .flex_none();
 
