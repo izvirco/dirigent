@@ -40,8 +40,8 @@ use branching::*;
 use crate::{
     cache::SessionCache,
     model::{
-        ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace, Message, MessageRole, Project,
-        RetryStatus, WorkspaceState,
+        CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
+        Message, MessageRole, Project, RetryStatus, WorkspaceState,
     },
     platform,
     rpc::{PiProcess, RuntimeEvent, RuntimeTarget},
@@ -344,6 +344,7 @@ pub(crate) struct Dirigent {
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) expanded_archived_projects: HashSet<Id>,
     pub(crate) sidebar_menu: Option<SidebarMenu>,
+    pub(crate) codex_usage: Option<CodexUsage>,
     pub(crate) renaming_harness: Option<Id>,
     pub(crate) project_input: Entity<TextInput>,
     pub(crate) harness_input: Entity<TextInput>,
@@ -930,6 +931,7 @@ impl Dirigent {
             collapsed_projects,
             expanded_archived_projects: HashSet::new(),
             sidebar_menu: None,
+            codex_usage: None,
             renaming_harness: None,
             project_input,
             harness_input,

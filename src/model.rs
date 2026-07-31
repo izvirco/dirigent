@@ -508,6 +508,19 @@ pub(crate) struct ContextUsage {
     pub(crate) context_window: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CodexUsageWindow {
+    pub(crate) used_percent: f64,
+    pub(crate) resets_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CodexUsage {
+    pub(crate) five_hour: Option<CodexUsageWindow>,
+    pub(crate) weekly: Option<CodexUsageWindow>,
+    pub(crate) fetched_at: u64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HarnessTitleState {
     Initial,

@@ -50,6 +50,37 @@ pub(super) fn parse_context_usage(value: &Value) -> Option<ContextUsage> {
     })
 }
 
+pub(super) fn parse_codex_usage(value: &Value) -> Option<CodexUsage> {
+    const FIVE_HOURS_SECONDS: u64 = 5 * 60 * 60;
+    const WEEK_SECONDS: u64 = 7 * 24 * 60 * 60;
+    const DURATION_TOLERANCE_SECONDS: u64 = 60;
+
+    let windows = value.get("windows")?.as_array()?;
+    let mut usage = CodexUsage {
+        five_hour: None,
+        weekly: None,
+        fetched_at: value.get("fetchedAt")?.as_u64()?,
+    };
+    for window in windows {
+        let Some(duration) = window.get("durationSeconds").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Some(used_percent) = window.get("usedPercent").and_then(Value::as_f64) else {
+            continue;
+        };
+        let parsed = CodexUsageWindow {
+            used_percent,
+            resets_at: window.get("resetsAt").and_then(Value::as_u64),
+        };
+        if duration.abs_diff(FIVE_HOURS_SECONDS) <= DURATION_TOLERANCE_SECONDS {
+            usage.five_hour = Some(parsed);
+        } else if duration.abs_diff(WEEK_SECONDS) <= DURATION_TOLERANCE_SECONDS {
+            usage.weekly = Some(parsed);
+        }
+    }
+    Some(usage)
+}
+
 pub(super) fn compact_json(value: &Value) -> String {
     truncate_output(&serde_json::to_string(value).unwrap_or_else(|_| "{}".into()))
 }

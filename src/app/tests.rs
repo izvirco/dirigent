@@ -1,11 +1,12 @@
 use super::{
     FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
     conversation_list_splice, directory_path_query, effective_settings_before_entry,
-    entries_through_leaf, parse_available_model, parse_cached_draft_images, parse_context_usage,
-    parse_entries, parse_message, parse_messages, reconcile_queued_messages, resolve_tilde_path,
-    rpc_string_array, tool_expanded, tool_label, tool_result_detail, truncate_output, write_detail,
+    entries_through_leaf, parse_available_model, parse_cached_draft_images, parse_codex_usage,
+    parse_context_usage, parse_entries, parse_message, parse_messages, reconcile_queued_messages,
+    resolve_tilde_path, rpc_string_array, tool_expanded, tool_label, tool_result_detail,
+    truncate_output, write_detail,
 };
-use crate::model::{Message, MessageRole};
+use crate::model::{CodexUsageWindow, Message, MessageRole};
 use serde_json::json;
 use std::{collections::VecDeque, path::PathBuf, time::Duration};
 
@@ -217,6 +218,44 @@ fn parses_context_usage() {
 
     assert_eq!(usage.used_tokens, 60_000);
     assert_eq!(usage.context_window, 200_000);
+}
+
+#[test]
+fn parses_codex_usage_windows_by_duration() {
+    let usage = parse_codex_usage(&json!({
+        "operation": "codex_usage",
+        "success": true,
+        "fetchedAt": 1_785_903_234_u64,
+        "windows": [
+            {
+                "usedPercent": 52.0,
+                "durationSeconds": 604_800,
+                "resetsAt": 1_785_903_234_u64
+            },
+            {
+                "usedPercent": 26.0,
+                "durationSeconds": 18_000,
+                "resetsAt": 1_785_000_000_u64
+            }
+        ]
+    }))
+    .unwrap();
+
+    assert_eq!(
+        usage.five_hour,
+        Some(CodexUsageWindow {
+            used_percent: 26.0,
+            resets_at: Some(1_785_000_000),
+        })
+    );
+    assert_eq!(
+        usage.weekly,
+        Some(CodexUsageWindow {
+            used_percent: 52.0,
+            resets_at: Some(1_785_903_234),
+        })
+    );
+    assert_eq!(usage.fetched_at, 1_785_903_234);
 }
 
 #[test]

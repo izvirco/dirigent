@@ -478,6 +478,17 @@ impl Dirigent {
             )
             .to_string();
         match operation {
+            "codex_usage" => {
+                if success
+                    && let Some(usage) = parse_codex_usage(&result)
+                    && self
+                        .codex_usage
+                        .is_none_or(|current| usage.fetched_at >= current.fetched_at)
+                {
+                    self.codex_usage = Some(usage);
+                }
+                true
+            }
             "navigate" => {
                 let Some(pending) = self.pending_edit_submit.as_ref() else {
                     return true;

@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::{
     app::{Dirigent, KeyboardMode, SidebarMenu},
-    model::{HarnessStatus, Id, WorkspaceBackend},
+    model::{CodexUsage, CodexUsageWindow, HarnessStatus, Id, WorkspaceBackend},
     theme::{
         blue, border, faint, muted, orange, red, rgb, surface, surface_hover, theme_text, yellow,
     },
@@ -120,6 +120,21 @@ fn format_elapsed(started_at: Option<Instant>) -> String {
     )
 }
 
+fn format_codex_usage(usage: CodexUsage) -> Option<String> {
+    let mut windows = Vec::new();
+    let mut push_window = |label: &str, window: CodexUsageWindow| {
+        let available = (100.0 - window.used_percent).clamp(0.0, 100.0);
+        windows.push(format!("{label} {available:.0}% left"));
+    };
+    if let Some(window) = usage.five_hour {
+        push_window("5h", window);
+    }
+    if let Some(window) = usage.weekly {
+        push_window("week", window);
+    }
+    (!windows.is_empty()).then(|| windows.join(" · "))
+}
+
 impl Dirigent {
     fn render_section_header(&self, title: &'static str, count: usize, color: u32) -> AnyElement {
         div()
@@ -222,6 +237,7 @@ impl Dirigent {
             width: self.sidebar_width,
             mouse_x: window.mouse_position().x,
         };
+        let codex_usage = self.codex_usage.and_then(format_codex_usage);
 
         div()
             .relative()
@@ -297,10 +313,28 @@ impl Dirigent {
                             }))
                             .child(self.keyboard_mode.label()),
                     )
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .relative()
+                            .top(px(3.0))
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_xs()
+                            .text_color(rgb(muted()))
+                            .when_some(codex_usage, |element, usage| element.child(usage)),
+                    )
                     .child(
                         div()
                             .id("sidebar-bottom-menu-trigger")
+                            .relative()
+                            .top(px(3.0))
+                            .flex_none()
                             .group("sidebar-bottom-menu-trigger")
                             .h(px(26.0))
                             .px_2()
@@ -358,7 +392,8 @@ impl Dirigent {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_duration, format_elapsed};
+    use super::{format_codex_usage, format_duration, format_elapsed};
+    use crate::model::{CodexUsage, CodexUsageWindow};
     use std::time::{Duration, Instant};
 
     #[test]
@@ -366,6 +401,41 @@ mod tests {
         assert_eq!(format_duration(Duration::from_secs(65)), "1m 05s");
         assert!(
             format_elapsed(Some(Instant::now() - Duration::from_secs(65))).starts_with("1m 05s")
+        );
+    }
+
+    #[test]
+    fn formats_available_codex_limits() {
+        assert_eq!(
+            format_codex_usage(CodexUsage {
+                five_hour: Some(CodexUsageWindow {
+                    used_percent: 26.0,
+                    resets_at: None,
+                }),
+                weekly: Some(CodexUsageWindow {
+                    used_percent: 52.0,
+                    resets_at: None,
+                }),
+                fetched_at: 1,
+            })
+            .as_deref(),
+            Some("5h 74% left · week 48% left")
+        );
+    }
+
+    #[test]
+    fn formats_only_limits_returned_by_codex() {
+        assert_eq!(
+            format_codex_usage(CodexUsage {
+                five_hour: None,
+                weekly: Some(CodexUsageWindow {
+                    used_percent: 105.0,
+                    resets_at: None,
+                }),
+                fetched_at: 1,
+            })
+            .as_deref(),
+            Some("week 0% left")
         );
     }
 }
