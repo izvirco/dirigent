@@ -84,14 +84,66 @@ impl Dirigent {
             cx.notify();
             return;
         }
-        if let Some(harness) = self.harnesses.iter_mut().find(|harness| harness.id == id) {
-            harness.title = title;
+        if let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) {
+            self.harnesses[index].set_manual_title(title);
+            self.title_processes.remove(&id);
+            self.synchronize_harness_session_name(index);
             self.persist();
         }
         self.renaming_harness = None;
         self.enter_normal_mode();
         cx.notify();
     }
+    fn synchronize_harness_session_name(&self, index: usize) {
+        let Some(process) = self.harnesses[index].process.as_ref() else {
+            return;
+        };
+        let _ = process.send(json!({
+            "type": "set_session_name",
+            "name": self.harnesses[index].title,
+        }));
+    }
+
+    fn start_title_generation(&mut self, harness_id: Id, prompt: &str) {
+        let Some(project_path) = self
+            .harnesses
+            .iter()
+            .find(|harness| harness.id == harness_id)
+            .and_then(|harness| {
+                self.projects
+                    .iter()
+                    .find(|project| project.id == harness.project_id)
+            })
+            .map(|project| project.path.clone())
+        else {
+            return;
+        };
+        if let Ok(process) =
+            TitleProcess::spawn(harness_id, &project_path, prompt, self.title_events.clone())
+        {
+            self.title_processes.insert(harness_id, process);
+        }
+    }
+
+    pub(super) fn handle_title_generation_event(&mut self, event: TitleGenerationEvent) {
+        self.title_processes.remove(&event.harness_id);
+        let Ok(title) = event.result else {
+            return;
+        };
+        let Some(index) = self
+            .harnesses
+            .iter()
+            .position(|harness| harness.id == event.harness_id)
+        else {
+            return;
+        };
+        if !self.harnesses[index].apply_generated_title(title) {
+            return;
+        }
+        self.synchronize_harness_session_name(index);
+        self.persist();
+    }
+
     pub(super) fn select_after_harness_hidden(&mut self, project_id: Id) {
         let replacement = self.harness_navigation_ids().into_iter().next();
         if let Some(id) = replacement {
@@ -147,6 +199,7 @@ impl Dirigent {
         let project_id = self.harnesses[index].project_id;
         self.harnesses.remove(index);
         self.composer_inputs.remove(&id);
+        self.title_processes.remove(&id);
         self.pending_workspace_sources.remove(&id);
         self.deleting_workspace_harnesses.remove(&id);
         if self.pending_workspace_deletion == Some(id) {
@@ -177,6 +230,8 @@ impl Dirigent {
         self.projects.remove(index);
         self.harnesses.retain(|harness| harness.project_id != id);
         self.composer_inputs
+            .retain(|harness_id, _| !removed_harnesses.contains(harness_id));
+        self.title_processes
             .retain(|harness_id, _| !removed_harnesses.contains(harness_id));
         self.collapsed_projects.remove(&id);
         self.expanded_archived_projects.remove(&id);
@@ -479,6 +534,7 @@ impl Dirigent {
         self.banner = None;
         self.harness_input.update(cx, |input, cx| input.clear(cx));
         self.persist();
+        self.start_title_generation(id, &prompt);
         if let Some(source) = workspace_source {
             self.provision_harness_workspace(id, source);
         } else {

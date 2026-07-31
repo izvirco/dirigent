@@ -508,10 +508,18 @@ pub(crate) struct ContextUsage {
     pub(crate) context_window: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HarnessTitleState {
+    Initial,
+    Generated,
+    Manual,
+}
+
 pub(crate) struct Harness {
     pub(crate) id: Id,
     pub(crate) project_id: Id,
     pub(crate) title: String,
+    title_state: HarnessTitleState,
     pub(crate) session_file: Option<PathBuf>,
     pub(crate) status: HarnessStatus,
     pub(crate) has_unread_completion: bool,
@@ -549,6 +557,7 @@ impl Harness {
             id,
             project_id,
             title,
+            title_state: HarnessTitleState::Initial,
             session_file: None,
             status: HarnessStatus::Starting,
             has_unread_completion: false,
@@ -581,6 +590,24 @@ impl Harness {
         }
     }
 
+    pub(crate) fn set_manual_title(&mut self, title: String) {
+        self.title = title;
+        self.title_state = HarnessTitleState::Manual;
+    }
+
+    pub(crate) fn set_derived_title(&mut self) {
+        self.title_state = HarnessTitleState::Generated;
+    }
+
+    pub(crate) fn apply_generated_title(&mut self, title: String) -> bool {
+        if self.title_state != HarnessTitleState::Initial {
+            return false;
+        }
+        self.title = title;
+        self.title_state = HarnessTitleState::Generated;
+        true
+    }
+
     pub(crate) fn is_in_workpool(&self) -> bool {
         !self.archived
             && !self.attention_required
@@ -607,6 +634,7 @@ impl Harness {
             id,
             project_id,
             title,
+            title_state: HarnessTitleState::Manual,
             session_file,
             status: HarnessStatus::Idle,
             has_unread_completion: false,
@@ -750,6 +778,24 @@ mod tests {
                 (27..35, green())
             ]
         );
+    }
+
+    #[test]
+    fn generated_titles_do_not_overwrite_manual_edits() {
+        let mut harness = Harness::new(1, 2, "original prompt".into(), 1);
+        harness.set_manual_title("original prompt".into());
+
+        assert!(!harness.apply_generated_title("Generated title".into()));
+        assert_eq!(harness.title, "original prompt");
+    }
+
+    #[test]
+    fn generated_titles_replace_untouched_initial_titles_once() {
+        let mut harness = Harness::new(1, 2, "original prompt".into(), 1);
+
+        assert!(harness.apply_generated_title("Generated title".into()));
+        assert!(!harness.apply_generated_title("Later title".into()));
+        assert_eq!(harness.title, "Generated title");
     }
 
     #[test]

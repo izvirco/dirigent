@@ -48,6 +48,7 @@ use crate::{
     storage,
     text_input::{AttachedImage, InputEvent, TextInput},
     theme::{self, bg, border, muted, rgb, theme_text},
+    title_generator::{TitleGenerationEvent, TitleProcess},
     vcs::RepositorySnapshot,
 };
 
@@ -402,6 +403,8 @@ pub(crate) struct Dirigent {
     next_sidebar_order: u64,
     runtime_events: Sender<RuntimeEvent>,
     workspace_events: Sender<WorkspaceEvent>,
+    title_events: Sender<TitleGenerationEvent>,
+    title_processes: HashMap<Id, TitleProcess>,
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -611,6 +614,22 @@ impl Dirigent {
                 if this
                     .update(cx, |this, cx| {
                         this.handle_runtime_event(event, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let (title_event_tx, title_event_rx) = async_channel::unbounded();
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = title_event_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.handle_title_generation_event(event);
                         cx.notify();
                     })
                     .is_err()
@@ -969,6 +988,8 @@ impl Dirigent {
             next_sidebar_order,
             runtime_events: event_tx,
             workspace_events: workspace_event_tx,
+            title_events: title_event_tx,
+            title_processes: HashMap::new(),
         };
         if let Some(project_id) = selected_project {
             this.refresh_repository(project_id);

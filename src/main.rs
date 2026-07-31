@@ -14,6 +14,7 @@ mod selectable_text;
 mod storage;
 mod text_input;
 mod theme;
+mod title_generator;
 mod ui;
 mod vcs;
 

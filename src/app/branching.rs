@@ -294,6 +294,7 @@ impl Dirigent {
                 sidebar_order,
             )
         };
+        harness.set_derived_title();
         harness.status = if root_user_fork {
             HarnessStatus::Stopped
         } else {
