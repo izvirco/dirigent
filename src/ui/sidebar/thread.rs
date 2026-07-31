@@ -139,7 +139,8 @@ impl Dirigent {
             .iter()
             .find(|harness| harness.id == id)
             .unwrap();
-        let has_workspace = self.workspace_for_harness(id).is_some();
+        let workspace = self.workspace_for_harness(id);
+        let has_workspace = workspace.is_some();
         let active = self.selected_harness == Some(id)
             && !self.adding_project
             && self.project_settings.is_none();
@@ -165,16 +166,26 @@ impl Dirigent {
             .map(|project| project.name.as_str())
             .unwrap_or("Unknown project");
         let detailed = placement != ThreadPlacement::Project;
-        let height = if detailed { 48.0 } else { 34.0 };
+        let height = if detailed { 62.0 } else { 34.0 };
         let title_color = if archived {
             muted()
         } else if has_unread {
             blue()
-        } else if active {
-            theme_text()
         } else {
-            muted()
+            theme_text()
         };
+        let repository = self.repository_snapshot_for_project(harness.project_id);
+        let vcs_label = workspace.map(|workspace| workspace.id.clone()).or_else(|| {
+            repository.map(|repository| match repository.backend {
+                WorkspaceBackend::Git => repository.source_label.clone(),
+                WorkspaceBackend::Jj => repository
+                    .source_revision
+                    .chars()
+                    .take(8)
+                    .collect::<String>(),
+            })
+        });
+        let hover_controls_width = if quick_archive { 48.0 } else { 22.0 };
         let (state_label, state_color) = if placement == ThreadPlacement::Workpool {
             (format_elapsed(harness.run_started_at), muted())
         } else if attention_required {
@@ -215,68 +226,138 @@ impl Dirigent {
             .child(
                 div()
                     .min_w(px(0.0))
+                    .h_full()
                     .flex_1()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .child(
-                        div()
-                            .h(px(if detailed { 21.0 } else { 34.0 }))
+                    .when(detailed, |content| {
+                        content
+                            .py(px(3.0))
                             .flex()
-                            .items_center()
-                            .gap_1()
-                            .line_height(px(if detailed { 21.0 } else { 34.0 }))
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_sm()
-                            .font_weight(if active || has_unread {
-                                gpui::FontWeight::SEMIBOLD
-                            } else {
-                                gpui::FontWeight::NORMAL
-                            })
-                            .text_color(rgb(title_color))
-                            .when(has_workspace, |element| {
-                                element.child(git_branch_icon(title_color))
-                            })
-                            .when(renaming, |element| {
-                                element.child(self.thread_rename_input.clone())
-                            })
-                            .when(!renaming, |element| {
-                                element.child(
-                                    div()
-                                        .min_w(px(0.0))
-                                        .flex_1()
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .line_clamp(1)
-                                        .child(title),
-                                )
-                            }),
-                    )
-                    .when(detailed && !renaming, |element| {
-                        element.child(
+                            .flex_col()
+                            .child(
+                                div()
+                                    .h(px(16.0))
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .line_height(px(16.0))
+                                    .whitespace_nowrap()
+                                    .text_xs()
+                                    .text_color(rgb(faint()))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .child(project_name.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_color(rgb(state_color))
+                                            .child(state_label),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .h(px(22.0))
+                                    .flex()
+                                    .items_center()
+                                    .line_height(px(22.0))
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_sm()
+                                    .font_weight(if active || has_unread {
+                                        gpui::FontWeight::SEMIBOLD
+                                    } else {
+                                        gpui::FontWeight::NORMAL
+                                    })
+                                    .text_color(rgb(title_color))
+                                    .when(renaming, |element| {
+                                        element.child(self.thread_rename_input.clone())
+                                    })
+                                    .when(!renaming, |element| {
+                                        element.child(
+                                            div()
+                                                .min_w(px(0.0))
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .line_clamp(1)
+                                                .child(title.clone()),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .h(px(18.0))
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_xs()
+                                    .text_color(rgb(faint()))
+                                    .when(menu_open, |row| row.pr(px(hover_controls_width)))
+                                    .when(!menu_open, |row| {
+                                        row.group_hover(group.clone(), |style| {
+                                            style.pr(px(hover_controls_width))
+                                        })
+                                    })
+                                    .when_some(vcs_label, |row, label| {
+                                        row.when(has_workspace, |row| {
+                                            row.child(git_graph_icon(faint()))
+                                        })
+                                        .when(!has_workspace, |row| {
+                                            row.child(git_branch_icon(faint()))
+                                        })
+                                        .child(
+                                            div()
+                                                .min_w(px(0.0))
+                                                .flex_1()
+                                                .overflow_hidden()
+                                                .text_ellipsis()
+                                                .child(label),
+                                        )
+                                    }),
+                            )
+                    })
+                    .when(!detailed, |content| {
+                        content.child(
                             div()
-                                .h(px(18.0))
-                                .w_full()
+                                .h(px(34.0))
                                 .flex()
                                 .items_center()
+                                .gap_1()
+                                .line_height(px(34.0))
                                 .whitespace_nowrap()
-                                .text_xs()
-                                .text_color(rgb(faint()))
-                                .child(
-                                    div()
-                                        .min_w(px(0.0))
-                                        .overflow_hidden()
-                                        .text_ellipsis()
-                                        .child(project_name.to_string()),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_color(rgb(state_color))
-                                        .child(state_label),
-                                ),
+                                .overflow_hidden()
+                                .text_sm()
+                                .font_weight(if active || has_unread {
+                                    gpui::FontWeight::SEMIBOLD
+                                } else {
+                                    gpui::FontWeight::NORMAL
+                                })
+                                .text_color(rgb(title_color))
+                                .when(has_workspace, |element| {
+                                    element.child(git_branch_icon(title_color))
+                                })
+                                .when(renaming, |element| {
+                                    element.child(self.thread_rename_input.clone())
+                                })
+                                .when(!renaming, |element| {
+                                    element.child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .line_clamp(1)
+                                            .child(title),
+                                    )
+                                }),
                         )
                     }),
             )
@@ -284,13 +365,19 @@ impl Dirigent {
                 div()
                     .id(("thread-hover-controls", id as usize))
                     .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .right(px(2.0))
+                    .right(px(if detailed { 8.0 } else { 2.0 }))
                     .flex()
                     .items_center()
-                    .rounded_r_md()
-                    .bg(rgb(surface_hover()))
+                    .when(detailed, |controls| {
+                        controls.bottom(px(3.0)).h(px(18.0)).gap_1()
+                    })
+                    .when(!detailed, |controls| {
+                        controls
+                            .top_0()
+                            .bottom_0()
+                            .rounded_r_md()
+                            .bg(rgb(surface_hover()))
+                    })
                     .when(!menu_open, |controls| {
                         controls
                             .invisible()
@@ -301,8 +388,7 @@ impl Dirigent {
                             div()
                                 .id(("quick-archive-thread", id as usize))
                                 .group(archive_group.clone())
-                                .w(px(26.0))
-                                .h_full()
+                                .size(px(if detailed { 18.0 } else { 26.0 }))
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -326,8 +412,7 @@ impl Dirigent {
                         div()
                             .id(("thread-menu-trigger", id as usize))
                             .group(menu_group.clone())
-                            .h(px(26.0))
-                            .px_2()
+                            .size(px(if detailed { 18.0 } else { 26.0 }))
                             .flex()
                             .items_center()
                             .justify_center()

@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::{
     app::{Dirigent, KeyboardMode, SidebarMenu},
-    model::{HarnessStatus, Id},
+    model::{HarnessStatus, Id, WorkspaceBackend},
     theme::{
         blue, border, faint, muted, orange, red, rgb, surface, surface_hover, theme_text, yellow,
     },
@@ -55,6 +55,10 @@ fn grip_vertical_icon(color: u32) -> impl IntoElement {
 
 fn git_branch_icon(color: u32) -> impl IntoElement {
     sidebar_icon("icon/git-branch.svg", color)
+}
+
+fn git_graph_icon(color: u32) -> impl IntoElement {
+    sidebar_icon("icon/git-graph.svg", color)
 }
 
 fn plus_icon(color: u32) -> impl IntoElement {

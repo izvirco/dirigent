@@ -58,9 +58,16 @@ impl Dirigent {
             .find(|workspace| workspace.id == workspace_id)
     }
 
+    pub(crate) fn repository_snapshot_for_project(
+        &self,
+        project_id: Id,
+    ) -> Option<&RepositorySnapshot> {
+        self.repository_snapshots.get(&project_id)
+    }
+
     pub(crate) fn repository_snapshot_for_composer(&self) -> Option<&RepositorySnapshot> {
         self.selected_project
-            .and_then(|project_id| self.repository_snapshots.get(&project_id))
+            .and_then(|project_id| self.repository_snapshot_for_project(project_id))
     }
 
     pub(crate) fn choose_new_workspace(&mut self) {
