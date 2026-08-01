@@ -352,7 +352,10 @@ impl Dirigent {
                 );
                 self.send_project_value(project_id, json!({"type":"get_available_models"}));
             }
-            Err(error) => self.banner = Some(error),
+            Err(error) => {
+                tracing::error!(error = %error, project_id, "could not start Pi project probe");
+                self.banner = Some(error);
+            }
         }
     }
     pub(super) fn send_project_value(&mut self, project_id: Id, value: Value) -> bool {
@@ -363,6 +366,7 @@ impl Dirigent {
             .ok_or_else(|| "pi project setup process is not running".to_string())
             .and_then(|(_, process)| process.send(value));
         if let Err(error) = result {
+            tracing::error!(error = %error, project_id, "could not send Pi project command");
             self.banner = Some(error);
             false
         } else {

@@ -358,6 +358,7 @@ impl Dirigent {
         cx.notify();
     }
     pub(super) fn fail_pending_edit(&mut self, message: String) {
+        tracing::error!(error = %message, "message edit failed");
         self.banner = Some(message);
         self.pending_edit_submit = None;
         if let Some(edit) = self.editing_message.as_mut() {
@@ -426,6 +427,7 @@ impl Dirigent {
         self.sync_conversation_list(index, None);
     }
     pub(super) fn fail_pending_fork(&mut self, harness_id: Id, message: String) {
+        tracing::error!(error = %message, harness_id, "thread fork failed");
         let source_harness_id = self
             .pending_forks
             .remove(&harness_id)

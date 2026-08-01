@@ -54,6 +54,10 @@ pub(crate) fn state_database_path() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("state.sqlite3"))
 }
 
+pub(crate) fn logs_directory() -> Result<PathBuf, String> {
+    Ok(state_directory()?.join("logs"))
+}
+
 // Legacy: Remove once all users have migrated
 pub(crate) fn legacy_state_path() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("state.json"))

@@ -118,17 +118,24 @@ impl Dirigent {
         else {
             return;
         };
-        if let Ok(process) =
-            TitleProcess::spawn(harness_id, &project_path, prompt, self.title_events.clone())
-        {
-            self.title_processes.insert(harness_id, process);
+        match TitleProcess::spawn(harness_id, &project_path, prompt, self.title_events.clone()) {
+            Ok(process) => {
+                self.title_processes.insert(harness_id, process);
+            }
+            Err(error) => {
+                tracing::error!(error = %error, harness_id, "could not start title generation");
+            }
         }
     }
 
     pub(super) fn handle_title_generation_event(&mut self, event: TitleGenerationEvent) {
         self.title_processes.remove(&event.harness_id);
-        let Ok(title) = event.result else {
-            return;
+        let title = match event.result {
+            Ok(title) => title,
+            Err(error) => {
+                tracing::error!(error = %error, harness_id = event.harness_id, "title generation failed");
+                return;
+            }
         };
         let Some(index) = self
             .harnesses
@@ -429,6 +436,7 @@ impl Dirigent {
                 return;
             }
             Err(error) => {
+                tracing::error!(error = %error, path = %path.display(), "could not open project directory");
                 self.banner = Some(format!("Cannot open {}: {error}", path.display()));
                 cx.notify();
                 return;
@@ -468,7 +476,10 @@ impl Dirigent {
             Ok(picker) => {
                 self.project_file_pickers.insert(id, picker);
             }
-            Err(error) => self.banner = Some(error),
+            Err(error) => {
+                tracing::error!(error = %error, project_id = id, "could not start project file index");
+                self.banner = Some(error);
+            }
         }
         self.collapsed_projects.insert(id);
         self.selected_project = Some(id);

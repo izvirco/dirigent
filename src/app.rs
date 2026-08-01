@@ -436,15 +436,19 @@ impl Dirigent {
             .unwrap_or_else(|error| panic!("could not initialize persistent state: {error}"));
         let (config_dir, appearance, mut config_error) = match theme::initialize() {
             Ok((config_dir, appearance)) => (Some(config_dir), appearance, None),
-            Err(error) => (
-                platform::config_dir().ok(),
-                theme::default_appearance(),
-                Some(error),
-            ),
+            Err(error) => {
+                tracing::error!(error = %error, "could not initialize theme configuration");
+                (
+                    platform::config_dir().ok(),
+                    theme::default_appearance(),
+                    Some(error),
+                )
+            }
         };
         if let Some(config_dir) = config_dir {
             let (config_tx, config_rx) = async_channel::unbounded();
             if let Err(error) = theme::watch(config_dir.clone(), config_tx) {
+                tracing::error!(error = %error, path = %config_dir.display(), "could not watch theme configuration");
                 config_error = Some(error);
             } else {
                 cx.spawn(async move |this, cx| {
@@ -455,6 +459,7 @@ impl Dirigent {
                                 match appearance {
                                     Ok(appearance) => this.apply_appearance(appearance, cx),
                                     Err(error) => {
+                                        tracing::error!(error = %error, "could not reload theme configuration");
                                         this.config_error = Some(error.clone());
                                         this.banner = Some(error);
                                     }
@@ -649,6 +654,7 @@ impl Dirigent {
         let pi_bridge_extension = match platform::materialize_pi_bridge() {
             Ok(path) => Some(path),
             Err(error) => {
+                tracing::error!(error = %error, "could not materialize Pi bridge extension");
                 if banner.is_none() {
                     banner = Some(error);
                 }
@@ -668,12 +674,16 @@ impl Dirigent {
         for workspace in &mut workspaces {
             workspace.state = match crate::vcs::validate_workspace(workspace) {
                 Ok(()) => WorkspaceState::Ready,
-                Err(error) => WorkspaceState::Failed(error),
+                Err(error) => {
+                    tracing::error!(error = %error, workspace_id = %workspace.id, "managed workspace validation failed");
+                    WorkspaceState::Failed(error)
+                }
             };
         }
         let session_cache = match SessionCache::open() {
             Ok(cache) => Some(cache),
             Err(error) => {
+                tracing::error!(error = %error, "could not open session cache");
                 if banner.is_none() {
                     banner = Some(error);
                 }
@@ -695,6 +705,7 @@ impl Dirigent {
                         match parse_cached_draft_images(&cached.composer_images_json) {
                             Ok(images) => harness.composer_draft_images = images,
                             Err(error) => {
+                                tracing::error!(error = %error, harness_id = harness.id, "could not restore cached draft images");
                                 if banner.is_none() {
                                     banner = Some(error);
                                 }
@@ -709,6 +720,7 @@ impl Dirigent {
                     }
                     Ok(None) => {}
                     Err(error) => {
+                        tracing::error!(error = %error, harness_id = harness.id, "could not load cached session");
                         if banner.is_none() {
                             banner = Some(error);
                         }
@@ -722,6 +734,7 @@ impl Dirigent {
                             available_models_by_project.insert(project.id, models);
                         }
                         Err(error) => {
+                            tracing::error!(error = %error, project_id = project.id, "could not decode cached models");
                             if banner.is_none() {
                                 banner = Some(format!("could not decode cached models: {error}"));
                             }
@@ -729,6 +742,7 @@ impl Dirigent {
                     },
                     Ok(None) => {}
                     Err(error) => {
+                        tracing::error!(error = %error, project_id = project.id, "could not load cached models");
                         if banner.is_none() {
                             banner = Some(error);
                         }
@@ -743,6 +757,7 @@ impl Dirigent {
                         );
                     }
                     Err(error) => {
+                        tracing::error!(error = %error, project_id = project.id, "could not load cached thinking levels");
                         if banner.is_none() {
                             banner = Some(error);
                         }
@@ -778,8 +793,12 @@ impl Dirigent {
                 Ok(picker) => {
                     project_file_pickers.insert(project.id, picker);
                 }
-                Err(error) if banner.is_none() => banner = Some(error),
-                Err(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, project_id = project.id, "could not start project file index");
+                    if banner.is_none() {
+                        banner = Some(error);
+                    }
+                }
             }
         }
         let mut workspace_file_pickers = HashMap::new();
@@ -796,8 +815,12 @@ impl Dirigent {
                 Ok(picker) => {
                     workspace_file_pickers.insert(workspace.id.clone(), picker);
                 }
-                Err(error) if banner.is_none() => banner = Some(error),
-                Err(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, workspace_id = %workspace.id, "could not start workspace file index");
+                    if banner.is_none() {
+                        banner = Some(error);
+                    }
+                }
             }
         }
 
@@ -1016,11 +1039,13 @@ impl Dirigent {
             &self.collapsed_projects,
             self.sidebar_width,
         ) {
+            tracing::error!(error = %error, "could not persist application state");
             self.banner = Some(error);
         }
     }
 
     fn report_cache_error(&mut self, error: String) {
+        tracing::error!(error = %error, "session cache operation failed");
         if self.banner.is_none() {
             self.banner = Some(error);
         }

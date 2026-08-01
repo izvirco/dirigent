@@ -2,6 +2,12 @@ use super::*;
 
 impl Dirigent {
     pub(super) fn fail_harness(&mut self, index: usize, error: String) {
+        tracing::error!(
+            error = %error,
+            harness_id = self.harnesses[index].id,
+            generation = self.harnesses[index].process_generation,
+            "harness failed"
+        );
         self.harnesses[index].status = HarnessStatus::Failed;
         self.harnesses[index].run_started_at = None;
         self.harnesses[index].attention_required = false;
@@ -12,6 +18,7 @@ impl Dirigent {
         self.sync_conversation_list(index, None);
     }
     pub(super) fn handle_runtime_error(&mut self, target: RuntimeTarget, message: String) {
+        tracing::error!(error = %message, ?target, "Pi runtime error");
         match target {
             RuntimeTarget::Harness(harness_id, generation) => {
                 if let Some(index) = self.harnesses.iter().position(|harness| {
@@ -174,6 +181,7 @@ impl Dirigent {
                     .get("error")
                     .and_then(Value::as_str)
                     .unwrap_or("A pi extension failed.");
+                tracing::error!(error, harness_id, "Pi extension failed");
                 self.harnesses[index].messages.push(Message::error(error));
                 None
             }
@@ -276,6 +284,12 @@ impl Dirigent {
             .and_then(Value::as_str)
             .unwrap_or("Unknown error");
         let message = format!("Automatic retry failed after {attempt} attempt(s): {error}");
+        tracing::error!(
+            error,
+            attempt,
+            harness_id = self.harnesses[index].id,
+            "automatic retry failed"
+        );
         self.harnesses[index].status = HarnessStatus::Failed;
         self.harnesses[index].error = Some(message.clone());
         self.harnesses[index].messages.push(Message::error(message));
@@ -291,6 +305,7 @@ impl Dirigent {
         {
             return self.harnesses[index].messages.len().checked_sub(1);
         }
+        tracing::error!(error = %error, harness_id = self.harnesses[index].id, "assistant request failed");
         self.harnesses[index].error = Some(error.clone());
         self.harnesses[index].messages.push(Message::error(error));
         self.harnesses[index].messages.len().checked_sub(1)
@@ -433,6 +448,14 @@ impl Dirigent {
         let detail = value
             .get("result")
             .and_then(|result| tool_result_detail(name, result, is_error));
+        if is_error {
+            tracing::error!(
+                harness_id = self.harnesses[index].id,
+                tool = name,
+                error = detail.as_deref().unwrap_or("tool execution failed"),
+                "Pi tool execution failed"
+            );
+        }
         let message_index = self.harnesses[index]
             .messages
             .iter()
@@ -456,13 +479,13 @@ impl Dirigent {
             return;
         }
         if value.get("success").and_then(Value::as_bool) == Some(false) {
-            self.banner = Some(
-                value
-                    .get("error")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Pi could not load project settings.")
-                    .to_string(),
-            );
+            let error = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("Pi could not load project settings.")
+                .to_string();
+            tracing::error!(error = %error, project_id, "Pi project request failed");
+            self.banner = Some(error);
             return;
         }
         match value.get("command").and_then(Value::as_str) {
@@ -602,6 +625,13 @@ impl Dirigent {
                 .get("error")
                 .and_then(Value::as_str)
                 .unwrap_or("Pi rejected a command.");
+            tracing::error!(
+                error,
+                harness_id = self.harnesses[index].id,
+                command = command.unwrap_or("unknown"),
+                request_id = request_id.unwrap_or("unknown"),
+                "Pi command failed"
+            );
             self.harnesses[index].messages.push(Message::error(error));
             return;
         }

@@ -22,6 +22,7 @@ impl Dirigent {
                 self.repository_snapshots.remove(&project_id);
             }
             Err(error) => {
+                tracing::error!(error = %error, project_id, "could not inspect project repository");
                 self.repository_snapshots.remove(&project_id);
                 self.banner = Some(error);
             }
@@ -190,6 +191,7 @@ impl Dirigent {
                 let _ = events.send_blocking(event);
             })
         {
+            tracing::error!(error = %error, harness_id, "could not start workspace removal");
             self.deleting_workspace_harnesses.remove(&harness_id);
             self.banner = Some(format!("could not start workspace removal: {error}"));
         }
@@ -332,7 +334,10 @@ impl Dirigent {
                         self.workspace_file_pickers
                             .insert(workspace_id.clone(), picker);
                     }
-                    Err(error) => self.banner = Some(error),
+                    Err(error) => {
+                        tracing::error!(error = %error, workspace_id = %workspace_id, "could not start workspace file index");
+                        self.banner = Some(error);
+                    }
                 }
                 self.persist();
                 let harness_ids = self
@@ -346,6 +351,7 @@ impl Dirigent {
                 }
             }
             WorkspaceEvent::Failed(workspace_id, error) => {
+                tracing::error!(error = %error, workspace_id = %workspace_id, "managed workspace creation failed");
                 if let Some(workspace) = self
                     .workspaces
                     .iter_mut()
@@ -379,6 +385,7 @@ impl Dirigent {
                 self.persist();
             }
             WorkspaceEvent::RemoveFailed { harness_id, error } => {
+                tracing::error!(error = %error, harness_id, "managed workspace removal failed");
                 self.deleting_workspace_harnesses.remove(&harness_id);
                 self.banner = Some(error);
                 self.persist();
@@ -565,6 +572,7 @@ impl Dirigent {
             return;
         }
         if let Err(error) = fs::create_dir_all(&path) {
+            tracing::error!(error = %error, path = %path.display(), "could not create workspace directory");
             self.banner = Some(format!("Could not create {}: {error}", path.display()));
             cx.notify();
             return;
@@ -572,6 +580,7 @@ impl Dirigent {
         let path = match fs::canonicalize(&path) {
             Ok(path) => path,
             Err(error) => {
+                tracing::error!(error = %error, path = %path.display(), "could not open workspace directory");
                 self.banner = Some(format!("Could not open {}: {error}", path.display()));
                 cx.notify();
                 return;

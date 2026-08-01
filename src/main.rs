@@ -6,6 +6,7 @@
 mod app;
 mod assets;
 mod cache;
+mod logging;
 mod markdown;
 mod model;
 mod platform;
@@ -47,6 +48,16 @@ fn load_bundled_fonts(cx: &App) {
 }
 
 fn main() {
+    let _logging_guard = match logging::initialize() {
+        Ok(guard) => Some(guard),
+        Err(error) => {
+            logging::initialize_console();
+            tracing::error!(error = %error, "file logging is unavailable");
+            None
+        }
+    };
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Dirigent");
+
     application().with_assets(Assets).run(|cx: &mut App| {
         cx.set_app_identity("dirigent", "Dirigent");
         cx.set_cursor_hide_mode(CursorHideMode::Never);

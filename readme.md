@@ -4,34 +4,6 @@ Dirigent is a native desktop workspace for running and managing multiple [Pi cod
 
 Dirigent requires Pi 0.82.1 or newer. It launches Pi with a bundled, private extension that exposes session-tree navigation to the UI; nothing is installed into the user's Pi configuration.
 
-## Configuration and themes
-
-On first launch, Dirigent creates `~/.config/dirigent/config.toml` and sample themes in `~/.config/dirigent/theme/`. Set `theme` in `config.toml` to a theme filename without `.toml`. Set `font` to any installed font family, for example `font = "Iosevka"`. Changes to the config or selected theme are reloaded automatically.
-
-Theme colors accept `#RRGGBB` (opaque) or `#RRGGBBAA`, with the final byte controlling opacity. For example, `surface = "#15181e80"` uses 50% opacity. The equivalent `0xRRGGBB` and `0xRRGGBBAA` forms are also accepted. When `background` has an alpha value below `ff`, Dirigent exposes a transparent window surface to the compositor.
-
-Niri can blur behind the transparent surface with a window rule:
-
-```kdl
-blur {
-    on
-}
-window-rule {
-    match app-id="^dirigent$"
-    background-effect {
-        blur true
-    }
-}
-```
-
-Dirigent follows `XDG_CONFIG_HOME` on Unix. On Windows, configuration is stored in `%APPDATA%\dirigent`.
-
-## Managed workspaces
-
-The composer shows the current JJ change ID or Git branch. New threads can create an isolated JJ workspace alongside the current change or a Git worktree on a generated `dirigent/<id>` branch. Dirigent starts Pi, file indexing, and any enabled Nix development shell from the managed workspace.
-
-Managed workspaces are stored under `${XDG_DATA_HOME:-~/.local/share}/dirigent/workspace` on Unix and `%LOCALAPPDATA%\dirigent\workspace` on Windows. A project-specific parent directory can be selected from the project's **Settings** menu.
-
 ## Linux (Nix)
 
 ```
@@ -59,3 +31,4 @@ cargo run --release
 ```
 
 After that realize that you want to use NixOS
+

@@ -20,6 +20,9 @@ notify = "8"
 toml = "0.9"
 fastrand = "2.5"
 rust-embed = { version = "8", features = ["debug-embed", "include-exclude"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [build-dependencies]
 embed-resource = "3"
