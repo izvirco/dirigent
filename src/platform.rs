@@ -29,25 +29,34 @@ pub(crate) fn config_dir() -> Result<PathBuf, String> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub(crate) fn state_path() -> Result<PathBuf, String> {
+fn state_directory() -> Result<PathBuf, String> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(data_home).join("dirigent/v0/state.json"));
+        return Ok(PathBuf::from(data_home).join("dirigent/v0"));
     }
     let home = home_dir().ok_or_else(|| {
         "HOME and XDG_DATA_HOME are unset; cannot persist Dirigent state".to_string()
     })?;
-    Ok(home.join(".local/share/dirigent/v0/state.json"))
+    Ok(home.join(".local/share/dirigent/v0"))
 }
 
 #[cfg(target_os = "windows")]
-pub(crate) fn state_path() -> Result<PathBuf, String> {
+fn state_directory() -> Result<PathBuf, String> {
     let data_home = env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| home_dir().map(|home| home.join("AppData/Roaming")))
         .ok_or_else(|| {
             "APPDATA and USERPROFILE are unset; cannot persist Dirigent state".to_string()
         })?;
-    Ok(data_home.join("dirigent/v0/state.json"))
+    Ok(data_home.join("dirigent/v0"))
+}
+
+pub(crate) fn state_database_path() -> Result<PathBuf, String> {
+    Ok(state_directory()?.join("state.sqlite3"))
+}
+
+// Legacy: Remove once all users have migrated
+pub(crate) fn legacy_state_path() -> Result<PathBuf, String> {
+    Ok(state_directory()?.join("state.json"))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -96,10 +105,10 @@ pub(crate) fn cache_path() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn materialize_pi_bridge() -> Result<PathBuf, String> {
-    let state = state_path()?;
-    let directory = state
+    let database = state_database_path()?;
+    let directory = database
         .parent()
-        .ok_or_else(|| "Dirigent state path has no parent directory".to_string())?;
+        .ok_or_else(|| "Dirigent state database path has no parent directory".to_string())?;
     fs::create_dir_all(directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
     let path = directory.join("pi-bridge.ts");

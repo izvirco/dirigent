@@ -379,6 +379,7 @@ pub(crate) struct Dirigent {
     pub(crate) available_models: Vec<AvailableModel>,
     available_models_by_project: HashMap<Id, Vec<AvailableModel>>,
     available_thinking_levels: HashMap<(Id, String), Vec<String>>,
+    state_database: storage::StateDatabase,
     session_cache: Option<SessionCache>,
     pub(crate) draft_model: Option<String>,
     pub(crate) draft_thinking_level: Option<String>,
@@ -430,6 +431,9 @@ fn project_path_placeholder() -> &'static str {
 
 impl Dirigent {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        // Initialize and migrate persistent state before the rest of app startup reads from disk.
+        let (state_database, loaded) = storage::StateDatabase::open()
+            .unwrap_or_else(|error| panic!("could not initialize persistent state: {error}"));
         let (config_dir, appearance, mut config_error) = match theme::initialize() {
             Ok((config_dir, appearance)) => (Some(config_dir), appearance, None),
             Err(error) => (
@@ -641,25 +645,7 @@ impl Dirigent {
         })
         .detach();
 
-        let (loaded, mut banner) = match storage::load() {
-            Ok(state) => (state, None),
-            Err(error) => (
-                storage::LoadedState {
-                    projects: Vec::new(),
-                    harnesses: Vec::new(),
-                    workspaces: Vec::new(),
-                    next_id: 1,
-                    next_sidebar_order: 1,
-                    last_used_harness: None,
-                    collapsed_projects: HashSet::new(),
-                    sidebar_width: storage::DEFAULT_SIDEBAR_WIDTH,
-                },
-                Some(error),
-            ),
-        };
-        if banner.is_none() {
-            banner = config_error.clone();
-        }
+        let mut banner = config_error.clone();
         let pi_bridge_extension = match platform::materialize_pi_bridge() {
             Ok(path) => Some(path),
             Err(error) => {
@@ -966,6 +952,7 @@ impl Dirigent {
             available_models,
             available_models_by_project,
             available_thinking_levels,
+            state_database,
             session_cache,
             draft_model: None,
             draft_thinking_level: None,
@@ -1019,7 +1006,7 @@ impl Dirigent {
     }
 
     fn persist(&mut self) {
-        if let Err(error) = storage::save(
+        if let Err(error) = self.state_database.save(
             &self.projects,
             &self.harnesses,
             &self.workspaces,
