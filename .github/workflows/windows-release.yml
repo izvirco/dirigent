@@ -1,0 +1,84 @@
+name: Windows release
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  LILEX_VERSION: "2.700"
+  LILEX_SHA256: "34310edb4ba749f772d42b88e3eec4a6318527e75ceeaa96cfc556ee35366fbc"
+
+jobs:
+  build-windows:
+    name: Build Windows executable
+    runs-on: blacksmith-2vcpu-windows-2025
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Create build name
+        shell: pwsh
+        run: |
+          $versionMatch = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $versionMatch) {
+            throw "Could not read the package version from Cargo.toml"
+          }
+
+          $version = $versionMatch.Matches[0].Groups[1].Value
+          $timestamp = [DateTime]::UtcNow.ToString("yyyyMMdd_HHmm", [Globalization.CultureInfo]::InvariantCulture)
+          $buildName = "dirigent_${version}_${timestamp}"
+
+          "DIRIGENT_BUILD_NAME=$buildName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "DIRIGENT_ASSET_NAME=$buildName.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Building $buildName (UTC)"
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Rust build
+        uses: useblacksmith/rust-cache@v3
+
+      - name: Download Lilex
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "Lilex.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "Lilex"
+          $url = "https://github.com/mishamyrt/Lilex/releases/download/$env:LILEX_VERSION/Lilex.zip"
+
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualHash = (Get-FileHash -Path $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne $env:LILEX_SHA256) {
+            throw "Lilex archive checksum mismatch: expected $env:LILEX_SHA256, got $actualHash"
+          }
+
+          Expand-Archive -Path $archive -DestinationPath $destination -Force
+          $fontDirectory = Join-Path $destination "ttf"
+          "LILEX_FONT_DIR=$fontDirectory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build bundled release executable
+        run: cargo build --locked --release --features bundled-lilex
+
+      - name: Prepare build artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $executable = Join-Path "dist" $env:DIRIGENT_ASSET_NAME
+          Copy-Item target/release/dirigent.exe $executable
+          Copy-Item licenses/Lilex-OFL.txt dist/Lilex-OFL.txt
+
+          $checksum = (Get-FileHash -Path $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  $env:DIRIGENT_ASSET_NAME" | Set-Content -Path "$executable.sha256" -Encoding ascii
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.DIRIGENT_BUILD_NAME }}
+          path: dist/*
+          if-no-files-found: error
