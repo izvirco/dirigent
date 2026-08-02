@@ -135,6 +135,10 @@ pub(super) fn normalize_diff_spacing(diff: &str) -> String {
     detail
 }
 
+fn message_timestamp_ms(value: &Value) -> Option<u64> {
+    value.get("timestamp").and_then(Value::as_u64)
+}
+
 pub(super) fn tool_message(
     name: &str,
     args: &Value,
@@ -417,15 +421,15 @@ pub(super) fn push_parsed_message(
                     ),
                     Some("toolCall") => {
                         let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
-                        messages.push(
-                            tool_message(
-                                name,
-                                block.get("arguments").unwrap_or(&Value::Null),
-                                block.get("id").and_then(Value::as_str).map(str::to_string),
-                                false,
-                            )
-                            .with_entry_id(entry_id),
-                        );
+                        let mut message = tool_message(
+                            name,
+                            block.get("arguments").unwrap_or(&Value::Null),
+                            block.get("id").and_then(Value::as_str).map(str::to_string),
+                            false,
+                        )
+                        .with_entry_id(entry_id);
+                        message.set_tool_started_timestamp(message_timestamp_ms(value));
+                        messages.push(message);
                     }
                     _ => {}
                 }
@@ -452,6 +456,7 @@ pub(super) fn push_parsed_message(
             if detail.is_some() && (name != "write" || is_error || message.detail.is_none()) {
                 message.set_detail(detail);
             }
+            message.finish_tool(is_error, message_timestamp_ms(value));
         } else if let Some(message) = parse_message(value) {
             messages.push(message.with_entry_id(entry_id));
         }
@@ -489,6 +494,7 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
                 tool_expanded(name),
             );
             message.set_detail(tool_result_detail(name, value, is_error));
+            message.finish_tool(is_error, message_timestamp_ms(value));
             Some(message)
         }
         "bashExecution" => {

@@ -18,7 +18,8 @@ use crate::{
     app::{ComposerDropdown, Dirigent},
     model::{HarnessStatus, Message, MessageRole, RetryStatus},
     theme::{
-        blue, green, muted, orange, purple, rgb, surface_hover, theme_text, thinking_text, yellow,
+        blue, green, muted, orange, purple, red, rgb, surface_hover, theme_text, thinking_text,
+        yellow,
     },
 };
 

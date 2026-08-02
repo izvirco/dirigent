@@ -461,12 +461,9 @@ impl Dirigent {
             .iter()
             .rposition(|message| message.tool_call_id.as_deref() == id)?;
         let message = &mut self.harnesses[index].messages[message_index];
-        message.set_running(false);
+        message.finish_tool(is_error, None);
         if detail.is_some() && (name != "write" || is_error || message.detail.is_none()) {
             message.set_detail(detail);
-        }
-        if is_error {
-            message.append_text(" · failed");
         }
         Some(message_index)
     }

@@ -86,6 +86,10 @@ pub(crate) struct Message {
     pub(crate) detail_colors: Vec<(Range<usize>, u32)>,
     pub(crate) tool_call_id: Option<String>,
     pub(crate) running: bool,
+    pub(crate) tool_started_at: Option<Instant>,
+    pub(crate) tool_duration: Option<Duration>,
+    pub(crate) tool_failed: bool,
+    tool_started_timestamp_ms: Option<u64>,
     pub(crate) expanded: bool,
     pub(crate) images: Vec<Arc<Image>>,
     pub(crate) detail_scroll: ScrollHandle,
@@ -107,6 +111,10 @@ impl Message {
             detail_colors: Vec::new(),
             tool_call_id: None,
             running: false,
+            tool_started_at: None,
+            tool_duration: None,
+            tool_failed: false,
+            tool_started_timestamp_ms: None,
             expanded: false,
             images: Vec::new(),
             detail_scroll: ScrollHandle::new(),
@@ -124,6 +132,7 @@ impl Message {
         let mut message = Self::new(MessageRole::Tool, text);
         message.tool_call_id = tool_call_id;
         message.running = running;
+        message.tool_started_at = running.then(Instant::now);
         message.expanded = expanded;
         message
     }
@@ -172,11 +181,35 @@ impl Message {
     }
 
     pub(crate) fn set_running(&mut self, running: bool) {
+        if self.role == MessageRole::Tool {
+            if running && !self.running {
+                self.tool_started_at = Some(Instant::now());
+                self.tool_duration = None;
+                self.tool_failed = false;
+            } else if !running && self.running {
+                self.tool_duration = self.tool_started_at.map(|started_at| started_at.elapsed());
+            }
+        }
         self.running = running;
         if running {
             self.markdown = None;
         } else {
             self.refresh_markdown_cache();
+        }
+    }
+
+    pub(crate) fn set_tool_started_timestamp(&mut self, timestamp_ms: Option<u64>) {
+        self.tool_started_timestamp_ms = timestamp_ms;
+    }
+
+    pub(crate) fn finish_tool(&mut self, failed: bool, finished_timestamp_ms: Option<u64>) {
+        self.set_running(false);
+        self.tool_failed = failed;
+        if self.tool_duration.is_none() {
+            self.tool_duration = self
+                .tool_started_timestamp_ms
+                .zip(finished_timestamp_ms)
+                .map(|(started, finished)| Duration::from_millis(finished.saturating_sub(started)));
         }
     }
 

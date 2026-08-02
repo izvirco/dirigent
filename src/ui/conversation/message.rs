@@ -228,6 +228,31 @@ impl Dirigent {
                         cx,
                     )
                 };
+                let timer = if message.running {
+                    message.tool_started_at.map(|started_at| {
+                        div()
+                            .ml_2()
+                            .flex_none()
+                            .text_color(rgb(blue()))
+                            .with_animation(
+                                format!("tool-timer-{index}"),
+                                Animation::new(Duration::from_secs(1)).repeat(),
+                                move |timer, _| {
+                                    timer.child(format_working_duration(started_at.elapsed()))
+                                },
+                            )
+                            .into_any_element()
+                    })
+                } else {
+                    message.tool_duration.map(|duration| {
+                        div()
+                            .ml_2()
+                            .flex_none()
+                            .text_color(rgb(if message.tool_failed { red() } else { muted() }))
+                            .child(format_working_duration(duration))
+                            .into_any_element()
+                    })
+                };
                 div()
                     .id(("tool-message", index))
                     .relative()
@@ -273,6 +298,7 @@ impl Dirigent {
                                 }
                             }))
                             .child(div().min_w(px(0.0)).flex_1().child(label))
+                            .when_some(timer, |element, timer| element.child(timer))
                             .child(self.render_message_actions(
                                 message,
                                 index,

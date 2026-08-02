@@ -378,6 +378,33 @@ fn restores_tool_commands_with_collapsed_output() {
 }
 
 #[test]
+fn restores_tool_duration_and_failure_without_changing_the_label() {
+    let messages = parse_messages(&[
+        json!({
+            "role":"assistant",
+            "timestamp":1_000,
+            "content":[{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"false"}}]
+        }),
+        json!({
+            "role":"toolResult",
+            "toolCallId":"call-1",
+            "toolName":"bash",
+            "content":"exit status 1",
+            "isError":true,
+            "timestamp":4_500
+        }),
+    ]);
+
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "false");
+    assert_eq!(
+        messages[0].tool_duration,
+        Some(Duration::from_millis(3_500))
+    );
+    assert!(messages[0].tool_failed);
+}
+
+#[test]
 fn restores_write_content_instead_of_success_message() {
     let messages = parse_messages(&[
         json!({
