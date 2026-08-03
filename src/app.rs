@@ -40,7 +40,7 @@ use branching::*;
 
 use crate::{
     cache::SessionCache,
-    diff::{DiffSelectionReference, DiffViewMode, TurnDiffStatus},
+    diff::{DiffScope, DiffSelectionReference, DiffViewMode, TurnDiff, TurnDiffStatus},
     model::{
         CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
         Message, MessageRole, Project, RetryStatus, WorkspaceState,
@@ -347,9 +347,12 @@ pub(crate) struct Dirigent {
     pub(crate) diff_sidebar_open: bool,
     pub(crate) diff_sidebar_width: f32,
     pub(crate) diff_view_mode: DiffViewMode,
+    pub(crate) diff_scope: DiffScope,
     pub(crate) selected_diff_turn: Option<(Id, u64)>,
-    pub(crate) diff_scroll: ScrollHandle,
-    pub(crate) diff_turn_scroll: ScrollHandle,
+    pub(crate) diff_turn_dropdown_open: bool,
+    pub(crate) diff_list: ListState,
+    pub(crate) diff_display_key: Option<(Id, u64, DiffScope)>,
+    pub(crate) diff_display: Option<TurnDiff>,
     pub(crate) diff_code_scrolls: std::cell::RefCell<HashMap<String, ScrollHandle>>,
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) expanded_archived_projects: HashSet<Id>,
@@ -958,9 +961,13 @@ impl Dirigent {
             diff_sidebar_open,
             diff_sidebar_width: diff_sidebar_width.clamp(420.0, 960.0),
             diff_view_mode,
+            diff_scope: DiffScope::Cumulative,
             selected_diff_turn: None,
-            diff_scroll: ScrollHandle::new(),
-            diff_turn_scroll: ScrollHandle::new(),
+            diff_turn_dropdown_open: false,
+            diff_list: ListState::new(0, ListAlignment::Top, px(700.0))
+                .with_uniform_item_height(px(300.0)),
+            diff_display_key: None,
+            diff_display: None,
             diff_code_scrolls: std::cell::RefCell::new(HashMap::new()),
             collapsed_projects,
             expanded_archived_projects: HashSet::new(),
@@ -1098,6 +1105,7 @@ impl Dirigent {
             + usize::from(self.conversation_list_working);
         self.conversation_list
             .remeasure_items(0..conversation_items);
+        self.diff_display_key = None;
 
         let inputs = self.composer_inputs.values().cloned().chain([
             self.project_input.clone(),
@@ -1210,12 +1218,15 @@ impl Render for Dirigent {
                 }),
             )
             .on_click(cx.listener(|this, _, _, cx| {
-                if this.composer_dropdown.take().is_some() {
+                let changed = this.composer_dropdown.take().is_some()
+                    | std::mem::take(&mut this.diff_turn_dropdown_open);
+                if changed {
                     cx.notify();
                 }
             }))
             .when(
                 self.composer_dropdown.is_some()
+                    || self.diff_turn_dropdown_open
                     || self.sidebar_menu.is_some()
                     || self.path_completion.is_some(),
                 |element| {
@@ -1228,6 +1239,7 @@ impl Render for Dirigent {
                                 .size_full()
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let changed = this.composer_dropdown.take().is_some()
+                                        | std::mem::take(&mut this.diff_turn_dropdown_open)
                                         | this.sidebar_menu.take().is_some()
                                         | this.path_completion.take().is_some();
                                     if changed {

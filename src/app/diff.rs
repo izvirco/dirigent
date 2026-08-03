@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::diff::{self, DiffViewMode, TurnDiffStatus};
+use crate::diff::{self, DiffScope, DiffViewMode, TurnDiffStatus};
 
 impl Dirigent {
     fn persist_diff_sidebar(&mut self) {
@@ -72,6 +72,7 @@ impl Dirigent {
 
     pub(crate) fn toggle_diff_sidebar(&mut self) {
         self.diff_sidebar_open = !self.diff_sidebar_open;
+        self.diff_turn_dropdown_open = false;
         if self.diff_sidebar_open {
             self.select_latest_diff_turn();
         }
@@ -81,6 +82,7 @@ impl Dirigent {
     pub(crate) fn close_diff_sidebar(&mut self) {
         if self.diff_sidebar_open {
             self.diff_sidebar_open = false;
+            self.diff_turn_dropdown_open = false;
             self.persist_diff_sidebar();
         }
     }
@@ -96,14 +98,30 @@ impl Dirigent {
     pub(crate) fn set_diff_view_mode(&mut self, mode: DiffViewMode) {
         if self.diff_view_mode != mode {
             self.diff_view_mode = mode;
+            self.diff_list.remeasure();
             self.persist_diff_sidebar();
         }
+    }
+
+    pub(crate) fn set_diff_scope(&mut self, scope: DiffScope) {
+        if self.diff_scope != scope {
+            self.diff_scope = scope;
+            self.diff_turn_dropdown_open = false;
+            self.diff_display_key = None;
+            self.thread_text_selection = None;
+        }
+    }
+
+    pub(crate) fn toggle_diff_turn_dropdown(&mut self) {
+        self.diff_turn_dropdown_open = !self.diff_turn_dropdown_open;
     }
 
     pub(crate) fn select_diff_turn(&mut self, turn_id: u64) {
         if let Some(harness_id) = self.selected_harness {
             self.selected_diff_turn = Some((harness_id, turn_id));
-            self.diff_scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            self.diff_turn_dropdown_open = false;
+            self.diff_display_key = None;
+            self.thread_text_selection = None;
         }
     }
 
@@ -113,9 +131,53 @@ impl Dirigent {
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
         else {
             self.selected_diff_turn = None;
+            self.diff_display_key = None;
             return;
         };
         self.selected_diff_turn = harness.turn_diffs.last().map(|turn| (harness.id, turn.id));
+        self.diff_display_key = None;
+    }
+
+    pub(crate) fn sync_diff_display(&mut self) {
+        let Some(harness) = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+        else {
+            if self.diff_display.take().is_some() {
+                self.diff_list.reset(0);
+            }
+            self.diff_display_key = None;
+            return;
+        };
+        let Some(turn_id) = self.selected_diff_turn_id() else {
+            if self.diff_display.take().is_some() {
+                self.diff_list.reset(0);
+            }
+            self.diff_display_key = None;
+            return;
+        };
+        let key = (harness.id, turn_id, self.diff_scope);
+        if self.diff_display_key == Some(key) {
+            return;
+        }
+        let Some(index) = harness
+            .turn_diffs
+            .iter()
+            .position(|turn| turn.id == turn_id)
+        else {
+            return;
+        };
+        self.diff_display = match self.diff_scope {
+            DiffScope::Cumulative => diff::combine_turn_diffs(&harness.turn_diffs[..=index]),
+            DiffScope::Turn => Some(harness.turn_diffs[index].clone()),
+        };
+        self.diff_display_key = Some(key);
+        self.diff_list.reset_with_uniform_height(
+            self.diff_display
+                .as_ref()
+                .map_or(0, |turn| turn.files.len()),
+            px(300.0),
+        );
     }
 
     pub(crate) fn selected_diff_turn_id(&self) -> Option<u64> {
@@ -156,6 +218,9 @@ impl Dirigent {
         self.harnesses[index]
             .turn_diffs
             .retain(|turn| turn.prompt == "Agent turn" || prompts.contains(&turn.prompt));
+        if self.selected_harness == Some(self.harnesses[index].id) {
+            self.diff_display_key = None;
+        }
     }
 
     pub(crate) fn add_diff_selection_to_composer(&mut self, cx: &mut Context<Self>) {

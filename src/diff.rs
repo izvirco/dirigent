@@ -29,6 +29,12 @@ pub(crate) enum DiffViewMode {
     Split,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DiffScope {
+    Cumulative,
+    Turn,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct DiffSelectionReference {
     pub(crate) turn_id: u64,
@@ -99,6 +105,10 @@ pub(crate) struct FileDiff {
     pub(crate) new_text: Option<String>,
     pub(crate) old_mode: u32,
     pub(crate) new_mode: u32,
+    #[serde(default)]
+    pub(crate) old_exists: Option<bool>,
+    #[serde(default)]
+    pub(crate) new_exists: Option<bool>,
     pub(crate) hunks: Vec<DiffHunk>,
     pub(crate) additions: usize,
     pub(crate) deletions: usize,
@@ -143,6 +153,167 @@ impl TurnDiff {
             file.refresh_highlights();
         }
     }
+}
+
+#[derive(Clone)]
+struct CombinedFileVersion {
+    exists: bool,
+    text: Option<String>,
+    mode: u32,
+    highlights: Vec<SyntaxSpan>,
+    opaque_kind: Option<FileDiffKind>,
+    message: Option<String>,
+}
+
+#[derive(Clone)]
+struct CombinedFile {
+    original_path: String,
+    current_path: String,
+    old: CombinedFileVersion,
+    new: CombinedFileVersion,
+}
+
+fn combined_version(file: &FileDiff, old: bool) -> CombinedFileVersion {
+    let exists = if old {
+        file.old_exists.unwrap_or(file.kind != FileDiffKind::Added)
+    } else {
+        file.new_exists
+            .unwrap_or(file.kind != FileDiffKind::Deleted)
+    };
+    CombinedFileVersion {
+        exists,
+        text: if old {
+            file.old_text.clone()
+        } else {
+            file.new_text.clone()
+        },
+        mode: if old { file.old_mode } else { file.new_mode },
+        highlights: if old {
+            file.old_highlights.clone()
+        } else {
+            file.new_highlights.clone()
+        },
+        opaque_kind: matches!(file.kind, FileDiffKind::Binary | FileDiffKind::Omitted)
+            .then_some(file.kind),
+        message: file.message.clone(),
+    }
+}
+
+fn finish_combined_file(file: CombinedFile) -> Option<FileDiff> {
+    if !file.old.exists && !file.new.exists {
+        return None;
+    }
+    let renamed = file.old.exists && file.new.exists && file.original_path != file.current_path;
+    let text_available = (!file.old.exists || file.old.text.is_some())
+        && (!file.new.exists || file.new.text.is_some());
+    let unchanged = file.old.exists
+        && file.new.exists
+        && !renamed
+        && file.old.mode == file.new.mode
+        && text_available
+        && file.old.text == file.new.text;
+    if unchanged {
+        return None;
+    }
+
+    let requested_kind = match (file.old.exists, file.new.exists, renamed) {
+        (false, true, _) => FileDiffKind::Added,
+        (true, false, _) => FileDiffKind::Deleted,
+        (true, true, true) => FileDiffKind::Renamed,
+        (true, true, false) if file.old.text == file.new.text => FileDiffKind::ModeChanged,
+        _ => FileDiffKind::Modified,
+    };
+    let opaque_kind = file.old.opaque_kind.or(file.new.opaque_kind);
+    let (kind, hunks, additions, deletions, message) = if let Some(kind) = opaque_kind {
+        (
+            kind,
+            Vec::new(),
+            0,
+            0,
+            file.new.message.or(file.old.message),
+        )
+    } else if requested_kind == FileDiffKind::ModeChanged {
+        (
+            requested_kind,
+            Vec::new(),
+            0,
+            0,
+            Some(format!(
+                "File mode changed {:o} → {:o}",
+                file.old.mode, file.new.mode
+            )),
+        )
+    } else {
+        let (hunks, additions, deletions) = diff_text(
+            file.old.text.as_deref().unwrap_or_default(),
+            file.new.text.as_deref().unwrap_or_default(),
+        );
+        (requested_kind, hunks, additions, deletions, None)
+    };
+
+    Some(FileDiff {
+        path: file.current_path.clone(),
+        old_path: renamed.then_some(file.original_path),
+        kind,
+        old_text: file.old.exists.then_some(file.old.text).flatten(),
+        new_text: file.new.exists.then_some(file.new.text).flatten(),
+        old_mode: file.old.mode,
+        new_mode: file.new.mode,
+        old_exists: Some(file.old.exists),
+        new_exists: Some(file.new.exists),
+        hunks,
+        additions,
+        deletions,
+        message,
+        old_highlights: file.old.highlights,
+        new_highlights: file.new.highlights,
+    })
+}
+
+/// Collapse consecutive per-turn snapshots into the net workspace change through the last turn.
+pub(crate) fn combine_turn_diffs(turns: &[TurnDiff]) -> Option<TurnDiff> {
+    let last = turns.last()?;
+    let mut combined = BTreeMap::<String, CombinedFile>::new();
+    for turn in turns {
+        for file in &turn.files {
+            let source_path = file.old_path.as_deref().unwrap_or(&file.path);
+            let old = combined
+                .remove(source_path)
+                .unwrap_or_else(|| CombinedFile {
+                    original_path: source_path.to_string(),
+                    current_path: source_path.to_string(),
+                    old: combined_version(file, true),
+                    new: combined_version(file, true),
+                });
+            let mut updated = old;
+            updated.current_path = file.path.clone();
+            updated.new = combined_version(file, false);
+            combined.insert(file.path.clone(), updated);
+        }
+    }
+
+    let mut files = combined
+        .into_values()
+        .filter_map(finish_combined_file)
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let additions = files.iter().map(|file| file.additions).sum();
+    let deletions = files.iter().map(|file| file.deletions).sum();
+    Some(TurnDiff {
+        id: last.id,
+        prompt: last.prompt.clone(),
+        started_at: turns
+            .first()
+            .map_or(last.started_at, |turn| turn.started_at),
+        finished_at: last.finished_at,
+        status: last.status,
+        error: files
+            .is_empty()
+            .then(|| "No net file changes through this turn.".into()),
+        files,
+        additions,
+        deletions,
+    })
 }
 
 #[derive(Debug)]
@@ -446,6 +617,8 @@ fn build_file_diff(
     old: Option<SnapshotFile>,
     new: Option<SnapshotFile>,
 ) -> FileDiff {
+    let old_exists = old.is_some();
+    let new_exists = new.is_some();
     let old_mode = old.as_ref().map_or(0, |file| file.mode);
     let new_mode = new.as_ref().map_or(0, |file| file.mode);
     let binary = old.as_ref().is_some_and(|file| file.binary)
@@ -505,6 +678,8 @@ fn build_file_diff(
         new_text,
         old_mode,
         new_mode,
+        old_exists: Some(old_exists),
+        new_exists: Some(new_exists),
         hunks,
         additions,
         deletions,
@@ -888,6 +1063,85 @@ mod tests {
                 .iter()
                 .any(|row| row.kind == DiffRowKind::Replaced)
         );
+    }
+
+    #[test]
+    fn combines_turns_into_the_net_change() {
+        let first = build_turn(
+            1,
+            "first".into(),
+            1,
+            TurnDiffStatus::Completed,
+            WorkspaceSnapshot {
+                files: BTreeMap::from([("file.txt".into(), snapshot_file("one\n"))]),
+            },
+            WorkspaceSnapshot {
+                files: BTreeMap::from([("file.txt".into(), snapshot_file("two\n"))]),
+            },
+        );
+        let second = build_turn(
+            2,
+            "second".into(),
+            2,
+            TurnDiffStatus::Completed,
+            WorkspaceSnapshot {
+                files: BTreeMap::from([("file.txt".into(), snapshot_file("two\n"))]),
+            },
+            WorkspaceSnapshot {
+                files: BTreeMap::from([("file.txt".into(), snapshot_file("three\n"))]),
+            },
+        );
+
+        let combined = combine_turn_diffs(&[first, second]).unwrap();
+        assert_eq!(combined.id, 2);
+        assert_eq!(combined.files.len(), 1);
+        assert_eq!(combined.files[0].old_text.as_deref(), Some("one\n"));
+        assert_eq!(combined.files[0].new_text.as_deref(), Some("three\n"));
+        assert_eq!((combined.additions, combined.deletions), (1, 1));
+    }
+
+    #[test]
+    fn cumulative_diff_omits_files_added_then_deleted() {
+        let mut added = build_file_diff(
+            "temporary.txt".into(),
+            None,
+            FileDiffKind::Added,
+            None,
+            Some(snapshot_file("temporary\n")),
+        );
+        added.refresh_highlights();
+        let mut deleted = build_file_diff(
+            "temporary.txt".into(),
+            None,
+            FileDiffKind::Deleted,
+            Some(snapshot_file("temporary\n")),
+            None,
+        );
+        deleted.refresh_highlights();
+        let turn = |id, files| TurnDiff {
+            id,
+            prompt: format!("turn {id}"),
+            started_at: id,
+            finished_at: id,
+            status: TurnDiffStatus::Completed,
+            additions: 1,
+            deletions: 1,
+            files,
+            error: None,
+        };
+
+        let combined = combine_turn_diffs(&[turn(1, vec![added]), turn(2, vec![deleted])]).unwrap();
+        assert!(combined.files.is_empty());
+    }
+
+    fn snapshot_file(text: &str) -> SnapshotFile {
+        SnapshotFile {
+            hash: blake3::hash(text.as_bytes()),
+            bytes: Some(text.as_bytes().to_vec()),
+            len: text.len() as u64,
+            mode: 0o100644,
+            binary: false,
+        }
     }
 
     #[test]

@@ -2,14 +2,16 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    ScrollHandle, SharedString, Window, div, prelude::*, px,
+    ScrollHandle, SharedString, Window, deferred, div, list, prelude::*, px,
 };
+
+use super::composer::dropdown_arrow;
 
 use crate::{
     app::Dirigent,
     diff::{
-        DiffHunk, DiffRowKind, DiffSelectionReference, DiffViewMode, FileDiff, FileDiffKind,
-        SyntaxSpan, TurnDiff, TurnDiffStatus,
+        DiffHunk, DiffRowKind, DiffScope, DiffSelectionReference, DiffViewMode, FileDiff,
+        FileDiffKind, SyntaxSpan, TurnDiff, TurnDiffStatus,
     },
     theme::{
         bg, blue, border, code_text, green, muted, orange, red, rgb, surface, surface_hover,
@@ -334,6 +336,34 @@ impl Dirigent {
             .into_any_element()
     }
 
+    fn render_diff_scope_button(
+        &self,
+        label: &'static str,
+        scope: DiffScope,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.diff_scope == scope;
+        div()
+            .id(format!("diff-scope-{label}"))
+            .h_full()
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_sm()
+            .whitespace_nowrap()
+            .text_xs()
+            .text_color(rgb(if selected { theme_text() } else { muted() }))
+            .when(selected, |element| element.bg(rgb(surface_hover())))
+            .hover(|style| style.bg(rgb(surface_hover())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.set_diff_scope(scope);
+                cx.notify();
+                cx.stop_propagation();
+            }))
+            .child(label)
+            .into_any_element()
+    }
+
     fn render_diff_turn_row(
         &self,
         turn: &TurnDiff,
@@ -391,6 +421,115 @@ impl Dirigent {
             .into_any_element()
     }
 
+    fn render_diff_turn_picker(
+        &self,
+        turns: &[TurnDiff],
+        active: bool,
+        selected_turn_id: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let open = self.diff_turn_dropdown_open;
+        let selected = selected_turn_id.and_then(|id| turns.iter().find(|turn| turn.id == id));
+        let label = selected
+            .map(|turn| format!("Turn {}", turn.id))
+            .unwrap_or_else(|| "No turns".into());
+
+        div()
+            .relative()
+            .min_w(px(74.0))
+            .max_w(px(118.0))
+            .flex_1()
+            .child(
+                div()
+                    .id("diff-turn-picker")
+                    .h(px(28.0))
+                    .w_full()
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(if open { blue() } else { border() }))
+                    .bg(rgb(surface()))
+                    .whitespace_nowrap()
+                    .text_xs()
+                    .text_color(rgb(theme_text()))
+                    .when(!turns.is_empty(), |element| {
+                        element
+                            .cursor_pointer()
+                            .hover(|style| style.bg(rgb(surface_hover())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.toggle_diff_turn_dropdown();
+                                cx.notify();
+                                cx.stop_propagation();
+                            }))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                    .when(active, |element| {
+                        element.child(div().size(px(6.0)).rounded_full().bg(rgb(orange())))
+                    })
+                    .when(!turns.is_empty(), |element| {
+                        element.child(dropdown_arrow(open))
+                    }),
+            )
+            .when(open, |element| {
+                element.child(
+                    deferred(
+                        div()
+                            .id("diff-turn-dropdown")
+                            .absolute()
+                            .top(px(32.0))
+                            .left_0()
+                            .w(px(310.0))
+                            .max_h(px(320.0))
+                            .p_1()
+                            .overflow_y_scroll()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(border()))
+                            .bg(rgb(crate::theme::menu_bg()))
+                            .shadow_lg()
+                            .occlude()
+                            .on_mouse_down(
+                                gpui::MouseButton::Left,
+                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                            )
+                            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                            .when(active, |element| {
+                                element.child(
+                                    div()
+                                        .px_2()
+                                        .py_1()
+                                        .mb_1()
+                                        .rounded_md()
+                                        .bg(rgb(orange()).opacity(0.08))
+                                        .text_xs()
+                                        .text_color(rgb(orange()))
+                                        .child("Turn in progress · diff freezes when complete"),
+                                )
+                            })
+                            .children(turns.iter().rev().map(|turn| {
+                                self.render_diff_turn_row(
+                                    turn,
+                                    Some(turn.id) == selected_turn_id,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .priority(3),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_diff_code(
         &self,
         id: String,
@@ -426,6 +565,46 @@ impl Dirigent {
             .max()
             .unwrap_or(0);
         (columns as f32 * 7.4 + 20.0).max(120.0)
+    }
+
+    fn render_diff_list_scrollbar(&self) -> AnyElement {
+        let max_offset = self.diff_list.max_offset_for_scrollbar().y.as_f32();
+        let viewport = self.diff_list.viewport_bounds().size.height.as_f32();
+        let thumb_fraction = if viewport > 0.0 && max_offset > 0.0 {
+            let minimum = (10.0 / viewport).clamp(0.08, 1.0);
+            (viewport / (viewport + max_offset)).clamp(minimum, 1.0)
+        } else {
+            1.0
+        };
+        let scroll_fraction = if max_offset > 0.0 {
+            (-self.diff_list.scroll_px_offset_for_scrollbar().y.as_f32() / max_offset)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let thumb_top = (1.0 - thumb_fraction) * scroll_fraction;
+
+        div()
+            .id("diff-list-scrollbar")
+            .absolute()
+            .top(px(3.0))
+            .bottom(px(3.0))
+            .right(px(2.0))
+            .w(px(2.0))
+            .rounded_full()
+            .when(max_offset > 0.0, |element| {
+                element.bg(gpui::rgba(0xffffff16)).child(
+                    div()
+                        .absolute()
+                        .top(gpui::relative(thumb_top))
+                        .h(gpui::relative(thumb_fraction))
+                        .min_h(px(10.0))
+                        .w_full()
+                        .rounded_full()
+                        .bg(rgb(muted())),
+                )
+            })
+            .into_any_element()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -668,21 +847,51 @@ impl Dirigent {
             .into_any_element()
     }
 
+    fn render_diff_file_item(
+        &mut self,
+        index: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(turn) = self.diff_display.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(file) = turn.files.get(index) else {
+            return div().into_any_element();
+        };
+        self.render_diff_file(turn.id, index, file, cx)
+    }
+
     pub(crate) fn render_diff_sidebar(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if !self.diff_sidebar_open || self.selected_harness.is_none() {
             return div().into_any_element();
         }
+        self.sync_diff_display();
         let harness = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
             .expect("selected harness exists");
         let selected_turn_id = self.selected_diff_turn_id();
-        let selected_turn = selected_turn_id
-            .and_then(|turn_id| harness.turn_diffs.iter().find(|turn| turn.id == turn_id));
+        let display_empty = self
+            .diff_display
+            .as_ref()
+            .is_none_or(|turn| turn.files.is_empty());
+        let empty_message = self.diff_display.as_ref().and_then(|turn| {
+            display_empty.then(|| {
+                turn.error.clone().unwrap_or_else(|| match self.diff_scope {
+                    DiffScope::Cumulative => "No net file changes through this turn.".into(),
+                    DiffScope::Turn => "No file changes in this turn.".into(),
+                })
+            })
+        });
+        let no_turns = harness.turn_diffs.is_empty();
+        let active_turn = harness.active_turn_diff.is_some();
+        let turn_picker =
+            self.render_diff_turn_picker(&harness.turn_diffs, active_turn, selected_turn_id, cx);
         let resize_drag = DiffSidebarResizeDrag {
             width: self.diff_sidebar_width,
             mouse_x: window.mouse_position().x,
@@ -713,107 +922,130 @@ impl Dirigent {
             })
             .child(
                 div()
-                    .h(px(44.0))
-                    .px_3()
                     .flex_none()
                     .flex()
-                    .items_center()
-                    .gap_2()
+                    .flex_col()
                     .border_b_1()
                     .border_color(rgb(border()))
                     .child(
                         div()
-                            .flex_1()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("Changes"),
-                    )
-                    .child(self.render_diff_mode_button("Unified", DiffViewMode::Unified, cx))
-                    .child(self.render_diff_mode_button("Split", DiffViewMode::Split, cx))
-                    .child(
-                        div()
-                            .id("close-diff-sidebar")
-                            .size(px(26.0))
+                            .h(px(44.0))
+                            .px_3()
                             .flex()
                             .items_center()
-                            .justify_center()
-                            .rounded_md()
-                            .text_color(rgb(muted()))
-                            .hover(|style| {
-                                style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_diff_sidebar();
-                                cx.notify();
-                            }))
-                            .child("×"),
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Changes"),
+                            )
+                            .child(turn_picker)
+                            .child(
+                                div()
+                                    .h(px(28.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(border()))
+                                    .bg(rgb(surface()))
+                                    .child(self.render_diff_scope_button(
+                                        "Cumulative",
+                                        DiffScope::Cumulative,
+                                        cx,
+                                    ))
+                                    .child(self.render_diff_scope_button(
+                                        "Turn only",
+                                        DiffScope::Turn,
+                                        cx,
+                                    )),
+                            )
+                            .child(
+                                div()
+                                    .id("close-diff-sidebar")
+                                    .size(px(26.0))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded_md()
+                                    .text_color(rgb(muted()))
+                                    .hover(|style| {
+                                        style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.close_diff_sidebar();
+                                        cx.notify();
+                                    }))
+                                    .child("×"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(34.0))
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
+                            .border_t_1()
+                            .border_color(rgb(border()))
+                            .child(
+                                div()
+                                    .mr_1()
+                                    .text_xs()
+                                    .text_color(rgb(muted()))
+                                    .child("View"),
+                            )
+                            .child(self.render_diff_mode_button(
+                                "Unified",
+                                DiffViewMode::Unified,
+                                cx,
+                            ))
+                            .child(self.render_diff_mode_button("Split", DiffViewMode::Split, cx)),
                     ),
             )
             .child(
                 div()
-                    .id("diff-turn-scroll")
-                    .max_h(px(190.0))
-                    .flex_none()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.diff_turn_scroll)
-                    .p_2()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .when(harness.active_turn_diff.is_some(), |element| {
-                        element.child(
-                            div()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .bg(rgb(orange()).opacity(0.08))
-                                .text_xs()
-                                .text_color(rgb(orange()))
-                                .child("Turn in progress · diff freezes when complete"),
-                        )
-                    })
-                    .when(
-                        harness.turn_diffs.is_empty() && harness.active_turn_diff.is_none(),
-                        |element| {
-                            element.child(
-                                div()
-                                    .px_2()
-                                    .py_3()
-                                    .text_xs()
-                                    .text_color(rgb(muted()))
-                                    .child("Completed turn diffs will appear here."),
-                            )
-                        },
-                    )
-                    .children(harness.turn_diffs.iter().rev().map(|turn| {
-                        self.render_diff_turn_row(turn, Some(turn.id) == selected_turn_id, cx)
-                    })),
-            )
-            .child(
-                div()
-                    .id("diff-content-scroll")
+                    .id("diff-content-list")
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_scroll()
-                    .track_scroll(&self.diff_scroll)
                     .whitespace_nowrap()
                     .text_xs()
                     .text_color(rgb(code_text()))
-                    .when_some(selected_turn, |element, turn| {
-                        element
-                            .when(turn.files.is_empty(), |element| {
-                                element.child(
-                                    div().p_6().text_center().text_color(rgb(muted())).child(
-                                        turn.error.clone().unwrap_or_else(|| {
-                                            "No file changes in this turn.".into()
-                                        }),
-                                    ),
-                                )
-                            })
-                            .children(turn.files.iter().enumerate().map(|(index, file)| {
-                                self.render_diff_file(turn.id, index, file, cx)
-                            }))
-                    }),
+                    .when(!display_empty, |element| {
+                        element.child(
+                            list(
+                                self.diff_list.clone(),
+                                cx.processor(Self::render_diff_file_item),
+                            )
+                            .size_full(),
+                        )
+                    })
+                    .when(display_empty, |element| {
+                        let message = empty_message.unwrap_or_else(|| {
+                            if no_turns {
+                                "Completed turn diffs will appear here.".into()
+                            } else {
+                                "No file changes to display.".into()
+                            }
+                        });
+                        element.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .p_6()
+                                .text_center()
+                                .whitespace_normal()
+                                .text_color(rgb(muted()))
+                                .child(message),
+                        )
+                    })
+                    .child(self.render_diff_list_scrollbar()),
             )
             .when(has_diff_selection, |element| {
                 element.child(
@@ -854,7 +1086,6 @@ impl Dirigent {
                         ),
                 )
             })
-            .child(self.render_thin_scrollbar("diff-scrollbar", &self.diff_scroll))
             .child(
                 div()
                     .id("diff-sidebar-resize-handle")
@@ -921,6 +1152,8 @@ mod tests {
             new_text: Some("new one\nnew two\n".into()),
             old_mode: 0,
             new_mode: 0,
+            old_exists: Some(true),
+            new_exists: Some(true),
             hunks: vec![hunk.clone()],
             additions: 2,
             deletions: 2,
