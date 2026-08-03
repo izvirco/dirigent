@@ -245,7 +245,8 @@ impl Message {
     }
 
     fn refresh_markdown_cache(&mut self) {
-        self.markdown = (self.role == MessageRole::Assistant && !self.running)
+        self.markdown = (matches!(self.role, MessageRole::User | MessageRole::Assistant)
+            && !self.running)
             .then(|| parse_markdown(&self.text));
     }
 
@@ -731,6 +732,22 @@ mod tests {
             message.display_text.as_ref(),
             "Planning\nCheck the implementation.\nDone"
         );
+    }
+
+    #[test]
+    fn parses_user_markdown() {
+        let message = Message::new(MessageRole::User, "**formatted** message");
+
+        let markdown = message
+            .markdown
+            .as_ref()
+            .expect("markdown should be cached");
+        let crate::markdown::MarkdownBlock::Paragraph(text) = &markdown.blocks[0] else {
+            panic!("expected a paragraph")
+        };
+        assert_eq!(text.text, "formatted message");
+        assert!(text.spans[0].style.strong);
+        assert_eq!(message.copy_text.as_ref(), "**formatted** message");
     }
 
     #[test]

@@ -104,12 +104,16 @@ impl Dirigent {
                             .flex()
                             .flex_col()
                             .gap_1()
-                            .child(self.render_selectable_text(
-                                format!("user-message-text-{index}"),
-                                message.display_text.clone(),
-                                &[],
-                                cx,
-                            ))
+                            .child(if let Some(markdown) = message.markdown.as_ref() {
+                                self.render_markdown(markdown, index, cx)
+                            } else {
+                                self.render_selectable_text(
+                                    format!("user-message-text-{index}"),
+                                    message.display_text.clone(),
+                                    &[],
+                                    cx,
+                                )
+                            })
                             .when(!images.is_empty(), |element| {
                                 element.child(div().flex().flex_wrap().gap_1().children(
                                     images.into_iter().enumerate().map(|(image_index, image)| {
