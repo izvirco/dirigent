@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    ScrollDelta, ScrollHandle, SharedString, Window, deferred, div, list, prelude::*, px, svg,
+    ScrollHandle, SharedString, Window, deferred, div, list, prelude::*, px, svg,
 };
 
 use super::composer::dropdown_arrow;
@@ -573,9 +573,13 @@ impl Dirigent {
             .clone()
     }
 
-    fn diff_code_width(text: &str) -> f32 {
-        let columns = text
-            .lines()
+    fn diff_file_code_width(file: &FileDiff) -> f32 {
+        let columns = file
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.rows)
+            .flat_map(|row| [row.old_text.as_deref(), row.new_text.as_deref()])
+            .flatten()
             .map(|line| line.chars().count())
             .max()
             .unwrap_or(0);
@@ -631,6 +635,7 @@ impl Dirigent {
         content_width: f32,
         reference: DiffSelectionReference,
         scroll: ScrollHandle,
+        show_scrollbar: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let scrollbar_id = format!("{id}-scrollbar");
@@ -641,6 +646,22 @@ impl Dirigent {
             gutter,
         } = block;
         let gap_colors = gutter.iter().map(|line| line.color).collect::<Vec<_>>();
+        let mut code_scroll = div()
+            .id(scroll_id)
+            .w_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .track_scroll(&scroll)
+            .child(
+                div()
+                    .min_w(px(content_width))
+                    .whitespace_nowrap()
+                    .line_height(px(18.0))
+                    .child(self.render_diff_code(id, text, highlights, reference, cx)),
+            );
+        // Keep vertical wheel input on the virtualized diff list instead of converting it
+        // into horizontal movement for this nested x-only scroll area.
+        code_scroll.style().restrict_scroll_to_axis = Some(true);
         div()
             .w_full()
             .min_w_0()
@@ -714,56 +735,12 @@ impl Dirigent {
                         })
                 }),
             ))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .id(scroll_id)
-                            .w_full()
-                            .min_w_0()
-                            .overflow_x_scroll()
-                            .track_scroll(&scroll)
-                            .on_scroll_wheel(cx.listener(
-                                |this, event: &gpui::ScrollWheelEvent, _, cx| {
-                                    let vertical = match event.delta {
-                                        ScrollDelta::Pixels(delta)
-                                            if !event.modifiers.shift
-                                                && delta.y.abs() >= delta.x.abs()
-                                                && delta.y != px(0.0) =>
-                                        {
-                                            Some(-delta.y)
-                                        }
-                                        ScrollDelta::Lines(delta)
-                                            if !event.modifiers.shift
-                                                && delta.y.abs() >= delta.x.abs()
-                                                && delta.y != 0.0 =>
-                                        {
-                                            Some(px(-delta.y * 20.0))
-                                        }
-                                        _ => None,
-                                    };
-                                    if let Some(distance) = vertical {
-                                        this.diff_list.scroll_by(distance);
-                                        cx.notify();
-                                        cx.stop_propagation();
-                                    }
-                                },
-                            ))
-                            .child(
-                                div()
-                                    .min_w(px(content_width))
-                                    .whitespace_nowrap()
-                                    .line_height(px(18.0))
-                                    .child(
-                                        self.render_diff_code(id, text, highlights, reference, cx),
-                                    ),
-                            ),
-                    )
-                    .child(self.render_thin_horizontal_scrollbar(scrollbar_id, &scroll)),
-            )
+            .child(div().relative().flex_1().min_w_0().child(code_scroll).when(
+                show_scrollbar,
+                |element| {
+                    element.child(self.render_thin_horizontal_scrollbar(scrollbar_id, &scroll))
+                },
+            ))
             .into_any_element()
     }
 
@@ -775,6 +752,14 @@ impl Dirigent {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let language = language_for_path(&file.path);
+        let mode_label = match self.diff_view_mode {
+            DiffViewMode::Unified => "unified",
+            DiffViewMode::Split => "split",
+        };
+        let file_scroll =
+            self.diff_code_scroll(&format!("diff-{turn_id}-{file_index}-{mode_label}"));
+        let content_width = Self::diff_file_code_width(file);
+        let last_hunk_index = file.hunks.len().saturating_sub(1);
         div()
             .w_full()
             .border_b_1()
@@ -833,8 +818,6 @@ impl Dirigent {
                         DiffViewMode::Unified => {
                             let id = format!("diff-{turn_id}-{file_index}-{hunk_index}-unified");
                             let block = unified_hunk_block(file, hunk);
-                            let content_width = Self::diff_code_width(&block.text);
-                            let scroll = self.diff_code_scroll(&id);
                             self.render_diff_block(
                                 id,
                                 block,
@@ -850,20 +833,16 @@ impl Dirigent {
                                     ),
                                     language: language.clone(),
                                 },
-                                scroll,
+                                file_scroll.clone(),
+                                hunk_index == last_hunk_index,
                                 cx,
                             )
                         }
                         DiffViewMode::Split => {
                             let old_id = format!("diff-{turn_id}-{file_index}-{hunk_index}-old");
                             let new_id = format!("diff-{turn_id}-{file_index}-{hunk_index}-new");
-                            let scroll_key =
-                                format!("diff-{turn_id}-{file_index}-{hunk_index}-split");
                             let old_block = split_hunk_block(file, hunk, true);
                             let new_block = split_hunk_block(file, hunk, false);
-                            let content_width = Self::diff_code_width(&old_block.text)
-                                .max(Self::diff_code_width(&new_block.text));
-                            let scroll = self.diff_code_scroll(&scroll_key);
                             div()
                                 .w_full()
                                 .min_w_0()
@@ -897,7 +876,8 @@ impl Dirigent {
                                                     ),
                                                     language: language.clone(),
                                                 },
-                                                scroll.clone(),
+                                                file_scroll.clone(),
+                                                false,
                                                 cx,
                                             ),
                                         ),
@@ -919,7 +899,8 @@ impl Dirigent {
                                             ),
                                             language: language.clone(),
                                         },
-                                        scroll,
+                                        file_scroll.clone(),
+                                        hunk_index == last_hunk_index,
                                         cx,
                                     ),
                                 ))
