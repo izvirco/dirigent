@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::theme::{green, red};
 
 use crate::{
+    diff::{ActiveTurnDiff, TurnDiff},
     markdown::{MarkdownDocument, parse_markdown},
     rpc::PiProcess,
     text_input::AttachedImage,
@@ -596,6 +597,8 @@ pub(crate) struct Harness {
     pub(crate) nix_enabled: bool,
     pub(crate) nix_restart_pending: bool,
     pub(crate) workspace_id: Option<String>,
+    pub(crate) turn_diffs: Vec<TurnDiff>,
+    pub(crate) active_turn_diff: Option<ActiveTurnDiff>,
 }
 
 impl Harness {
@@ -634,6 +637,8 @@ impl Harness {
             nix_enabled: false,
             nix_restart_pending: false,
             workspace_id: None,
+            turn_diffs: Vec::new(),
+            active_turn_diff: None,
         }
     }
 
@@ -676,6 +681,7 @@ impl Harness {
         workspace_id: Option<String>,
         archived: bool,
         sidebar_order: u64,
+        turn_diffs: Vec<TurnDiff>,
     ) -> Self {
         Self {
             id,
@@ -711,6 +717,8 @@ impl Harness {
             nix_enabled,
             nix_restart_pending: false,
             workspace_id,
+            turn_diffs,
+            active_turn_diff: None,
         }
     }
 }

@@ -6,6 +6,7 @@
 mod app;
 mod assets;
 mod cache;
+mod diff;
 mod logging;
 mod markdown;
 mod model;

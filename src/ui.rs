@@ -1,5 +1,6 @@
 mod composer;
 mod conversation;
+mod diff_sidebar;
 mod extension_dialog;
 mod keyboard_menu;
 mod markdown;
@@ -231,6 +232,7 @@ impl Dirigent {
                     element
                         .child(self.render_conversation(cx))
                         .child(self.render_composer(window, cx))
+                        .child(self.render_changes_toggle(cx))
                 },
             )
             .when(

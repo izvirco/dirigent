@@ -2,6 +2,7 @@ use super::*;
 
 impl Dirigent {
     pub(super) fn fail_harness(&mut self, index: usize, error: String) {
+        self.finish_turn_diff(index, TurnDiffStatus::Failed);
         tracing::error!(
             error = %error,
             harness_id = self.harnesses[index].id,
@@ -62,6 +63,7 @@ impl Dirigent {
         {
             self.pending_dialog = None;
         }
+        self.finish_turn_diff(index, TurnDiffStatus::Interrupted);
         self.harnesses[index].process.take();
         self.harnesses[index].retry_status = None;
         self.harnesses[index].steering_queue.clear();
@@ -127,6 +129,7 @@ impl Dirigent {
             && !self.harnesses[index].loaded_messages;
         let changed_message = match event_type {
             "agent_start" => {
+                self.begin_turn_diff(index, "Agent turn");
                 self.harnesses[index].status = HarnessStatus::Working;
                 if let Some(retry) = self.harnesses[index].retry_status.as_mut() {
                     retry.waiting = false;
@@ -294,6 +297,7 @@ impl Dirigent {
             harness_id = self.harnesses[index].id,
             "automatic retry failed"
         );
+        self.mark_turn_diff_status(index, TurnDiffStatus::Failed);
         self.harnesses[index].status = HarnessStatus::Failed;
         self.harnesses[index].error = Some(message.clone());
         self.harnesses[index].messages.push(Message::error(message));
@@ -310,6 +314,7 @@ impl Dirigent {
             return self.harnesses[index].messages.len().checked_sub(1);
         }
         tracing::error!(error = %error, harness_id = self.harnesses[index].id, "assistant request failed");
+        self.mark_turn_diff_status(index, TurnDiffStatus::Failed);
         self.harnesses[index].error = Some(error.clone());
         self.harnesses[index].messages.push(Message::error(error));
         self.harnesses[index].messages.len().checked_sub(1)
@@ -376,6 +381,7 @@ impl Dirigent {
         None
     }
     pub(super) fn settle_harness(&mut self, index: usize) -> Option<usize> {
+        self.finish_turn_diff(index, TurnDiffStatus::Completed);
         if self.harnesses[index].status != HarnessStatus::Failed {
             self.harnesses[index].status = HarnessStatus::Idle;
         }
@@ -743,6 +749,7 @@ impl Dirigent {
                     .pointer("/data/leafId")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                self.prune_turn_diffs_to_active_branch(index);
                 self.harnesses[index].messages = parse_entries(
                     self.harnesses[index]
                         .cached_entries

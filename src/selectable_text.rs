@@ -9,6 +9,7 @@ use gpui::{
 
 use crate::{
     app::{Dirigent, ThreadTextSelection},
+    diff::DiffSelectionReference,
     theme::rgb,
 };
 
@@ -113,6 +114,30 @@ impl Dirigent {
         single_line: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.render_styled_selectable_text_with_reference(
+            id,
+            text,
+            highlights,
+            font_overrides,
+            links,
+            single_line,
+            None,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_styled_selectable_text_with_reference(
+        &self,
+        id: impl Into<String>,
+        text: impl Into<SharedString>,
+        highlights: &[(Range<usize>, HighlightStyle)],
+        font_overrides: &[(Range<usize>, SharedString)],
+        links: &[(Range<usize>, SharedString)],
+        single_line: bool,
+        diff_reference: Option<DiffSelectionReference>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = id.into();
         let text = text.into();
         let selected_range = self
@@ -133,6 +158,7 @@ impl Dirigent {
         let down_id = id.clone();
         let down_text = text.clone();
         let down_layout = layout.clone();
+        let down_diff_reference = diff_reference.clone();
         let move_id = id.clone();
         let move_layout = layout.clone();
         let up_layout = layout.clone();
@@ -171,6 +197,7 @@ impl Dirigent {
                             head: index,
                             range: index..index,
                             selecting: true,
+                            diff_reference: down_diff_reference.clone(),
                         });
                     }
                     cx.notify();

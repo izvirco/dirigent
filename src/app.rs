@@ -1,4 +1,5 @@
 mod branching;
+mod diff;
 mod harness;
 mod keyboard;
 mod managed_workspace;
@@ -39,6 +40,7 @@ use branching::*;
 
 use crate::{
     cache::SessionCache,
+    diff::{DiffSelectionReference, DiffViewMode, TurnDiffStatus},
     model::{
         CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
         Message, MessageRole, Project, RetryStatus, WorkspaceState,
@@ -160,6 +162,7 @@ pub(crate) struct ThreadTextSelection {
     pub(crate) head: usize,
     pub(crate) range: Range<usize>,
     pub(crate) selecting: bool,
+    pub(crate) diff_reference: Option<DiffSelectionReference>,
 }
 
 pub(crate) struct MessageEdit {
@@ -341,6 +344,12 @@ pub(crate) struct Dirigent {
     pub(crate) project_settings: Option<Id>,
     pub(crate) workspace_settings_editing: bool,
     pub(crate) sidebar_width: f32,
+    pub(crate) diff_sidebar_open: bool,
+    pub(crate) diff_sidebar_width: f32,
+    pub(crate) diff_view_mode: DiffViewMode,
+    pub(crate) selected_diff_turn: Option<(Id, u64)>,
+    pub(crate) diff_scroll: ScrollHandle,
+    pub(crate) diff_turn_scroll: ScrollHandle,
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) expanded_archived_projects: HashSet<Id>,
     pub(crate) sidebar_menu: Option<SidebarMenu>,
@@ -670,7 +679,15 @@ impl Dirigent {
             last_used_harness,
             collapsed_projects,
             sidebar_width,
+            diff_sidebar_open,
+            diff_sidebar_width,
+            diff_view_mode,
         } = loaded;
+        for harness in &mut harnesses {
+            for turn in &mut harness.turn_diffs {
+                turn.refresh_highlights();
+            }
+        }
         for workspace in &mut workspaces {
             workspace.state = match crate::vcs::validate_workspace(workspace) {
                 Ok(()) => WorkspaceState::Ready,
@@ -937,6 +954,12 @@ impl Dirigent {
             project_settings: None,
             workspace_settings_editing: false,
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
+            diff_sidebar_open,
+            diff_sidebar_width: diff_sidebar_width.clamp(420.0, 960.0),
+            diff_view_mode,
+            selected_diff_turn: None,
+            diff_scroll: ScrollHandle::new(),
+            diff_turn_scroll: ScrollHandle::new(),
             collapsed_projects,
             expanded_archived_projects: HashSet::new(),
             sidebar_menu: None,
@@ -1038,6 +1061,9 @@ impl Dirigent {
             self.last_used_harness,
             &self.collapsed_projects,
             self.sidebar_width,
+            self.diff_sidebar_open,
+            self.diff_sidebar_width,
+            self.diff_view_mode,
         ) {
             tracing::error!(error = %error, "could not persist application state");
             self.banner = Some(error);
@@ -1054,6 +1080,9 @@ impl Dirigent {
     fn apply_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
         self.font = appearance.font.into();
         for harness in &mut self.harnesses {
+            for turn in &mut harness.turn_diffs {
+                turn.refresh_highlights();
+            }
             for message in harness
                 .messages
                 .iter_mut()
@@ -1210,6 +1239,7 @@ impl Render for Dirigent {
             )
             .child(self.render_sidebar(window, cx))
             .child(self.render_center(window, cx))
+            .child(self.render_diff_sidebar(window, cx))
             .when_some(path_completion_anchor, |element, anchor| {
                 let width = 520.0;
                 let left = anchor.x.as_f32().clamp(

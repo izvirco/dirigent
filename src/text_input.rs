@@ -226,6 +226,12 @@ impl TextInput {
         cx.notify();
     }
 
+    pub(crate) fn insert_at_cursor(&mut self, value: &str, cx: &mut Context<Self>) {
+        self.replace_selection(value);
+        cx.emit(InputEvent::Changed);
+        cx.notify();
+    }
+
     pub(crate) fn set_text(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.content = text.into();
         self.cursor = self.content.len();

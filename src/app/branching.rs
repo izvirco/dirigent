@@ -292,6 +292,7 @@ impl Dirigent {
                 workspace_id.clone(),
                 false,
                 sidebar_order,
+                self.harnesses[source_index].turn_diffs.clone(),
             )
         };
         harness.set_derived_title();
@@ -587,6 +588,7 @@ impl Dirigent {
                 self.harnesses[target_index].session_file = Some(session_file);
                 self.harnesses[target_index].cached_entries = Some(entries);
                 self.harnesses[target_index].cached_leaf_id = leaf_id;
+                self.prune_turn_diffs_to_active_branch(target_index);
                 self.harnesses[target_index].messages = parse_entries(
                     self.harnesses[target_index]
                         .cached_entries

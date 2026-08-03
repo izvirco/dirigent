@@ -543,6 +543,7 @@ impl Dirigent {
         images: Vec<AttachedImage>,
         steer_if_working: bool,
     ) {
+        self.begin_turn_diff(index, &prompt);
         let images = images
             .into_iter()
             .map(|attachment| {
@@ -672,6 +673,7 @@ impl Dirigent {
             .and_then(|id| self.harnesses.iter().position(|harness| harness.id == id))
             && self.send_value(index, json!({"type":"abort"}))
         {
+            self.mark_turn_diff_status(index, TurnDiffStatus::Aborted);
             self.harnesses[index].startup_settings_pending = false;
             self.harnesses[index].pending_initial_prompt = None;
             self.harnesses[index].status = HarnessStatus::Idle;

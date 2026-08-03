@@ -95,6 +95,7 @@ impl Dirigent {
             (KeyboardMenu::Space, "d") if shift => {
                 self.debug_panels_visible = !self.debug_panels_visible;
             }
+            (KeyboardMenu::Space, "d") => self.toggle_diff_sidebar(),
             (KeyboardMenu::Space, "y") => {
                 self.copy_thread_selection(cx);
             }

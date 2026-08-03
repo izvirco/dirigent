@@ -1,0 +1,19 @@
+The bundled syntax highlighters include the following MIT-licensed tree-sitter grammars:
+
+- tree-sitter-bash
+- tree-sitter-c
+- tree-sitter-cpp
+- tree-sitter-css
+- tree-sitter-go
+- tree-sitter-html
+- tree-sitter-javascript
+- tree-sitter-json
+- tree-sitter-md
+- tree-sitter-python
+- tree-sitter-rust
+- tree-sitter-toml-ng
+- tree-sitter-typescript
+- tree-sitter-yaml
+
+The MIT license text is provided in tree-sitter-MIT.txt.
+The tree-house and tree-house-bindings crates are MPL-2.0; their license is provided in tree-house-MPL-2.0.txt.

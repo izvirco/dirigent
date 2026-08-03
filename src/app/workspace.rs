@@ -564,6 +564,7 @@ impl Dirigent {
         self.selected_harness = Some(id);
         self.last_used_harness = Some(id);
         self.thread_text_selection = None;
+        self.selected_diff_turn = None;
         self.hovered_copy_message = None;
         self.hovered_action_message = None;
         self.hovered_tool_detail_message = None;
@@ -603,6 +604,7 @@ impl Dirigent {
         self.selected_project = Some(project_id);
         self.show_cached_models(project_id);
         self.selected_harness = None;
+        self.selected_diff_turn = None;
         self.adding_project = false;
         self.creating_harness = true;
         self.project_settings = None;
