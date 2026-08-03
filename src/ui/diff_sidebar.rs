@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    SharedString, Window, div, prelude::*, px,
+    ScrollHandle, SharedString, Window, div, prelude::*, px,
 };
 
 use crate::{
@@ -84,57 +84,61 @@ fn line_offsets(text: Option<&str>) -> Vec<usize> {
     offsets
 }
 
-#[allow(clippy::too_many_arguments)]
+struct DiffGutterLine {
+    label: String,
+    color: u32,
+}
+
+struct DiffBlock {
+    text: String,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    gutter: Vec<DiffGutterLine>,
+}
+
+impl DiffBlock {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            highlights: Vec::new(),
+            gutter: Vec::new(),
+        }
+    }
+}
+
 fn append_syntax(
-    output: &mut String,
-    highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
-    prefix: &str,
+    block: &mut DiffBlock,
     text: &str,
     line_number: Option<u32>,
     source_offsets: &[usize],
     source_spans: &[SyntaxSpan],
-    marker_color: Option<u32>,
+    changed_color: Option<u32>,
 ) {
-    let line_start = output.len();
-    output.push_str(prefix);
-    let source_start = output.len();
-    output.push_str(text);
-    output.push('\n');
-    let changed_background = marker_color.map(|color| rgb(color).opacity(0.10).into());
-    if let Some(color) = marker_color {
-        highlights.push((
-            line_start..source_start,
-            HighlightStyle {
-                color: Some(rgb(color).into()),
-                background_color: changed_background,
-                ..Default::default()
-            },
-        ));
-    }
-    let Some(line_number) = line_number else {
-        return;
-    };
-    let Some(&file_start) = source_offsets.get(line_number.saturating_sub(1) as usize) else {
-        return;
-    };
-    let file_end = file_start + text.len();
-    for span in source_spans {
-        let start = span.range.start.max(file_start);
-        let end = span.range.end.min(file_end);
-        if start < end {
-            highlights.push((
-                source_start + start - file_start..source_start + end - file_start,
-                HighlightStyle {
-                    color: Some(rgb(span.color).into()),
-                    background_color: changed_background,
-                    ..Default::default()
-                },
-            ));
+    let line_start = block.text.len();
+    block.text.push_str(text);
+    block.text.push('\n');
+    let changed_background = changed_color.map(|color| rgb(color).opacity(0.10).into());
+    if let Some(line_number) = line_number
+        && let Some(&file_start) = source_offsets.get(line_number.saturating_sub(1) as usize)
+    {
+        let file_end = file_start + text.len();
+        for span in source_spans {
+            let start = span.range.start.max(file_start);
+            let end = span.range.end.min(file_end);
+            if start < end {
+                block.highlights.push((
+                    line_start + start - file_start..line_start + end - file_start,
+                    HighlightStyle {
+                        color: Some(rgb(span.color).into()),
+                        background_color: changed_background,
+                        ..Default::default()
+                    },
+                ));
+            }
         }
     }
     if changed_background.is_some() {
-        highlights.push((
-            line_start..output.len(),
+        block.highlights.push((
+            line_start..block.text.len(),
             HighlightStyle {
                 background_color: changed_background,
                 ..Default::default()
@@ -143,99 +147,92 @@ fn append_syntax(
     }
 }
 
-fn unified_hunk_text(
-    file: &FileDiff,
-    hunk: &DiffHunk,
-) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
-    let mut output = String::new();
-    let mut highlights = Vec::new();
+#[allow(clippy::too_many_arguments)]
+fn append_diff_line(
+    block: &mut DiffBlock,
+    label: String,
+    text: &str,
+    line_number: Option<u32>,
+    source_offsets: &[usize],
+    source_spans: &[SyntaxSpan],
+    changed_color: Option<u32>,
+) {
+    block.gutter.push(DiffGutterLine {
+        label,
+        color: changed_color.unwrap_or_else(border),
+    });
+    append_syntax(
+        block,
+        text,
+        line_number,
+        source_offsets,
+        source_spans,
+        changed_color,
+    );
+}
+
+fn unified_hunk_block(file: &FileDiff, hunk: &DiffHunk) -> DiffBlock {
+    let mut block = DiffBlock::new();
     let old_offsets = line_offsets(file.old_text.as_deref());
     let new_offsets = line_offsets(file.new_text.as_deref());
-    for row in &hunk.rows {
-        match row.kind {
-            DiffRowKind::Context => {
-                let prefix = format!(
-                    "  {:>4} {:>4} │ ",
+    let mut index = 0;
+    while index < hunk.rows.len() {
+        let row = &hunk.rows[index];
+        if row.kind == DiffRowKind::Context {
+            append_diff_line(
+                &mut block,
+                format!(
+                    "  {:>4} {:>4}",
                     row.old_number.unwrap_or(0),
                     row.new_number.unwrap_or(0)
-                );
-                append_syntax(
-                    &mut output,
-                    &mut highlights,
-                    &prefix,
-                    row.new_text.as_deref().unwrap_or_default(),
-                    row.new_number,
-                    &new_offsets,
-                    &file.new_highlights,
-                    None,
-                );
-            }
-            DiffRowKind::Removed => {
-                let prefix = format!("- {:>4}      │ ", row.old_number.unwrap_or(0));
-                append_syntax(
-                    &mut output,
-                    &mut highlights,
-                    &prefix,
-                    row.old_text.as_deref().unwrap_or_default(),
+                ),
+                row.new_text.as_deref().unwrap_or_default(),
+                row.new_number,
+                &new_offsets,
+                &file.new_highlights,
+                None,
+            );
+            index += 1;
+            continue;
+        }
+
+        let changed_start = index;
+        while index < hunk.rows.len() && hunk.rows[index].kind != DiffRowKind::Context {
+            index += 1;
+        }
+        let changed_rows = &hunk.rows[changed_start..index];
+        for row in changed_rows {
+            if let Some(text) = row.old_text.as_deref() {
+                append_diff_line(
+                    &mut block,
+                    format!("- {:>4}", row.old_number.unwrap_or(0)),
+                    text,
                     row.old_number,
                     &old_offsets,
                     &file.old_highlights,
                     Some(red()),
                 );
             }
-            DiffRowKind::Added => {
-                let prefix = format!("+      {:>4} │ ", row.new_number.unwrap_or(0));
-                append_syntax(
-                    &mut output,
-                    &mut highlights,
-                    &prefix,
-                    row.new_text.as_deref().unwrap_or_default(),
+        }
+        for row in changed_rows {
+            if let Some(text) = row.new_text.as_deref() {
+                append_diff_line(
+                    &mut block,
+                    format!("+ {:>4}", row.new_number.unwrap_or(0)),
+                    text,
                     row.new_number,
                     &new_offsets,
                     &file.new_highlights,
                     Some(green()),
                 );
             }
-            DiffRowKind::Replaced => {
-                if let Some(text) = row.old_text.as_deref() {
-                    let prefix = format!("- {:>4}      │ ", row.old_number.unwrap_or(0));
-                    append_syntax(
-                        &mut output,
-                        &mut highlights,
-                        &prefix,
-                        text,
-                        row.old_number,
-                        &old_offsets,
-                        &file.old_highlights,
-                        Some(red()),
-                    );
-                }
-                if let Some(text) = row.new_text.as_deref() {
-                    let prefix = format!("+      {:>4} │ ", row.new_number.unwrap_or(0));
-                    append_syntax(
-                        &mut output,
-                        &mut highlights,
-                        &prefix,
-                        text,
-                        row.new_number,
-                        &new_offsets,
-                        &file.new_highlights,
-                        Some(green()),
-                    );
-                }
-            }
         }
     }
-    (output, highlights)
+    block
 }
 
-fn split_hunk_text(
-    file: &FileDiff,
-    hunk: &DiffHunk,
-    old_side: bool,
-) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
-    let mut output = String::new();
-    let mut highlights = Vec::new();
+fn split_hunk_block(file: &FileDiff, hunk: &DiffHunk, old_side: bool) -> DiffBlock {
+    let mut block = DiffBlock::new();
     let offsets = line_offsets(if old_side {
         file.old_text.as_deref()
     } else {
@@ -260,22 +257,19 @@ fn split_hunk_text(
                 matches!(row.kind, DiffRowKind::Added | DiffRowKind::Replaced),
             )
         };
-        let prefix = number.map_or_else(
-            || "       │ ".to_string(),
-            |number| format!("{:>6} │ ", number),
-        );
-        append_syntax(
-            &mut output,
-            &mut highlights,
-            &prefix,
+        let changed_color =
+            (changed && text.is_some()).then_some(if old_side { red() } else { green() });
+        append_diff_line(
+            &mut block,
+            number.map_or_else(String::new, |number| format!("{number:>6}")),
             text.unwrap_or_default(),
             number,
             &offsets,
             spans,
-            changed.then_some(if old_side { red() } else { green() }),
+            changed_color,
         );
     }
-    (output, highlights)
+    block
 }
 
 impl Dirigent {
@@ -417,6 +411,99 @@ impl Dirigent {
         )
     }
 
+    fn diff_code_scroll(&self, key: &str) -> ScrollHandle {
+        self.diff_code_scrolls
+            .borrow_mut()
+            .entry(key.to_string())
+            .or_default()
+            .clone()
+    }
+
+    fn diff_code_width(text: &str) -> f32 {
+        let columns = text
+            .lines()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0);
+        (columns as f32 * 7.4 + 20.0).max(120.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_diff_block(
+        &self,
+        id: String,
+        block: DiffBlock,
+        gutter_width: f32,
+        content_width: f32,
+        reference: DiffSelectionReference,
+        scroll: ScrollHandle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let scrollbar_id = format!("{id}-scrollbar");
+        let scroll_id = format!("{id}-scroll");
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_start()
+            .child(
+                div()
+                    .w(px(gutter_width))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .text_xs()
+                    .children(block.gutter.into_iter().map(|line| {
+                        div()
+                            .h(px(18.0))
+                            .pr_2()
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .border_r_4()
+                            .border_color(rgb(line.color))
+                            .text_color(rgb(if line.color == border() {
+                                muted()
+                            } else {
+                                line.color
+                            }))
+                            .child(line.label)
+                    })),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .pl_1()
+                    .pb_2()
+                    .child(
+                        div()
+                            .id(scroll_id)
+                            .w_full()
+                            .min_w_0()
+                            .overflow_x_scroll()
+                            .track_scroll(&scroll)
+                            .child(
+                                div()
+                                    .min_w(px(content_width))
+                                    .whitespace_nowrap()
+                                    .line_height(px(18.0))
+                                    .child(self.render_diff_code(
+                                        id,
+                                        block.text,
+                                        block.highlights,
+                                        reference,
+                                        cx,
+                                    )),
+                            ),
+                    )
+                    .child(self.render_thin_horizontal_scrollbar(scrollbar_id, &scroll)),
+            )
+            .into_any_element()
+    }
+
     fn render_diff_file(
         &self,
         turn_id: u64,
@@ -475,30 +562,21 @@ impl Dirigent {
                 )
             })
             .children(file.hunks.iter().enumerate().map(|(hunk_index, hunk)| {
-                let header = format!(
-                    "@@ -{},{} +{},{} @@",
-                    hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len
-                );
                 div()
                     .w_full()
-                    .child(
-                        div()
-                            .h(px(26.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .bg(rgb(blue()).opacity(0.08))
-                            .text_xs()
-                            .text_color(rgb(blue()))
-                            .child(header),
-                    )
+                    .overflow_hidden()
+                    .when(hunk_index > 0, |element| element.mt_2())
                     .child(match self.diff_view_mode {
                         DiffViewMode::Unified => {
-                            let (text, highlights) = unified_hunk_text(file, hunk);
-                            self.render_diff_code(
-                                format!("diff-{turn_id}-{file_index}-{hunk_index}-unified"),
-                                text,
-                                highlights,
+                            let id = format!("diff-{turn_id}-{file_index}-{hunk_index}-unified");
+                            let block = unified_hunk_block(file, hunk);
+                            let content_width = Self::diff_code_width(&block.text);
+                            let scroll = self.diff_code_scroll(&id);
+                            self.render_diff_block(
+                                id,
+                                block,
+                                82.0,
+                                content_width,
                                 DiffSelectionReference {
                                     turn_id,
                                     path: file.path.clone(),
@@ -509,29 +587,38 @@ impl Dirigent {
                                     ),
                                     language: language.clone(),
                                 },
+                                scroll,
                                 cx,
                             )
                         }
                         DiffViewMode::Split => {
-                            let (old_text, old_highlights) = split_hunk_text(file, hunk, true);
-                            let (new_text, new_highlights) = split_hunk_text(file, hunk, false);
+                            let old_id = format!("diff-{turn_id}-{file_index}-{hunk_index}-old");
+                            let new_id = format!("diff-{turn_id}-{file_index}-{hunk_index}-new");
+                            let scroll_key =
+                                format!("diff-{turn_id}-{file_index}-{hunk_index}-split");
+                            let old_block = split_hunk_block(file, hunk, true);
+                            let new_block = split_hunk_block(file, hunk, false);
+                            let content_width = Self::diff_code_width(&old_block.text)
+                                .max(Self::diff_code_width(&new_block.text));
+                            let scroll = self.diff_code_scroll(&scroll_key);
                             div()
                                 .w_full()
+                                .min_w_0()
                                 .flex()
+                                .overflow_hidden()
                                 .child(
                                     div()
                                         .w_1_2()
                                         .min_w_0()
-                                        .pr_2()
+                                        .overflow_hidden()
                                         .border_r_1()
                                         .border_color(rgb(border()))
                                         .child(
-                                            self.render_diff_code(
-                                                format!(
-                                                    "diff-{turn_id}-{file_index}-{hunk_index}-old"
-                                                ),
-                                                old_text,
-                                                old_highlights,
+                                            self.render_diff_block(
+                                                old_id,
+                                                old_block,
+                                                48.0,
+                                                content_width,
                                                 DiffSelectionReference {
                                                     turn_id,
                                                     path: file
@@ -547,27 +634,32 @@ impl Dirigent {
                                                     ),
                                                     language: language.clone(),
                                                 },
+                                                scroll.clone(),
                                                 cx,
                                             ),
                                         ),
                                 )
-                                .child(div().w_1_2().min_w_0().pl_2().child(self.render_diff_code(
-                                    format!("diff-{turn_id}-{file_index}-{hunk_index}-new"),
-                                    new_text,
-                                    new_highlights,
-                                    DiffSelectionReference {
-                                        turn_id,
-                                        path: file.path.clone(),
-                                        side: "new",
-                                        lines: format!(
-                                            "{}–{}",
-                                            hunk.new_start,
-                                            hunk.new_start + hunk.new_len.saturating_sub(1)
-                                        ),
-                                        language: language.clone(),
-                                    },
-                                    cx,
-                                )))
+                                .child(div().w_1_2().min_w_0().overflow_hidden().child(
+                                    self.render_diff_block(
+                                        new_id,
+                                        new_block,
+                                        48.0,
+                                        content_width,
+                                        DiffSelectionReference {
+                                            turn_id,
+                                            path: file.path.clone(),
+                                            side: "new",
+                                            lines: format!(
+                                                "{}–{}",
+                                                hunk.new_start,
+                                                hunk.new_start + hunk.new_len.saturating_sub(1)
+                                            ),
+                                            language: language.clone(),
+                                        },
+                                        scroll,
+                                        cx,
+                                    ),
+                                ))
                                 .into_any_element()
                         }
                     })
@@ -790,5 +882,78 @@ impl Dirigent {
                     )),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::{DiffRow, FileDiffKind};
+
+    fn replaced_file_and_hunk() -> (FileDiff, DiffHunk) {
+        let hunk = DiffHunk {
+            old_start: 1,
+            old_len: 2,
+            new_start: 1,
+            new_len: 2,
+            rows: vec![
+                DiffRow {
+                    old_number: Some(1),
+                    new_number: Some(1),
+                    old_text: Some("old one".into()),
+                    new_text: Some("new one".into()),
+                    kind: DiffRowKind::Replaced,
+                },
+                DiffRow {
+                    old_number: Some(2),
+                    new_number: Some(2),
+                    old_text: Some("old two".into()),
+                    new_text: Some("new two".into()),
+                    kind: DiffRowKind::Replaced,
+                },
+            ],
+        };
+        let file = FileDiff {
+            path: "src/main.rs".into(),
+            old_path: None,
+            kind: FileDiffKind::Modified,
+            old_text: Some("old one\nold two\n".into()),
+            new_text: Some("new one\nnew two\n".into()),
+            old_mode: 0,
+            new_mode: 0,
+            hunks: vec![hunk.clone()],
+            additions: 2,
+            deletions: 2,
+            message: None,
+            old_highlights: Vec::new(),
+            new_highlights: Vec::new(),
+        };
+        (file, hunk)
+    }
+
+    #[test]
+    fn unified_replacements_group_removals_before_additions() {
+        let (file, hunk) = replaced_file_and_hunk();
+        let block = unified_hunk_block(&file, &hunk);
+
+        assert_eq!(block.text, "old one\nold two\nnew one\nnew two\n");
+        assert_eq!(
+            block
+                .gutter
+                .iter()
+                .map(|line| line.label.as_str())
+                .collect::<Vec<_>>(),
+            ["-    1", "-    2", "+    1", "+    2"]
+        );
+    }
+
+    #[test]
+    fn split_blocks_keep_placeholder_rows_aligned() {
+        let (file, hunk) = replaced_file_and_hunk();
+        let old = split_hunk_block(&file, &hunk, true);
+        let new = split_hunk_block(&file, &hunk, false);
+
+        assert_eq!(old.text.lines().count(), new.text.lines().count());
+        assert_eq!(old.gutter.len(), new.gutter.len());
     }
 }

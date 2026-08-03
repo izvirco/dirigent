@@ -170,14 +170,6 @@ impl Dirigent {
             return;
         };
         let selected = selection.text[selection.range.clone()].to_string();
-        let selected = selected
-            .lines()
-            .map(|line| {
-                line.split_once('│')
-                    .map_or(line, |(_, source)| source.trim_start())
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
         let block = format!(
             "\n[Diff: turn {} · {} · {} {}]\n```{}\n{}\n```\n",
             reference.turn_id,
