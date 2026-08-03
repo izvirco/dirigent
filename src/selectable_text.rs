@@ -25,37 +25,102 @@ fn merged_highlights(
     highlights: &[(Range<usize>, HighlightStyle)],
     selection: Option<Range<usize>>,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
-    let mut boundaries = vec![0, len];
-    for (range, _) in highlights {
-        boundaries.extend([range.start, range.end]);
-    }
-    if let Some(range) = selection.as_ref() {
-        boundaries.extend([range.start, range.end]);
-    }
-    boundaries.sort_unstable();
-    boundaries.dedup();
-    boundaries
-        .windows(2)
-        .filter_map(|pair| {
-            let range = pair[0]..pair[1];
-            if range.is_empty() {
-                return None;
-            }
-            let mut style = highlights
-                .iter()
-                .find(|(highlight_range, _)| highlight_range.contains(&range.start))
-                .map(|(_, style)| *style)
-                .unwrap_or_default();
-            let selected = selection
-                .as_ref()
-                .is_some_and(|selected| selected.contains(&range.start));
-            if selected {
-                style.background_color =
-                    Some(rgb(crate::theme::text_selection()).opacity(0.40).into());
-            }
-            (style != HighlightStyle::default()).then_some((range, style))
+    // Highlight producers emit ordered, non-overlapping ranges. Walk those ranges and the
+    // single selection range together instead of searching all highlights at every boundary.
+    let ordered = highlights
+        .iter()
+        .filter_map(|(range, style)| {
+            let range = range.start.min(len)..range.end.min(len);
+            (!range.is_empty()).then_some((range, *style))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if !ordered
+        .windows(2)
+        .all(|pair| pair[0].0.end <= pair[1].0.start)
+    {
+        // Keep the original first-highlight-wins behavior for uncommon overlapping inputs.
+        // Diff highlights use the linear path above.
+        let mut boundaries = vec![0, len];
+        for (range, _) in &ordered {
+            boundaries.extend([range.start, range.end]);
+        }
+        if let Some(range) = selection.as_ref() {
+            boundaries.extend([range.start.min(len), range.end.min(len)]);
+        }
+        boundaries.sort_unstable();
+        boundaries.dedup();
+        return boundaries
+            .windows(2)
+            .filter_map(|pair| {
+                let range = pair[0]..pair[1];
+                let mut style = ordered
+                    .iter()
+                    .find(|(highlight_range, _)| highlight_range.contains(&range.start))
+                    .map(|(_, style)| *style)
+                    .unwrap_or_default();
+                if selection
+                    .as_ref()
+                    .is_some_and(|selected| selected.contains(&range.start))
+                {
+                    style.background_color =
+                        Some(rgb(crate::theme::text_selection()).opacity(0.40).into());
+                }
+                (style != HighlightStyle::default()).then_some((range, style))
+            })
+            .collect();
+    }
+
+    let selection = selection.map(|range| range.start.min(len)..range.end.min(len));
+    let selection_style = rgb(crate::theme::text_selection()).opacity(0.40).into();
+    let mut result: Vec<(Range<usize>, HighlightStyle)> = Vec::with_capacity(
+        ordered.len() + usize::from(selection.as_ref().is_some_and(|range| !range.is_empty())) * 2,
+    );
+    let mut highlight_index = 0;
+    let mut position = 0;
+
+    while position < len {
+        while highlight_index < ordered.len() && ordered[highlight_index].0.end <= position {
+            highlight_index += 1;
+        }
+        let highlight = ordered.get(highlight_index);
+        let mut end = highlight
+            .map_or(len, |(range, _)| {
+                if position < range.start {
+                    range.start
+                } else {
+                    range.end
+                }
+            })
+            .min(len);
+        let mut style = highlight
+            .filter(|(range, _)| range.contains(&position))
+            .map(|(_, style)| *style)
+            .unwrap_or_default();
+
+        if let Some(selected) = selection.as_ref() {
+            if selected.contains(&position) {
+                end = end.min(selected.end);
+                style.background_color = Some(selection_style);
+            } else if position < selected.start {
+                end = end.min(selected.start);
+            }
+        }
+        if end <= position {
+            end = position + 1;
+        }
+        if style != HighlightStyle::default() {
+            if let Some((previous_range, previous_style)) = result.last_mut()
+                && *previous_style == style
+                && previous_range.end == position
+            {
+                previous_range.end = end;
+            } else {
+                result.push((position..end, style));
+            }
+        }
+        position = end;
+    }
+    result
 }
 
 impl Dirigent {
@@ -248,5 +313,45 @@ impl Dirigent {
             )
             .child(styled)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merges_ordered_highlights_without_fragmenting_them() {
+        let first = HighlightStyle {
+            color: Some(rgb(0xff0000).into()),
+            ..Default::default()
+        };
+        let second = HighlightStyle {
+            color: Some(rgb(0x00ff00).into()),
+            ..Default::default()
+        };
+        let merged = merged_highlights(10, &[(1..3, first), (5..8, second)], None);
+
+        assert_eq!(merged, [(1..3, first), (5..8, second)]);
+    }
+
+    #[test]
+    fn selection_is_merged_with_highlight_and_plain_text_ranges() {
+        let syntax = HighlightStyle {
+            color: Some(rgb(0xff0000).into()),
+            ..Default::default()
+        };
+        let merged = merged_highlights(8, &[(1..3, syntax)], Some(2..6));
+
+        assert_eq!(
+            merged
+                .iter()
+                .map(|(range, _)| range.clone())
+                .collect::<Vec<_>>(),
+            [1..2, 2..3, 3..6]
+        );
+        assert_eq!(merged[0].1.background_color, None);
+        assert!(merged[1].1.background_color.is_some());
+        assert!(merged[2].1.background_color.is_some());
     }
 }

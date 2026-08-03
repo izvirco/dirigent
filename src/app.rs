@@ -51,6 +51,7 @@ use crate::{
     text_input::{AttachedImage, InputEvent, TextInput},
     theme::{self, bg, border, muted, rgb, theme_text},
     title_generator::{TitleGenerationEvent, TitleProcess},
+    ui::DiffRenderCache,
     vcs::RepositorySnapshot,
 };
 
@@ -353,6 +354,7 @@ pub(crate) struct Dirigent {
     pub(crate) diff_list: ListState,
     pub(crate) diff_display_key: Option<(Id, u64, DiffScope)>,
     pub(crate) diff_display: Option<TurnDiff>,
+    pub(crate) diff_render_cache: DiffRenderCache,
     pub(crate) diff_code_scrolls: std::cell::RefCell<HashMap<String, ScrollHandle>>,
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) expanded_archived_projects: HashSet<Id>,
@@ -964,10 +966,11 @@ impl Dirigent {
             diff_scope: DiffScope::Cumulative,
             selected_diff_turn: None,
             diff_turn_dropdown_open: false,
-            diff_list: ListState::new(0, ListAlignment::Top, px(700.0))
+            diff_list: ListState::new(0, ListAlignment::Top, px(180.0))
                 .with_uniform_item_height(px(300.0)),
             diff_display_key: None,
             diff_display: None,
+            diff_render_cache: DiffRenderCache::default(),
             diff_code_scrolls: std::cell::RefCell::new(HashMap::new()),
             collapsed_projects,
             expanded_archived_projects: HashSet::new(),

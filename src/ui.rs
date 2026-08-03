@@ -1,6 +1,8 @@
 mod composer;
 mod conversation;
 mod diff_sidebar;
+
+pub(crate) use diff_sidebar::DiffRenderCache;
 mod extension_dialog;
 mod keyboard_menu;
 mod markdown;

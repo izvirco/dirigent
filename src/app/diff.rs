@@ -137,7 +137,8 @@ impl Dirigent {
     pub(crate) fn set_diff_view_mode(&mut self, mode: DiffViewMode) {
         if self.diff_view_mode != mode {
             self.diff_view_mode = mode;
-            self.diff_list.remeasure();
+            self.rebuild_diff_render_cache();
+            self.thread_text_selection = None;
             self.persist_diff_sidebar();
         }
     }
@@ -183,14 +184,14 @@ impl Dirigent {
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
         else {
             if self.diff_display.take().is_some() {
-                self.diff_list.reset(0);
+                self.rebuild_diff_render_cache();
             }
             self.diff_display_key = None;
             return;
         };
         let Some(turn_id) = self.selected_diff_turn_id() else {
             if self.diff_display.take().is_some() {
-                self.diff_list.reset(0);
+                self.rebuild_diff_render_cache();
             }
             self.diff_display_key = None;
             return;
@@ -226,12 +227,7 @@ impl Dirigent {
             };
         }
         self.diff_display_key = Some(key);
-        self.diff_list.reset_with_uniform_height(
-            self.diff_display
-                .as_ref()
-                .map_or(0, |turn| turn.files.len()),
-            px(300.0),
-        );
+        self.rebuild_diff_render_cache();
     }
 
     pub(crate) fn selected_diff_turn_id(&self) -> Option<u64> {
