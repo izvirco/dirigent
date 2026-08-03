@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    ScrollHandle, SharedString, Window, deferred, div, list, prelude::*, px,
+    ScrollHandle, SharedString, Window, deferred, div, list, prelude::*, px, svg,
 };
 
 use super::composer::dropdown_arrow;
@@ -276,87 +276,77 @@ fn split_hunk_block(file: &FileDiff, hunk: &DiffHunk, old_side: bool) -> DiffBlo
 
 impl Dirigent {
     pub(super) fn render_changes_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        let count = self
-            .selected_harness
-            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
-            .map_or(0, |harness| harness.turn_diffs.len());
+        if self.diff_sidebar_open {
+            return div().into_any_element();
+        }
         div()
             .id("changes-toggle")
             .absolute()
             .top(px(10.0))
             .right(px(14.0))
-            .h(px(28.0))
-            .px_2()
+            .size(px(28.0))
             .flex()
             .items_center()
-            .gap_1()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(border()))
-            .bg(rgb(bg()).opacity(0.92))
-            .text_xs()
-            .text_color(rgb(if self.diff_sidebar_open {
-                blue()
-            } else {
-                muted()
-            }))
-            .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
+            .justify_center()
+            .text_color(rgb(muted()))
+            .hover(|style| style.text_color(rgb(theme_text())))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.toggle_diff_sidebar();
                 cx.notify();
             }))
-            .child("Changes")
-            .when(count > 0, |element| element.child(count.to_string()))
+            .child(
+                svg()
+                    .path("icon/panel-right.svg")
+                    .size(px(18.0))
+                    .text_color(rgb(theme_text())),
+            )
             .into_any_element()
     }
 
-    fn render_diff_mode_button(
-        &self,
-        label: &'static str,
-        mode: DiffViewMode,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = self.diff_view_mode == mode;
+    fn render_diff_mode_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (label, next) = match self.diff_view_mode {
+            DiffViewMode::Unified => ("Unified", DiffViewMode::Split),
+            DiffViewMode::Split => ("Split", DiffViewMode::Unified),
+        };
         div()
-            .id(format!("diff-mode-{label}"))
+            .id("diff-mode-toggle")
             .h(px(24.0))
             .px_2()
+            .flex_none()
             .flex()
             .items_center()
             .rounded_md()
+            .whitespace_nowrap()
             .text_xs()
-            .text_color(rgb(if selected { theme_text() } else { muted() }))
-            .when(selected, |element| element.bg(rgb(surface_hover())))
+            .text_color(rgb(theme_text()))
             .hover(|style| style.bg(rgb(surface_hover())))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_diff_view_mode(mode);
+                this.set_diff_view_mode(next);
                 cx.notify();
             }))
             .child(label)
             .into_any_element()
     }
 
-    fn render_diff_scope_button(
-        &self,
-        label: &'static str,
-        scope: DiffScope,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected = self.diff_scope == scope;
+    fn render_diff_scope_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
+        let (label, next) = match self.diff_scope {
+            DiffScope::Cumulative => ("Cumulative", DiffScope::Turn),
+            DiffScope::Turn => ("Turn only", DiffScope::Cumulative),
+        };
         div()
-            .id(format!("diff-scope-{label}"))
-            .h_full()
+            .id("diff-scope-toggle")
+            .h(px(24.0))
             .px_2()
+            .flex_none()
             .flex()
             .items_center()
-            .rounded_sm()
+            .rounded_md()
             .whitespace_nowrap()
             .text_xs()
-            .text_color(rgb(if selected { theme_text() } else { muted() }))
-            .when(selected, |element| element.bg(rgb(surface_hover())))
+            .text_color(rgb(theme_text()))
             .hover(|style| style.bg(rgb(surface_hover())))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.set_diff_scope(scope);
+                this.set_diff_scope(next);
                 cx.notify();
                 cx.stop_propagation();
             }))
@@ -436,22 +426,17 @@ impl Dirigent {
 
         div()
             .relative()
-            .min_w(px(74.0))
-            .max_w(px(118.0))
-            .flex_1()
+            .flex_none()
             .child(
                 div()
                     .id("diff-turn-picker")
-                    .h(px(28.0))
-                    .w_full()
+                    .h(px(24.0))
+                    .w_auto()
                     .px_2()
                     .flex()
                     .items_center()
                     .gap_1()
                     .rounded_md()
-                    .border_1()
-                    .border_color(rgb(if open { blue() } else { border() }))
-                    .bg(rgb(surface()))
                     .whitespace_nowrap()
                     .text_xs()
                     .text_color(rgb(theme_text()))
@@ -465,14 +450,7 @@ impl Dirigent {
                                 cx.stop_propagation();
                             }))
                     })
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(label),
-                    )
+                    .child(label)
                     .when(active, |element| {
                         element.child(div().size(px(6.0)).rounded_full().bg(rgb(orange())))
                     })
@@ -922,90 +900,38 @@ impl Dirigent {
             })
             .child(
                 div()
+                    .h(px(44.0))
+                    .px_3()
                     .flex_none()
                     .flex()
-                    .flex_col()
+                    .items_center()
+                    .gap_2()
                     .border_b_1()
                     .border_color(rgb(border()))
+                    .child(turn_picker)
+                    .child(self.render_diff_scope_toggle(cx))
+                    .child(self.render_diff_mode_toggle(cx))
+                    .child(div().flex_1())
                     .child(
                         div()
-                            .h(px(44.0))
-                            .px_3()
+                            .id("close-diff-sidebar")
+                            .size(px(28.0))
+                            .flex_none()
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .justify_center()
+                            .text_color(rgb(muted()))
+                            .hover(|style| style.text_color(rgb(theme_text())))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_diff_sidebar();
+                                cx.notify();
+                            }))
                             .child(
-                                div()
-                                    .flex_none()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("Changes"),
-                            )
-                            .child(turn_picker)
-                            .child(
-                                div()
-                                    .h(px(28.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .rounded_md()
-                                    .border_1()
-                                    .border_color(rgb(border()))
-                                    .bg(rgb(surface()))
-                                    .child(self.render_diff_scope_button(
-                                        "Cumulative",
-                                        DiffScope::Cumulative,
-                                        cx,
-                                    ))
-                                    .child(self.render_diff_scope_button(
-                                        "Turn only",
-                                        DiffScope::Turn,
-                                        cx,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .id("close-diff-sidebar")
-                                    .size(px(26.0))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded_md()
-                                    .text_color(rgb(muted()))
-                                    .hover(|style| {
-                                        style.bg(rgb(surface_hover())).text_color(rgb(theme_text()))
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.close_diff_sidebar();
-                                        cx.notify();
-                                    }))
-                                    .child("×"),
+                                svg()
+                                    .path("icon/panel-right.svg")
+                                    .size(px(18.0))
+                                    .text_color(rgb(theme_text())),
                             ),
-                    )
-                    .child(
-                        div()
-                            .h(px(34.0))
-                            .px_3()
-                            .flex()
-                            .items_center()
-                            .justify_end()
-                            .gap_1()
-                            .border_t_1()
-                            .border_color(rgb(border()))
-                            .child(
-                                div()
-                                    .mr_1()
-                                    .text_xs()
-                                    .text_color(rgb(muted()))
-                                    .child("View"),
-                            )
-                            .child(self.render_diff_mode_button(
-                                "Unified",
-                                DiffViewMode::Unified,
-                                cx,
-                            ))
-                            .child(self.render_diff_mode_button("Split", DiffViewMode::Split, cx)),
                     ),
             )
             .child(
