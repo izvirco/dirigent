@@ -40,7 +40,25 @@ impl Dirigent {
             .into_any_element()
     }
 
-    fn render_markdown_block(
+    pub(super) fn render_markdown_block_segment(
+        &self,
+        block: &MarkdownBlock,
+        original_block: &MarkdownBlock,
+        path: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let MarkdownBlock::CodeBlock { code, .. } = block
+            && let MarkdownBlock::CodeBlock {
+                code: original_code,
+                ..
+            } = original_block
+        {
+            return self.render_markdown_code_block_with_copy(path, code, original_code, cx);
+        }
+        self.render_markdown_block(block, path, cx)
+    }
+
+    pub(super) fn render_markdown_block(
         &self,
         block: &MarkdownBlock,
         path: &str,
@@ -185,7 +203,17 @@ impl Dirigent {
         code: &str,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let copied_code = code.to_string();
+        self.render_markdown_code_block_with_copy(path, code, code, cx)
+    }
+
+    fn render_markdown_code_block_with_copy(
+        &self,
+        path: &str,
+        code: &str,
+        full_code: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copied_code = full_code.to_string();
         let display_code = code.strip_suffix('\n').unwrap_or(code);
         let copy_button_id = format!("{path}-copy");
         let copy_group_id = format!("{path}-copy-group");

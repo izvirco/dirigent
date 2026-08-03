@@ -1,10 +1,9 @@
 use super::{
     FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
-    conversation_list_splice, directory_path_query, effective_settings_before_entry,
-    entries_through_leaf, parse_available_model, parse_cached_draft_images, parse_codex_usage,
-    parse_context_usage, parse_entries, parse_message, parse_messages, reconcile_queued_messages,
-    resolve_tilde_path, rpc_string_array, tool_expanded, tool_label, tool_result_detail,
-    truncate_output, write_detail,
+    directory_path_query, effective_settings_before_entry, entries_through_leaf,
+    parse_available_model, parse_cached_draft_images, parse_codex_usage, parse_context_usage,
+    parse_entries, parse_message, parse_messages, reconcile_queued_messages, resolve_tilde_path,
+    rpc_string_array, tool_expanded, tool_label, tool_result_detail, truncate_output, write_detail,
 };
 use crate::model::{CodexUsageWindow, Message, MessageRole};
 use serde_json::json;
@@ -124,14 +123,6 @@ fn tolerates_frames_without_response_timing() {
         FrameTiming::summarize(&samples).unwrap().response_p99_ms,
         None
     );
-}
-
-#[test]
-fn conversation_list_splice_removes_messages_missing_from_canonical_history() {
-    let (old_range, new_item_count) = conversation_list_splice(30, false, 25, false);
-
-    assert_eq!(old_range, 25..30);
-    assert_eq!(new_item_count, 0);
 }
 
 #[test]

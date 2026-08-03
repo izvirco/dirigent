@@ -1,8 +1,9 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    ScrollHandle, SharedString, Window, deferred, div, list, prelude::*, px, svg,
+    ScrollHandle, SharedString, StyledText, Window, canvas, deferred, div, fill, list, point,
+    prelude::*, px, size, svg,
 };
 
 use super::composer::dropdown_arrow;
@@ -150,21 +151,77 @@ impl DiffBlockBuilder {
             }
             self.highlights.retain(|(range, _)| !range.is_empty());
         }
-        DiffBlock {
-            text: self.text.into(),
-            highlights: self.highlights,
-            gutter: self.gutter,
-        }
+        DiffBlock::new(self.text.into(), self.highlights, self.gutter)
     }
+}
+
+#[derive(Clone, Copy)]
+struct GutterColorRun {
+    first_line: usize,
+    end_line: usize,
+    color: u32,
 }
 
 struct DiffBlock {
     text: SharedString,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     gutter: Vec<DiffGutterLine>,
+    gutter_text: SharedString,
+    gutter_highlights: Vec<(Range<usize>, HighlightStyle)>,
+    gutter_color_runs: Arc<[GutterColorRun]>,
 }
 
 impl DiffBlock {
+    fn new(
+        text: SharedString,
+        highlights: Vec<(Range<usize>, HighlightStyle)>,
+        gutter: Vec<DiffGutterLine>,
+    ) -> Self {
+        let mut gutter_text = String::new();
+        let mut gutter_highlights = Vec::with_capacity(gutter.len());
+        let mut gutter_color_runs: Vec<GutterColorRun> = Vec::new();
+        for (line_index, line) in gutter.iter().enumerate() {
+            if line_index > 0 {
+                gutter_text.push('\n');
+            }
+            let start = gutter_text.len();
+            gutter_text.push_str(&line.label);
+            gutter_highlights.push((
+                start..gutter_text.len(),
+                HighlightStyle {
+                    color: Some(
+                        rgb(if line.color == border() {
+                            muted()
+                        } else {
+                            line.color
+                        })
+                        .into(),
+                    ),
+                    ..Default::default()
+                },
+            ));
+            if let Some(run) = gutter_color_runs.last_mut()
+                && run.color == line.color
+            {
+                run.end_line = line_index + 1;
+            } else {
+                gutter_color_runs.push(GutterColorRun {
+                    first_line: line_index,
+                    end_line: line_index + 1,
+                    color: line.color,
+                });
+            }
+        }
+        Self {
+            text,
+            highlights,
+            gutter,
+            gutter_text: gutter_text.into(),
+            gutter_highlights,
+            gutter_color_runs: gutter_color_runs.into(),
+        }
+    }
+
     fn line_count(&self) -> usize {
         self.gutter.len()
     }
@@ -172,11 +229,11 @@ impl DiffBlock {
     fn chunks(&self) -> Vec<Self> {
         let line_count = self.line_count();
         if line_count <= DIFF_CHUNK_LINES {
-            return vec![Self {
-                text: self.text.clone(),
-                highlights: self.highlights.clone(),
-                gutter: self.gutter.clone(),
-            }];
+            return vec![Self::new(
+                self.text.clone(),
+                self.highlights.clone(),
+                self.gutter.clone(),
+            )];
         }
 
         let mut starts = vec![0];
@@ -201,11 +258,11 @@ impl DiffBlock {
                         (start < end).then_some((start - byte_start..end - byte_start, *style))
                     })
                     .collect();
-                Self {
-                    text: self.text[byte_start..byte_end].to_string().into(),
+                Self::new(
+                    self.text[byte_start..byte_end].to_string().into(),
                     highlights,
-                    gutter: self.gutter[first_line..end_line].to_vec(),
-                }
+                    self.gutter[first_line..end_line].to_vec(),
+                )
             })
             .collect()
     }
@@ -425,7 +482,7 @@ enum DiffRenderItem {
         file_index: usize,
         hunk_index: usize,
         chunk_index: usize,
-        block: DiffBlock,
+        block: Box<DiffBlock>,
         reference: DiffSelectionReference,
         top_gap: bool,
         last_in_file: bool,
@@ -434,8 +491,8 @@ enum DiffRenderItem {
         file_index: usize,
         hunk_index: usize,
         chunk_index: usize,
-        old_block: DiffBlock,
-        new_block: DiffBlock,
+        old_block: Box<DiffBlock>,
+        new_block: Box<DiffBlock>,
         old_reference: DiffSelectionReference,
         new_reference: DiffSelectionReference,
         top_gap: bool,
@@ -512,7 +569,7 @@ impl DiffRenderCache {
                                 file_index,
                                 hunk_index,
                                 chunk_index,
-                                block,
+                                block: Box::new(block),
                                 reference: reference.clone(),
                                 top_gap: top_gap && chunk_index == 0,
                                 last_in_file: false,
@@ -552,8 +609,8 @@ impl DiffRenderCache {
                                 file_index,
                                 hunk_index,
                                 chunk_index,
-                                old_block,
-                                new_block,
+                                old_block: Box::new(old_block),
+                                new_block: Box::new(new_block),
                                 old_reference: old_reference.clone(),
                                 new_reference: new_reference.clone(),
                                 top_gap: top_gap && chunk_index == 0,
@@ -918,28 +975,44 @@ impl Dirigent {
     ) -> AnyElement {
         let scrollbar_id = format!("{id}-scrollbar");
         let scroll_id = format!("{id}-scroll");
-        let gutter = block
-            .gutter
-            .iter()
-            .map(|line| {
-                div()
-                    .h(px(18.0))
-                    .w_full()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .pr_1()
-                    .border_r_4()
-                    .border_color(rgb(line.color))
-                    .text_color(rgb(if line.color == border() {
-                        muted()
-                    } else {
-                        line.color
-                    }))
-                    .child(line.label.clone())
-            })
-            .collect::<Vec<_>>();
+        let gutter_runs = block.gutter_color_runs.clone();
+        let gutter = div()
+            .relative()
+            .w(px(gutter_width))
+            .flex_none()
+            .pr_1()
+            .whitespace_nowrap()
+            .text_right()
+            .text_xs()
+            .line_height(px(18.0))
+            .child(
+                StyledText::new(block.gutter_text.clone())
+                    .with_highlights(block.gutter_highlights.iter().cloned()),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, _, window, _| {
+                        for run in gutter_runs.iter() {
+                            window.paint_quad(fill(
+                                gpui::Bounds::new(
+                                    point(
+                                        bounds.right() - px(4.0),
+                                        bounds.top() + px(run.first_line as f32 * 18.0),
+                                    ),
+                                    size(
+                                        px(4.0),
+                                        px((run.end_line - run.first_line) as f32 * 18.0),
+                                    ),
+                                ),
+                                rgb(run.color),
+                            ));
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            );
         let mut code_scroll = div()
             .id(scroll_id)
             .w_full()
@@ -961,15 +1034,7 @@ impl Dirigent {
             .min_w_0()
             .flex()
             .items_start()
-            .child(
-                div()
-                    .w(px(gutter_width))
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .text_xs()
-                    .children(gutter),
-            )
+            .child(gutter)
             .child(div().relative().flex_1().min_w_0().child(code_scroll).when(
                 show_scrollbar,
                 |element| {

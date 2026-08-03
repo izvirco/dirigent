@@ -1,5 +1,9 @@
 mod actions;
+mod cache;
 mod message;
+
+pub(crate) use cache::ConversationRenderCache;
+use cache::{AssistantSegmentContent, ConversationRenderItem};
 
 #[cfg(test)]
 use message::tool_color;
@@ -7,9 +11,9 @@ use message::tool_color;
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
-    canvas, deferred, div, img, list, prelude::*, px, relative,
+    Animation, AnimationExt as _, AnyElement, Context, FollowMode, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle, SharedString,
+    StyledImage, Window, canvas, deferred, div, img, list, prelude::*, px, relative,
 };
 
 use super::composer::dropdown_arrow;
@@ -69,6 +73,34 @@ fn format_retry_status(retry: &RetryStatus) -> String {
 }
 
 impl Dirigent {
+    pub(crate) fn reset_conversation_render_cache(&mut self) {
+        self.conversation_render_cache = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+            .map(ConversationRenderCache::build)
+            .unwrap_or_default();
+        self.conversation_list.reset_with_uniform_height(
+            self.conversation_render_cache.len(),
+            px(self.conversation_render_cache.item_height_hint()),
+        );
+        self.conversation_list.set_follow_mode(FollowMode::Tail);
+    }
+
+    pub(crate) fn sync_conversation_render_cache(&mut self, rebuild_from_message: usize) {
+        let old_cache = std::mem::take(&mut self.conversation_render_cache);
+        let (new_cache, old_range, new_count) = if let Some(harness) = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+        {
+            ConversationRenderCache::update(harness, old_cache, rebuild_from_message)
+        } else {
+            let old_len = old_cache.len();
+            (ConversationRenderCache::default(), 0..old_len, 0)
+        };
+        self.conversation_list.splice(old_range, new_count);
+        self.conversation_render_cache = new_cache;
+    }
+
     fn render_conversation_ruler(
         &self,
         messages: &[Message],
@@ -230,32 +262,149 @@ impl Dirigent {
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
             .expect("selected harness must exist");
+        let Some(item) = self.conversation_render_cache.items.get(index) else {
+            return div().into_any_element();
+        };
 
-        if let Some(message) = harness.messages.get(index) {
-            let follows_activity = index > 0
-                && matches!(message.role, MessageRole::Thinking | MessageRole::Tool)
-                && matches!(
-                    harness.messages[index - 1].role,
-                    MessageRole::Thinking | MessageRole::Tool
-                );
-            return div()
-                .w_full()
-                .child(
-                    div()
+        match item {
+            ConversationRenderItem::Message {
+                message_index,
+                queued: false,
+                ..
+            } => {
+                let Some(message) = harness.messages.get(*message_index) else {
+                    return div().into_any_element();
+                };
+                let follows_activity = *message_index > 0
+                    && matches!(message.role, MessageRole::Thinking | MessageRole::Tool)
+                    && matches!(
+                        harness.messages[*message_index - 1].role,
+                        MessageRole::Thinking | MessageRole::Tool
+                    );
+                div()
+                    .w_full()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(820.0))
+                            .mx_auto()
+                            .px_7()
+                            .when(*message_index > 0 && !follows_activity, |element| {
+                                element.mt_2()
+                            })
+                            .child(self.render_message(message, *message_index, cx)),
+                    )
+                    .into_any_element()
+            }
+            ConversationRenderItem::Message {
+                message_index,
+                queued: true,
+                ..
+            } => {
+                let Some(message) = harness.queued_messages.get(*message_index) else {
+                    return div().into_any_element();
+                };
+                let render_index = harness.messages.len()
+                    + usize::from(harness.status == HarnessStatus::Working)
+                    + message_index;
+                div()
+                    .w_full()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(820.0))
+                            .mx_auto()
+                            .px_7()
+                            .mt_2()
+                            .child(self.render_message(message, render_index, cx)),
+                    )
+                    .into_any_element()
+            }
+            ConversationRenderItem::AssistantSegment {
+                message_index,
+                segment_index,
+                content,
+                first,
+                top_gap,
+                last,
+                ..
+            } => {
+                let Some(message) = harness.messages.get(*message_index) else {
+                    return div().into_any_element();
+                };
+                let content = match content {
+                    AssistantSegmentContent::Plain { text, range } => self
+                        .render_assistant_text_segment(
+                            message,
+                            *message_index,
+                            *segment_index,
+                            SharedString::from(text[range.clone()].to_string()),
+                            *top_gap,
+                            *last,
+                            cx,
+                        ),
+                    AssistantSegmentContent::Markdown { block_index, block } => {
+                        let original_block = message
+                            .markdown
+                            .as_ref()
+                            .and_then(|document| document.blocks.get(*block_index));
+                        let Some(original_block) = original_block else {
+                            return div().into_any_element();
+                        };
+                        self.render_assistant_markdown_segment(
+                            message,
+                            *message_index,
+                            *segment_index,
+                            *block_index,
+                            block.as_ref().unwrap_or(original_block),
+                            original_block,
+                            *top_gap,
+                            *last,
+                            cx,
+                        )
+                    }
+                };
+                div()
+                    .w_full()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(820.0))
+                            .mx_auto()
+                            .px_7()
+                            .when(*first && *message_index > 0, |element| element.mt_2())
+                            .child(content),
+                    )
+                    .into_any_element()
+            }
+            ConversationRenderItem::Working => {
+                if let Some(retry) = harness.retry_status.as_ref() {
+                    return div()
                         .w_full()
-                        .max_w(px(820.0))
-                        .mx_auto()
-                        .px_7()
-                        .when(index > 0 && !follows_activity, |element| element.mt_2())
-                        .child(self.render_message(message, index, cx)),
-                )
-                .into_any_element();
-        }
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(820.0))
+                                .mx_auto()
+                                .px_7()
+                                .mt_4()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .min_h(px(22.0))
+                                        .flex()
+                                        .flex_col()
+                                        .text_xs()
+                                        .text_color(rgb(orange()))
+                                        .child(format_retry_status(retry))
+                                        .child(retry.error_message.clone()),
+                                ),
+                        )
+                        .into_any_element();
+                }
 
-        let working = harness.status == HarnessStatus::Working;
-        if working && index == harness.messages.len() {
-            if let Some(retry) = harness.retry_status.as_ref() {
-                return div()
+                let run_started_at = harness.run_started_at;
+                div()
                     .w_full()
                     .child(
                         div()
@@ -264,86 +413,41 @@ impl Dirigent {
                             .mx_auto()
                             .px_7()
                             .mt_4()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .min_h(px(22.0))
-                                    .flex()
-                                    .flex_col()
-                                    .text_xs()
-                                    .text_color(rgb(orange()))
-                                    .child(format_retry_status(retry))
-                                    .child(retry.error_message.clone()),
+                            .flex()
+                            .text_xs()
+                            .with_animation(
+                                "working-indicator",
+                                Animation::new(Duration::from_millis(6_660 * 2)).repeat(),
+                                move |indicator, delta| {
+                                    let elapsed = run_started_at
+                                        .map(|started_at| started_at.elapsed())
+                                        .unwrap_or_default();
+                                    let label =
+                                        format!("Working for {}", format_working_duration(elapsed));
+                                    let color_label = label.clone();
+                                    indicator.children(label.chars().enumerate().map(
+                                        move |(index, character)| {
+                                            div()
+                                                .text_color(rgb(
+                                                    if working_character_is_orange(
+                                                        delta,
+                                                        index,
+                                                        &color_label,
+                                                    ) {
+                                                        orange()
+                                                    } else {
+                                                        blue()
+                                                    },
+                                                ))
+                                                .child(character.to_string())
+                                        },
+                                    ))
+                                },
                             ),
                     )
-                    .into_any_element();
+                    .into_any_element()
             }
-
-            let run_started_at = harness.run_started_at;
-            return div()
-                .w_full()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(820.0))
-                        .mx_auto()
-                        .px_7()
-                        .mt_4()
-                        .flex()
-                        .text_xs()
-                        .with_animation(
-                            "working-indicator",
-                            Animation::new(Duration::from_millis(6_660 * 2)).repeat(),
-                            move |indicator, delta| {
-                                let elapsed = run_started_at
-                                    .map(|started_at| started_at.elapsed())
-                                    .unwrap_or_default();
-                                let label =
-                                    format!("Working for {}", format_working_duration(elapsed));
-                                let color_label = label.clone();
-                                indicator.children(label.chars().enumerate().map(
-                                    move |(index, character)| {
-                                        div()
-                                            .text_color(rgb(
-                                                if working_character_is_orange(
-                                                    delta,
-                                                    index,
-                                                    &color_label,
-                                                ) {
-                                                    orange()
-                                                } else {
-                                                    blue()
-                                                },
-                                            ))
-                                            .child(character.to_string())
-                                    },
-                                ))
-                            },
-                        ),
-                )
-                .into_any_element();
         }
-
-        let queued_start = harness.messages.len() + usize::from(working);
-        if let Some(message) = index
-            .checked_sub(queued_start)
-            .and_then(|queued_index| harness.queued_messages.get(queued_index))
-        {
-            return div()
-                .w_full()
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(820.0))
-                        .mx_auto()
-                        .px_7()
-                        .mt_2()
-                        .child(self.render_message(message, index, cx)),
-                )
-                .into_any_element();
-        }
-
-        div().into_any_element()
     }
 
     pub(super) fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement {

@@ -1,20 +1,5 @@
 use super::*;
 
-pub(super) fn conversation_list_splice(
-    old_message_count: usize,
-    old_working: bool,
-    new_message_count: usize,
-    new_working: bool,
-) -> (Range<usize>, usize) {
-    let retained_message_count = old_message_count.min(new_message_count);
-    let old_item_count = old_message_count + usize::from(old_working);
-    let new_item_count = new_message_count + usize::from(new_working);
-    (
-        retained_message_count..old_item_count,
-        new_item_count - retained_message_count,
-    )
-}
-
 pub(super) fn reasoning_options_for_model(
     project_id: Option<Id>,
     current_model: &str,
@@ -239,12 +224,7 @@ impl Dirigent {
         self.conversation_list_message_count = harness.messages.len();
         self.conversation_list_queued_count = harness.queued_messages.len();
         self.conversation_list_working = harness.status == HarnessStatus::Working;
-        let item_count = self.conversation_list_message_count
-            + self.conversation_list_queued_count
-            + usize::from(self.conversation_list_working);
-        self.conversation_list
-            .reset_with_uniform_height(item_count, px(48.0));
-        self.conversation_list.set_follow_mode(FollowMode::Tail);
+        self.reset_conversation_render_cache();
     }
     pub(super) fn sync_conversation_list(
         &mut self,
@@ -258,42 +238,16 @@ impl Dirigent {
         let new_message_count = harness.messages.len();
         let new_queued_count = harness.queued_messages.len();
         let new_working = harness.status == HarnessStatus::Working;
-        if (self.conversation_list_queued_count > 0 || new_queued_count > 0)
-            && (self.conversation_list_message_count != new_message_count
-                || self.conversation_list_queued_count != new_queued_count
-                || self.conversation_list_working != new_working)
-        {
-            let old_item_count = self.conversation_list_message_count
-                + self.conversation_list_queued_count
-                + usize::from(self.conversation_list_working);
-            let new_item_count = new_message_count + new_queued_count + usize::from(new_working);
-            self.conversation_list
-                .splice(0..old_item_count, new_item_count);
-            self.conversation_list_message_count = new_message_count;
-            self.conversation_list_queued_count = new_queued_count;
-            self.conversation_list_working = new_working;
-        } else if self.conversation_list_message_count != new_message_count
-            || self.conversation_list_working != new_working
-        {
-            let (old_range, new_item_count) = conversation_list_splice(
-                self.conversation_list_message_count,
-                self.conversation_list_working,
-                new_message_count,
-                new_working,
-            );
-            self.conversation_list.splice(old_range, new_item_count);
-            if new_message_count < self.conversation_list_message_count {
-                // A completed run is replaced with canonical session entries, which can
-                // contain fewer, differently grouped messages than the streamed view.
-                self.conversation_list.remeasure_items(0..new_message_count);
-            }
-            self.conversation_list_message_count = new_message_count;
-            self.conversation_list_queued_count = new_queued_count;
-            self.conversation_list_working = new_working;
-        }
-        if let Some(index) = changed_message.filter(|index| *index < new_message_count) {
-            self.conversation_list.remeasure_items(index..index + 1);
-        }
+        let old_message_count = self.conversation_list_message_count;
+        let rebuild_from_message = if new_message_count < old_message_count {
+            0
+        } else {
+            changed_message.unwrap_or(old_message_count.min(new_message_count))
+        };
+        self.sync_conversation_render_cache(rebuild_from_message);
+        self.conversation_list_message_count = new_message_count;
+        self.conversation_list_queued_count = new_queued_count;
+        self.conversation_list_working = new_working;
     }
     pub(crate) fn scroll_conversation_to_fraction(&mut self, fraction: f32) {
         let max_offset = self.conversation_list.max_offset_for_scrollbar().y;

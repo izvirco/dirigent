@@ -51,7 +51,7 @@ use crate::{
     text_input::{AttachedImage, InputEvent, TextInput},
     theme::{self, bg, border, muted, rgb, theme_text},
     title_generator::{TitleGenerationEvent, TitleProcess},
-    ui::DiffRenderCache,
+    ui::{ConversationRenderCache, DiffRenderCache},
     vcs::RepositorySnapshot,
 };
 
@@ -373,6 +373,7 @@ pub(crate) struct Dirigent {
     pub(crate) font: SharedString,
     window_transparent: Option<bool>,
     pub(crate) conversation_list: ListState,
+    pub(crate) conversation_render_cache: ConversationRenderCache,
     conversation_list_message_count: usize,
     conversation_list_queued_count: usize,
     conversation_list_working: bool,
@@ -886,12 +887,15 @@ impl Dirigent {
             selected_conversation.map_or(0, |harness| harness.queued_messages.len());
         let conversation_list_working =
             selected_conversation.is_some_and(|harness| harness.status == HarnessStatus::Working);
-        let conversation_item_count = conversation_list_message_count
-            + conversation_list_queued_count
-            + usize::from(conversation_list_working);
-        let conversation_list =
-            ListState::new(conversation_item_count, ListAlignment::Bottom, px(1_000.0))
-                .with_uniform_item_height(px(48.0));
+        let conversation_render_cache = selected_conversation
+            .map(ConversationRenderCache::build)
+            .unwrap_or_default();
+        let conversation_list = ListState::new(
+            conversation_render_cache.len(),
+            ListAlignment::Bottom,
+            px(180.0),
+        )
+        .with_uniform_item_height(px(conversation_render_cache.item_height_hint()));
         conversation_list.set_follow_mode(FollowMode::Tail);
         let entity = cx.entity();
         conversation_list.set_scroll_handler(move |_, _, cx| {
@@ -989,6 +993,7 @@ impl Dirigent {
             font: appearance.font.into(),
             window_transparent: None,
             conversation_list,
+            conversation_render_cache,
             conversation_list_message_count,
             conversation_list_queued_count,
             conversation_list_working,
