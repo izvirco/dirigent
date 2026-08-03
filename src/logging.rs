@@ -1,10 +1,15 @@
 use std::{fs, io, panic};
 
+use tracing::{Event, Subscriber, field::Visit};
 use tracing_appender::{
     non_blocking::WorkerGuard,
     rolling::{RollingFileAppender, Rotation},
 };
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter,
+    layer::{Context, Filter, Layer, SubscriberExt},
+    util::SubscriberInitExt,
+};
 
 use crate::platform;
 
@@ -12,6 +17,45 @@ use crate::platform;
 // cannot act on: optional D-Bus services may be absent, and inotify may report that a
 // deleted child watch was already removed by the kernel.
 const DEFAULT_FILTER: &str = "warn,dirigent=info,zbus::proxy=error,notify::inotify=error";
+
+#[derive(Clone, Copy)]
+struct ExpectedNoiseFilter;
+
+impl<S: Subscriber> Filter<S> for ExpectedNoiseFilter {
+    fn enabled(&self, _: &tracing::Metadata<'_>, _: &Context<'_, S>) -> bool {
+        true
+    }
+
+    fn event_enabled(&self, event: &Event<'_>, _: &Context<'_, S>) -> bool {
+        let mut message = EventMessage::default();
+        event.record(&mut message);
+        !is_expected_noise(event.metadata().target(), message.value.as_deref())
+    }
+}
+
+#[derive(Default)]
+struct EventMessage {
+    value: Option<String>,
+}
+
+impl Visit for EventMessage {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.value = Some(value.to_string());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "message" {
+            self.value = Some(format!("{value:?}"));
+        }
+    }
+}
+
+fn is_expected_noise(target: &str, message: Option<&str>) -> bool {
+    target == "gpui::window"
+        && message.is_some_and(|message| message.trim_matches('"') == "window not found")
+}
 
 pub(crate) struct LoggingGuard {
     _file_guard: WorkerGuard,
@@ -43,13 +87,15 @@ pub(crate) fn initialize() -> Result<LoggingGuard, String> {
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(io::stderr)
-                .with_thread_names(true),
+                .with_thread_names(true)
+                .with_filter(ExpectedNoiseFilter),
         )
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(file_writer)
                 .with_ansi(false)
-                .with_thread_names(true),
+                .with_thread_names(true)
+                .with_filter(ExpectedNoiseFilter),
         )
         .with(env_filter())
         .try_init()
@@ -63,10 +109,14 @@ pub(crate) fn initialize() -> Result<LoggingGuard, String> {
 }
 
 pub(crate) fn initialize_console() {
-    let _ = tracing_subscriber::fmt()
-        .with_writer(io::stderr)
-        .with_thread_names(true)
-        .with_env_filter(env_filter())
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(io::stderr)
+                .with_thread_names(true)
+                .with_filter(ExpectedNoiseFilter),
+        )
+        .with(env_filter())
         .try_init();
     install_panic_hook();
 }
@@ -85,6 +135,21 @@ fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
+    use super::is_expected_noise;
+
+    #[test]
+    fn suppresses_only_the_benign_closed_window_race() {
+        assert!(is_expected_noise("gpui::window", Some("window not found")));
+        assert!(!is_expected_noise(
+            "gpui::window",
+            Some("unexpected rendering failure")
+        ));
+        assert!(!is_expected_noise(
+            "dirigent::app",
+            Some("window not found")
+        ));
+    }
+
     #[test]
     fn stores_logs_beside_v0_state() {
         assert!(
