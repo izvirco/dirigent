@@ -64,6 +64,9 @@ macro_rules! define_theme {
         #[serde(deny_unknown_fields)]
         struct ThemeFile {
             $($field: Color,)+
+            // Accept this removed color so existing generated and custom themes keep loading.
+            #[serde(default, rename = "notice_background")]
+            _legacy_notice_background: Option<Color>,
         }
 
         $(static $storage: AtomicU32 = AtomicU32::new(($default << 8) | 0xff);)+
@@ -115,7 +118,6 @@ define_theme!(
     (red, RED, red, 0xff7b72),
     (error_text, ERROR_TEXT, error_text, 0xff9999),
     (error_background, ERROR_BACKGROUND, error_bg, 0x2a1919),
-    (notice_background, NOTICE_BACKGROUND, notice_bg, 0x171d24),
     (warning_border, WARNING_BORDER, warning_border, 0xffb15e),
     (warning_background, WARNING_BACKGROUND, warning_bg, 0x2a2117),
     (warning_text, WARNING_TEXT, warning_text, 0xffc978),
@@ -150,7 +152,6 @@ green = "#7fd88f"
 red = "#ff7b72"
 error_text = "#ff9999"
 error_background = "#2a1919"
-notice_background = "#171d24"
 warning_border = "#ffb15e"
 warning_background = "#2a2117"
 warning_text = "#ffc978"
@@ -185,7 +186,6 @@ green = "#a3be8c"
 red = "#bf616a"
 error_text = "#e88b92"
 error_background = "#4a3038"
-notice_background = "#354252"
 warning_border = "#d08770"
 warning_background = "#493e39"
 warning_text = "#ebcb8b"
@@ -220,7 +220,6 @@ green = "#b8bb26"
 red = "#fb4934"
 error_text = "#fb7b6b"
 error_background = "#4c2f2a"
-notice_background = "#323d3c"
 warning_border = "#d79921"
 warning_background = "#4a3f27"
 warning_text = "#fabd2f"
@@ -387,6 +386,15 @@ mod tests {
         ] {
             toml::from_str::<ThemeFile>(source).unwrap();
         }
+    }
+
+    #[test]
+    fn accepts_legacy_notice_background() {
+        let source = format!(
+            "{}notice_background = \"#171d24\"\n",
+            super::DEFAULT_THEME_FILE
+        );
+        toml::from_str::<ThemeFile>(&source).unwrap();
     }
 
     #[test]
