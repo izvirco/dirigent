@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use gpui::SharedString;
 
@@ -21,6 +21,27 @@ pub(super) enum AssistantSegmentContent {
         block_index: usize,
         block: Option<MarkdownBlock>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct ConversationRulerMarker {
+    pub(super) message_index: usize,
+    pub(super) role: MessageRole,
+    pub(super) is_compaction: bool,
+}
+
+fn conversation_ruler_marker(
+    message: &Message,
+    message_index: usize,
+) -> Option<ConversationRulerMarker> {
+    let is_compaction = message.role == MessageRole::Tool && message.is_compaction();
+    (matches!(message.role, MessageRole::User | MessageRole::Assistant) || is_compaction).then_some(
+        ConversationRulerMarker {
+            message_index,
+            role: message.role,
+            is_compaction,
+        },
+    )
 }
 
 pub(super) enum ConversationRenderItem {
@@ -66,6 +87,7 @@ impl ConversationRenderItem {
 #[derive(Default)]
 pub(crate) struct ConversationRenderCache {
     pub(super) items: Vec<ConversationRenderItem>,
+    pub(super) ruler_markers: Arc<[ConversationRulerMarker]>,
     estimated_height: f32,
 }
 
@@ -88,8 +110,16 @@ impl ConversationRenderCache {
                     .is_some_and(|index| index < rebuild_from_message)
             })
             .count();
+        let marker_prefix_len = old
+            .ruler_markers
+            .partition_point(|marker| marker.message_index < rebuild_from_message);
+        let mut ruler_markers = Vec::with_capacity(
+            marker_prefix_len + harness.messages.len().saturating_sub(rebuild_from_message),
+        );
+        ruler_markers.extend_from_slice(&old.ruler_markers[..marker_prefix_len]);
         let mut cache = Self {
             items: old.items.into_iter().take(prefix_len).collect(),
+            ruler_markers: Arc::default(),
             estimated_height: 0.0,
         };
         for (message_index, message) in harness
@@ -98,6 +128,7 @@ impl ConversationRenderCache {
             .enumerate()
             .skip(rebuild_from_message)
         {
+            ruler_markers.extend(conversation_ruler_marker(message, message_index));
             cache.push_message(message, message_index);
         }
         if harness.status == HarnessStatus::Working {
@@ -114,6 +145,7 @@ impl ConversationRenderCache {
             .iter()
             .map(ConversationRenderItem::estimated_height)
             .sum();
+        cache.ruler_markers = ruler_markers.into();
         let new_count = cache.items.len() - prefix_len;
         (cache, prefix_len..old_len, new_count)
     }
@@ -354,6 +386,30 @@ fn estimate_markdown_height(
 mod tests {
     use super::*;
     use crate::markdown::{MarkdownSpan, MarkdownSpanStyle};
+
+    #[test]
+    fn ruler_markers_include_only_navigation_messages() {
+        assert_eq!(
+            conversation_ruler_marker(&Message::new(MessageRole::User, "prompt"), 4),
+            Some(ConversationRulerMarker {
+                message_index: 4,
+                role: MessageRole::User,
+                is_compaction: false,
+            })
+        );
+        assert_eq!(
+            conversation_ruler_marker(&Message::compaction(None, None, false), 5),
+            Some(ConversationRulerMarker {
+                message_index: 5,
+                role: MessageRole::Tool,
+                is_compaction: true,
+            })
+        );
+        assert_eq!(
+            conversation_ruler_marker(&Message::tool("read file", None, false, false), 6),
+            None
+        );
+    }
 
     #[test]
     fn long_text_is_split_at_utf8_boundaries() {

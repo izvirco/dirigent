@@ -212,8 +212,14 @@ impl Dirigent {
             .map(|selection| selection.range.clone());
         let mut styled = StyledText::new(text.clone());
         if !highlights.is_empty() || selected_range.is_some() {
-            styled =
-                styled.with_highlights(merged_highlights(text.len(), highlights, selected_range));
+            styled = if selected_range.is_none() && diff_reference.is_some() {
+                // Prepared diff highlights are already clipped, ordered, and non-overlapping.
+                // Avoid rebuilding the full run list on every frame unless a selection must
+                // be merged into it.
+                styled.with_highlights(highlights.iter().cloned())
+            } else {
+                styled.with_highlights(merged_highlights(text.len(), highlights, selected_range))
+            };
         }
         if !font_overrides.is_empty() {
             styled = styled.with_font_family_overrides(font_overrides.iter().cloned());

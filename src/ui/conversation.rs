@@ -8,12 +8,13 @@ use cache::{AssistantSegmentContent, ConversationRenderItem};
 #[cfg(test)]
 use message::tool_color;
 
-use std::time::Duration;
+use std::{ops::Range, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, Context, FollowMode, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle, SharedString,
-    StyledImage, Window, canvas, deferred, div, img, list, prelude::*, px, relative,
+    Animation, AnimationExt as _, AnyElement, Context, FollowMode, HighlightStyle, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle,
+    SharedString, StyledImage, StyledText, Window, canvas, deferred, div, fill, img, list, point,
+    prelude::*, px, relative, size,
 };
 
 use super::composer::dropdown_arrow;
@@ -43,6 +44,7 @@ fn working_character(delta: f32, text: &str) -> usize {
     ((delta * character_count as f32) as usize).min(character_count.saturating_sub(1))
 }
 
+#[cfg(test)]
 fn working_character_is_orange(delta: f32, index: usize, text: &str) -> bool {
     if delta >= 1.0 {
         return false;
@@ -55,6 +57,24 @@ fn working_character_is_orange(delta: f32, index: usize, text: &str) -> bool {
     } else {
         index > active
     }
+}
+
+fn working_orange_range(delta: f32, text: &str) -> Option<Range<usize>> {
+    if text.is_empty() || delta >= 1.0 {
+        return None;
+    }
+    let animation_position = delta * 2.0;
+    let active = working_character(animation_position.fract(), text);
+    let active_end = text
+        .char_indices()
+        .nth(active + 1)
+        .map_or(text.len(), |(index, _)| index);
+    let range = if animation_position < 1.0 {
+        0..active_end
+    } else {
+        active_end..text.len()
+    };
+    (!range.is_empty()).then_some(range)
 }
 
 fn format_retry_status(retry: &RetryStatus) -> String {
@@ -132,6 +152,7 @@ impl Dirigent {
         };
         let viewport_top = (1.0 - viewport_fraction) * scroll_fraction;
         let message_count = messages.len().max(1) as f32;
+        let markers = self.conversation_render_cache.ruler_markers.clone();
         let entity = cx.entity();
 
         div()
@@ -143,59 +164,82 @@ impl Dirigent {
             .w(px(18.0))
             .overflow_hidden()
             .child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .flex()
-                    .flex_col()
-                    .justify_between()
-                    .py(px(1.0))
-                    .children((0..17).map(|_| {
-                        div()
-                            .h(px(1.0))
-                            .w(px(14.0))
-                            .mx_auto()
-                            .flex_none()
-                            .bg(rgb(orange()).opacity(0.60))
-                    })),
-            )
-            .children(messages.iter().enumerate().filter_map(|(index, message)| {
-                let (color, is_compaction) = match message.role {
-                    MessageRole::User => (blue(), false),
-                    MessageRole::Assistant => (crate::theme::detail_text(), false),
-                    MessageRole::Tool if message.is_compaction() => (purple(), true),
-                    _ => return None,
-                };
-                Some(
-                    div()
-                        .absolute()
-                        .top(relative((index as f32 + 0.5) / message_count))
-                        .when(is_compaction, |marker| {
-                            marker.left(px(2.0)).right(px(2.0)).h(px(6.0))
-                        })
-                        .when(!is_compaction, |marker| {
-                            marker.left(px(6.0)).size(px(6.0)).rounded_full()
-                        })
-                        .bg(rgb(color)),
-                )
-            }))
-            .child(
-                div()
-                    .absolute()
-                    .top(relative(viewport_top))
-                    .left_0()
-                    .right_0()
-                    .h(relative(viewport_fraction))
-                    .min_h(px(5.0))
-                    .border_t_1()
-                    .border_b_1()
-                    .border_color(rgb(crate::theme::warning_border()))
-                    .bg(rgb(orange()).opacity(0.09)),
-            )
-            .child(
                 canvas(
                     |_, _, _| (),
                     move |track_bounds, _, window, _| {
+                        window.paint_layer(track_bounds, |window| {
+                            let orange_color = rgb(orange());
+                            let user_color = rgb(blue());
+                            let assistant_color = rgb(crate::theme::detail_text());
+                            let compaction_color = rgb(purple());
+                            let tick_color = orange_color.opacity(0.60);
+                            let tick_span = (track_bounds.size.height - px(3.0)).max(px(0.0));
+                            for index in 0..17 {
+                                let y = track_bounds.top()
+                                    + px(1.0)
+                                    + tick_span * (index as f32 / 16.0);
+                                window.paint_quad(fill(
+                                    gpui::Bounds::new(
+                                        point(track_bounds.left() + px(2.0), y),
+                                        size(px(14.0), px(1.0)),
+                                    ),
+                                    tick_color,
+                                ));
+                            }
+
+                            for marker in markers.iter() {
+                                let fraction = (marker.message_index as f32 + 0.5) / message_count;
+                                let (left, width, color) = if marker.is_compaction {
+                                    (2.0, 14.0, compaction_color)
+                                } else {
+                                    let color = match marker.role {
+                                        MessageRole::User => user_color,
+                                        MessageRole::Assistant => assistant_color,
+                                        _ => continue,
+                                    };
+                                    (6.0, 6.0, color)
+                                };
+                                let marker_quad = fill(
+                                    gpui::Bounds::new(
+                                        point(
+                                            track_bounds.left() + px(left),
+                                            track_bounds.top()
+                                                + track_bounds.size.height * fraction,
+                                        ),
+                                        size(px(width), px(6.0)),
+                                    ),
+                                    color,
+                                );
+                                window.paint_quad(if marker.is_compaction {
+                                    marker_quad
+                                } else {
+                                    marker_quad.corner_radii(px(3.0))
+                                });
+                            }
+
+                            let viewport_height =
+                                (track_bounds.size.height * viewport_fraction).max(px(5.0));
+                            let viewport_y =
+                                track_bounds.top() + track_bounds.size.height * viewport_top;
+                            window.paint_quad(fill(
+                                gpui::Bounds::new(
+                                    point(track_bounds.left(), viewport_y),
+                                    size(track_bounds.size.width, viewport_height),
+                                ),
+                                orange_color.opacity(0.09),
+                            ));
+                            let viewport_border = rgb(crate::theme::warning_border());
+                            for y in [viewport_y, viewport_y + viewport_height - px(1.0)] {
+                                window.paint_quad(fill(
+                                    gpui::Bounds::new(
+                                        point(track_bounds.left(), y),
+                                        size(track_bounds.size.width, px(1.0)),
+                                    ),
+                                    viewport_border,
+                                ));
+                            }
+                        });
+
                         window.on_mouse_event({
                             let entity = entity.clone();
                             move |event: &MouseDownEvent, _, _, cx| {
@@ -415,6 +459,7 @@ impl Dirigent {
                             .mt_4()
                             .flex()
                             .text_xs()
+                            .text_color(rgb(blue()))
                             .with_animation(
                                 "working-indicator",
                                 Animation::new(Duration::from_millis(6_660 * 2)).repeat(),
@@ -424,24 +469,18 @@ impl Dirigent {
                                         .unwrap_or_default();
                                     let label =
                                         format!("Working for {}", format_working_duration(elapsed));
-                                    let color_label = label.clone();
-                                    indicator.children(label.chars().enumerate().map(
-                                        move |(index, character)| {
-                                            div()
-                                                .text_color(rgb(
-                                                    if working_character_is_orange(
-                                                        delta,
-                                                        index,
-                                                        &color_label,
-                                                    ) {
-                                                        orange()
-                                                    } else {
-                                                        blue()
-                                                    },
-                                                ))
-                                                .child(character.to_string())
-                                        },
-                                    ))
+                                    let orange_range = working_orange_range(delta, &label);
+                                    let mut text = StyledText::new(SharedString::from(label));
+                                    if let Some(range) = orange_range {
+                                        text = text.with_highlights(std::iter::once((
+                                            range,
+                                            HighlightStyle {
+                                                color: Some(rgb(orange()).into()),
+                                                ..Default::default()
+                                            },
+                                        )));
+                                    }
+                                    indicator.child(text)
                                 },
                             ),
                     )
@@ -503,7 +542,7 @@ mod tests {
 
     use super::{
         format_retry_status, format_working_duration, tool_color, working_character,
-        working_character_is_orange,
+        working_character_is_orange, working_orange_range,
     };
     use crate::{
         model::RetryStatus,
@@ -558,6 +597,12 @@ mod tests {
         assert!(!working_character_is_orange(0.75, 2, text));
         assert!(working_character_is_orange(0.75, 3, text));
         assert!((0..4).all(|index| !working_character_is_orange(1.0, index, text)));
+
+        assert_eq!(working_orange_range(0.0, text), Some(0..1));
+        assert_eq!(working_orange_range(0.25, text), Some(0..3));
+        assert_eq!(working_orange_range(0.5, text), Some(1..4));
+        assert_eq!(working_orange_range(0.75, text), Some(3..4));
+        assert_eq!(working_orange_range(1.0, text), None);
     }
 
     #[test]
