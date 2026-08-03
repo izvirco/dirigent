@@ -431,7 +431,7 @@ fn project_path_placeholder() -> &'static str {
 
 impl Dirigent {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
-        // Initialize and migrate persistent state before the rest of app startup reads from disk.
+        // Initialize persistent state before the rest of app startup reads from disk.
         let (state_database, loaded) = storage::StateDatabase::open()
             .unwrap_or_else(|error| panic!("could not initialize persistent state: {error}"));
         let (config_dir, appearance, mut config_error) = match theme::initialize() {

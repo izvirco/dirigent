@@ -6,7 +6,7 @@ use std::{
 };
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Serialize, de::DeserializeOwned};
 
 use crate::{
     model::{Harness, Id, ManagedWorkspace, Project, WorkspaceBackend, WorkspaceState},
@@ -62,17 +62,14 @@ const SCHEMA: &str = "
     );
 ";
 
-#[derive(Serialize, Deserialize)]
 struct StoredState {
     next_id: Id,
     next_sidebar_order: u64,
     projects: Vec<StoredProject>,
     harnesses: Vec<StoredHarness>,
-    #[serde(default)]
     workspaces: Vec<StoredWorkspace>,
     last_used_harness: Option<Id>,
     collapsed_projects: Vec<Id>,
-    #[serde(default = "default_sidebar_width")]
     sidebar_width: f32,
 }
 
@@ -86,34 +83,29 @@ impl StoredState {
             workspaces: Vec::new(),
             last_used_harness: None,
             collapsed_projects: Vec::new(),
-            sidebar_width: default_sidebar_width(),
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
         }
     }
 }
 
-#[derive(Serialize, Deserialize)]
 struct StoredProject {
     id: Id,
     name: String,
     path: PathBuf,
-    #[serde(default)]
     workspace_root: Option<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
 struct StoredHarness {
     id: Id,
     project_id: Id,
     title: String,
     session_file: Option<PathBuf>,
     nix_enabled: bool,
-    #[serde(default)]
     workspace_id: Option<String>,
     archived: bool,
     sidebar_order: u64,
 }
 
-#[derive(Serialize, Deserialize)]
 struct StoredWorkspace {
     id: String,
     project_id: Id,
@@ -124,7 +116,6 @@ struct StoredWorkspace {
     source_id: String,
     source_label: String,
     source_revision: String,
-    #[serde(default)]
     jj_parent_revisions: Vec<String>,
     git_branch: Option<String>,
     state: WorkspaceState,
@@ -148,12 +139,11 @@ pub(crate) struct StateDatabase {
 impl StateDatabase {
     pub(crate) fn open() -> Result<(Self, LoadedState), String> {
         let database_path = platform::state_database_path()?;
-        let legacy_path = platform::legacy_state_path()?;
-        Self::open_at(&database_path, &legacy_path)
+        Self::open_at(&database_path)
     }
 
-    fn open_at(database_path: &Path, legacy_path: &Path) -> Result<(Self, LoadedState), String> {
-        let connection = open_database(database_path, legacy_path)?;
+    fn open_at(database_path: &Path) -> Result<(Self, LoadedState), String> {
+        let connection = open_database(database_path)?;
         let loaded = read_stored_state(&connection).map(StoredState::into_loaded)?;
         Ok((Self { connection }, loaded))
     }
@@ -222,7 +212,7 @@ impl StateDatabase {
     }
 }
 
-fn open_database(database_path: &Path, legacy_path: &Path) -> Result<Connection, String> {
+fn open_database(database_path: &Path) -> Result<Connection, String> {
     if let Some(parent) = database_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
@@ -240,16 +230,7 @@ fn open_database(database_path: &Path, legacy_path: &Path) -> Result<Connection,
         })
         .map_err(|error| format!("could not inspect {}: {error}", database_path.display()))?;
 
-    if legacy_path.exists() {
-        if !has_state {
-            let bytes = fs::read(legacy_path)
-                .map_err(|error| format!("could not read {}: {error}", legacy_path.display()))?;
-            let state: StoredState = serde_json::from_slice(&bytes)
-                .map_err(|error| format!("could not parse {}: {error}", legacy_path.display()))?;
-            write_stored_state(&mut connection, &state)?;
-        }
-        back_up_legacy_state(legacy_path)?;
-    } else if !has_state {
+    if !has_state {
         write_stored_state(&mut connection, &StoredState::empty())?;
     }
 
@@ -274,25 +255,6 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
              PRAGMA user_version = {SCHEMA_VERSION};"
         ))
         .map_err(|error| format!("could not initialize {}: {error}", database_path.display()))
-}
-
-fn back_up_legacy_state(legacy_path: &Path) -> Result<(), String> {
-    let backup_path = legacy_path.with_file_name("state.json.backup");
-    if backup_path.exists() {
-        fs::remove_file(&backup_path).map_err(|error| {
-            format!(
-                "could not replace legacy state backup {}: {error}",
-                backup_path.display()
-            )
-        })?;
-    }
-    fs::rename(legacy_path, &backup_path).map_err(|error| {
-        format!(
-            "could not rename {} to {}: {error}",
-            legacy_path.display(),
-            backup_path.display()
-        )
-    })
 }
 
 fn write_stored_state(connection: &mut Connection, state: &StoredState) -> Result<(), String> {
@@ -670,10 +632,6 @@ impl StoredState {
     }
 }
 
-fn default_sidebar_width() -> f32 {
-    DEFAULT_SIDEBAR_WIDTH
-}
-
 fn encode_json<T: Serialize + ?Sized>(value: &T, description: &str) -> Result<Vec<u8>, String> {
     serde_json::to_vec(value).map_err(|error| format!("could not encode {description}: {error}"))
 }
@@ -695,7 +653,7 @@ fn order_index(index: usize) -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_SIDEBAR_WIDTH, StateDatabase, StoredState};
+    use super::{DEFAULT_SIDEBAR_WIDTH, StateDatabase};
     use std::{fs, path::PathBuf};
 
     fn temporary_directory(name: &str) -> PathBuf {
@@ -715,103 +673,26 @@ mod tests {
                 .unwrap()
                 .ends_with("dirigent/v0/state.sqlite3")
         );
-        assert!(
-            crate::platform::legacy_state_path()
-                .unwrap()
-                .ends_with("dirigent/v0/state.json")
-        );
     }
 
     #[test]
-    fn migrates_json_and_keeps_a_backup() {
-        let directory = temporary_directory("migration");
+    fn initializes_new_database() {
+        let directory = temporary_directory("initialization");
         let database = directory.join("state.sqlite3");
-        let legacy = directory.join("state.json");
-        fs::write(
-            &legacy,
-            r#"{
-                "next_id": 3,
-                "next_sidebar_order": 8,
-                "projects": [{
-                    "id": 1,
-                    "name": "Dirigent",
-                    "path": "/tmp/dirigent",
-                    "workspace_root": "/tmp/workspaces"
-                }],
-                "harnesses": [{
-                    "id": 2,
-                    "project_id": 1,
-                    "title": "Migration",
-                    "session_file": "/tmp/session.jsonl",
-                    "nix_enabled": true,
-                    "workspace_id": "workspace-1",
-                    "archived": false,
-                    "sidebar_order": 7
-                }],
-                "workspaces": [{
-                    "id": "workspace-1",
-                    "project_id": 1,
-                    "backend": "Git",
-                    "root": "/tmp/workspaces/workspace-1",
-                    "working_directory": "/tmp/workspaces/workspace-1",
-                    "source_repository": "/tmp/dirigent",
-                    "source_id": "main",
-                    "source_label": "main",
-                    "source_revision": "abc123",
-                    "jj_parent_revisions": [],
-                    "git_branch": "dirigent/workspace-1",
-                    "state": "Ready"
-                }],
-                "last_used_harness": 2,
-                "collapsed_projects": [1],
-                "sidebar_width": 320.0
-            }"#,
-        )
-        .unwrap();
 
-        let (_database, loaded) = StateDatabase::open_at(&database, &legacy).unwrap();
+        let (state_database, loaded) = StateDatabase::open_at(&database).unwrap();
 
         assert!(database.exists());
-        assert!(!legacy.exists());
-        assert!(directory.join("state.json.backup").exists());
-        assert_eq!(loaded.next_id, 3);
-        assert_eq!(loaded.next_sidebar_order, 8);
-        assert_eq!(loaded.projects.len(), 1);
-        assert_eq!(
-            loaded.projects[0].workspace_root.as_deref(),
-            Some(std::path::Path::new("/tmp/workspaces"))
-        );
-        assert_eq!(loaded.harnesses.len(), 1);
-        assert_eq!(
-            loaded.harnesses[0].workspace_id.as_deref(),
-            Some("workspace-1")
-        );
-        assert_eq!(loaded.workspaces.len(), 1);
-        assert_eq!(
-            loaded.workspaces[0].backend,
-            crate::model::WorkspaceBackend::Git
-        );
-        assert_eq!(loaded.last_used_harness, Some(2));
-        assert!(loaded.collapsed_projects.contains(&1));
-        assert_eq!(loaded.sidebar_width, 320.0);
+        assert_eq!(loaded.next_id, 1);
+        assert_eq!(loaded.next_sidebar_order, 1);
+        assert!(loaded.projects.is_empty());
+        assert!(loaded.harnesses.is_empty());
+        assert!(loaded.workspaces.is_empty());
+        assert_eq!(loaded.last_used_harness, None);
+        assert!(loaded.collapsed_projects.is_empty());
+        assert_eq!(loaded.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
 
+        drop(state_database);
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn defaults_sidebar_width_for_existing_state() {
-        let state: StoredState = serde_json::from_str(
-            r#"{
-                "next_id": 1,
-                "next_sidebar_order": 1,
-                "projects": [],
-                "harnesses": [],
-                "last_used_harness": null,
-                "collapsed_projects": []
-            }"#,
-        )
-        .unwrap();
-
-        assert_eq!(state.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
     }
 }

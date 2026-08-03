@@ -58,11 +58,6 @@ pub(crate) fn logs_directory() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("logs"))
 }
 
-// Legacy: Remove once all users have migrated
-pub(crate) fn legacy_state_path() -> Result<PathBuf, String> {
-    Ok(state_directory()?.join("state.json"))
-}
-
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
