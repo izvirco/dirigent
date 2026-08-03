@@ -472,10 +472,15 @@ impl Dirigent {
             .messages
             .iter()
             .rposition(|message| message.tool_call_id.as_deref() == id)?;
-        let message = &mut self.harnesses[index].messages[message_index];
-        message.finish_tool(is_error, None);
-        if detail.is_some() && (name != "write" || is_error || message.detail.is_none()) {
-            message.set_detail(detail);
+        {
+            let message = &mut self.harnesses[index].messages[message_index];
+            message.finish_tool(is_error, None);
+            if detail.is_some() && (name != "write" || is_error || message.detail.is_none()) {
+                message.set_detail(detail);
+            }
+        }
+        if !is_error && matches!(name, "write" | "edit") {
+            self.refresh_active_turn_diff(index);
         }
         Some(message_index)
     }

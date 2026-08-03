@@ -325,7 +325,7 @@ pub(crate) struct ActiveTurnDiff {
     baseline: Result<WorkspaceSnapshot, String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct SnapshotFile {
     hash: blake3::Hash,
     bytes: Option<Vec<u8>>,
@@ -334,7 +334,7 @@ struct SnapshotFile {
     binary: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct WorkspaceSnapshot {
     files: BTreeMap<String, SnapshotFile>,
 }
@@ -347,6 +347,34 @@ pub(crate) fn begin_turn(id: u64, prompt: &str, root: &Path) -> ActiveTurnDiff {
         status_override: None,
         baseline: capture_workspace(root),
     }
+}
+
+pub(crate) fn preview_turn(active: &ActiveTurnDiff, root: &Path) -> TurnDiff {
+    let endpoint = capture_workspace(root);
+    let status = active.status_override.unwrap_or(TurnDiffStatus::Completed);
+    let mut turn = match (active.baseline.clone(), endpoint) {
+        (Ok(old), Ok(new)) => build_turn(
+            active.id,
+            active.prompt.clone(),
+            active.started_at,
+            status,
+            old,
+            new,
+        ),
+        (Err(error), _) | (_, Err(error)) => TurnDiff {
+            id: active.id,
+            prompt: active.prompt.clone(),
+            started_at: active.started_at,
+            finished_at: unix_timestamp(),
+            status: TurnDiffStatus::Unavailable,
+            files: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            error: Some(error),
+        },
+    };
+    turn.refresh_highlights();
+    turn
 }
 
 pub(crate) fn finish_turn(active: ActiveTurnDiff, root: &Path, status: TurnDiffStatus) -> TurnDiff {
@@ -1178,6 +1206,26 @@ mod tests {
     fn truncates_prompt_on_a_character_boundary() {
         let prompt = "é".repeat(100);
         assert!(prompt_excerpt(&prompt).ends_with('…'));
+    }
+
+    #[test]
+    fn previews_active_turn_changes_without_finishing_the_turn() {
+        let root = std::env::temp_dir().join(format!(
+            "dirigent-diff-preview-{}-{}",
+            std::process::id(),
+            fastrand::u64(..)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("file.txt"), "before\n").unwrap();
+
+        let active = begin_turn(1, "change file", &root);
+        fs::write(root.join("file.txt"), "after\n").unwrap();
+        let preview = preview_turn(&active, &root);
+
+        assert_eq!(preview.files.len(), 1);
+        assert_eq!(preview.files[0].old_text.as_deref(), Some("before\n"));
+        assert_eq!(preview.files[0].new_text.as_deref(), Some("after\n"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

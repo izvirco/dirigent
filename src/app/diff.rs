@@ -32,7 +32,42 @@ impl Dirigent {
                 return;
             }
         };
+        self.harnesses[index].active_turn_preview = None;
         self.harnesses[index].active_turn_diff = Some(diff::begin_turn(id, prompt, &root));
+    }
+
+    pub(super) fn refresh_active_turn_diff(&mut self, index: usize) {
+        if self.harnesses[index].active_turn_diff.is_none() {
+            return;
+        }
+        let harness_id = self.harnesses[index].id;
+        let root = match self.working_directory_for_harness(harness_id) {
+            Ok(root) => root,
+            Err(error) => {
+                tracing::warn!(error = %error, harness_id, "could not refresh active turn diff");
+                return;
+            }
+        };
+        let Some(active) = self.harnesses[index].active_turn_diff.as_ref() else {
+            return;
+        };
+        let preview = diff::preview_turn(active, &root);
+        let preview_id = preview.id;
+        let latest_completed = self.harnesses[index].turn_diffs.last().map(|turn| turn.id);
+        let follows_latest =
+            self.selected_diff_turn
+                .is_none_or(|(selected_harness, selected_turn)| {
+                    selected_harness != harness_id
+                        || Some(selected_turn) == latest_completed
+                        || selected_turn == preview_id
+                });
+        self.harnesses[index].active_turn_preview = Some(preview);
+        if self.selected_harness == Some(harness_id) {
+            if follows_latest {
+                self.selected_diff_turn = Some((harness_id, preview_id));
+            }
+            self.diff_display_key = None;
+        }
     }
 
     pub(super) fn mark_turn_diff_status(&mut self, index: usize, status: TurnDiffStatus) {
@@ -42,6 +77,10 @@ impl Dirigent {
     }
 
     pub(super) fn finish_turn_diff(&mut self, index: usize, status: TurnDiffStatus) {
+        self.harnesses[index].active_turn_preview = None;
+        if self.selected_harness == Some(self.harnesses[index].id) {
+            self.diff_display_key = None;
+        }
         let Some(active) = self.harnesses[index].active_turn_diff.take() else {
             return;
         };
@@ -88,7 +127,7 @@ impl Dirigent {
     }
 
     pub(crate) fn resize_diff_sidebar(&mut self, width: f32) {
-        let width = width.clamp(420.0, 960.0);
+        let width = width.clamp(420.0, 1_600.0);
         if self.diff_sidebar_width != width {
             self.diff_sidebar_width = width;
             self.persist_diff_sidebar();
@@ -112,10 +151,6 @@ impl Dirigent {
         }
     }
 
-    pub(crate) fn toggle_diff_turn_dropdown(&mut self) {
-        self.diff_turn_dropdown_open = !self.diff_turn_dropdown_open;
-    }
-
     pub(crate) fn select_diff_turn(&mut self, turn_id: u64) {
         if let Some(harness_id) = self.selected_harness {
             self.selected_diff_turn = Some((harness_id, turn_id));
@@ -134,7 +169,11 @@ impl Dirigent {
             self.diff_display_key = None;
             return;
         };
-        self.selected_diff_turn = harness.turn_diffs.last().map(|turn| (harness.id, turn.id));
+        self.selected_diff_turn = harness
+            .active_turn_preview
+            .as_ref()
+            .or_else(|| harness.turn_diffs.last())
+            .map(|turn| (harness.id, turn.id));
         self.diff_display_key = None;
     }
 
@@ -160,17 +199,32 @@ impl Dirigent {
         if self.diff_display_key == Some(key) {
             return;
         }
-        let Some(index) = harness
-            .turn_diffs
-            .iter()
-            .position(|turn| turn.id == turn_id)
-        else {
-            return;
-        };
-        self.diff_display = match self.diff_scope {
-            DiffScope::Cumulative => diff::combine_turn_diffs(&harness.turn_diffs[..=index]),
-            DiffScope::Turn => Some(harness.turn_diffs[index].clone()),
-        };
+        if let Some(preview) = harness
+            .active_turn_preview
+            .as_ref()
+            .filter(|preview| preview.id == turn_id)
+        {
+            self.diff_display = match self.diff_scope {
+                DiffScope::Cumulative => {
+                    let mut turns = harness.turn_diffs.clone();
+                    turns.push(preview.clone());
+                    diff::combine_turn_diffs(&turns)
+                }
+                DiffScope::Turn => Some(preview.clone()),
+            };
+        } else {
+            let Some(index) = harness
+                .turn_diffs
+                .iter()
+                .position(|turn| turn.id == turn_id)
+            else {
+                return;
+            };
+            self.diff_display = match self.diff_scope {
+                DiffScope::Cumulative => diff::combine_turn_diffs(&harness.turn_diffs[..=index]),
+                DiffScope::Turn => Some(harness.turn_diffs[index].clone()),
+            };
+        }
         self.diff_display_key = Some(key);
         self.diff_list.reset_with_uniform_height(
             self.diff_display
@@ -187,10 +241,20 @@ impl Dirigent {
         self.selected_diff_turn
             .filter(|(harness_id, turn_id)| {
                 *harness_id == harness.id
-                    && harness.turn_diffs.iter().any(|turn| turn.id == *turn_id)
+                    && (harness.turn_diffs.iter().any(|turn| turn.id == *turn_id)
+                        || harness
+                            .active_turn_preview
+                            .as_ref()
+                            .is_some_and(|preview| preview.id == *turn_id))
             })
             .map(|(_, turn_id)| turn_id)
-            .or_else(|| harness.turn_diffs.last().map(|turn| turn.id))
+            .or_else(|| {
+                harness
+                    .active_turn_preview
+                    .as_ref()
+                    .or_else(|| harness.turn_diffs.last())
+                    .map(|turn| turn.id)
+            })
     }
 
     pub(super) fn prune_turn_diffs_to_active_branch(&mut self, index: usize) {

@@ -959,7 +959,7 @@ impl Dirigent {
             workspace_settings_editing: false,
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
             diff_sidebar_open,
-            diff_sidebar_width: diff_sidebar_width.clamp(420.0, 960.0),
+            diff_sidebar_width: diff_sidebar_width.clamp(420.0, 1_600.0),
             diff_view_mode,
             diff_scope: DiffScope::Cumulative,
             selected_diff_turn: None,
@@ -1091,6 +1091,9 @@ impl Dirigent {
         for harness in &mut self.harnesses {
             for turn in &mut harness.turn_diffs {
                 turn.refresh_highlights();
+            }
+            if let Some(preview) = harness.active_turn_preview.as_mut() {
+                preview.refresh_highlights();
             }
             for message in harness
                 .messages
@@ -1226,7 +1229,6 @@ impl Render for Dirigent {
             }))
             .when(
                 self.composer_dropdown.is_some()
-                    || self.diff_turn_dropdown_open
                     || self.sidebar_menu.is_some()
                     || self.path_completion.is_some(),
                 |element| {

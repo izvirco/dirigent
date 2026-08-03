@@ -599,6 +599,7 @@ pub(crate) struct Harness {
     pub(crate) workspace_id: Option<String>,
     pub(crate) turn_diffs: Vec<TurnDiff>,
     pub(crate) active_turn_diff: Option<ActiveTurnDiff>,
+    pub(crate) active_turn_preview: Option<TurnDiff>,
 }
 
 impl Harness {
@@ -639,6 +640,7 @@ impl Harness {
             workspace_id: None,
             turn_diffs: Vec::new(),
             active_turn_diff: None,
+            active_turn_preview: None,
         }
     }
 
@@ -719,6 +721,7 @@ impl Harness {
             workspace_id,
             turn_diffs,
             active_turn_diff: None,
+            active_turn_preview: None,
         }
     }
 }
