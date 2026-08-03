@@ -200,7 +200,8 @@ fn formats_write_content_as_added_lines() {
         write_detail(&json!({"content":"fn main() {\n    run();\n}\n"})).as_deref(),
         Some("+ fn main() {\n+     run();\n+ }\n")
     );
-    assert!(tool_expanded("write"));
+    assert!(!tool_expanded("write"));
+    assert!(!tool_expanded("edit"));
 }
 
 #[test]
@@ -423,9 +424,9 @@ fn restores_write_content_instead_of_success_message() {
     ]);
 
     assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0].text, "write src/main.rs");
+    assert_eq!(messages[0].text, "write src/main.rs +1 -0");
     assert_eq!(messages[0].detail.as_deref(), Some("+ fn main() {}\n"));
-    assert!(messages[0].expanded);
+    assert!(!messages[0].expanded);
 }
 
 #[test]
@@ -445,11 +446,12 @@ fn restores_edit_diff_instead_of_success_message() {
     ]);
 
     assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "edit src/app.rs +1 -1");
     assert_eq!(
         messages[0].detail.as_deref(),
         Some("  9 before\n- 10 old\n+ 10 new\n  11 after")
     );
-    assert!(messages[0].expanded);
+    assert!(!messages[0].expanded);
 }
 
 #[test]

@@ -104,8 +104,32 @@ pub(super) fn tool_label(name: &str, args: &Value) -> String {
     }
 }
 
-pub(super) fn tool_expanded(name: &str) -> bool {
-    matches!(name, "edit" | "write")
+pub(super) fn tool_expanded(_name: &str) -> bool {
+    false
+}
+
+pub(super) fn add_tool_change_summary(message: &mut Message) {
+    let tool = message
+        .text
+        .split_once(' ')
+        .map_or(message.text.as_str(), |(tool, _)| tool);
+    if !matches!(tool, "edit" | "write") {
+        return;
+    }
+    let (additions, deletions) = message
+        .detail
+        .as_deref()
+        .map(|detail| {
+            detail.lines().fold((0, 0), |(additions, deletions), line| {
+                match line.as_bytes().first() {
+                    Some(b'+') => (additions + 1, deletions),
+                    Some(b'-') => (additions, deletions + 1),
+                    _ => (additions, deletions),
+                }
+            })
+        })
+        .unwrap_or_default();
+    message.append_text(&format!(" +{additions} -{deletions}"));
 }
 
 pub(super) fn write_detail(args: &Value) -> Option<String> {
@@ -456,6 +480,9 @@ pub(super) fn push_parsed_message(
             if detail.is_some() && (name != "write" || is_error || message.detail.is_none()) {
                 message.set_detail(detail);
             }
+            if !is_error {
+                add_tool_change_summary(message);
+            }
             message.finish_tool(is_error, message_timestamp_ms(value));
         } else if let Some(message) = parse_message(value) {
             messages.push(message.with_entry_id(entry_id));
@@ -494,6 +521,9 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
                 tool_expanded(name),
             );
             message.set_detail(tool_result_detail(name, value, is_error));
+            if !is_error {
+                add_tool_change_summary(&mut message);
+            }
             message.finish_tool(is_error, message_timestamp_ms(value));
             Some(message)
         }

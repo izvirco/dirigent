@@ -478,6 +478,9 @@ impl Dirigent {
             if detail.is_some() && (name != "write" || is_error || message.detail.is_none()) {
                 message.set_detail(detail);
             }
+            if !is_error {
+                add_tool_change_summary(message);
+            }
         }
         if !is_error && matches!(name, "write" | "edit") {
             self.refresh_active_turn_diff(index);
