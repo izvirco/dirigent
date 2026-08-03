@@ -26,6 +26,10 @@ pub(crate) enum RuntimeEvent {
         target: RuntimeTarget,
         message: String,
     },
+    Diagnostic {
+        target: RuntimeTarget,
+        message: String,
+    },
     Exited {
         target: RuntimeTarget,
     },
@@ -183,8 +187,11 @@ fn read_stderr(target: RuntimeTarget, stderr: impl Read, events: Sender<RuntimeE
     for line in BufReader::new(stderr).lines() {
         match line {
             Ok(line) if !line.trim().is_empty() => {
+                // RPC protocol failures arrive on stdout as structured events. Stderr is
+                // unstructured diagnostic output from Pi and extensions, so it must not
+                // fail a harness or add an error message to the conversation.
                 if events
-                    .send_blocking(RuntimeEvent::Error {
+                    .send_blocking(RuntimeEvent::Diagnostic {
                         target,
                         message: line,
                     })
@@ -217,13 +224,39 @@ fn rpc_command_path(session_file: Option<&Path>) -> (String, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::rpc_command_path;
-    use std::path::Path;
+    use super::{RuntimeEvent, RuntimeTarget, read_stderr, rpc_command_path};
+    use async_channel::unbounded;
+    use std::{io::Cursor, path::Path};
 
     #[test]
     fn resumed_process_uses_native_pi_session() {
         let (program, args) = rpc_command_path(Some(Path::new("/tmp/session.jsonl")));
         assert_eq!(program, "pi");
         assert_eq!(args, ["--mode", "rpc", "--session", "/tmp/session.jsonl"]);
+    }
+
+    #[test]
+    fn stderr_is_reported_as_diagnostic_output() {
+        let target = RuntimeTarget::Harness(42, 3);
+        let (events, received) = unbounded();
+
+        read_stderr(
+            target,
+            Cursor::new("extension warning\n\nprovider error\n"),
+            events,
+        );
+
+        for expected in ["extension warning", "provider error"] {
+            let RuntimeEvent::Diagnostic {
+                target: actual_target,
+                message,
+            } = received.recv_blocking().unwrap()
+            else {
+                panic!("stderr was reported as a runtime error");
+            };
+            assert_eq!(actual_target, target);
+            assert_eq!(message, expected);
+        }
+        assert!(received.recv_blocking().is_err());
     }
 }

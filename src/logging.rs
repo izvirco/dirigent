@@ -8,7 +8,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use crate::platform;
 
-const DEFAULT_FILTER: &str = "warn,dirigent=info";
+// These dependency warnings describe expected desktop/filesystem races that Dirigent
+// cannot act on: optional D-Bus services may be absent, and inotify may report that a
+// deleted child watch was already removed by the kernel.
+const DEFAULT_FILTER: &str = "warn,dirigent=info,zbus::proxy=error,notify::inotify=error";
 
 pub(crate) struct LoggingGuard {
     _file_guard: WorkerGuard,

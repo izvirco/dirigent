@@ -91,6 +91,10 @@ impl Dirigent {
                 self.handle_runtime_error(target, message);
                 return;
             }
+            RuntimeEvent::Diagnostic { target, message } => {
+                tracing::warn!(diagnostic = %message, ?target, "Pi diagnostic");
+                return;
+            }
             RuntimeEvent::Exited { target } => {
                 self.handle_runtime_exit(target);
                 return;
@@ -449,7 +453,9 @@ impl Dirigent {
             .get("result")
             .and_then(|result| tool_result_detail(name, result, is_error));
         if is_error {
-            tracing::error!(
+            // A failed tool call is an expected agent outcome and is already shown in the
+            // conversation. Keep it available only for opt-in diagnostics.
+            tracing::debug!(
                 harness_id = self.harnesses[index].id,
                 tool = name,
                 error = detail.as_deref().unwrap_or("tool execution failed"),
