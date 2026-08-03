@@ -1,9 +1,8 @@
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    ScrollHandle, SharedString, StyledText, Window, canvas, deferred, div, fill, list, point,
-    prelude::*, px, size, svg,
+    ScrollHandle, SharedString, StyledText, Window, deferred, div, list, prelude::*, px, svg,
 };
 
 use super::composer::dropdown_arrow;
@@ -155,11 +154,15 @@ impl DiffBlockBuilder {
     }
 }
 
-#[derive(Clone, Copy)]
-struct GutterColorRun {
-    first_line: usize,
-    end_line: usize,
-    color: u32,
+struct GutterColumn {
+    text: SharedString,
+    highlights: Vec<(Range<usize>, HighlightStyle)>,
+}
+
+struct GutterColumns {
+    old: GutterColumn,
+    new: GutterColumn,
+    sign: GutterColumn,
 }
 
 struct DiffBlock {
@@ -168,7 +171,33 @@ struct DiffBlock {
     gutter: Vec<DiffGutterLine>,
     gutter_text: SharedString,
     gutter_highlights: Vec<(Range<usize>, HighlightStyle)>,
-    gutter_color_runs: Arc<[GutterColorRun]>,
+    gutter_columns: Option<GutterColumns>,
+    gutter_border: GutterColumn,
+}
+
+fn push_gutter_column_line(
+    text: &mut String,
+    highlights: &mut Vec<(Range<usize>, HighlightStyle)>,
+    value: &str,
+    color: u32,
+    line_index: usize,
+) {
+    if line_index > 0 {
+        text.push('\n');
+    }
+    let start = text.len();
+    if value.is_empty() {
+        text.push('\u{00a0}');
+    } else {
+        text.push_str(value);
+    }
+    highlights.push((
+        start..text.len(),
+        HighlightStyle {
+            color: Some(rgb(color).into()),
+            ..Default::default()
+        },
+    ));
 }
 
 impl DiffBlock {
@@ -177,40 +206,71 @@ impl DiffBlock {
         highlights: Vec<(Range<usize>, HighlightStyle)>,
         gutter: Vec<DiffGutterLine>,
     ) -> Self {
+        let unified = gutter.first().is_some_and(|line| line.label.len() > 5);
         let mut gutter_text = String::new();
         let mut gutter_highlights = Vec::with_capacity(gutter.len());
-        let mut gutter_color_runs: Vec<GutterColorRun> = Vec::new();
+        let mut old_text = String::new();
+        let mut old_highlights = Vec::with_capacity(gutter.len());
+        let mut new_text = String::new();
+        let mut new_highlights = Vec::with_capacity(gutter.len());
+        let mut sign_text = String::new();
+        let mut sign_highlights = Vec::with_capacity(gutter.len());
+        let mut border_text = String::new();
+        let mut border_highlights = Vec::with_capacity(gutter.len());
         for (line_index, line) in gutter.iter().enumerate() {
             if line_index > 0 {
                 gutter_text.push('\n');
             }
             let start = gutter_text.len();
             gutter_text.push_str(&line.label);
+            let color = if line.color == border() {
+                muted()
+            } else {
+                line.color
+            };
             gutter_highlights.push((
                 start..gutter_text.len(),
                 HighlightStyle {
-                    color: Some(
-                        rgb(if line.color == border() {
-                            muted()
-                        } else {
-                            line.color
-                        })
-                        .into(),
-                    ),
+                    color: Some(rgb(color).into()),
                     ..Default::default()
                 },
             ));
-            if let Some(run) = gutter_color_runs.last_mut()
-                && run.color == line.color
-            {
-                run.end_line = line_index + 1;
-            } else {
-                gutter_color_runs.push(GutterColorRun {
-                    first_line: line_index,
-                    end_line: line_index + 1,
-                    color: line.color,
-                });
+            if unified {
+                let label: &str = &line.label;
+                push_gutter_column_line(
+                    &mut old_text,
+                    &mut old_highlights,
+                    label[..5].trim(),
+                    color,
+                    line_index,
+                );
+                push_gutter_column_line(
+                    &mut new_text,
+                    &mut new_highlights,
+                    label[6..11].trim(),
+                    color,
+                    line_index,
+                );
+                push_gutter_column_line(
+                    &mut sign_text,
+                    &mut sign_highlights,
+                    label[12..].trim(),
+                    color,
+                    line_index,
+                );
             }
+            if line_index > 0 {
+                border_text.push('\n');
+            }
+            let border_start = border_text.len();
+            border_text.push('\u{00a0}');
+            border_highlights.push((
+                border_start..border_text.len(),
+                HighlightStyle {
+                    background_color: Some(rgb(line.color).into()),
+                    ..Default::default()
+                },
+            ));
         }
         Self {
             text,
@@ -218,7 +278,24 @@ impl DiffBlock {
             gutter,
             gutter_text: gutter_text.into(),
             gutter_highlights,
-            gutter_color_runs: gutter_color_runs.into(),
+            gutter_columns: unified.then(|| GutterColumns {
+                old: GutterColumn {
+                    text: old_text.into(),
+                    highlights: old_highlights,
+                },
+                new: GutterColumn {
+                    text: new_text.into(),
+                    highlights: new_highlights,
+                },
+                sign: GutterColumn {
+                    text: sign_text.into(),
+                    highlights: sign_highlights,
+                },
+            }),
+            gutter_border: GutterColumn {
+                text: border_text.into(),
+                highlights: border_highlights,
+            },
         }
     }
 
@@ -975,44 +1052,55 @@ impl Dirigent {
     ) -> AnyElement {
         let scrollbar_id = format!("{id}-scrollbar");
         let scroll_id = format!("{id}-scroll");
-        let gutter_runs = block.gutter_color_runs.clone();
+        let border_column = div().w(px(4.0)).flex_none().overflow_hidden().child(
+            StyledText::new(block.gutter_border.text.clone())
+                .with_highlights(block.gutter_border.highlights.iter().cloned()),
+        );
+        let gutter_content = if let Some(columns) = block.gutter_columns.as_ref() {
+            div()
+                .w_full()
+                .flex()
+                .child(
+                    div().w(px(38.0)).flex_none().pr_1().text_right().child(
+                        StyledText::new(columns.old.text.clone())
+                            .with_highlights(columns.old.highlights.iter().cloned()),
+                    ),
+                )
+                .child(
+                    div().w(px(38.0)).flex_none().pr_1().text_right().child(
+                        StyledText::new(columns.new.text.clone())
+                            .with_highlights(columns.new.highlights.iter().cloned()),
+                    ),
+                )
+                .child(
+                    div().w(px(14.0)).flex_none().text_center().child(
+                        StyledText::new(columns.sign.text.clone())
+                            .with_highlights(columns.sign.highlights.iter().cloned()),
+                    ),
+                )
+                .child(border_column)
+                .into_any_element()
+        } else {
+            div()
+                .w_full()
+                .flex()
+                .child(
+                    div().min_w_0().flex_1().pr_1().text_right().child(
+                        StyledText::new(block.gutter_text.clone())
+                            .with_highlights(block.gutter_highlights.iter().cloned()),
+                    ),
+                )
+                .child(border_column)
+                .into_any_element()
+        };
         let gutter = div()
             .relative()
             .w(px(gutter_width))
             .flex_none()
-            .pr_1()
             .whitespace_nowrap()
-            .text_right()
             .text_xs()
             .line_height(px(18.0))
-            .child(
-                StyledText::new(block.gutter_text.clone())
-                    .with_highlights(block.gutter_highlights.iter().cloned()),
-            )
-            .child(
-                canvas(
-                    |_, _, _| (),
-                    move |bounds, _, window, _| {
-                        for run in gutter_runs.iter() {
-                            window.paint_quad(fill(
-                                gpui::Bounds::new(
-                                    point(
-                                        bounds.right() - px(4.0),
-                                        bounds.top() + px(run.first_line as f32 * 18.0),
-                                    ),
-                                    size(
-                                        px(4.0),
-                                        px((run.end_line - run.first_line) as f32 * 18.0),
-                                    ),
-                                ),
-                                rgb(run.color),
-                            ));
-                        }
-                    },
-                )
-                .absolute()
-                .inset_0(),
-            );
+            .child(gutter_content);
         let mut code_scroll = div()
             .id(scroll_id)
             .w_full()
@@ -1560,6 +1648,39 @@ mod tests {
                 "          2 +"
             ]
         );
+    }
+
+    #[test]
+    fn gutter_columns_keep_context_and_changed_rows_aligned() {
+        let block = DiffBlock::new(
+            "".into(),
+            Vec::new(),
+            vec![
+                DiffGutterLine {
+                    label: DiffGutterContent::Unified {
+                        sign: None,
+                        old_number: Some(390),
+                        new_number: Some(450),
+                    }
+                    .label(),
+                    color: border(),
+                },
+                DiffGutterLine {
+                    label: DiffGutterContent::Unified {
+                        sign: Some('+'),
+                        old_number: None,
+                        new_number: Some(451),
+                    }
+                    .label(),
+                    color: green(),
+                },
+            ],
+        );
+        let columns = block.gutter_columns.as_ref().unwrap();
+
+        assert_eq!(columns.old.text.as_ref(), "390\n\u{00a0}");
+        assert_eq!(columns.new.text.as_ref(), "450\n451");
+        assert_eq!(columns.sign.text.as_ref(), "\u{00a0}\n+");
     }
 
     #[test]
