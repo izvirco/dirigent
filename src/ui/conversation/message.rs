@@ -220,14 +220,12 @@ impl Dirigent {
         match message.role {
             MessageRole::User => {
                 let images = message.images.clone();
-                let queued = message.queued;
                 div()
                     .id(("user-message", index))
                     .relative()
                     .w_full()
-                    .pr_3()
-                    .border_r_4()
-                    .border_color(rgb(if queued { orange() } else { blue() }))
+                    .px_1()
+                    .py_2()
                     .flex()
                     .items_start()
                     .gap_2()
@@ -241,6 +239,16 @@ impl Dirigent {
                             cx.notify();
                         }
                     }))
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .left(px(-8.0))
+                            .right(px(-8.0))
+                            .rounded_xl()
+                            .bg(rgb(blue()).opacity(0.10)),
+                    )
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -290,9 +298,6 @@ impl Dirigent {
                 .id(("assistant-message", index))
                 .relative()
                 .w_full()
-                .pr_3()
-                .border_r_4()
-                .border_color(rgb(crate::theme::detail_text()))
                 .flex()
                 .items_start()
                 .text_sm()
