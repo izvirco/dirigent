@@ -141,6 +141,7 @@ impl DiffGutterContent {
 struct DiffGutterLine {
     label: SharedString,
     color: u32,
+    background: Option<u32>,
 }
 
 struct DiffBlockBuilder {
@@ -190,6 +191,7 @@ struct DiffBlock {
     gutter_highlights: Vec<(Range<usize>, HighlightStyle)>,
     gutter_columns: Option<GutterColumns>,
     gutter_border: GutterColumn,
+    code_padding: GutterColumn,
 }
 
 fn push_gutter_column_line(
@@ -234,6 +236,8 @@ impl DiffBlock {
         let mut sign_highlights = Vec::with_capacity(gutter.len());
         let mut border_text = String::new();
         let mut border_highlights = Vec::with_capacity(gutter.len());
+        let mut padding_text = String::new();
+        let mut padding_highlights = Vec::with_capacity(gutter.len());
         for (line_index, line) in gutter.iter().enumerate() {
             if line_index > 0 {
                 gutter_text.push('\n');
@@ -288,6 +292,21 @@ impl DiffBlock {
                     ..Default::default()
                 },
             ));
+
+            if line_index > 0 {
+                padding_text.push('\n');
+            }
+            let padding_start = padding_text.len();
+            padding_text.push('\u{00a0}');
+            if let Some(color) = line.background {
+                padding_highlights.push((
+                    padding_start..padding_text.len(),
+                    HighlightStyle {
+                        background_color: Some(rgb(color).opacity(0.10).into()),
+                        ..Default::default()
+                    },
+                ));
+            }
         }
         Self {
             text,
@@ -312,6 +331,10 @@ impl DiffBlock {
             gutter_border: GutterColumn {
                 text: border_text.into(),
                 highlights: border_highlights,
+            },
+            code_padding: GutterColumn {
+                text: padding_text.into(),
+                highlights: padding_highlights,
             },
         }
     }
@@ -439,6 +462,7 @@ fn append_diff_line(
     block.gutter.push(DiffGutterLine {
         label: gutter.label(),
         color: changed_color.unwrap_or_else(border),
+        background: changed_color,
     });
     append_syntax(
         block,
@@ -1118,6 +1142,16 @@ impl Dirigent {
             .text_xs()
             .line_height(px(18.0))
             .child(gutter_content);
+        let code_padding = div()
+            .w(px(4.0))
+            .flex_none()
+            .overflow_hidden()
+            .text_xs()
+            .line_height(px(18.0))
+            .child(
+                StyledText::new(block.code_padding.text.clone())
+                    .with_highlights(block.code_padding.highlights.iter().cloned()),
+            );
         let mut code_scroll = div()
             .id(scroll_id)
             .w_full()
@@ -1140,6 +1174,7 @@ impl Dirigent {
             .flex()
             .items_start()
             .child(gutter)
+            .child(code_padding)
             .child(div().relative().flex_1().min_w_0().child(code_scroll).when(
                 show_scrollbar,
                 |element| {
@@ -1684,6 +1719,7 @@ mod tests {
                     }
                     .label(),
                     color: border(),
+                    background: None,
                 },
                 DiffGutterLine {
                     label: DiffGutterContent::Unified {
@@ -1693,6 +1729,7 @@ mod tests {
                     }
                     .label(),
                     color: green(),
+                    background: Some(green()),
                 },
             ],
         );
@@ -1701,6 +1738,15 @@ mod tests {
         assert_eq!(columns.old.text.as_ref(), "390\n\u{00a0}");
         assert_eq!(columns.new.text.as_ref(), "450\n451");
         assert_eq!(columns.sign.text.as_ref(), "\u{00a0}\n+");
+        assert_eq!(block.code_padding.text.as_ref(), "\u{00a0}\n\u{00a0}");
+        assert_eq!(block.code_padding.highlights.len(), 1);
+        assert_eq!(block.code_padding.highlights[0].0, 3..5);
+        assert!(
+            block.code_padding.highlights[0]
+                .1
+                .background_color
+                .is_some()
+        );
     }
 
     #[test]
