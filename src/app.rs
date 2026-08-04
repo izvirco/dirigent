@@ -1265,6 +1265,9 @@ impl Render for Dirigent {
             .child(self.render_sidebar(window, cx))
             .child(self.render_center(window, cx))
             .child(self.render_diff_sidebar(window, cx))
+            .when_some(self.keyboard_menu, |element, menu| {
+                element.child(self.render_keyboard_menu(menu, cx))
+            })
             .when_some(path_completion_anchor, |element, anchor| {
                 let width = 520.0;
                 let left = anchor.x.as_f32().clamp(

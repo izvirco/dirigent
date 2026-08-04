@@ -279,9 +279,6 @@ impl Dirigent {
                     )
                 },
             )
-            .when_some(self.keyboard_menu, |element, menu| {
-                element.child(self.render_keyboard_menu(menu, cx))
-            })
             .when(self.pending_dialog.is_some(), |element| {
                 element.child(self.render_extension_dialog(cx))
             })
