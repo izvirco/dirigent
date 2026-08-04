@@ -27,6 +27,17 @@ struct DiffSidebarResizeDrag {
 
 struct DiffSidebarResizePreview;
 
+const MIN_THREAD_WIDTH: f32 = 420.0;
+const MIN_DIFF_SIDEBAR_WIDTH: f32 = 420.0;
+
+fn diff_sidebar_replaces_thread(
+    viewport_width: f32,
+    sidebar_width: f32,
+    diff_sidebar_width: f32,
+) -> bool {
+    viewport_width < sidebar_width + MIN_THREAD_WIDTH + diff_sidebar_width
+}
+
 impl gpui::Render for DiffSidebarResizePreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -1419,6 +1430,16 @@ impl Dirigent {
         );
     }
 
+    pub(crate) fn diff_sidebar_replaces_thread(&self, window: &Window) -> bool {
+        self.diff_sidebar_open
+            && self.selected_harness.is_some()
+            && diff_sidebar_replaces_thread(
+                window.viewport_size().width.as_f32(),
+                self.sidebar_width,
+                self.diff_sidebar_width,
+            )
+    }
+
     pub(crate) fn render_diff_sidebar(
         &mut self,
         window: &mut Window,
@@ -1427,6 +1448,7 @@ impl Dirigent {
         if !self.diff_sidebar_open || self.selected_harness.is_none() {
             return div().into_any_element();
         }
+        let replaces_thread = self.diff_sidebar_replaces_thread(window);
         self.sync_diff_display();
         let harness = self
             .selected_harness
@@ -1460,8 +1482,22 @@ impl Dirigent {
             width: self.diff_sidebar_width,
             mouse_x: window.mouse_position().x,
         };
-        let overlay = window.viewport_size().width.as_f32()
-            < self.sidebar_width + 420.0 + self.diff_sidebar_width;
+        let viewport_width = window.viewport_size().width.as_f32();
+        let rendered_width = if replaces_thread {
+            (viewport_width - self.sidebar_width).max(0.0)
+        } else {
+            self.diff_sidebar_width
+        };
+        let minimum_width = if replaces_thread {
+            0.0
+        } else {
+            MIN_DIFF_SIDEBAR_WIDTH
+        };
+        let maximum_width = if replaces_thread {
+            rendered_width
+        } else {
+            viewport_width * 0.85
+        };
         let has_diff_selection = self
             .thread_text_selection
             .as_ref()
@@ -1471,9 +1507,9 @@ impl Dirigent {
 
         div()
             .relative()
-            .w(px(self.diff_sidebar_width))
-            .min_w(px(420.0))
-            .max_w(window.viewport_size().width * 0.85)
+            .w(px(rendered_width))
+            .min_w(px(minimum_width))
+            .max_w(px(maximum_width))
             .h_full()
             .flex_none()
             .flex()
@@ -1481,9 +1517,6 @@ impl Dirigent {
             .border_l_1()
             .border_color(rgb(border()))
             .bg(rgb(bg()))
-            .when(overlay, |element| {
-                element.absolute().top_0().right_0().shadow_lg()
-            })
             .child(
                 div()
                     .h(px(36.0))
@@ -1601,32 +1634,34 @@ impl Dirigent {
                         ),
                 )
             })
-            .child(
-                div()
-                    .id("diff-sidebar-resize-handle")
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .left(px(-3.0))
-                    .w(px(7.0))
-                    .cursor(CursorStyle::ResizeColumn)
-                    .hover(|style| style.bg(rgb(blue())))
-                    .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(|_, _, _, cx| cx.stop_propagation()),
-                    )
-                    .on_drag(resize_drag, |_, _, _, cx| {
-                        cx.new(|_| DiffSidebarResizePreview)
-                    })
-                    .on_drag_move::<DiffSidebarResizeDrag>(cx.listener(
-                        |this, event: &DragMoveEvent<DiffSidebarResizeDrag>, _, cx| {
-                            let drag = event.drag(cx);
-                            let delta = drag.mouse_x - event.event.position.x;
-                            this.resize_diff_sidebar(drag.width + delta.as_f32());
-                            cx.notify();
-                        },
-                    )),
-            )
+            .when(!replaces_thread, |element| {
+                element.child(
+                    div()
+                        .id("diff-sidebar-resize-handle")
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left(px(-3.0))
+                        .w(px(7.0))
+                        .cursor(CursorStyle::ResizeColumn)
+                        .hover(|style| style.bg(rgb(blue())))
+                        .on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .on_drag(resize_drag, |_, _, _, cx| {
+                            cx.new(|_| DiffSidebarResizePreview)
+                        })
+                        .on_drag_move::<DiffSidebarResizeDrag>(cx.listener(
+                            |this, event: &DragMoveEvent<DiffSidebarResizeDrag>, _, cx| {
+                                let drag = event.drag(cx);
+                                let delta = drag.mouse_x - event.event.position.x;
+                                this.resize_diff_sidebar(drag.width + delta.as_f32());
+                                cx.notify();
+                            },
+                        )),
+                )
+            })
             .into_any_element()
     }
 }
@@ -1635,6 +1670,12 @@ impl Dirigent {
 mod tests {
     use super::*;
     use crate::diff::{DiffRow, FileDiffKind};
+
+    #[test]
+    fn narrow_windows_replace_the_thread_with_the_diff() {
+        assert!(diff_sidebar_replaces_thread(1_267.0, 288.0, 560.0));
+        assert!(!diff_sidebar_replaces_thread(1_268.0, 288.0, 560.0));
+    }
 
     fn replaced_file_and_hunk() -> (FileDiff, DiffHunk) {
         let hunk = DiffHunk {

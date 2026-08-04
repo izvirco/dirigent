@@ -1167,6 +1167,7 @@ impl Render for Dirigent {
                 .read(cx)
                 .position_for_offset(at)
         });
+        let diff_replaces_thread = self.diff_sidebar_replaces_thread(window);
 
         if self.focus_normal_mode {
             self.focus_normal_mode = false;
@@ -1263,7 +1264,9 @@ impl Render for Dirigent {
                 },
             )
             .child(self.render_sidebar(window, cx))
-            .child(self.render_center(window, cx))
+            .when(!diff_replaces_thread, |element| {
+                element.child(self.render_center(window, cx))
+            })
             .child(self.render_diff_sidebar(window, cx))
             .when_some(self.keyboard_menu, |element, menu| {
                 element.child(self.render_keyboard_menu(menu, cx))
