@@ -16,7 +16,7 @@ use crate::{
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
 pub(crate) const DEFAULT_DIFF_SIDEBAR_WIDTH: f32 = 560.0;
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS app_state (
@@ -34,7 +34,8 @@ const SCHEMA: &str = "
         order_index INTEGER NOT NULL UNIQUE,
         name TEXT NOT NULL,
         path_json BLOB NOT NULL,
-        workspace_root_json BLOB
+        workspace_root_json BLOB,
+        last_vcs_label TEXT
     );
     CREATE TABLE IF NOT EXISTS harnesses (
         id TEXT PRIMARY KEY,
@@ -105,6 +106,7 @@ struct StoredProject {
     name: String,
     path: PathBuf,
     workspace_root: Option<PathBuf>,
+    last_vcs_label: Option<String>,
 }
 
 struct StoredHarness {
@@ -210,6 +212,7 @@ impl StateDatabase {
                     name: project.name.clone(),
                     path: project.path.clone(),
                     workspace_root: project.workspace_root.clone(),
+                    last_vcs_label: project.last_vcs_label.clone(),
                 })
                 .collect(),
             harnesses: harnesses
@@ -317,6 +320,11 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
             "turn_diffs_json",
             "ALTER TABLE harnesses ADD COLUMN turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D';",
         ),
+        (
+            "projects",
+            "last_vcs_label",
+            "ALTER TABLE projects ADD COLUMN last_vcs_label TEXT;",
+        ),
     ];
     for (table, column, migration) in migrations {
         if !table_has_column(connection, table, column).map_err(|error| {
@@ -395,14 +403,15 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
         transaction
             .execute(
                 "INSERT INTO projects (
-                    id, order_index, name, path_json, workspace_root_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    id, order_index, name, path_json, workspace_root_json, last_vcs_label
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     project.id.to_string(),
                     order_index(index)?,
                     &project.name,
                     path_json,
                     workspace_root_json,
+                    &project.last_vcs_label,
                 ],
             )
             .map_err(|error| format!("could not store project {}: {error}", project.id))?;
@@ -515,7 +524,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut projects = Vec::new();
     let mut statement = connection
         .prepare(
-            "SELECT id, name, path_json, workspace_root_json
+            "SELECT id, name, path_json, workspace_root_json, last_vcs_label
              FROM projects ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare project state: {error}"))?;
@@ -526,11 +535,12 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, String>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })
         .map_err(|error| format!("could not read projects: {error}"))?;
     for row in rows {
-        let (id, name, path_json, workspace_root_json) =
+        let (id, name, path_json, workspace_root_json, last_vcs_label) =
             row.map_err(|error| format!("could not read project: {error}"))?;
         projects.push(StoredProject {
             id: decode_id(&id, "project id")?,
@@ -540,6 +550,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 .as_deref()
                 .map(|bytes| decode_json(bytes, "project workspace root"))
                 .transpose()?,
+            last_vcs_label,
         });
     }
     drop(statement);
@@ -695,6 +706,7 @@ impl StoredState {
                 name: project.name,
                 path: project.path,
                 workspace_root: project.workspace_root,
+                last_vcs_label: project.last_vcs_label,
             })
             .collect();
         let harnesses = self
@@ -787,8 +799,8 @@ fn order_index(index: usize) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DIFF_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, StateDatabase, decode_turn_diffs,
-        encode_turn_diffs,
+        DEFAULT_DIFF_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, StateDatabase, StoredProject,
+        StoredState, decode_turn_diffs, encode_turn_diffs, write_stored_state,
     };
     use crate::diff::DiffViewMode;
     use std::{fs, path::PathBuf};
@@ -833,6 +845,28 @@ mod tests {
         assert_eq!(loaded.diff_view_mode, DiffViewMode::Unified);
 
         drop(state_database);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persists_last_vcs_label() {
+        let directory = temporary_directory("vcs-label");
+        let database = directory.join("state.sqlite3");
+        let (mut state_database, _) = StateDatabase::open_at(&database).unwrap();
+        let mut state = StoredState::empty();
+        state.projects.push(StoredProject {
+            id: 1,
+            name: "project".into(),
+            path: directory.clone(),
+            workspace_root: None,
+            last_vcs_label: Some("main".into()),
+        });
+        write_stored_state(&mut state_database.connection, &state).unwrap();
+        drop(state_database);
+
+        let (_, loaded) = StateDatabase::open_at(&database).unwrap();
+        assert_eq!(loaded.projects[0].last_vcs_label.as_deref(), Some("main"));
+
         fs::remove_dir_all(directory).unwrap();
     }
 

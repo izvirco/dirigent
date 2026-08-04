@@ -10,7 +10,7 @@ use gpui::{
 
 use crate::{
     app::{Dirigent, KeyboardMode, SidebarMenu},
-    model::{CodexUsage, CodexUsageWindow, HarnessStatus, Id, WorkspaceBackend},
+    model::{CodexUsage, CodexUsageWindow, HarnessStatus, Id},
     theme::{
         blue, border, faint, muted, orange, red, rgb, surface, surface_hover, theme_text, yellow,
     },

@@ -17,6 +17,15 @@ pub(crate) struct RepositorySnapshot {
     pub(crate) dirty: bool,
 }
 
+impl RepositorySnapshot {
+    pub(crate) fn sidebar_label(&self) -> String {
+        match self.backend {
+            WorkspaceBackend::Git => self.source_label.clone(),
+            WorkspaceBackend::Jj => self.source_revision.chars().take(8).collect(),
+        }
+    }
+}
+
 fn command_output(mut command: Command, description: &str) -> Result<Output, String> {
     command
         .output()

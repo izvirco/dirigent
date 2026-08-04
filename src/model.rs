@@ -24,6 +24,7 @@ pub(crate) struct Project {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
     pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) last_vcs_label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
