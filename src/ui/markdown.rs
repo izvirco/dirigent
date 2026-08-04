@@ -5,9 +5,34 @@ use gpui::{
 
 use crate::{
     app::Dirigent,
-    markdown::{MarkdownBlock, MarkdownDocument, MarkdownTable, MarkdownText, TableAlignment},
+    markdown::{
+        MarkdownBlock, MarkdownDocument, MarkdownTable, MarkdownText, TableAlignment,
+        markdown_selection_text,
+    },
     theme::{accent, blue, border, muted, rgb, surface, surface_hover, theme_text},
 };
+
+struct MarkdownSelectionContext {
+    id: String,
+    text: SharedString,
+    next_offset: usize,
+    has_leaf: bool,
+}
+
+impl MarkdownSelectionContext {
+    fn range_for(&mut self, text: &str) -> std::ops::Range<usize> {
+        if text.is_empty() {
+            return self.next_offset..self.next_offset;
+        }
+        if self.has_leaf {
+            self.next_offset += 1;
+        }
+        self.has_leaf = true;
+        let start = self.next_offset;
+        self.next_offset += text.len();
+        start..self.next_offset
+    }
+}
 
 impl Dirigent {
     pub(super) fn render_markdown(
@@ -16,20 +41,33 @@ impl Dirigent {
         message_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_markdown_blocks(&document.blocks, &format!("markdown-{message_index}"), cx)
+        let id = format!("markdown-{message_index}");
+        let text = SharedString::from(markdown_selection_text(&document.blocks));
+        let mut selection = MarkdownSelectionContext {
+            id: id.clone(),
+            text,
+            next_offset: 0,
+            has_leaf: false,
+        };
+        self.render_markdown_blocks(&document.blocks, &id, &mut selection, cx)
     }
 
     fn render_markdown_blocks(
         &self,
         blocks: &[MarkdownBlock],
         path: &str,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let children = blocks
-            .iter()
-            .enumerate()
-            .map(|(index, block)| self.render_markdown_block(block, &format!("{path}-{index}"), cx))
-            .collect::<Vec<_>>();
+        let mut children = Vec::with_capacity(blocks.len());
+        for (index, block) in blocks.iter().enumerate() {
+            children.push(self.render_markdown_block(
+                block,
+                &format!("{path}-{index}"),
+                selection,
+                cx,
+            ));
+        }
         div()
             .w_full()
             .min_w(px(0.0))
@@ -40,32 +78,49 @@ impl Dirigent {
             .into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_markdown_block_segment(
         &self,
         block: &MarkdownBlock,
         original_block: &MarkdownBlock,
         path: &str,
+        selection_id: String,
+        selection_text: SharedString,
+        selection_offset: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let mut selection = MarkdownSelectionContext {
+            id: selection_id,
+            text: selection_text,
+            next_offset: selection_offset,
+            has_leaf: false,
+        };
         if let MarkdownBlock::CodeBlock { code, .. } = block
             && let MarkdownBlock::CodeBlock {
                 code: original_code,
                 ..
             } = original_block
         {
-            return self.render_markdown_code_block_with_copy(path, code, original_code, cx);
+            return self.render_markdown_code_block_with_copy(
+                path,
+                code,
+                original_code,
+                &mut selection,
+                cx,
+            );
         }
-        self.render_markdown_block(block, path, cx)
+        self.render_markdown_block(block, path, &mut selection, cx)
     }
 
-    pub(super) fn render_markdown_block(
+    fn render_markdown_block(
         &self,
         block: &MarkdownBlock,
         path: &str,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match block {
-            MarkdownBlock::Paragraph(text) => self.render_markdown_text(path, text, cx),
+            MarkdownBlock::Paragraph(text) => self.render_markdown_text(path, text, selection, cx),
             MarkdownBlock::Heading { level, text } => div()
                 .w_full()
                 .mt_1()
@@ -80,10 +135,10 @@ impl Dirigent {
                 .when(*level >= 3, |element| {
                     element.text_sm().line_height(px(23.0))
                 })
-                .child(self.render_markdown_text(path, text, cx))
+                .child(self.render_markdown_text(path, text, selection, cx))
                 .into_any_element(),
             MarkdownBlock::CodeBlock { code, .. } => {
-                self.render_markdown_code_block(path, code, cx)
+                self.render_markdown_code_block(path, code, selection, cx)
             }
             MarkdownBlock::BlockQuote(blocks) => div()
                 .w_full()
@@ -93,7 +148,7 @@ impl Dirigent {
                 .border_l_2()
                 .border_color(rgb(muted()))
                 .text_color(rgb(muted()))
-                .child(self.render_markdown_blocks(blocks, &format!("{path}-quote"), cx))
+                .child(self.render_markdown_blocks(blocks, &format!("{path}-quote"), selection, cx))
                 .into_any_element(),
             MarkdownBlock::List { start, items } => {
                 let children = items
@@ -122,6 +177,7 @@ impl Dirigent {
                                 self.render_markdown_blocks(
                                     blocks,
                                     &format!("{path}-item-{item_index}"),
+                                    selection,
                                     cx,
                                 ),
                             ))
@@ -143,7 +199,7 @@ impl Dirigent {
                 .h(px(1.0))
                 .bg(rgb(border()))
                 .into_any_element(),
-            MarkdownBlock::Table(table) => self.render_markdown_table(path, table, cx),
+            MarkdownBlock::Table(table) => self.render_markdown_table(path, table, selection, cx),
         }
     }
 
@@ -151,6 +207,7 @@ impl Dirigent {
         &self,
         id: &str,
         text: &MarkdownText,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut highlights = Vec::with_capacity(text.spans.len());
@@ -186,13 +243,16 @@ impl Dirigent {
             }
             highlights.push((span.range.clone(), highlight));
         }
-        self.render_styled_selectable_text(
+        let selection_range = selection.range_for(&text.text);
+        self.render_grouped_styled_selectable_text(
             id.to_string(),
             SharedString::from(text.text.clone()),
             &highlights,
             &font_overrides,
             &links,
-            false,
+            selection.id.clone(),
+            selection.text.clone(),
+            selection_range,
             cx,
         )
     }
@@ -201,9 +261,10 @@ impl Dirigent {
         &self,
         path: &str,
         code: &str,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_markdown_code_block_with_copy(path, code, code, cx)
+        self.render_markdown_code_block_with_copy(path, code, code, selection, cx)
     }
 
     fn render_markdown_code_block_with_copy(
@@ -211,10 +272,12 @@ impl Dirigent {
         path: &str,
         code: &str,
         full_code: &str,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let copied_code = full_code.to_string();
         let display_code = code.strip_suffix('\n').unwrap_or(code);
+        let selection_range = selection.range_for(display_code);
         let copy_button_id = format!("{path}-copy");
         let copy_group_id = format!("{path}-copy-group");
         let copied = self
@@ -241,10 +304,15 @@ impl Dirigent {
                     .text_xs()
                     .line_height(px(19.0))
                     .text_color(rgb(crate::theme::code_text()))
-                    .child(self.render_selectable_text(
+                    .child(self.render_grouped_styled_selectable_text(
                         format!("{path}-code"),
                         SharedString::from(display_code.to_string()),
                         &[],
+                        &[],
+                        &[],
+                        selection.id.clone(),
+                        selection.text.clone(),
+                        selection_range,
                         cx,
                     )),
             )
@@ -283,6 +351,7 @@ impl Dirigent {
         &self,
         path: &str,
         table: &MarkdownTable,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let column_count = table
@@ -307,6 +376,7 @@ impl Dirigent {
                     true,
                     row_count == 1,
                     column + 1 == column_count,
+                    selection,
                     cx,
                 ));
             }
@@ -323,6 +393,7 @@ impl Dirigent {
                     false,
                     row + row_offset + 1 == row_count,
                     column + 1 == column_count,
+                    selection,
                     cx,
                 ));
             }
@@ -370,11 +441,19 @@ impl Dirigent {
         header: bool,
         last_row: bool,
         last_column: bool,
+        selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let content = text.map_or_else(
             || div().into_any_element(),
-            |text| self.render_markdown_text(&format!("{path}-cell-{row}-{column}"), text, cx),
+            |text| {
+                self.render_markdown_text(
+                    &format!("{path}-cell-{row}-{column}"),
+                    text,
+                    selection,
+                    cx,
+                )
+            },
         );
         div()
             .min_w(px(0.0))

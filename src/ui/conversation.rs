@@ -387,7 +387,12 @@ impl Dirigent {
                             *last,
                             cx,
                         ),
-                    AssistantSegmentContent::Markdown { block_index, block } => {
+                    AssistantSegmentContent::Markdown {
+                        block_index,
+                        block,
+                        selection_text,
+                        selection_offset,
+                    } => {
                         let original_block = message
                             .markdown
                             .as_ref()
@@ -402,6 +407,8 @@ impl Dirigent {
                             *block_index,
                             block.as_ref().unwrap_or(original_block),
                             original_block,
+                            selection_text.clone(),
+                            *selection_offset,
                             *top_gap,
                             *last,
                             cx,

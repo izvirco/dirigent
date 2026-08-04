@@ -3,7 +3,7 @@ use std::{ops::Range, sync::Arc};
 use gpui::SharedString;
 
 use crate::{
-    markdown::{MarkdownBlock, MarkdownTable, MarkdownText},
+    markdown::{MarkdownBlock, MarkdownTable, MarkdownText, markdown_block_selection_text},
     model::{Harness, HarnessStatus, Message, MessageRole},
 };
 
@@ -20,6 +20,8 @@ pub(super) enum AssistantSegmentContent {
     Markdown {
         block_index: usize,
         block: Option<MarkdownBlock>,
+        selection_text: SharedString,
+        selection_offset: usize,
     },
 }
 
@@ -161,22 +163,49 @@ impl ConversationRenderCache {
 
         let first_item = self.items.len();
         if let Some(document) = message.markdown.as_ref() {
-            for (block_index, block) in document.blocks.iter().enumerate() {
-                for (chunk_index, block) in markdown_block_chunks(block).into_iter().enumerate() {
+            let mut segments = Vec::new();
+            let mut selection = String::new();
+            for (block_index, original_block) in document.blocks.iter().enumerate() {
+                for (chunk_index, block) in markdown_block_chunks(original_block)
+                    .into_iter()
+                    .enumerate()
+                {
+                    let rendered_block = block.as_ref().unwrap_or(original_block);
+                    let piece = markdown_block_selection_text(rendered_block);
+                    if !piece.is_empty() && !selection.is_empty() {
+                        selection.push('\n');
+                    }
+                    let selection_offset = selection.len();
+                    selection.push_str(&piece);
                     let estimate = block.as_ref().map_or_else(
                         || estimate_markdown_height(block_index, document),
                         estimate_block_height,
                     );
-                    self.items.push(ConversationRenderItem::AssistantSegment {
-                        message_index,
-                        segment_index: self.items.len() - first_item,
-                        content: AssistantSegmentContent::Markdown { block_index, block },
-                        first: false,
-                        top_gap: block_index > 0 && chunk_index == 0,
-                        last: false,
-                        estimated_height: estimate,
-                    });
+                    segments.push((
+                        block_index,
+                        block,
+                        selection_offset,
+                        block_index > 0 && chunk_index == 0,
+                        estimate,
+                    ));
                 }
+            }
+            let selection_text = SharedString::from(selection);
+            for (block_index, block, selection_offset, top_gap, estimated_height) in segments {
+                self.items.push(ConversationRenderItem::AssistantSegment {
+                    message_index,
+                    segment_index: self.items.len() - first_item,
+                    content: AssistantSegmentContent::Markdown {
+                        block_index,
+                        block,
+                        selection_text: selection_text.clone(),
+                        selection_offset,
+                    },
+                    first: false,
+                    top_gap,
+                    last: false,
+                    estimated_height,
+                });
             }
         } else {
             let text = message.display_text.clone();

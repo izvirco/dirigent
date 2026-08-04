@@ -20,6 +20,58 @@ fn text_index(layout: &TextLayout, position: gpui::Point<gpui::Pixels>, len: usi
         .min(len)
 }
 
+fn word_range(text: &str, index: usize) -> Range<usize> {
+    if text.is_empty() {
+        return 0..0;
+    }
+
+    let index = index.min(text.len());
+    let character_start = if index == text.len() {
+        text.char_indices()
+            .next_back()
+            .map_or(0, |(start, _)| start)
+    } else if text.is_char_boundary(index) {
+        index
+    } else {
+        (0..index)
+            .rev()
+            .find(|offset| text.is_char_boundary(*offset))
+            .unwrap_or(0)
+    };
+    let character = text[character_start..]
+        .chars()
+        .next()
+        .expect("non-empty text has a character at a valid boundary");
+    let is_word = |candidate: char| candidate.is_alphanumeric() || candidate == '_';
+
+    if !is_word(character) {
+        return character_start..character_start + character.len_utf8();
+    }
+
+    let start = text[..character_start]
+        .char_indices()
+        .rev()
+        .take_while(|(_, candidate)| is_word(*candidate))
+        .last()
+        .map_or(character_start, |(start, _)| start);
+    let end = character_start
+        + text[character_start..]
+            .char_indices()
+            .take_while(|(_, candidate)| is_word(*candidate))
+            .map(|(_, candidate)| candidate.len_utf8())
+            .sum::<usize>();
+    start..end
+}
+
+fn local_selection_range(
+    selection: &ThreadTextSelection,
+    element_range: &Range<usize>,
+) -> Option<Range<usize>> {
+    let start = selection.range.start.max(element_range.start);
+    let end = selection.range.end.min(element_range.end);
+    (start < end).then(|| start - element_range.start..end - element_range.start)
+}
+
 fn merged_highlights(
     len: usize,
     highlights: &[(Range<usize>, HighlightStyle)],
@@ -192,6 +244,34 @@ impl Dirigent {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_grouped_styled_selectable_text(
+        &self,
+        element_id: impl Into<String>,
+        text: impl Into<SharedString>,
+        highlights: &[(Range<usize>, HighlightStyle)],
+        font_overrides: &[(Range<usize>, SharedString)],
+        links: &[(Range<usize>, SharedString)],
+        selection_id: impl Into<String>,
+        selection_text: SharedString,
+        selection_range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_styled_selectable_text_internal(
+            element_id.into(),
+            text.into(),
+            highlights,
+            font_overrides,
+            links,
+            false,
+            selection_id.into(),
+            selection_text,
+            selection_range,
+            None,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_styled_selectable_text_with_reference(
         &self,
         id: impl Into<String>,
@@ -205,11 +285,43 @@ impl Dirigent {
     ) -> AnyElement {
         let id = id.into();
         let text = text.into();
+        let text_len = text.len();
+        self.render_styled_selectable_text_internal(
+            id.clone(),
+            text.clone(),
+            highlights,
+            font_overrides,
+            links,
+            single_line,
+            id,
+            text,
+            0..text_len,
+            diff_reference,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_styled_selectable_text_internal(
+        &self,
+        element_id: String,
+        text: SharedString,
+        highlights: &[(Range<usize>, HighlightStyle)],
+        font_overrides: &[(Range<usize>, SharedString)],
+        links: &[(Range<usize>, SharedString)],
+        single_line: bool,
+        selection_id: String,
+        selection_text: SharedString,
+        selection_range: Range<usize>,
+        diff_reference: Option<DiffSelectionReference>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        debug_assert_eq!(selection_range.len(), text.len());
         let selected_range = self
             .thread_text_selection
             .as_ref()
-            .filter(|selection| selection.id == id)
-            .map(|selection| selection.range.clone());
+            .filter(|selection| selection.id == selection_id)
+            .and_then(|selection| local_selection_range(selection, &selection_range));
         let mut styled = StyledText::new(text.clone());
         if !highlights.is_empty() || selected_range.is_some() {
             styled = if selected_range.is_none() && diff_reference.is_some() {
@@ -226,16 +338,19 @@ impl Dirigent {
         }
         let layout = styled.layout().clone();
 
-        let down_id = id.clone();
-        let down_text = text.clone();
+        let down_id = selection_id.clone();
+        let down_text = selection_text.clone();
+        let down_element_text = text.clone();
+        let down_range = selection_range.clone();
         let down_layout = layout.clone();
         let down_diff_reference = diff_reference.clone();
-        let move_id = id.clone();
+        let move_id = selection_id.clone();
+        let move_range = selection_range.clone();
         let move_layout = layout.clone();
         let up_layout = layout.clone();
         let up_links = links.to_vec();
         div()
-            .id(id)
+            .id(element_id)
             .w_full()
             .min_w(gpui::px(0.0))
             .when(single_line, |element| {
@@ -250,8 +365,23 @@ impl Dirigent {
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                     this.enter_normal_mode();
                     window.focus(&this.thread_focus, cx);
-                    let index = text_index(&down_layout, event.position, down_text.len());
-                    if event.modifiers.shift
+                    let local_index =
+                        text_index(&down_layout, event.position, down_element_text.len());
+                    let index = down_range.start + local_index;
+                    if event.click_count >= 2 {
+                        let local_word = word_range(&down_element_text, local_index);
+                        let word =
+                            down_range.start + local_word.start..down_range.start + local_word.end;
+                        this.thread_text_selection = Some(ThreadTextSelection {
+                            id: down_id.clone(),
+                            text: down_text.clone(),
+                            anchor: word.start,
+                            head: word.end,
+                            range: word,
+                            selecting: true,
+                            diff_reference: down_diff_reference.clone(),
+                        });
+                    } else if event.modifiers.shift
                         && let Some(selection) = this
                             .thread_text_selection
                             .as_mut()
@@ -282,7 +412,8 @@ impl Dirigent {
                 else {
                     return;
                 };
-                let index = text_index(&move_layout, event.position, selection.text.len());
+                let local_index = text_index(&move_layout, event.position, move_range.len());
+                let index = move_range.start + local_index;
                 selection.head = index;
                 selection.range = selection.anchor.min(index)..selection.anchor.max(index);
                 cx.notify();
@@ -325,6 +456,28 @@ impl Dirigent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn double_click_word_ranges_follow_utf8_boundaries() {
+        let text = "one naïve_word two";
+        assert_eq!(&text[word_range(text, 5)], "naïve_word");
+        assert_eq!(&text[word_range(text, text.len())], "two");
+    }
+
+    #[test]
+    fn selection_ranges_are_rebased_for_grouped_elements() {
+        let selection = ThreadTextSelection {
+            id: "message".to_string(),
+            text: SharedString::from("first\nsecond"),
+            anchor: 2,
+            head: 10,
+            range: 2..10,
+            selecting: true,
+            diff_reference: None,
+        };
+        assert_eq!(local_selection_range(&selection, &(6..12)), Some(0..4));
+        assert_eq!(local_selection_range(&selection, &(11..12)), None);
+    }
 
     #[test]
     fn merges_ordered_highlights_without_fragmenting_them() {

@@ -95,6 +95,8 @@ impl Dirigent {
         block_index: usize,
         block: &crate::markdown::MarkdownBlock,
         original_block: &crate::markdown::MarkdownBlock,
+        selection_text: SharedString,
+        selection_offset: usize,
         top_gap: bool,
         last: bool,
         cx: &mut Context<Self>,
@@ -103,6 +105,9 @@ impl Dirigent {
             block,
             original_block,
             &format!("markdown-{index}-{block_index}-{segment_index}"),
+            format!("markdown-{index}"),
+            selection_text,
+            selection_offset,
             cx,
         );
         self.render_assistant_segment_shell(

@@ -77,6 +77,54 @@ pub(crate) struct MarkdownSpanStyle {
     pub(crate) link: Option<String>,
 }
 
+pub(crate) fn markdown_selection_text(blocks: &[MarkdownBlock]) -> String {
+    let mut leaves = Vec::new();
+    for block in blocks {
+        collect_selection_leaves(block, &mut leaves);
+    }
+    leaves.join("\n")
+}
+
+pub(crate) fn markdown_block_selection_text(block: &MarkdownBlock) -> String {
+    markdown_selection_text(std::slice::from_ref(block))
+}
+
+fn collect_selection_leaves<'a>(block: &'a MarkdownBlock, leaves: &mut Vec<&'a str>) {
+    match block {
+        MarkdownBlock::Paragraph(text) | MarkdownBlock::Heading { text, .. } => {
+            if !text.text.is_empty() {
+                leaves.push(&text.text);
+            }
+        }
+        MarkdownBlock::CodeBlock { code, .. } => {
+            let code = code.strip_suffix('\n').unwrap_or(code);
+            if !code.is_empty() {
+                leaves.push(code);
+            }
+        }
+        MarkdownBlock::BlockQuote(blocks) => {
+            for block in blocks {
+                collect_selection_leaves(block, leaves);
+            }
+        }
+        MarkdownBlock::List { items, .. } => {
+            for blocks in items {
+                for block in blocks {
+                    collect_selection_leaves(block, leaves);
+                }
+            }
+        }
+        MarkdownBlock::Table(table) => {
+            for text in table.header.iter().chain(table.rows.iter().flatten()) {
+                if !text.text.is_empty() {
+                    leaves.push(&text.text);
+                }
+            }
+        }
+        MarkdownBlock::Rule => {}
+    }
+}
+
 #[derive(Default)]
 struct InlineState {
     strong: usize,
@@ -467,7 +515,16 @@ fn table_alignment(alignment: CmarkAlignment) -> TableAlignment {
 
 #[cfg(test)]
 mod tests {
-    use super::{MarkdownBlock, TableAlignment, parse_markdown};
+    use super::{MarkdownBlock, TableAlignment, markdown_selection_text, parse_markdown};
+
+    #[test]
+    fn selection_text_joins_rendered_markdown_leaves() {
+        let document = parse_markdown("# Heading\n\nFirst **paragraph**.\n\n- one\n- two\n");
+        assert_eq!(
+            markdown_selection_text(&document.blocks),
+            "Heading\nFirst paragraph.\none\ntwo"
+        );
+    }
 
     #[test]
     fn parses_tables_with_alignment_and_inline_formatting() {
