@@ -55,6 +55,22 @@ fn file_kind_label(kind: FileDiffKind) -> &'static str {
     }
 }
 
+fn render_diff_stats(additions: usize, deletions: usize) -> AnyElement {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .gap_1()
+        .whitespace_nowrap()
+        .child(
+            div()
+                .text_color(rgb(green()))
+                .child(format!("+{additions}")),
+        )
+        .child(div().text_color(rgb(red())).child(format!("−{deletions}")))
+        .into_any_element()
+}
+
 fn language_for_path(path: &str) -> String {
     std::path::Path::new(path)
         .extension()
@@ -1174,11 +1190,7 @@ impl Dirigent {
                             .text_color(rgb(theme_text()))
                             .child(file.path.clone()),
                     )
-                    .child(
-                        div()
-                            .text_color(rgb(muted()))
-                            .child(format!("+{} −{}", file.additions, file.deletions)),
-                    ),
+                    .child(render_diff_stats(file.additions, file.deletions)),
             )
             .when_some(file.message.clone(), |element, message| {
                 element.child(
@@ -1397,6 +1409,10 @@ impl Dirigent {
                 })
             })
         });
+        let combined_stats = self
+            .diff_display
+            .as_ref()
+            .map(|turn| (turn.additions, turn.deletions));
         let no_turns = harness.turn_diffs.is_empty() && harness.active_turn_preview.is_none();
         let turn_picker = self.render_diff_turn_picker(
             &harness.turn_diffs,
@@ -1446,6 +1462,9 @@ impl Dirigent {
                     .child(self.render_diff_scope_toggle(cx))
                     .child(self.render_diff_mode_toggle(cx))
                     .child(div().flex_1())
+                    .when_some(combined_stats, |element, (additions, deletions)| {
+                        element.child(render_diff_stats(additions, deletions))
+                    })
                     .child(
                         div()
                             .id("close-diff-sidebar")

@@ -6,7 +6,7 @@ pub(crate) use cache::ConversationRenderCache;
 use cache::{AssistantSegmentContent, ConversationRenderItem};
 
 #[cfg(test)]
-use message::tool_color;
+use message::{tool_color, tool_label_colors};
 
 use std::{ops::Range, time::Duration};
 
@@ -548,12 +548,12 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        format_retry_status, format_working_duration, tool_color, working_character,
-        working_character_is_orange, working_orange_range,
+        format_retry_status, format_working_duration, tool_color, tool_label_colors,
+        working_character, working_character_is_orange, working_orange_range,
     };
     use crate::{
         model::RetryStatus,
-        theme::{purple, yellow},
+        theme::{green, purple, red, yellow},
     };
 
     #[test]
@@ -620,5 +620,20 @@ mod tests {
     #[test]
     fn write_tools_are_yellow() {
         assert_eq!(tool_color("write"), yellow());
+    }
+
+    #[test]
+    fn edit_and_write_stats_use_diff_colors() {
+        let text = "edit src/main.rs +12 -3";
+        assert_eq!(
+            tool_label_colors(text, "edit"),
+            vec![(0..4, yellow()), (17..20, green()), (21..23, red())]
+        );
+
+        let text = "write src/main.rs +2 -0";
+        assert_eq!(
+            tool_label_colors(text, "write"),
+            vec![(0..5, yellow()), (18..20, green()), (21..23, red())]
+        );
     }
 }

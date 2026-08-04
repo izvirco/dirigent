@@ -9,6 +9,35 @@ pub(super) fn tool_color(tool: &str) -> u32 {
     }
 }
 
+pub(super) fn tool_label_colors(text: &str, tool: &str) -> Vec<(Range<usize>, u32)> {
+    let mut colors = vec![(0..tool.len(), tool_color(tool))];
+    if !matches!(tool, "edit" | "write") {
+        return colors;
+    }
+
+    let Some(stats_start) = text.rfind(" +") else {
+        return colors;
+    };
+    let stats_start = stats_start + 1;
+    let Some((additions, deletions)) = text[stats_start..].split_once(' ') else {
+        return colors;
+    };
+    if additions
+        .strip_prefix('+')
+        .is_none_or(|count| count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit()))
+        || deletions.strip_prefix('-').is_none_or(|count| {
+            count.is_empty() || !count.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return colors;
+    }
+
+    let additions_end = stats_start + additions.len();
+    colors.push((stats_start..additions_end, green()));
+    colors.push((additions_end + 1..text.len(), red()));
+    colors
+}
+
 impl Dirigent {
     #[allow(clippy::too_many_arguments)]
     fn render_assistant_segment_shell(
@@ -328,9 +357,8 @@ impl Dirigent {
                     .text
                     .split_once(' ')
                     .map_or(message.text.as_str(), |(tool, _)| tool);
-                let tool_color = tool_color(tool);
                 let label_id = format!("tool-label-{index}");
-                let label_colors = vec![(0..tool.len(), tool_color)];
+                let label_colors = tool_label_colors(&message.display_text, tool);
                 let label = if expanded {
                     self.render_selectable_text(
                         label_id.clone(),
