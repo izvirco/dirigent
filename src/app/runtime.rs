@@ -3,6 +3,7 @@ use super::*;
 impl Dirigent {
     pub(super) fn fail_harness(&mut self, index: usize, error: String) {
         self.finish_turn_diff(index, TurnDiffStatus::Failed);
+        self.refresh_harness_vcs_label(index);
         tracing::error!(
             error = %error,
             harness_id = self.harnesses[index].id,
@@ -72,9 +73,11 @@ impl Dirigent {
             message.queued = false;
             self.harnesses[index].messages.push(message);
         }
+        let vcs_label_changed = self.refresh_harness_vcs_label(index);
         let transitioned = self.harnesses[index].status != HarnessStatus::Stopped
             || self.harnesses[index].run_started_at.is_some()
-            || self.harnesses[index].attention_required;
+            || self.harnesses[index].attention_required
+            || vcs_label_changed;
         if self.harnesses[index].status != HarnessStatus::Failed {
             self.harnesses[index].status = HarnessStatus::Stopped;
         }
@@ -402,6 +405,7 @@ impl Dirigent {
             self.harnesses[index].has_unread_completion = true;
         }
         self.refresh_harness_order(index);
+        self.refresh_harness_vcs_label(index);
         self.persist();
         let mut changed_message = None;
         for (message_index, message) in self.harnesses[index].messages.iter_mut().enumerate() {

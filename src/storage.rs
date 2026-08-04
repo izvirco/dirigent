@@ -34,8 +34,7 @@ const SCHEMA: &str = "
         order_index INTEGER NOT NULL UNIQUE,
         name TEXT NOT NULL,
         path_json BLOB NOT NULL,
-        workspace_root_json BLOB,
-        last_vcs_label TEXT
+        workspace_root_json BLOB
     );
     CREATE TABLE IF NOT EXISTS harnesses (
         id TEXT PRIMARY KEY,
@@ -45,6 +44,7 @@ const SCHEMA: &str = "
         session_file_json BLOB,
         nix_enabled INTEGER NOT NULL,
         workspace_id TEXT,
+        last_vcs_label TEXT,
         archived INTEGER NOT NULL,
         sidebar_order TEXT NOT NULL,
         turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D'
@@ -106,7 +106,6 @@ struct StoredProject {
     name: String,
     path: PathBuf,
     workspace_root: Option<PathBuf>,
-    last_vcs_label: Option<String>,
 }
 
 struct StoredHarness {
@@ -116,6 +115,7 @@ struct StoredHarness {
     session_file: Option<PathBuf>,
     nix_enabled: bool,
     workspace_id: Option<String>,
+    last_vcs_label: Option<String>,
     archived: bool,
     sidebar_order: u64,
     turn_diffs: Vec<TurnDiff>,
@@ -212,7 +212,6 @@ impl StateDatabase {
                     name: project.name.clone(),
                     path: project.path.clone(),
                     workspace_root: project.workspace_root.clone(),
-                    last_vcs_label: project.last_vcs_label.clone(),
                 })
                 .collect(),
             harnesses: harnesses
@@ -224,6 +223,7 @@ impl StateDatabase {
                     session_file: harness.session_file.clone(),
                     nix_enabled: harness.nix_enabled,
                     workspace_id: harness.workspace_id.clone(),
+                    last_vcs_label: harness.last_vcs_label.clone(),
                     archived: harness.archived,
                     sidebar_order: harness.sidebar_order,
                     turn_diffs: harness.turn_diffs.clone(),
@@ -321,9 +321,9 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
             "ALTER TABLE harnesses ADD COLUMN turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D';",
         ),
         (
-            "projects",
+            "harnesses",
             "last_vcs_label",
-            "ALTER TABLE projects ADD COLUMN last_vcs_label TEXT;",
+            "ALTER TABLE harnesses ADD COLUMN last_vcs_label TEXT;",
         ),
     ];
     for (table, column, migration) in migrations {
@@ -403,15 +403,14 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
         transaction
             .execute(
                 "INSERT INTO projects (
-                    id, order_index, name, path_json, workspace_root_json, last_vcs_label
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    id, order_index, name, path_json, workspace_root_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     project.id.to_string(),
                     order_index(index)?,
                     &project.name,
                     path_json,
                     workspace_root_json,
-                    &project.last_vcs_label,
                 ],
             )
             .map_err(|error| format!("could not store project {}: {error}", project.id))?;
@@ -427,8 +426,8 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
             .execute(
                 "INSERT INTO harnesses (
                     id, order_index, project_id, title, session_file_json, nix_enabled,
-                    workspace_id, archived, sidebar_order, turn_diffs_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    workspace_id, last_vcs_label, archived, sidebar_order, turn_diffs_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     harness.id.to_string(),
                     order_index(index)?,
@@ -437,6 +436,7 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
                     session_file_json,
                     harness.nix_enabled,
                     &harness.workspace_id,
+                    &harness.last_vcs_label,
                     harness.archived,
                     harness.sidebar_order.to_string(),
                     encode_turn_diffs(&harness.turn_diffs)?,
@@ -524,7 +524,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut projects = Vec::new();
     let mut statement = connection
         .prepare(
-            "SELECT id, name, path_json, workspace_root_json, last_vcs_label
+            "SELECT id, name, path_json, workspace_root_json
              FROM projects ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare project state: {error}"))?;
@@ -535,12 +535,11 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, String>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, Option<Vec<u8>>>(3)?,
-                row.get::<_, Option<String>>(4)?,
             ))
         })
         .map_err(|error| format!("could not read projects: {error}"))?;
     for row in rows {
-        let (id, name, path_json, workspace_root_json, last_vcs_label) =
+        let (id, name, path_json, workspace_root_json) =
             row.map_err(|error| format!("could not read project: {error}"))?;
         projects.push(StoredProject {
             id: decode_id(&id, "project id")?,
@@ -550,7 +549,6 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 .as_deref()
                 .map(|bytes| decode_json(bytes, "project workspace root"))
                 .transpose()?,
-            last_vcs_label,
         });
     }
     drop(statement);
@@ -559,7 +557,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, project_id, title, session_file_json, nix_enabled, workspace_id,
-                    archived, sidebar_order, turn_diffs_json
+                    last_vcs_label, archived, sidebar_order, turn_diffs_json
              FROM harnesses ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare harness state: {error}"))?;
@@ -572,9 +570,10 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, Option<Vec<u8>>>(3)?,
                 row.get::<_, bool>(4)?,
                 row.get::<_, Option<String>>(5)?,
-                row.get::<_, bool>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, Vec<u8>>(8)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, bool>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, Vec<u8>>(9)?,
             ))
         })
         .map_err(|error| format!("could not read harnesses: {error}"))?;
@@ -586,6 +585,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
             session_file_json,
             nix_enabled,
             workspace_id,
+            last_vcs_label,
             archived,
             sidebar_order,
             turn_diffs_json,
@@ -600,6 +600,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 .transpose()?,
             nix_enabled,
             workspace_id,
+            last_vcs_label,
             archived,
             sidebar_order: decode_id(&sidebar_order, "harness sidebar order")?,
             turn_diffs: decode_turn_diffs(&turn_diffs_json)?,
@@ -706,7 +707,6 @@ impl StoredState {
                 name: project.name,
                 path: project.path,
                 workspace_root: project.workspace_root,
-                last_vcs_label: project.last_vcs_label,
             })
             .collect();
         let harnesses = self
@@ -720,6 +720,7 @@ impl StoredState {
                     harness.session_file,
                     harness.nix_enabled,
                     harness.workspace_id,
+                    harness.last_vcs_label,
                     harness.archived,
                     harness.sidebar_order,
                     harness.turn_diffs,
@@ -799,8 +800,8 @@ fn order_index(index: usize) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_DIFF_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, StateDatabase, StoredProject,
-        StoredState, decode_turn_diffs, encode_turn_diffs, write_stored_state,
+        DEFAULT_DIFF_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, StateDatabase, StoredHarness,
+        StoredProject, StoredState, decode_turn_diffs, encode_turn_diffs, write_stored_state,
     };
     use crate::diff::DiffViewMode;
     use std::{fs, path::PathBuf};
@@ -859,13 +860,24 @@ mod tests {
             name: "project".into(),
             path: directory.clone(),
             workspace_root: None,
+        });
+        state.harnesses.push(StoredHarness {
+            id: 2,
+            project_id: 1,
+            title: "thread".into(),
+            session_file: None,
+            nix_enabled: false,
+            workspace_id: None,
             last_vcs_label: Some("main".into()),
+            archived: false,
+            sidebar_order: 1,
+            turn_diffs: Vec::new(),
         });
         write_stored_state(&mut state_database.connection, &state).unwrap();
         drop(state_database);
 
         let (_, loaded) = StateDatabase::open_at(&database).unwrap();
-        assert_eq!(loaded.projects[0].last_vcs_label.as_deref(), Some("main"));
+        assert_eq!(loaded.harnesses[0].last_vcs_label.as_deref(), Some("main"));
 
         fs::remove_dir_all(directory).unwrap();
     }

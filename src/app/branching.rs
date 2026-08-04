@@ -276,6 +276,7 @@ impl Dirigent {
         let title = format!("{} (fork)", self.harnesses[source_index].title);
         let nix_enabled = self.harnesses[source_index].nix_enabled;
         let workspace_id = self.harnesses[source_index].workspace_id.clone();
+        let last_vcs_label = self.harnesses[source_index].last_vcs_label.clone();
         let model = self.harnesses[source_index].model.clone();
         let thinking = self.harnesses[source_index].thinking_level.clone();
         let id = self.allocate_id();
@@ -290,6 +291,7 @@ impl Dirigent {
                 Some(source_session_file),
                 nix_enabled,
                 workspace_id.clone(),
+                last_vcs_label.clone(),
                 false,
                 sidebar_order,
                 self.harnesses[source_index].turn_diffs.clone(),
@@ -303,6 +305,7 @@ impl Dirigent {
         };
         harness.nix_enabled = nix_enabled;
         harness.workspace_id = workspace_id;
+        harness.last_vcs_label = last_vcs_label;
         harness.model = model;
         harness.thinking_level = thinking;
         self.harnesses.push(harness);

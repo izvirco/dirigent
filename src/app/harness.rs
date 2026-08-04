@@ -609,6 +609,9 @@ impl Dirigent {
         if self.harnesses[index].process.is_none() {
             return;
         }
+        if self.refresh_harness_vcs_label(index) {
+            self.persist();
+        }
         let images = input.read(cx).images();
         if self.harnesses[index].startup_settings_pending {
             self.harnesses[index].pending_initial_prompt = Some((message.clone(), images.clone()));

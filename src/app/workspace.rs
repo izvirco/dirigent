@@ -466,7 +466,6 @@ impl Dirigent {
             name,
             path: path.clone(),
             workspace_root: None,
-            last_vcs_label: None,
         });
         match start_fuzzy_index(
             &path,
@@ -533,6 +532,7 @@ impl Dirigent {
             images.iter().map(|image| image.image.clone()).collect(),
         ));
         self.harnesses.push(harness);
+        self.refresh_harness_vcs_label(self.harnesses.len() - 1);
         self.selected_harness = Some(id);
         self.last_used_harness = Some(id);
         self.add_composer_input(id, cx);

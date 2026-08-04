@@ -24,7 +24,6 @@ pub(crate) struct Project {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
     pub(crate) workspace_root: Option<PathBuf>,
-    pub(crate) last_vcs_label: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -600,6 +599,7 @@ pub(crate) struct Harness {
     pub(crate) nix_enabled: bool,
     pub(crate) nix_restart_pending: bool,
     pub(crate) workspace_id: Option<String>,
+    pub(crate) last_vcs_label: Option<String>,
     pub(crate) turn_diffs: Vec<TurnDiff>,
     pub(crate) active_turn_diff: Option<ActiveTurnDiff>,
     pub(crate) active_turn_preview: Option<TurnDiff>,
@@ -641,6 +641,7 @@ impl Harness {
             nix_enabled: false,
             nix_restart_pending: false,
             workspace_id: None,
+            last_vcs_label: None,
             turn_diffs: Vec::new(),
             active_turn_diff: None,
             active_turn_preview: None,
@@ -684,6 +685,7 @@ impl Harness {
         session_file: Option<PathBuf>,
         nix_enabled: bool,
         workspace_id: Option<String>,
+        last_vcs_label: Option<String>,
         archived: bool,
         sidebar_order: u64,
         turn_diffs: Vec<TurnDiff>,
@@ -722,6 +724,7 @@ impl Harness {
             nix_enabled,
             nix_restart_pending: false,
             workspace_id,
+            last_vcs_label,
             turn_diffs,
             active_turn_diff: None,
             active_turn_preview: None,

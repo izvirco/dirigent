@@ -16,23 +16,7 @@ impl Dirigent {
         };
         match vcs::probe_repository(&path) {
             Ok(Some(snapshot)) => {
-                let label = snapshot.sidebar_label();
                 self.repository_snapshots.insert(project_id, snapshot);
-                let label_changed = self
-                    .projects
-                    .iter_mut()
-                    .find(|project| project.id == project_id)
-                    .is_some_and(|project| {
-                        if project.last_vcs_label.as_ref() == Some(&label) {
-                            false
-                        } else {
-                            project.last_vcs_label = Some(label);
-                            true
-                        }
-                    });
-                if label_changed {
-                    self.persist();
-                }
             }
             Ok(None) => {
                 self.repository_snapshots.remove(&project_id);
@@ -43,6 +27,26 @@ impl Dirigent {
                 self.banner = Some(error);
             }
         }
+    }
+
+    pub(crate) fn refresh_harness_vcs_label(&mut self, index: usize) -> bool {
+        if self.harnesses[index].workspace_id.is_some() {
+            return false;
+        }
+        let project_id = self.harnesses[index].project_id;
+        self.refresh_repository(project_id);
+        let Some(label) = self
+            .repository_snapshots
+            .get(&project_id)
+            .map(RepositorySnapshot::sidebar_label)
+        else {
+            return false;
+        };
+        if self.harnesses[index].last_vcs_label.as_ref() == Some(&label) {
+            return false;
+        }
+        self.harnesses[index].last_vcs_label = Some(label);
+        true
     }
 
     pub(crate) fn toggle_workspace_dropdown(&mut self) {

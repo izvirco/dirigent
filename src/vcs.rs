@@ -19,10 +19,7 @@ pub(crate) struct RepositorySnapshot {
 
 impl RepositorySnapshot {
     pub(crate) fn sidebar_label(&self) -> String {
-        match self.backend {
-            WorkspaceBackend::Git => self.source_label.clone(),
-            WorkspaceBackend::Jj => self.source_revision.chars().take(8).collect(),
-        }
+        self.source_label.clone()
     }
 }
 
@@ -408,7 +405,25 @@ pub(crate) fn project_slug(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::project_slug;
+    use super::{RepositorySnapshot, project_slug};
+    use crate::model::WorkspaceBackend;
+    use std::path::PathBuf;
+
+    #[test]
+    fn jj_sidebar_label_uses_change_id() {
+        let snapshot = RepositorySnapshot {
+            backend: WorkspaceBackend::Jj,
+            repository_root: PathBuf::new(),
+            project_relative_path: PathBuf::new(),
+            source_id: "vvlnszyu".into(),
+            source_label: "vvlnszyu".into(),
+            source_revision: "e498991600000000".into(),
+            jj_parent_revisions: Vec::new(),
+            dirty: false,
+        };
+
+        assert_eq!(snapshot.sidebar_label(), "vvlnszyu");
+    }
 
     #[test]
     fn sanitizes_project_names_for_workspace_paths() {

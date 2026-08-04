@@ -174,16 +174,9 @@ impl Dirigent {
         } else {
             theme_text()
         };
-        let repository = self.repository_snapshot_for_project(harness.project_id);
         let vcs_label = workspace
             .map(|workspace| workspace.id.clone())
-            .or_else(|| repository.map(|repository| repository.sidebar_label()))
-            .or_else(|| {
-                self.projects
-                    .iter()
-                    .find(|project| project.id == harness.project_id)
-                    .and_then(|project| project.last_vcs_label.clone())
-            });
+            .or_else(|| harness.last_vcs_label.clone());
         let hover_controls_width = if quick_archive { 48.0 } else { 22.0 };
         let (state_label, state_color) = if placement == ThreadPlacement::Workpool {
             (format_elapsed(harness.run_started_at), muted())
