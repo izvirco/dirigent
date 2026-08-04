@@ -41,6 +41,7 @@ use branching::*;
 use crate::{
     cache::SessionCache,
     diff::{DiffScope, DiffSelectionReference, DiffViewMode, TurnDiff, TurnDiffStatus},
+    image_attachment::normalize_for_harness,
     model::{
         CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
         Message, MessageRole, Project, RetryStatus, WorkspaceState,

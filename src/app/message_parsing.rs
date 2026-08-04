@@ -15,9 +15,12 @@ pub(super) fn parse_cached_draft_images(bytes: &[u8]) -> Result<Vec<AttachedImag
             let bytes = BASE64
                 .decode(image.data)
                 .map_err(|error| format!("could not decode a cached composer image: {error}"))?;
+            let source = format!("cached composer image {}", image.label);
+            let normalized =
+                normalize_for_harness(Arc::new(Image::from_bytes(format, bytes)), &source)?;
             Ok(AttachedImage {
                 label: image.label,
-                image: Arc::new(Image::from_bytes(format, bytes)),
+                image: normalized,
             })
         })
         .collect()

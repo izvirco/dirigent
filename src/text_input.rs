@@ -1,14 +1,71 @@
-use std::{ops::Range, sync::Arc};
+use std::{ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
-    App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Element, ElementId,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, HighlightStyle, Image, IntoElement,
-    KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    Render, ScrollHandle, SharedString, StyledText, TextLayout, Window, div, fill, prelude::*, px,
-    relative, rgba, size,
+    App, AppContext as _, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Element,
+    ElementId, EventEmitter, FocusHandle, Focusable, GlobalElementId, HighlightStyle, Image,
+    IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Render, ScrollHandle, SharedString, StyledText, TextLayout, Window, div, fill,
+    prelude::*, px, relative, rgba, size,
 };
 
-use crate::theme::{accent, blue, border, faint, muted, rgb, surface, theme_text};
+use crate::{
+    image_attachment::{load_external_image, normalize_for_harness},
+    theme::{accent, blue, border, faint, muted, rgb, surface, theme_text},
+};
+
+fn clipboard_path(value: &str) -> Option<PathBuf> {
+    let path = if value.starts_with("file:") {
+        url::Url::parse(value).ok()?.to_file_path().ok()?
+    } else {
+        PathBuf::from(value)
+    };
+    (path.is_absolute() && path.exists()).then_some(path)
+}
+
+fn clipboard_text_paths(text: &str) -> Option<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || (paths.is_empty() && matches!(line, "copy" | "cut"))
+        {
+            continue;
+        }
+        paths.push(clipboard_path(line)?);
+    }
+    (!paths.is_empty()).then_some(paths)
+}
+
+fn native_clipboard_paths() -> Vec<PathBuf> {
+    use clipboard_rs::{Clipboard as _, ClipboardContext};
+
+    let clipboard = match ClipboardContext::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            tracing::debug!(error = %error, "could not initialize native clipboard path fallback");
+            return Vec::new();
+        }
+    };
+    match clipboard.get_files() {
+        Ok(files) => {
+            let paths = files
+                .iter()
+                .filter_map(|value| clipboard_path(value))
+                .collect::<Vec<_>>();
+            tracing::debug!(
+                reported_files = files.len(),
+                valid_paths = paths.len(),
+                "read native clipboard file list"
+            );
+            paths
+        }
+        Err(error) => {
+            tracing::debug!(error = %error, "native clipboard did not contain a readable file list");
+            Vec::new()
+        }
+    }
+}
 
 pub(crate) enum InputEvent {
     Submit,
@@ -340,31 +397,125 @@ impl TextInput {
     }
 
     fn paste(&mut self, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        let images = item
-            .entries
-            .iter()
+        let item = cx.read_from_clipboard();
+        if item.is_none() {
+            tracing::debug!(
+                "clipboard did not contain a GPUI-readable entry; trying native file-list fallback"
+            );
+        }
+        let fallback_text = item
+            .as_ref()
+            .into_iter()
+            .flat_map(|item| &item.entries)
             .filter_map(|entry| match entry {
-                ClipboardEntry::Image(image) if !image.bytes.is_empty() => {
-                    Some(Arc::new(image.clone()))
-                }
+                ClipboardEntry::String(value) => Some(value.text.as_str()),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-
-        if !images.is_empty() {
-            for image in images {
-                let label = format!("image-{}", self.next_image_number);
-                self.next_image_number += 1;
-                let marker = format!("[{label}]");
-                self.replace_selection(&marker);
-                self.images.push(AttachedImage { label, image });
+            .collect::<String>();
+        let mut clipboard_images = Vec::new();
+        let mut external_paths = Vec::new();
+        for entry in item.iter().flat_map(|item| &item.entries) {
+            match entry {
+                ClipboardEntry::Image(image) => clipboard_images.push(Arc::new(image.clone())),
+                ClipboardEntry::ExternalPaths(paths) => {
+                    external_paths.extend(paths.paths().iter().cloned())
+                }
+                ClipboardEntry::String(_) => {}
             }
-        } else if let Some(text) = item.text() {
-            self.replace_selection(&text);
         }
+
+        // Some Linux file managers expose copied files as URI text rather than a GPUI
+        // ExternalPaths entry. Try that before using a second, native clipboard reader.
+        if clipboard_images.is_empty()
+            && external_paths.is_empty()
+            && let Some(paths) = clipboard_text_paths(&fallback_text)
+        {
+            external_paths = paths;
+        }
+
+        let probe_native_paths =
+            clipboard_images.is_empty() && external_paths.is_empty() && fallback_text.is_empty();
+        tracing::debug!(
+            entries = item.as_ref().map_or(0, |item| item.entries.len()),
+            clipboard_images = clipboard_images.len(),
+            external_paths = external_paths.len(),
+            has_text = !fallback_text.is_empty(),
+            probe_native_paths,
+            "processing clipboard paste"
+        );
+
+        if clipboard_images.is_empty() && external_paths.is_empty() && !probe_native_paths {
+            if !fallback_text.is_empty() {
+                self.replace_selection(&fallback_text);
+            }
+            return;
+        }
+
+        let task = cx.background_spawn(async move {
+            if probe_native_paths {
+                external_paths = native_clipboard_paths();
+            }
+            let mut images = Vec::new();
+            for (index, image) in clipboard_images.into_iter().enumerate() {
+                let source = format!("clipboard image {}", index + 1);
+                match normalize_for_harness(image, &source) {
+                    Ok(image) => images.push(image),
+                    Err(error) => tracing::warn!(error = %error, source, "could not prepare clipboard image attachment"),
+                }
+            }
+
+            let mut remaining_paths = Vec::new();
+            for path in external_paths {
+                match load_external_image(&path) {
+                    Ok(Some(image)) => images.push(image),
+                    Ok(None) => remaining_paths.push(path),
+                    Err(error) => {
+                        tracing::warn!(error = %error, path = %path.display(), "could not load clipboard path as an image");
+                        remaining_paths.push(path);
+                    }
+                }
+            }
+            (images, remaining_paths, fallback_text)
+        });
+
+        cx.spawn(async move |this, cx| {
+            let (images, remaining_paths, fallback_text) = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let previous_content = this.content.clone();
+                let attached_images = !images.is_empty();
+                for image in images {
+                    let label = format!("image-{}", this.next_image_number);
+                    this.next_image_number += 1;
+                    let marker = format!("[{label}]");
+                    this.replace_selection(&marker);
+                    this.images.push(AttachedImage { label, image });
+                }
+
+                if !remaining_paths.is_empty() {
+                    let separator = if attached_images && this.multiline {
+                        "\n"
+                    } else if attached_images {
+                        " "
+                    } else {
+                        ""
+                    };
+                    let paths = remaining_paths
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(if this.multiline { "\n" } else { " " });
+                    this.replace_selection(&format!("{separator}{paths}"));
+                } else if !attached_images && !fallback_text.is_empty() {
+                    this.replace_selection(&fallback_text);
+                }
+
+                if this.content != previous_content {
+                    cx.emit(InputEvent::Changed);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn copy(&self, cx: &mut Context<Self>) {

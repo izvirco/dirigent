@@ -7,6 +7,7 @@ mod app;
 mod assets;
 mod cache;
 mod diff;
+mod image_attachment;
 mod logging;
 mod markdown;
 mod model;

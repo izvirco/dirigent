@@ -497,20 +497,46 @@ impl Dirigent {
         images: Vec<AttachedImage>,
         steer_if_working: bool,
     ) {
+        let harness_id = self.harnesses[index].id;
+        let mut image_payloads = Vec::with_capacity(images.len());
+        for attachment in images {
+            let source = format!("composer attachment {}", attachment.label);
+            let image = match normalize_for_harness(attachment.image, &source) {
+                Ok(image) => image,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        harness_id,
+                        label = attachment.label,
+                        "could not prepare image attachment for prompt"
+                    );
+                    self.banner = Some(format!("Could not attach {}: {error}", attachment.label));
+                    return;
+                }
+            };
+            tracing::debug!(
+                harness_id,
+                label = attachment.label,
+                mime_type = image.format.mime_type(),
+                bytes = image.bytes.len(),
+                "adding image to prompt command"
+            );
+            image_payloads.push(json!({
+                "type":"image",
+                "data":BASE64.encode(&image.bytes),
+                "mimeType":image.format.mime_type(),
+            }));
+        }
+        tracing::info!(
+            harness_id,
+            image_count = image_payloads.len(),
+            prompt_bytes = prompt.len(),
+            "sending prompt command"
+        );
         self.begin_turn_diff(index, &prompt);
-        let images = images
-            .into_iter()
-            .map(|attachment| {
-                json!({
-                    "type":"image",
-                    "data":BASE64.encode(&attachment.image.bytes),
-                    "mimeType":attachment.image.format.mime_type(),
-                })
-            })
-            .collect::<Vec<_>>();
         let mut command = json!({"type":"prompt","message":prompt});
-        if !images.is_empty() {
-            command["images"] = Value::Array(images);
+        if !image_payloads.is_empty() {
+            command["images"] = Value::Array(image_payloads);
         }
         if steer_if_working && self.harnesses[index].status == HarnessStatus::Working {
             command["streamingBehavior"] = Value::String("steer".into());
