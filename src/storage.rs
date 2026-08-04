@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -16,7 +16,7 @@ use crate::{
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
 pub(crate) const DEFAULT_DIFF_SIDEBAR_WIDTH: f32 = 560.0;
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS app_state (
@@ -47,7 +47,8 @@ const SCHEMA: &str = "
         last_vcs_label TEXT,
         archived INTEGER NOT NULL,
         sidebar_order TEXT NOT NULL,
-        turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D'
+        turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D',
+        work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D'
     );
     CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
@@ -119,6 +120,7 @@ struct StoredHarness {
     archived: bool,
     sidebar_order: u64,
     turn_diffs: Vec<TurnDiff>,
+    work_group_expansion: HashMap<String, bool>,
 }
 
 struct StoredWorkspace {
@@ -227,6 +229,7 @@ impl StateDatabase {
                     archived: harness.archived,
                     sidebar_order: harness.sidebar_order,
                     turn_diffs: harness.turn_diffs.clone(),
+                    work_group_expansion: harness.work_group_expansion.clone(),
                 })
                 .collect(),
             workspaces: workspaces
@@ -324,6 +327,11 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
             "harnesses",
             "last_vcs_label",
             "ALTER TABLE harnesses ADD COLUMN last_vcs_label TEXT;",
+        ),
+        (
+            "harnesses",
+            "work_group_expansion_json",
+            "ALTER TABLE harnesses ADD COLUMN work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D';",
         ),
     ];
     for (table, column, migration) in migrations {
@@ -426,8 +434,9 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
             .execute(
                 "INSERT INTO harnesses (
                     id, order_index, project_id, title, session_file_json, nix_enabled,
-                    workspace_id, last_vcs_label, archived, sidebar_order, turn_diffs_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    workspace_id, last_vcs_label, archived, sidebar_order, turn_diffs_json,
+                    work_group_expansion_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     harness.id.to_string(),
                     order_index(index)?,
@@ -440,6 +449,7 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
                     harness.archived,
                     harness.sidebar_order.to_string(),
                     encode_turn_diffs(&harness.turn_diffs)?,
+                    encode_json(&harness.work_group_expansion, "work group expansion")?,
                 ],
             )
             .map_err(|error| format!("could not store harness {}: {error}", harness.id))?;
@@ -557,7 +567,8 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, project_id, title, session_file_json, nix_enabled, workspace_id,
-                    last_vcs_label, archived, sidebar_order, turn_diffs_json
+                    last_vcs_label, archived, sidebar_order, turn_diffs_json,
+                    work_group_expansion_json
              FROM harnesses ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare harness state: {error}"))?;
@@ -574,6 +585,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, bool>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, Vec<u8>>(9)?,
+                row.get::<_, Vec<u8>>(10)?,
             ))
         })
         .map_err(|error| format!("could not read harnesses: {error}"))?;
@@ -589,6 +601,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
             archived,
             sidebar_order,
             turn_diffs_json,
+            work_group_expansion_json,
         ) = row.map_err(|error| format!("could not read harness: {error}"))?;
         harnesses.push(StoredHarness {
             id: decode_id(&id, "harness id")?,
@@ -604,6 +617,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
             archived,
             sidebar_order: decode_id(&sidebar_order, "harness sidebar order")?,
             turn_diffs: decode_turn_diffs(&turn_diffs_json)?,
+            work_group_expansion: decode_json(&work_group_expansion_json, "work group expansion")?,
         });
     }
     drop(statement);
@@ -724,6 +738,7 @@ impl StoredState {
                     harness.archived,
                     harness.sidebar_order,
                     harness.turn_diffs,
+                    harness.work_group_expansion,
                 )
             })
             .collect();
@@ -804,7 +819,7 @@ mod tests {
         StoredProject, StoredState, decode_turn_diffs, encode_turn_diffs, write_stored_state,
     };
     use crate::diff::DiffViewMode;
-    use std::{fs, path::PathBuf};
+    use std::{collections::HashMap, fs, path::PathBuf};
 
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -850,8 +865,8 @@ mod tests {
     }
 
     #[test]
-    fn persists_last_vcs_label() {
-        let directory = temporary_directory("vcs-label");
+    fn persists_harness_metadata() {
+        let directory = temporary_directory("harness-metadata");
         let database = directory.join("state.sqlite3");
         let (mut state_database, _) = StateDatabase::open_at(&database).unwrap();
         let mut state = StoredState::empty();
@@ -861,6 +876,8 @@ mod tests {
             path: directory.clone(),
             workspace_root: None,
         });
+        let mut work_group_expansion = HashMap::new();
+        work_group_expansion.insert("entry:user-1".into(), true);
         state.harnesses.push(StoredHarness {
             id: 2,
             project_id: 1,
@@ -872,12 +889,17 @@ mod tests {
             archived: false,
             sidebar_order: 1,
             turn_diffs: Vec::new(),
+            work_group_expansion,
         });
         write_stored_state(&mut state_database.connection, &state).unwrap();
         drop(state_database);
 
         let (_, loaded) = StateDatabase::open_at(&database).unwrap();
         assert_eq!(loaded.harnesses[0].last_vcs_label.as_deref(), Some("main"));
+        assert_eq!(
+            loaded.harnesses[0].work_group_expansion.get("entry:user-1"),
+            Some(&true)
+        );
 
         fs::remove_dir_all(directory).unwrap();
     }

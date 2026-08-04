@@ -191,6 +191,7 @@ pub(super) fn tool_message(
         running,
         tool_expanded(name),
     );
+    message.tool_name = Some(name.to_string());
     if name == "write" {
         message.set_detail(write_detail(args));
     }
@@ -330,15 +331,37 @@ pub(super) fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Mess
     active_entries.reverse();
 
     let mut messages = Vec::new();
+    let mut current_model = None;
+    let mut current_thinking_level = None;
     for entry in active_entries {
         match entry.get("type").and_then(Value::as_str) {
+            Some("model_change") => {
+                current_model = entry
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .zip(entry.get("modelId").and_then(Value::as_str))
+                    .map(|(provider, model)| format!("{provider}/{model}"));
+            }
+            Some("thinking_level_change") => {
+                current_thinking_level = entry
+                    .get("thinkingLevel")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
             Some("message") => {
                 if let Some(message) = entry.get("message") {
+                    let first_new_message = messages.len();
                     push_parsed_message(
                         &mut messages,
                         message,
                         entry.get("id").and_then(Value::as_str),
                     );
+                    for message in &mut messages[first_new_message..] {
+                        if message.model.is_none() {
+                            message.model = current_model.clone();
+                        }
+                        message.thinking_level = current_thinking_level.clone();
+                    }
                 }
             }
             Some("compaction") => {
@@ -346,10 +369,10 @@ pub(super) fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Mess
                     .get("summary")
                     .and_then(Value::as_str)
                     .map(truncate_output);
-                messages.push(
-                    Message::compaction(None, summary.as_deref(), false)
-                        .with_entry_id(entry.get("id").and_then(Value::as_str)),
-                );
+                let mut message = Message::compaction(None, summary.as_deref(), false)
+                    .with_entry_id(entry.get("id").and_then(Value::as_str));
+                message.set_turn_settings(current_model.clone(), current_thinking_level.clone());
+                messages.push(message);
             }
             _ => {}
         }
@@ -374,6 +397,40 @@ pub(super) fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect()
+}
+
+pub(super) fn reconcile_work_group_expansion(
+    previous: &[Message],
+    canonical: &[Message],
+    expansion: &mut HashMap<String, bool>,
+) -> bool {
+    let previous_users = previous
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == MessageRole::User)
+        .collect::<Vec<_>>();
+    let canonical_users = canonical
+        .iter()
+        .filter(|message| message.role == MessageRole::User)
+        .collect::<Vec<_>>();
+    let mut changed = false;
+    for ((previous_index, previous), canonical) in previous_users.into_iter().zip(canonical_users) {
+        let pending_id = format!("pending:{previous_index}");
+        let Some(expanded) = expansion.remove(&pending_id) else {
+            continue;
+        };
+        let Some(entry_id) = canonical
+            .entry_id
+            .as_deref()
+            .filter(|_| canonical.text == previous.text)
+        else {
+            expansion.insert(pending_id, expanded);
+            continue;
+        };
+        expansion.insert(format!("entry:{entry_id}"), expanded);
+        changed = true;
+    }
+    changed
 }
 
 pub(super) fn reconcile_queued_messages(
@@ -438,6 +495,7 @@ pub(super) fn push_parsed_message(
     value: &Value,
     entry_id: Option<&str>,
 ) {
+    let first_new_message = messages.len();
     if value.get("role").and_then(Value::as_str) == Some("assistant") {
         if let Some(blocks) = value.get("content").and_then(Value::as_array) {
             for block in blocks {
@@ -507,6 +565,19 @@ pub(super) fn push_parsed_message(
     } else if let Some(message) = parse_message(value) {
         messages.push(message.with_entry_id(entry_id));
     }
+
+    if value.get("role").and_then(Value::as_str) == Some("assistant") {
+        let model = value
+            .get("provider")
+            .and_then(Value::as_str)
+            .zip(value.get("model").and_then(Value::as_str))
+            .map(|(provider, model)| format!("{provider}/{model}"));
+        if model.is_some() {
+            for message in &mut messages[first_new_message..] {
+                message.model = model.clone();
+            }
+        }
+    }
 }
 
 pub(super) fn parse_message(value: &Value) -> Option<Message> {
@@ -520,7 +591,15 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
         }
         "assistant" => {
             let text = content_text(value.get("content")?);
-            (!text.is_empty()).then(|| Message::new(MessageRole::Assistant, text))
+            (!text.is_empty()).then(|| {
+                let mut message = Message::new(MessageRole::Assistant, text);
+                message.model = value
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .zip(value.get("model").and_then(Value::as_str))
+                    .map(|(provider, model)| format!("{provider}/{model}"));
+                message
+            })
         }
         "toolResult" => {
             let name = value
@@ -537,6 +616,7 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
                 false,
                 tool_expanded(name),
             );
+            message.tool_name = Some(name.to_string());
             message.set_detail(tool_result_detail(name, value, is_error));
             if !is_error {
                 add_tool_change_summary(&mut message, name, Some(value));
@@ -554,6 +634,7 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
                 false,
                 false,
             );
+            message.tool_name = Some("bash".into());
             message.set_detail(
                 value
                     .get("output")

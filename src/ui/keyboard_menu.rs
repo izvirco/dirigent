@@ -18,6 +18,8 @@ const SPACE_ITEMS: &[(&str, &str)] = &[
     ("m", "choose model"),
     ("e", "choose reasoning level"),
     ("y", "copy thread selection"),
+    ("o", "expand all work groups"),
+    ("O", "collapse all work groups"),
     ("b", "dismiss banner"),
     ("d", "toggle changes sidebar"),
     ("D", "toggle debug panels"),
@@ -138,6 +140,8 @@ mod tests {
         assert!(SPACE_ITEMS.contains(&("R", "restart agent")));
         assert!(SPACE_ITEMS.contains(&("d", "toggle changes sidebar")));
         assert!(SPACE_ITEMS.contains(&("D", "toggle debug panels")));
+        assert!(SPACE_ITEMS.contains(&("o", "expand all work groups")));
+        assert!(SPACE_ITEMS.contains(&("O", "collapse all work groups")));
         assert!(GOTO_ITEMS.len() >= 10);
         assert!(THREAD_ITEMS.len() >= 8);
         assert!(PROJECT_ITEMS.len() >= 5);

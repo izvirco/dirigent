@@ -3,7 +3,7 @@ mod cache;
 mod message;
 
 pub(crate) use cache::ConversationRenderCache;
-use cache::ConversationRenderItem;
+use cache::{ConversationRenderItem, WorkGroupSummary};
 
 #[cfg(test)]
 use message::{tool_color, tool_label_colors};
@@ -13,8 +13,8 @@ use std::{ops::Range, time::Duration};
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, FollowMode, HighlightStyle, IntoElement,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle,
-    SharedString, StyledImage, StyledText, Window, canvas, deferred, div, fill, img, list, point,
-    prelude::*, px, relative, size,
+    SharedString, StyledImage, StyledText, Transformation, Window, canvas, deferred, div, fill,
+    img, list, point, prelude::*, px, radians, relative, size, svg,
 };
 
 use super::composer::dropdown_arrow;
@@ -23,8 +23,8 @@ use crate::{
     app::{ComposerDropdown, Dirigent},
     model::{HarnessStatus, Message, MessageRole, RetryStatus},
     theme::{
-        blue, green, muted, orange, purple, red, rgb, surface_hover, theme_text, thinking_text,
-        yellow,
+        blue, faint, green, muted, orange, purple, red, rgb, surface_hover, theme_text,
+        thinking_text, yellow,
     },
 };
 
@@ -119,6 +119,61 @@ impl Dirigent {
         };
         self.conversation_list.splice(old_range, new_count);
         self.conversation_render_cache = new_cache;
+    }
+
+    pub(crate) fn toggle_work_group(&mut self, id: String, expanded: bool) {
+        let Some(index) = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().position(|harness| harness.id == id))
+        else {
+            return;
+        };
+        let rebuild_from_message = self
+            .conversation_render_cache
+            .items
+            .iter()
+            .find_map(|item| match item {
+                ConversationRenderItem::WorkGroup(group) if group.id == id => {
+                    Some(group.first_message_index)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.harnesses[index]
+            .work_group_expansion
+            .insert(id, expanded);
+        self.persist();
+        self.sync_conversation_render_cache(rebuild_from_message);
+    }
+
+    pub(crate) fn set_all_work_groups_expanded(&mut self, expanded: bool) {
+        let Some(index) = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().position(|harness| harness.id == id))
+        else {
+            return;
+        };
+        let rebuild_from_message = self
+            .conversation_render_cache
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationRenderItem::WorkGroup(group) => Some(group.first_message_index),
+                _ => None,
+            })
+            .min()
+            .unwrap_or_default();
+        let ids = ConversationRenderCache::work_group_ids(&self.harnesses[index]);
+        self.harnesses[index]
+            .work_group_expansion
+            .retain(|id, _| ids.contains(id));
+        for id in ids {
+            self.harnesses[index]
+                .work_group_expansion
+                .insert(id, expanded);
+        }
+        self.persist();
+        self.sync_conversation_render_cache(rebuild_from_message);
     }
 
     fn render_conversation_ruler(
@@ -319,12 +374,18 @@ impl Dirigent {
                 let Some(message) = harness.messages.get(*message_index) else {
                     return div().into_any_element();
                 };
-                let follows_activity = *message_index > 0
-                    && matches!(message.role, MessageRole::Thinking | MessageRole::Tool)
+                let follows_work_group = index > 0
                     && matches!(
-                        harness.messages[*message_index - 1].role,
-                        MessageRole::Thinking | MessageRole::Tool
+                        self.conversation_render_cache.items.get(index - 1),
+                        Some(ConversationRenderItem::WorkGroup(_))
                     );
+                let follows_activity = follows_work_group
+                    || (*message_index > 0
+                        && matches!(message.role, MessageRole::Thinking | MessageRole::Tool)
+                        && matches!(
+                            harness.messages[*message_index - 1].role,
+                            MessageRole::Thinking | MessageRole::Tool
+                        ));
                 div()
                     .w_full()
                     .child(
@@ -340,6 +401,18 @@ impl Dirigent {
                     )
                     .into_any_element()
             }
+            ConversationRenderItem::WorkGroup(group) => div()
+                .w_full()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(820.0))
+                        .mx_auto()
+                        .px_7()
+                        .mt_2()
+                        .child(self.render_work_group(group, cx)),
+                )
+                .into_any_element(),
             ConversationRenderItem::Message {
                 message_index,
                 queued: true,

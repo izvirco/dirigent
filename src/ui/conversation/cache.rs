@@ -1,6 +1,13 @@
-use std::{ops::Range, sync::Arc};
+use std::{
+    ops::Range,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use crate::model::{Harness, HarnessStatus, Message, MessageRole};
+use crate::{
+    diff::{self, TurnDiff},
+    model::{Harness, HarnessStatus, Message, MessageRole},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ConversationRulerMarker {
@@ -23,8 +30,104 @@ fn conversation_ruler_marker(
     )
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkGroupSummary {
+    pub(crate) id: String,
+    pub(crate) first_message_index: usize,
+    pub(crate) last_message_index: usize,
+    pub(crate) expanded: bool,
+    pub(crate) running: bool,
+    pub(crate) model: Option<String>,
+    pub(crate) thinking_level: Option<String>,
+    pub(crate) started_at: Option<Instant>,
+    pub(crate) duration: Option<Duration>,
+    pub(crate) additions: usize,
+    pub(crate) deletions: usize,
+    pub(crate) tool_count: usize,
+    pub(crate) write_count: usize,
+    pub(crate) edit_count: usize,
+    pub(crate) compaction_count: usize,
+    pub(crate) misc_count: usize,
+}
+
+impl WorkGroupSummary {
+    fn from_range(
+        harness: &Harness,
+        id: String,
+        range: Range<usize>,
+        running: bool,
+        turn: Option<&TurnDiff>,
+        latest_group: bool,
+    ) -> Self {
+        let messages = &harness.messages[range.clone()];
+        let model = messages
+            .iter()
+            .find_map(|message| message.model.clone())
+            .or_else(|| harness.model.clone());
+        let thinking_level = messages
+            .iter()
+            .find_map(|message| message.thinking_level.clone())
+            .or_else(|| harness.thinking_level.clone());
+        let mut write_count = 0;
+        let mut edit_count = 0;
+        let mut compaction_count = 0;
+        let mut misc_count = 0;
+        for message in messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Tool)
+        {
+            match message.tool_name.as_deref() {
+                Some("write") => write_count += 1,
+                Some("edit") => edit_count += 1,
+                Some("compact") => compaction_count += 1,
+                _ if message.is_compaction() => compaction_count += 1,
+                _ => misc_count += 1,
+            }
+        }
+        let (additions, deletions) = turn
+            .map(|turn| (turn.additions, turn.deletions))
+            .unwrap_or_default();
+        let duration = if !running && latest_group {
+            harness.last_run_duration.or_else(|| {
+                turn.map(|turn| {
+                    Duration::from_secs(turn.finished_at.saturating_sub(turn.started_at))
+                })
+            })
+        } else if !running {
+            turn.map(|turn| Duration::from_secs(turn.finished_at.saturating_sub(turn.started_at)))
+        } else {
+            None
+        };
+        let expanded = harness
+            .work_group_expansion
+            .get(&id)
+            .copied()
+            .unwrap_or(running);
+        Self {
+            id,
+            first_message_index: range.start,
+            last_message_index: range.end - 1,
+            expanded,
+            running,
+            model,
+            thinking_level,
+            started_at: running.then_some(harness.run_started_at).flatten(),
+            duration,
+            additions,
+            deletions,
+            tool_count: write_count + edit_count + compaction_count + misc_count,
+            write_count,
+            edit_count,
+            compaction_count,
+            misc_count,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ConversationRenderItem {
     Message { message_index: usize, queued: bool },
+    WorkGroup(WorkGroupSummary),
     Working,
 }
 
@@ -35,6 +138,7 @@ impl ConversationRenderItem {
                 message_index,
                 queued: false,
             } => Some(*message_index),
+            Self::WorkGroup(group) => Some(group.first_message_index),
             Self::Message { queued: true, .. } | Self::Working => None,
         }
     }
@@ -42,9 +146,90 @@ impl ConversationRenderItem {
     fn estimated_height(&self) -> f32 {
         match self {
             Self::Message { .. } => 48.0,
-            Self::Working => 32.0,
+            Self::WorkGroup(_) | Self::Working => 32.0,
         }
     }
+}
+
+fn work_group_id(user: &Message, user_index: usize) -> String {
+    user.entry_id.as_ref().map_or_else(
+        || format!("pending:{user_index}"),
+        |id| format!("entry:{id}"),
+    )
+}
+
+fn matching_turn<'a>(
+    harness: &'a Harness,
+    user: &Message,
+    turn_cursor: &mut usize,
+) -> Option<&'a TurnDiff> {
+    let prompt = diff::prompt_excerpt(&user.text);
+    let relative = harness.turn_diffs[*turn_cursor..]
+        .iter()
+        .position(|turn| turn.prompt == prompt)?;
+    let index = *turn_cursor + relative;
+    *turn_cursor = index + 1;
+    harness.turn_diffs.get(index)
+}
+
+fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
+    let mut groups = Vec::new();
+    let mut turn_cursor = 0;
+    let user_indices = harness
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
+        .collect::<Vec<_>>();
+    for (user_ordinal, user_index) in user_indices.iter().copied().enumerate() {
+        let segment_end = user_indices
+            .get(user_ordinal + 1)
+            .copied()
+            .unwrap_or(harness.messages.len());
+        let user = &harness.messages[user_index];
+        let completed_turn = matching_turn(harness, user, &mut turn_cursor);
+        let activity = &harness.messages[user_index + 1..segment_end];
+        let first_activity = activity
+            .iter()
+            .position(|message| matches!(message.role, MessageRole::Thinking | MessageRole::Tool))
+            .map(|offset| user_index + 1 + offset);
+        let last_activity = activity
+            .iter()
+            .rposition(|message| matches!(message.role, MessageRole::Thinking | MessageRole::Tool))
+            .map(|offset| user_index + 1 + offset);
+        let (Some(first_activity), Some(last_activity)) = (first_activity, last_activity) else {
+            continue;
+        };
+        let compaction_only = harness.messages[first_activity..=last_activity]
+            .iter()
+            .filter(|message| matches!(message.role, MessageRole::Thinking | MessageRole::Tool))
+            .all(Message::is_compaction);
+        let assistant_precedes_compaction = harness.messages[user_index + 1..first_activity]
+            .iter()
+            .any(|message| message.role == MessageRole::Assistant);
+        let range_start = if compaction_only && assistant_precedes_compaction {
+            first_activity
+        } else {
+            user_index + 1
+        };
+        let latest_group = user_ordinal + 1 == user_indices.len();
+        let running = latest_group && harness.status == HarnessStatus::Working;
+        let prompt = diff::prompt_excerpt(&user.text);
+        let turn = running
+            .then_some(harness.active_turn_preview.as_ref())
+            .flatten()
+            .filter(|turn| turn.prompt == prompt)
+            .or(completed_turn);
+        groups.push(WorkGroupSummary::from_range(
+            harness,
+            work_group_id(user, user_index),
+            range_start..last_activity + 1,
+            running,
+            turn,
+            latest_group,
+        ));
+    }
+    groups
 }
 
 #[derive(Default)]
@@ -56,7 +241,58 @@ pub(crate) struct ConversationRenderCache {
 
 impl ConversationRenderCache {
     pub(crate) fn build(harness: &Harness) -> Self {
-        Self::update(harness, Self::default(), 0).0
+        let groups = build_work_groups(harness);
+        let mut items = Vec::new();
+        let mut group_index = 0;
+        let mut message_index = 0;
+        while message_index < harness.messages.len() {
+            if let Some(group) = groups.get(group_index)
+                && group.first_message_index == message_index
+            {
+                items.push(ConversationRenderItem::WorkGroup(group.clone()));
+                if group.expanded {
+                    items.extend((group.first_message_index..=group.last_message_index).map(
+                        |message_index| ConversationRenderItem::Message {
+                            message_index,
+                            queued: false,
+                        },
+                    ));
+                }
+                message_index = group.last_message_index + 1;
+                group_index += 1;
+            } else {
+                items.push(ConversationRenderItem::Message {
+                    message_index,
+                    queued: false,
+                });
+                message_index += 1;
+            }
+        }
+        if harness.status == HarnessStatus::Working {
+            items.push(ConversationRenderItem::Working);
+        }
+        for (queued_index, _) in harness.queued_messages.iter().enumerate() {
+            items.push(ConversationRenderItem::Message {
+                message_index: queued_index,
+                queued: true,
+            });
+        }
+        let estimated_height = items
+            .iter()
+            .map(ConversationRenderItem::estimated_height)
+            .sum();
+        let ruler_markers = harness
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| conversation_ruler_marker(message, index))
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            items,
+            ruler_markers,
+            estimated_height,
+        }
     }
 
     pub(crate) fn update(
@@ -64,56 +300,28 @@ impl ConversationRenderCache {
         old: Self,
         rebuild_from_message: usize,
     ) -> (Self, Range<usize>, usize) {
+        let new = Self::build(harness);
         let old_len = old.items.len();
         let prefix_len = old
             .items
             .iter()
-            .take_while(|item| {
-                item.message_index()
-                    .is_some_and(|index| index < rebuild_from_message)
+            .zip(new.items.iter())
+            .take_while(|(old_item, new_item)| {
+                old_item == new_item
+                    && old_item
+                        .message_index()
+                        .is_some_and(|index| index < rebuild_from_message)
             })
             .count();
-        let marker_prefix_len = old
-            .ruler_markers
-            .partition_point(|marker| marker.message_index < rebuild_from_message);
-        let mut ruler_markers = Vec::with_capacity(
-            marker_prefix_len + harness.messages.len().saturating_sub(rebuild_from_message),
-        );
-        ruler_markers.extend_from_slice(&old.ruler_markers[..marker_prefix_len]);
-        let mut cache = Self {
-            items: old.items.into_iter().take(prefix_len).collect(),
-            ruler_markers: Arc::default(),
-            estimated_height: 0.0,
-        };
-        for (message_index, message) in harness
-            .messages
-            .iter()
-            .enumerate()
-            .skip(rebuild_from_message)
-        {
-            ruler_markers.extend(conversation_ruler_marker(message, message_index));
-            cache.items.push(ConversationRenderItem::Message {
-                message_index,
-                queued: false,
-            });
-        }
-        if harness.status == HarnessStatus::Working {
-            cache.items.push(ConversationRenderItem::Working);
-        }
-        for (queued_index, _) in harness.queued_messages.iter().enumerate() {
-            cache.items.push(ConversationRenderItem::Message {
-                message_index: queued_index,
-                queued: true,
-            });
-        }
-        cache.estimated_height = cache
-            .items
-            .iter()
-            .map(ConversationRenderItem::estimated_height)
-            .sum();
-        cache.ruler_markers = ruler_markers.into();
-        let new_count = cache.items.len() - prefix_len;
-        (cache, prefix_len..old_len, new_count)
+        let new_count = new.items.len() - prefix_len;
+        (new, prefix_len..old_len, new_count)
+    }
+
+    pub(crate) fn work_group_ids(harness: &Harness) -> Vec<String> {
+        build_work_groups(harness)
+            .into_iter()
+            .map(|group| group.id)
+            .collect()
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -132,6 +340,146 @@ impl ConversationRenderCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settled_harness() -> Harness {
+        let mut harness = Harness::new(1, 2, "task".into(), 1);
+        harness.status = HarnessStatus::Idle;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "prompt"),
+            Message::new(MessageRole::Thinking, "plan"),
+            Message::tool("read src/main.rs", None, false, false),
+            Message::new(MessageRole::Assistant, "done"),
+        ];
+        harness.messages[2].tool_name = Some("read".into());
+        harness
+    }
+
+    #[test]
+    fn settled_activity_is_collapsed_between_user_and_response() {
+        let harness = settled_harness();
+        let cache = ConversationRenderCache::build(&harness);
+        assert_eq!(cache.items.len(), 3);
+        assert!(matches!(
+            cache.items[0],
+            ConversationRenderItem::Message {
+                message_index: 0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cache.items[1],
+            ConversationRenderItem::WorkGroup(_)
+        ));
+        assert!(matches!(
+            cache.items[2],
+            ConversationRenderItem::Message {
+                message_index: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn interim_assistant_text_is_part_of_the_work_group() {
+        let mut harness = Harness::new(1, 2, "task".into(), 1);
+        harness.status = HarnessStatus::Idle;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "prompt"),
+            Message::new(MessageRole::Assistant, "I'll inspect it."),
+            Message::tool("read src/main.rs", None, false, false),
+            Message::new(MessageRole::Assistant, "done"),
+        ];
+        harness.messages[2].tool_name = Some("read".into());
+
+        let cache = ConversationRenderCache::build(&harness);
+        let ConversationRenderItem::WorkGroup(group) = &cache.items[1] else {
+            panic!("missing work group");
+        };
+        assert_eq!(group.first_message_index, 1);
+        assert_eq!(group.last_message_index, 2);
+        assert!(matches!(
+            cache.items[2],
+            ConversationRenderItem::Message {
+                message_index: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compaction_after_a_response_does_not_hide_the_response() {
+        let mut harness = Harness::new(1, 2, "task".into(), 1);
+        harness.status = HarnessStatus::Idle;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "prompt"),
+            Message::new(MessageRole::Assistant, "done"),
+            Message::compaction(None, Some("summary"), false),
+        ];
+
+        let cache = ConversationRenderCache::build(&harness);
+        assert!(matches!(
+            cache.items[1],
+            ConversationRenderItem::Message {
+                message_index: 1,
+                ..
+            }
+        ));
+        let ConversationRenderItem::WorkGroup(group) = &cache.items[2] else {
+            panic!("missing compaction group");
+        };
+        assert_eq!(group.first_message_index, 2);
+    }
+
+    #[test]
+    fn running_and_explicitly_expanded_activity_shows_original_messages() {
+        let mut harness = settled_harness();
+        harness.status = HarnessStatus::Working;
+        let cache = ConversationRenderCache::build(&harness);
+        assert_eq!(cache.items.len(), 6);
+        assert!(matches!(
+            cache.items.last(),
+            Some(ConversationRenderItem::Working)
+        ));
+        let ConversationRenderItem::WorkGroup(group) = &cache.items[1] else {
+            panic!("missing work group");
+        };
+        assert!(group.expanded);
+        assert!(group.running);
+
+        harness.status = HarnessStatus::Idle;
+        harness.work_group_expansion.insert(group.id.clone(), true);
+        let cache = ConversationRenderCache::build(&harness);
+        assert_eq!(cache.items.len(), 5);
+    }
+
+    #[test]
+    fn work_group_summary_uses_turn_and_tool_metadata() {
+        let mut harness = settled_harness();
+        harness.messages[1].set_turn_settings(Some("openai/gpt-5".into()), Some("high".into()));
+        harness.messages[2].tool_name = Some("write".into());
+        harness.turn_diffs.push(TurnDiff {
+            id: 1,
+            prompt: "prompt".into(),
+            started_at: 10,
+            finished_at: 15,
+            status: crate::diff::TurnDiffStatus::Completed,
+            files: Vec::new(),
+            additions: 12,
+            deletions: 3,
+            error: None,
+        });
+
+        let cache = ConversationRenderCache::build(&harness);
+        let ConversationRenderItem::WorkGroup(group) = &cache.items[1] else {
+            panic!("missing work group");
+        };
+        assert_eq!(group.model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(group.thinking_level.as_deref(), Some("high"));
+        assert_eq!(group.duration, Some(Duration::from_secs(5)));
+        assert_eq!((group.additions, group.deletions), (12, 3));
+        assert_eq!(group.tool_count, 1);
+        assert_eq!(group.write_count, 1);
+    }
 
     #[test]
     fn ruler_markers_include_only_navigation_messages() {

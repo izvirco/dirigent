@@ -761,15 +761,25 @@ impl Dirigent {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 self.prune_turn_diffs_to_active_branch(index);
-                self.harnesses[index].messages = parse_entries(
+                let canonical_messages = parse_entries(
                     self.harnesses[index]
                         .cached_entries
                         .as_deref()
                         .unwrap_or_default(),
                     self.harnesses[index].cached_leaf_id.as_deref(),
                 );
+                let previous_messages = std::mem::take(&mut self.harnesses[index].messages);
+                let expansion_changed = reconcile_work_group_expansion(
+                    &previous_messages,
+                    &canonical_messages,
+                    &mut self.harnesses[index].work_group_expansion,
+                );
+                self.harnesses[index].messages = canonical_messages;
                 self.harnesses[index].loaded_messages = true;
                 self.cache_harness_entries(index);
+                if expansion_changed {
+                    self.persist();
+                }
             }
             Some("get_messages") if !self.harnesses[index].loaded_messages => {
                 if let Some(messages) = value.pointer("/data/messages").and_then(Value::as_array) {

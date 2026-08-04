@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     ops::Range,
     path::PathBuf,
     sync::Arc,
@@ -86,6 +87,9 @@ pub(crate) struct Message {
     pub(crate) display_detail: Option<SharedString>,
     pub(crate) detail_colors: Vec<(Range<usize>, u32)>,
     pub(crate) tool_call_id: Option<String>,
+    pub(crate) tool_name: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) thinking_level: Option<String>,
     pub(crate) running: bool,
     pub(crate) tool_started_at: Option<Instant>,
     pub(crate) tool_duration: Option<Duration>,
@@ -112,6 +116,9 @@ impl Message {
             display_detail: None,
             detail_colors: Vec::new(),
             tool_call_id: None,
+            tool_name: None,
+            model: None,
+            thinking_level: None,
             running: false,
             tool_started_at: None,
             tool_duration: None,
@@ -152,6 +159,7 @@ impl Message {
             |reason| format!("compact context · {reason}"),
         );
         let mut message = Self::tool(text, None, running, false);
+        message.tool_name = Some("compact".into());
         message.set_detail(summary.map(str::to_string));
         message
     }
@@ -159,6 +167,15 @@ impl Message {
     pub(crate) fn with_entry_id(mut self, entry_id: Option<&str>) -> Self {
         self.entry_id = entry_id.map(str::to_string);
         self
+    }
+
+    pub(crate) fn set_turn_settings(
+        &mut self,
+        model: Option<String>,
+        thinking_level: Option<String>,
+    ) {
+        self.model = model;
+        self.thinking_level = thinking_level;
     }
 
     pub(crate) fn is_compaction(&self) -> bool {
@@ -603,6 +620,7 @@ pub(crate) struct Harness {
     pub(crate) turn_diffs: Vec<TurnDiff>,
     pub(crate) active_turn_diff: Option<ActiveTurnDiff>,
     pub(crate) active_turn_preview: Option<TurnDiff>,
+    pub(crate) work_group_expansion: HashMap<String, bool>,
 }
 
 impl Harness {
@@ -645,6 +663,7 @@ impl Harness {
             turn_diffs: Vec::new(),
             active_turn_diff: None,
             active_turn_preview: None,
+            work_group_expansion: HashMap::new(),
         }
     }
 
@@ -689,6 +708,7 @@ impl Harness {
         archived: bool,
         sidebar_order: u64,
         turn_diffs: Vec<TurnDiff>,
+        work_group_expansion: HashMap<String, bool>,
     ) -> Self {
         Self {
             id,
@@ -728,6 +748,7 @@ impl Harness {
             turn_diffs,
             active_turn_diff: None,
             active_turn_preview: None,
+            work_group_expansion,
         }
     }
 }

@@ -86,6 +86,121 @@ impl Dirigent {
             .child(self.render_thin_scrollbar(scrollbar_id, scroll))
             .into_any_element()
     }
+    pub(super) fn render_work_group(
+        &self,
+        group: &WorkGroupSummary,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let group_id = group.id.clone();
+        let expanded = group.expanded;
+        let model = group
+            .model
+            .as_deref()
+            .map(|model| model.split_once('/').map_or(model, |(_, model)| model))
+            .unwrap_or("unknown model")
+            .to_string();
+        let reasoning = group.thinking_level.clone();
+        let duration = if group.running {
+            group.started_at.map(|started_at| {
+                div()
+                    .flex_none()
+                    .text_color(rgb(blue()))
+                    .with_animation(
+                        format!("work-group-timer-{}", group.id),
+                        Animation::new(Duration::from_secs(1)).repeat(),
+                        move |timer, _| timer.child(format_working_duration(started_at.elapsed())),
+                    )
+                    .into_any_element()
+            })
+        } else {
+            group.duration.map(|duration| {
+                div()
+                    .flex_none()
+                    .child(format_working_duration(duration))
+                    .into_any_element()
+            })
+        };
+        let mut categories = Vec::new();
+        if group.write_count > 0 {
+            categories.push(format!("{} write", group.write_count));
+        }
+        if group.edit_count > 0 {
+            categories.push(format!("{} edit", group.edit_count));
+        }
+        if group.compaction_count > 0 {
+            categories.push(format!("{} compaction", group.compaction_count));
+        }
+        if group.misc_count > 0 {
+            categories.push(format!("{} misc", group.misc_count));
+        }
+        let tool_stats = (!categories.is_empty()).then(|| categories.join(" · "));
+        let chevron = svg()
+            .path("icon/chevron-down.svg")
+            .size(px(12.0))
+            .text_color(rgb(faint()))
+            .flex_none();
+        let chevron = if expanded {
+            chevron
+        } else {
+            chevron.with_transformation(Transformation::rotate(radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+        };
+
+        div()
+            .id(format!("work-group-{}", group.id))
+            .w_full()
+            .min_h(px(22.0))
+            .flex()
+            .items_center()
+            .gap_1()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .cursor_pointer()
+            .text_xs()
+            .text_color(rgb(muted()))
+            .hover(|style| style.text_color(rgb(theme_text())).bg(rgb(surface_hover())))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_work_group(group_id.clone(), !expanded);
+                cx.stop_propagation();
+                cx.notify();
+            }))
+            .child(chevron)
+            .child(div().flex_none().text_color(rgb(blue())).child(model))
+            .when_some(reasoning, |element, reasoning| {
+                element.child(div().flex_none().text_color(rgb(purple())).child(reasoning))
+            })
+            .when_some(duration, |element, duration| {
+                element.child("·").child(duration)
+            })
+            .when(group.additions > 0 || group.deletions > 0, |element| {
+                element
+                    .child("·")
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(green()))
+                            .child(format!("+{}", group.additions)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(rgb(red()))
+                            .child(format!("-{}", group.deletions)),
+                    )
+            })
+            .when_some(tool_stats, |element, tool_stats| {
+                element.child("·").child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(tool_stats),
+                )
+            })
+            .into_any_element()
+    }
+
     pub(super) fn render_message(
         &self,
         message: &Message,

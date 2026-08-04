@@ -1069,7 +1069,7 @@ impl Dirigent {
         self.harnesses[index].sidebar_order = self.allocate_sidebar_order();
     }
 
-    fn persist(&mut self) {
+    pub(crate) fn persist(&mut self) {
         if let Err(error) = self.state_database.save(
             &self.projects,
             &self.harnesses,

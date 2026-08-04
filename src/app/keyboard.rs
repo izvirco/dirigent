@@ -99,6 +99,8 @@ impl Dirigent {
             (KeyboardMenu::Space, "y") => {
                 self.copy_thread_selection(cx);
             }
+            (KeyboardMenu::Space, "o") if shift => self.set_all_work_groups_expanded(false),
+            (KeyboardMenu::Space, "o") => self.set_all_work_groups_expanded(true),
 
             (KeyboardMenu::Threads, "c") => self.start_new_selected_project(),
             (KeyboardMenu::Threads, "j" | "n") => self.select_relative_harness(1),

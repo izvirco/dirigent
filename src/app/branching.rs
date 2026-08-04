@@ -295,6 +295,7 @@ impl Dirigent {
                 false,
                 sidebar_order,
                 self.harnesses[source_index].turn_diffs.clone(),
+                self.harnesses[source_index].work_group_expansion.clone(),
             )
         };
         harness.set_derived_title();

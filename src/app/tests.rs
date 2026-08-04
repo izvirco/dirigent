@@ -2,12 +2,17 @@ use super::{
     FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
     directory_path_query, effective_settings_before_entry, entries_through_leaf,
     parse_available_model, parse_cached_draft_images, parse_codex_usage, parse_context_usage,
-    parse_entries, parse_message, parse_messages, reconcile_queued_messages, resolve_tilde_path,
-    rpc_string_array, tool_expanded, tool_label, tool_result_detail, truncate_output, write_detail,
+    parse_entries, parse_message, parse_messages, reconcile_queued_messages,
+    reconcile_work_group_expansion, resolve_tilde_path, rpc_string_array, tool_expanded,
+    tool_label, tool_result_detail, truncate_output, write_detail,
 };
 use crate::model::{CodexUsageWindow, Message, MessageRole};
 use serde_json::json;
-use std::{collections::VecDeque, path::PathBuf, time::Duration};
+use std::{
+    collections::{HashMap, VecDeque},
+    path::PathBuf,
+    time::Duration,
+};
 
 #[test]
 fn finds_the_active_composer_file_mention() {
@@ -365,6 +370,7 @@ fn restores_tool_commands_with_collapsed_output() {
     ]);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].text, "cargo fmt cargo test");
+    assert_eq!(messages[0].tool_name.as_deref(), Some("bash"));
     assert_eq!(messages[0].detail.as_deref(), Some("ok"));
     assert!(!messages[0].expanded);
 }
@@ -604,6 +610,60 @@ fn assistant_text_from_separate_entries_stays_separate() {
     assert_eq!(messages.len(), 2);
     assert_eq!(messages[0].text, "first");
     assert_eq!(messages[1].text, "second");
+}
+
+#[test]
+fn restores_historical_work_group_settings() {
+    let entries = vec![
+        json!({
+            "type":"model_change", "id":"model-1", "parentId":null,
+            "provider":"openai", "modelId":"gpt-5"
+        }),
+        json!({
+            "type":"thinking_level_change", "id":"thinking-1", "parentId":"model-1",
+            "thinkingLevel":"high"
+        }),
+        json!({
+            "type":"message", "id":"user-1", "parentId":"thinking-1",
+            "message":{"role":"user","content":"prompt", "timestamp":1000}
+        }),
+        json!({
+            "type":"message", "id":"assistant-1", "parentId":"user-1",
+            "message":{
+                "role":"assistant", "provider":"openai", "model":"gpt-5",
+                "content":[{"type":"thinking","thinking":"plan"}], "timestamp":2000
+            }
+        }),
+    ];
+
+    let messages = parse_entries(&entries, Some("assistant-1"));
+    assert_eq!(messages[0].model.as_deref(), Some("openai/gpt-5"));
+    assert_eq!(messages[0].thinking_level.as_deref(), Some("high"));
+    assert_eq!(messages[1].model.as_deref(), Some("openai/gpt-5"));
+    assert_eq!(messages[1].thinking_level.as_deref(), Some("high"));
+}
+
+#[test]
+fn migrates_pending_work_group_expansion_to_the_canonical_entry() {
+    let previous = vec![
+        Message::new(MessageRole::User, "older"),
+        Message::new(MessageRole::Assistant, "done"),
+        Message::new(MessageRole::User, "prompt"),
+    ];
+    let canonical = vec![
+        Message::new(MessageRole::User, "older").with_entry_id(Some("user-1")),
+        Message::new(MessageRole::Assistant, "done"),
+        Message::new(MessageRole::User, "prompt").with_entry_id(Some("user-2")),
+    ];
+    let mut expansion = HashMap::from([("pending:2".into(), false)]);
+
+    assert!(reconcile_work_group_expansion(
+        &previous,
+        &canonical,
+        &mut expansion
+    ));
+    assert_eq!(expansion.get("entry:user-2"), Some(&false));
+    assert!(!expansion.contains_key("pending:2"));
 }
 
 #[test]
