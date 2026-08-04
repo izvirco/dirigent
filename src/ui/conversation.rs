@@ -3,7 +3,7 @@ mod cache;
 mod message;
 
 pub(crate) use cache::ConversationRenderCache;
-use cache::{AssistantSegmentContent, ConversationRenderItem};
+use cache::ConversationRenderItem;
 
 #[cfg(test)]
 use message::{tool_color, tool_label_colors};
@@ -361,70 +361,6 @@ impl Dirigent {
                             .px_7()
                             .mt_2()
                             .child(self.render_message(message, render_index, cx)),
-                    )
-                    .into_any_element()
-            }
-            ConversationRenderItem::AssistantSegment {
-                message_index,
-                segment_index,
-                content,
-                first,
-                top_gap,
-                last,
-                ..
-            } => {
-                let Some(message) = harness.messages.get(*message_index) else {
-                    return div().into_any_element();
-                };
-                let content = match content {
-                    AssistantSegmentContent::Plain { text, range } => self
-                        .render_assistant_text_segment(
-                            message,
-                            *message_index,
-                            *segment_index,
-                            SharedString::from(text[range.clone()].to_string()),
-                            *top_gap,
-                            *last,
-                            cx,
-                        ),
-                    AssistantSegmentContent::Markdown {
-                        block_index,
-                        block,
-                        selection_text,
-                        selection_offset,
-                    } => {
-                        let original_block = message
-                            .markdown
-                            .as_ref()
-                            .and_then(|document| document.blocks.get(*block_index));
-                        let Some(original_block) = original_block else {
-                            return div().into_any_element();
-                        };
-                        self.render_assistant_markdown_segment(
-                            message,
-                            *message_index,
-                            *segment_index,
-                            *block_index,
-                            block.as_ref().unwrap_or(original_block),
-                            original_block,
-                            selection_text.clone(),
-                            *selection_offset,
-                            *top_gap,
-                            *last,
-                            cx,
-                        )
-                    }
-                };
-                div()
-                    .w_full()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(820.0))
-                            .mx_auto()
-                            .px_7()
-                            .when(*first && *message_index > 0, |element| element.mt_2())
-                            .child(content),
                     )
                     .into_any_element()
             }

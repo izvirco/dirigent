@@ -85,10 +85,6 @@ pub(crate) fn markdown_selection_text(blocks: &[MarkdownBlock]) -> String {
     leaves.join("\n")
 }
 
-pub(crate) fn markdown_block_selection_text(block: &MarkdownBlock) -> String {
-    markdown_selection_text(std::slice::from_ref(block))
-}
-
 fn collect_selection_leaves<'a>(block: &'a MarkdownBlock, leaves: &mut Vec<&'a str>) {
     match block {
         MarkdownBlock::Paragraph(text) | MarkdownBlock::Heading { text, .. } => {

@@ -78,40 +78,6 @@ impl Dirigent {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_markdown_block_segment(
-        &self,
-        block: &MarkdownBlock,
-        original_block: &MarkdownBlock,
-        path: &str,
-        selection_id: String,
-        selection_text: SharedString,
-        selection_offset: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut selection = MarkdownSelectionContext {
-            id: selection_id,
-            text: selection_text,
-            next_offset: selection_offset,
-            has_leaf: false,
-        };
-        if let MarkdownBlock::CodeBlock { code, .. } = block
-            && let MarkdownBlock::CodeBlock {
-                code: original_code,
-                ..
-            } = original_block
-        {
-            return self.render_markdown_code_block_with_copy(
-                path,
-                code,
-                original_code,
-                &mut selection,
-                cx,
-            );
-        }
-        self.render_markdown_block(block, path, &mut selection, cx)
-    }
-
     fn render_markdown_block(
         &self,
         block: &MarkdownBlock,
