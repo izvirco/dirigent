@@ -17,7 +17,7 @@ use tree_house::{
     tree_sitter::Grammar,
 };
 
-use crate::theme::{blue, code_text, green, muted, orange, purple, yellow};
+use crate::theme;
 
 const MAX_TEXT_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: u64 = 48 * 1024 * 1024;
@@ -998,43 +998,124 @@ impl LanguageLoader for HighlightLoader {
     }
 }
 
-const CAPTURE_KEYWORD: u32 = 0;
-const CAPTURE_STRING: u32 = 1;
-const CAPTURE_COMMENT: u32 = 2;
-const CAPTURE_FUNCTION: u32 = 3;
-const CAPTURE_TYPE: u32 = 4;
-const CAPTURE_CONSTANT: u32 = 5;
-const CAPTURE_VARIABLE: u32 = 6;
-const CAPTURE_PUNCTUATION: u32 = 7;
+#[derive(Clone, Copy)]
+#[repr(usize)]
+enum SyntaxCapture {
+    Annotation,
+    Attribute,
+    Comment,
+    Constant,
+    ConstantCharacter,
+    ConstantCharacterEscape,
+    ConstantMacro,
+    Constructor,
+    Function,
+    FunctionBuiltin,
+    FunctionMacro,
+    Keyword,
+    KeywordControlImport,
+    Label,
+    Module,
+    Namespace,
+    Operator,
+    Punctuation,
+    Special,
+    String,
+    StringRegexp,
+    StringSpecial,
+    StringSymbol,
+    Tag,
+    Type,
+    Variable,
+    VariableBuiltin,
+    VariableOtherMember,
+    VariableParameter,
+}
+
+fn capture_for_scope(scope: &str) -> Option<SyntaxCapture> {
+    Some(match scope {
+        "annotation" => SyntaxCapture::Annotation,
+        "attribute" => SyntaxCapture::Attribute,
+        "comment" => SyntaxCapture::Comment,
+        "constant" => SyntaxCapture::Constant,
+        "constant.character" | "character" => SyntaxCapture::ConstantCharacter,
+        "constant.character.escape" | "escape" | "string.escape" => {
+            SyntaxCapture::ConstantCharacterEscape
+        }
+        "constant.macro" => SyntaxCapture::ConstantMacro,
+        "constructor" => SyntaxCapture::Constructor,
+        "function" | "method" => SyntaxCapture::Function,
+        "function.builtin" => SyntaxCapture::FunctionBuiltin,
+        "function.macro" => SyntaxCapture::FunctionMacro,
+        "keyword" => SyntaxCapture::Keyword,
+        "keyword.control.import" | "import" | "include" => SyntaxCapture::KeywordControlImport,
+        "label" => SyntaxCapture::Label,
+        "module" => SyntaxCapture::Module,
+        "namespace" => SyntaxCapture::Namespace,
+        "operator" => SyntaxCapture::Operator,
+        "punctuation" | "delimiter" => SyntaxCapture::Punctuation,
+        "special" | "embedded" => SyntaxCapture::Special,
+        "string" => SyntaxCapture::String,
+        "string.regexp" => SyntaxCapture::StringRegexp,
+        "string.special" => SyntaxCapture::StringSpecial,
+        "string.symbol" => SyntaxCapture::StringSymbol,
+        "tag" => SyntaxCapture::Tag,
+        "type" => SyntaxCapture::Type,
+        "variable" => SyntaxCapture::Variable,
+        "variable.builtin" => SyntaxCapture::VariableBuiltin,
+        "variable.other.member" | "property" => SyntaxCapture::VariableOtherMember,
+        "variable.parameter" | "parameter" => SyntaxCapture::VariableParameter,
+        "number" | "boolean" => SyntaxCapture::Constant,
+        _ => return None,
+    })
+}
 
 fn highlight_for_capture(capture: &str) -> Option<Highlight> {
-    let root = capture.split('.').next().unwrap_or(capture);
-    let index = match root {
-        "keyword" | "operator" | "attribute" | "tag" => CAPTURE_KEYWORD,
-        "string" => CAPTURE_STRING,
-        "comment" => CAPTURE_COMMENT,
-        "function" | "constructor" | "method" => CAPTURE_FUNCTION,
-        "type" | "namespace" | "module" => CAPTURE_TYPE,
-        "constant" | "number" | "boolean" | "character" => CAPTURE_CONSTANT,
-        "variable" | "property" | "label" => CAPTURE_VARIABLE,
-        "punctuation" => CAPTURE_PUNCTUATION,
-        _ => return None,
-    };
-    Some(Highlight::new(index))
+    let mut scope = capture;
+    loop {
+        if let Some(capture) = capture_for_scope(scope) {
+            return Some(Highlight::new(capture as u32));
+        }
+        let (parent, _) = scope.rsplit_once('.')?;
+        scope = parent;
+    }
 }
 
 fn capture_color(index: usize) -> u32 {
-    match index as u32 {
-        CAPTURE_KEYWORD => purple(),
-        CAPTURE_STRING => green(),
-        CAPTURE_COMMENT => muted(),
-        CAPTURE_FUNCTION => blue(),
-        CAPTURE_TYPE => yellow(),
-        CAPTURE_CONSTANT => orange(),
-        CAPTURE_VARIABLE => code_text(),
-        CAPTURE_PUNCTUATION => code_text(),
-        _ => code_text(),
-    }
+    const COLORS: [fn() -> u32; 29] = [
+        theme::syntax_annotation,
+        theme::syntax_attribute,
+        theme::syntax_comment,
+        theme::syntax_constant,
+        theme::syntax_constant_character,
+        theme::syntax_constant_character_escape,
+        theme::syntax_constant_macro,
+        theme::syntax_constructor,
+        theme::syntax_function,
+        theme::syntax_function_builtin,
+        theme::syntax_function_macro,
+        theme::syntax_keyword,
+        theme::syntax_keyword_control_import,
+        theme::syntax_label,
+        theme::syntax_module,
+        theme::syntax_namespace,
+        theme::syntax_operator,
+        theme::syntax_punctuation,
+        theme::syntax_special,
+        theme::syntax_string,
+        theme::syntax_string_regexp,
+        theme::syntax_string_special,
+        theme::syntax_string_symbol,
+        theme::syntax_tag,
+        theme::syntax_type,
+        theme::syntax_variable,
+        theme::syntax_variable_builtin,
+        theme::syntax_variable_other_member,
+        theme::syntax_variable_parameter,
+    ];
+    COLORS
+        .get(index)
+        .map_or_else(theme::code_text, |color| color())
 }
 
 fn highlight_text(path: &str, text: &str) -> Vec<SyntaxSpan> {
@@ -1079,6 +1160,24 @@ fn highlight_text(path: &str, text: &str) -> Vec<SyntaxSpan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_specific_syntax_scopes_and_inherits_parent_scopes() {
+        let capture = |scope| highlight_for_capture(scope).map(|highlight| highlight.idx());
+        assert_eq!(
+            capture("function.builtin"),
+            Some(SyntaxCapture::FunctionBuiltin as usize)
+        );
+        assert_eq!(
+            capture("function.method.call"),
+            Some(SyntaxCapture::Function as usize)
+        );
+        assert_eq!(
+            capture("property.definition"),
+            Some(SyntaxCapture::VariableOtherMember as usize)
+        );
+        assert_eq!(capture("markup.heading"), None);
+    }
 
     #[test]
     fn creates_structured_replacement_hunks() {

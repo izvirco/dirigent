@@ -58,12 +58,198 @@ impl<'de> Deserialize<'de> for Color {
     }
 }
 
+macro_rules! define_syntax_theme {
+    ($(($field:ident, $name:literal, $storage:ident, $getter:ident, $default:expr)),+ $(,)?) => {
+        #[derive(Default, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SyntaxThemeFile {
+            $(#[serde(default, rename = $name)]
+            $field: Option<Color>,)+
+        }
+
+        $(static $storage: AtomicU32 = AtomicU32::new(($default << 8) | 0xff);)+
+
+        $(pub(crate) fn $getter() -> u32 {
+            $storage.load(Ordering::Relaxed)
+        })+
+
+        fn apply_syntax(theme: Option<&SyntaxThemeFile>) {
+            $($storage.store(
+                theme
+                    .and_then(|theme| theme.$field)
+                    .map_or(($default << 8) | 0xff, |color| color.0),
+                Ordering::Relaxed,
+            );)+
+        }
+    };
+}
+
+define_syntax_theme!(
+    (
+        annotation,
+        "annotation",
+        SYNTAX_ANNOTATION,
+        syntax_annotation,
+        0xE3D7BB
+    ),
+    (
+        attribute,
+        "attribute",
+        SYNTAX_ATTRIBUTE,
+        syntax_attribute,
+        0x93B686
+    ),
+    (comment, "comment", SYNTAX_COMMENT, syntax_comment, 0x8E8379),
+    (
+        constant,
+        "constant",
+        SYNTAX_CONSTANT,
+        syntax_constant,
+        0xD3869B
+    ),
+    (
+        constant_character,
+        "constant.character",
+        SYNTAX_CONSTANT_CHARACTER,
+        syntax_constant_character,
+        0x93B686
+    ),
+    (
+        constant_character_escape,
+        "constant.character.escape",
+        SYNTAX_CONSTANT_CHARACTER_ESCAPE,
+        syntax_constant_character_escape,
+        0xDC833B
+    ),
+    (
+        constant_macro,
+        "constant.macro",
+        SYNTAX_CONSTANT_MACRO,
+        syntax_constant_macro,
+        0x93B686
+    ),
+    (
+        constructor,
+        "constructor",
+        SYNTAX_CONSTRUCTOR,
+        syntax_constructor,
+        0xD3869B
+    ),
+    (
+        function,
+        "function",
+        SYNTAX_FUNCTION,
+        syntax_function,
+        0xA4A43C
+    ),
+    (
+        function_builtin,
+        "function.builtin",
+        SYNTAX_FUNCTION_BUILTIN,
+        syntax_function_builtin,
+        0xDB9B4D
+    ),
+    (
+        function_macro,
+        "function.macro",
+        SYNTAX_FUNCTION_MACRO,
+        syntax_function_macro,
+        0x83A598
+    ),
+    (keyword, "keyword", SYNTAX_KEYWORD, syntax_keyword, 0xDD5F50),
+    (
+        keyword_control_import,
+        "keyword.control.import",
+        SYNTAX_KEYWORD_CONTROL_IMPORT,
+        syntax_keyword_control_import,
+        0x93B686
+    ),
+    (label, "label", SYNTAX_LABEL, syntax_label, 0xDD5F50),
+    (module, "module", SYNTAX_MODULE, syntax_module, 0x93B686),
+    (
+        namespace,
+        "namespace",
+        SYNTAX_NAMESPACE,
+        syntax_namespace,
+        0xE3D7BB
+    ),
+    (
+        operator,
+        "operator",
+        SYNTAX_OPERATOR,
+        syntax_operator,
+        0xD3869B
+    ),
+    (
+        punctuation,
+        "punctuation",
+        SYNTAX_PUNCTUATION,
+        syntax_punctuation,
+        0xDC833B
+    ),
+    (special, "special", SYNTAX_SPECIAL, syntax_special, 0xB16286),
+    (string, "string", SYNTAX_STRING, syntax_string, 0xA4A43C),
+    (
+        string_regexp,
+        "string.regexp",
+        SYNTAX_STRING_REGEXP,
+        syntax_string_regexp,
+        0xDC833B
+    ),
+    (
+        string_special,
+        "string.special",
+        SYNTAX_STRING_SPECIAL,
+        syntax_string_special,
+        0xDC833B
+    ),
+    (
+        string_symbol,
+        "string.symbol",
+        SYNTAX_STRING_SYMBOL,
+        syntax_string_symbol,
+        0xDB9B4D
+    ),
+    (tag, "tag", SYNTAX_TAG, syntax_tag, 0x93B686),
+    (type_name, "type", SYNTAX_TYPE, syntax_type, 0xDB9B4D),
+    (
+        variable,
+        "variable",
+        SYNTAX_VARIABLE,
+        syntax_variable,
+        0xE3D7BB
+    ),
+    (
+        variable_builtin,
+        "variable.builtin",
+        SYNTAX_VARIABLE_BUILTIN,
+        syntax_variable_builtin,
+        0xDC833B
+    ),
+    (
+        variable_other_member,
+        "variable.other.member",
+        SYNTAX_VARIABLE_OTHER_MEMBER,
+        syntax_variable_other_member,
+        0x83A598
+    ),
+    (
+        variable_parameter,
+        "variable.parameter",
+        SYNTAX_VARIABLE_PARAMETER,
+        syntax_variable_parameter,
+        0x83A598
+    ),
+);
+
 macro_rules! define_theme {
     ($(($field:ident, $storage:ident, $getter:ident, $default:expr)),+ $(,)?) => {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct ThemeFile {
             $($field: Color,)+
+            #[serde(default)]
+            syntax: Option<SyntaxThemeFile>,
             // Accept this removed color so existing generated and custom themes keep loading.
             #[serde(default, rename = "notice_background")]
             _legacy_notice_background: Option<Color>,
@@ -77,6 +263,7 @@ macro_rules! define_theme {
 
         fn apply(theme: &ThemeFile) {
             $($storage.store(theme.$field.0, Ordering::Relaxed);)+
+            apply_syntax(theme.syntax.as_ref());
         }
     };
 }
@@ -157,6 +344,39 @@ warning_background = "#2a2117"
 warning_text = "#ffc978"
 yellow = "#f0c674"
 purple = "#b48ef7"
+
+# Syntax colors use Helix scope names. The entire section and each individual
+# scope are optional in custom themes.
+[syntax]
+annotation = "#E3D7BB"
+attribute = "#93B686"
+comment = "#8E8379"
+constant = "#D3869B"
+"constant.character" = "#93B686"
+"constant.character.escape" = "#DC833B"
+"constant.macro" = "#93B686"
+constructor = "#D3869B"
+function = "#A4A43C"
+"function.builtin" = "#DB9B4D"
+"function.macro" = "#83A598"
+keyword = "#DD5F50"
+"keyword.control.import" = "#93B686"
+label = "#DD5F50"
+module = "#93B686"
+namespace = "#E3D7BB"
+operator = "#D3869B"
+punctuation = "#DC833B"
+special = "#B16286"
+string = "#A4A43C"
+"string.regexp" = "#DC833B"
+"string.special" = "#DC833B"
+"string.symbol" = "#DB9B4D"
+tag = "#93B686"
+type = "#DB9B4D"
+variable = "#E3D7BB"
+"variable.builtin" = "#DC833B"
+"variable.other.member" = "#83A598"
+"variable.parameter" = "#83A598"
 "##;
 
 const NORD_THEME_FILE: &str = r##"# Nord-inspired sample theme.
@@ -390,11 +610,27 @@ mod tests {
 
     #[test]
     fn accepts_legacy_notice_background() {
-        let source = format!(
-            "{}notice_background = \"#171d24\"\n",
-            super::DEFAULT_THEME_FILE
+        let source = super::DEFAULT_THEME_FILE.replacen(
+            "\n[syntax]",
+            "\nnotice_background = \"#171d24\"\n\n[syntax]",
+            1,
         );
         toml::from_str::<ThemeFile>(&source).unwrap();
+    }
+
+    #[test]
+    fn syntax_overrides_are_optional_and_partial() {
+        let theme: ThemeFile = toml::from_str(super::NORD_THEME_FILE).unwrap();
+        assert!(theme.syntax.is_none());
+
+        let source = format!(
+            "{}\n[syntax]\nkeyword = \"#112233\"\n",
+            super::NORD_THEME_FILE
+        );
+        let theme: ThemeFile = toml::from_str(&source).unwrap();
+        let syntax = theme.syntax.unwrap();
+        assert_eq!(syntax.keyword.unwrap().0, 0x112233ff);
+        assert!(syntax.string.is_none());
     }
 
     #[test]
