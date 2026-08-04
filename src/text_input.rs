@@ -13,6 +13,22 @@ use crate::{
     theme::{accent, blue, border, faint, muted, rgb, surface, theme_text},
 };
 
+fn vertical_offset_to_reveal(
+    current_offset: Pixels,
+    max_offset: Pixels,
+    viewport: Range<Pixels>,
+    target: Range<Pixels>,
+) -> Pixels {
+    let offset = if target.start < viewport.start {
+        current_offset + viewport.start - target.start
+    } else if target.end > viewport.end {
+        current_offset + viewport.end - target.end
+    } else {
+        current_offset
+    };
+    offset.clamp(-max_offset, px(0.0))
+}
+
 fn clipboard_path(value: &str) -> Option<PathBuf> {
     let path = if value.starts_with("file:") {
         url::Url::parse(value).ok()?.to_file_path().ok()?
@@ -169,6 +185,7 @@ pub(crate) struct TextInput {
     next_image_number: usize,
     scroll: ScrollHandle,
     completion_active: bool,
+    autoscroll_cursor: bool,
 }
 
 impl TextInput {
@@ -190,6 +207,7 @@ impl TextInput {
             next_image_number: 1,
             scroll: ScrollHandle::new(),
             completion_active: false,
+            autoscroll_cursor: false,
         }
     }
 
@@ -299,9 +317,7 @@ impl TextInput {
 
     pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
         self.selection_anchor = 0;
-        self.cursor = self.content.len();
-        self.selection = 0..self.cursor;
-        self.preferred_cursor_x = None;
+        self.select_to(self.content.len());
         cx.notify();
     }
 
@@ -310,12 +326,14 @@ impl TextInput {
         self.selection = offset..offset;
         self.selection_anchor = offset;
         self.preferred_cursor_x = None;
+        self.autoscroll_cursor = true;
     }
 
     fn select_to(&mut self, offset: usize) {
         self.cursor = offset;
         self.selection = self.selection_anchor.min(offset)..self.selection_anchor.max(offset);
         self.preferred_cursor_x = None;
+        self.autoscroll_cursor = true;
     }
 
     fn previous_boundary(&self, offset: usize) -> usize {
@@ -688,6 +706,8 @@ struct TextInputElement {
     text: StyledText,
     layout: TextLayout,
     cursor: Option<usize>,
+    autoscroll_cursor: Option<usize>,
+    scroll: ScrollHandle,
 }
 
 impl IntoElement for TextInputElement {
@@ -730,7 +750,40 @@ impl Element for TextInputElement {
         cx: &mut App,
     ) {
         self.text
-            .prepaint(id, inspector_id, bounds, state, window, cx)
+            .prepaint(id, inspector_id, bounds, state, window, cx);
+
+        let Some(cursor) = self.autoscroll_cursor else {
+            return;
+        };
+        let Some(position) = self.layout.position_for_index(cursor) else {
+            return;
+        };
+
+        let viewport = self.scroll.bounds();
+        let current_offset = self.scroll.offset();
+        let next_y = vertical_offset_to_reveal(
+            current_offset.y,
+            self.scroll.max_offset().y,
+            viewport.top()..viewport.bottom(),
+            position.y..position.y + self.layout.line_height(),
+        );
+        if next_y == current_offset.y {
+            return;
+        }
+
+        self.scroll
+            .set_offset(gpui::point(current_offset.x, next_y));
+
+        // The parent's scroll offset was already applied before this child was
+        // prepainted. Move this frame's text as well, then redraw so the parent
+        // and scrollbar use the new offset on the next frame.
+        let translated_bounds = Bounds::new(
+            gpui::point(bounds.origin.x, bounds.origin.y + next_y - current_offset.y),
+            bounds.size,
+        );
+        self.text
+            .prepaint(id, inspector_id, translated_bounds, state, window, cx);
+        window.refresh();
     }
 
     fn paint(
@@ -810,6 +863,11 @@ impl Render for TextInput {
         let layout = text.layout().clone();
         self.last_layout = Some(layout.clone());
         let cursor = (focused && self.selection.is_empty()).then_some(self.cursor);
+        let autoscroll_cursor =
+            (focused && self.autoscroll_cursor && self.multiline).then_some(self.cursor);
+        if focused {
+            self.autoscroll_cursor = false;
+        }
         let viewport = self.scroll.bounds().size.height.as_f32();
         let max_offset = self.scroll.max_offset().y.as_f32();
         let thumb_fraction = if viewport > 0.0 && max_offset > 0.0 {
@@ -886,6 +944,8 @@ impl Render for TextInput {
                         text,
                         layout,
                         cursor,
+                        autoscroll_cursor,
+                        scroll: self.scroll.clone(),
                     }),
             )
             .when(self.multiline && max_offset > 0.0, |element| {
@@ -915,7 +975,9 @@ impl Render for TextInput {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_word_boundary, previous_word_boundary};
+    use gpui::px;
+
+    use super::{next_word_boundary, previous_word_boundary, vertical_offset_to_reveal};
 
     #[test]
     fn moves_between_word_boundaries() {
@@ -935,5 +997,38 @@ mod tests {
 
         assert_eq!(next_word_boundary(text, 0), second_word);
         assert_eq!(previous_word_boundary(text, text.len()), second_word);
+    }
+
+    #[test]
+    fn scrolls_only_enough_to_reveal_the_cursor() {
+        assert_eq!(
+            vertical_offset_to_reveal(px(-40.0), px(100.0), px(10.0)..px(60.0), px(65.0)..px(85.0)),
+            px(-65.0)
+        );
+        assert_eq!(
+            vertical_offset_to_reveal(px(-65.0), px(100.0), px(10.0)..px(60.0), px(0.0)..px(20.0)),
+            px(-55.0)
+        );
+        assert_eq!(
+            vertical_offset_to_reveal(px(-55.0), px(100.0), px(10.0)..px(60.0), px(20.0)..px(40.0)),
+            px(-55.0)
+        );
+    }
+
+    #[test]
+    fn cursor_scroll_is_clamped_to_the_content() {
+        assert_eq!(
+            vertical_offset_to_reveal(px(-90.0), px(100.0), px(0.0)..px(50.0), px(80.0)..px(110.0)),
+            px(-100.0)
+        );
+        assert_eq!(
+            vertical_offset_to_reveal(
+                px(-10.0),
+                px(100.0),
+                px(0.0)..px(50.0),
+                px(-30.0)..px(-10.0)
+            ),
+            px(0.0)
+        );
     }
 }
