@@ -455,9 +455,8 @@ impl Dirigent {
             .and_then(Value::as_str)
             .unwrap_or("tool");
         let is_error = value.get("isError").and_then(Value::as_bool) == Some(true);
-        let detail = value
-            .get("result")
-            .and_then(|result| tool_result_detail(name, result, is_error));
+        let result = value.get("result");
+        let detail = result.and_then(|result| tool_result_detail(name, result, is_error));
         if is_error {
             // A failed tool call is an expected agent outcome and is already shown in the
             // conversation. Keep it available only for opt-in diagnostics.
@@ -479,7 +478,7 @@ impl Dirigent {
                 message.set_detail(detail);
             }
             if !is_error {
-                add_tool_change_summary(message);
+                add_tool_change_summary(message, name, result);
             }
         }
         if !is_error && matches!(name, "write" | "edit") {

@@ -111,28 +111,41 @@ pub(super) fn tool_expanded(_name: &str) -> bool {
     false
 }
 
-pub(super) fn add_tool_change_summary(message: &mut Message) {
-    let tool = message
-        .text
-        .split_once(' ')
-        .map_or(message.text.as_str(), |(tool, _)| tool);
-    if !matches!(tool, "edit" | "write") {
-        return;
-    }
-    let (additions, deletions) = message
-        .detail
-        .as_deref()
-        .map(|detail| {
-            detail.lines().fold((0, 0), |(additions, deletions), line| {
-                match line.as_bytes().first() {
-                    Some(b'+') => (additions + 1, deletions),
-                    Some(b'-') => (additions, deletions + 1),
-                    _ => (additions, deletions),
-                }
-            })
+fn change_stats(diff: &str) -> (usize, usize) {
+    diff.lines().fold((0, 0), |(additions, deletions), line| {
+        match line.as_bytes().first() {
+            Some(b'+') => (additions + 1, deletions),
+            Some(b'-') => (additions, deletions + 1),
+            _ => (additions, deletions),
+        }
+    })
+}
+
+fn tool_call_change_stats(name: &str, args: &Value) -> Option<(usize, usize)> {
+    (name == "write").then(|| {
+        (
+            args.get("content")
+                .and_then(Value::as_str)
+                .map(|content| content.split_inclusive('\n').count())
+                .unwrap_or_default(),
+            0,
+        )
+    })
+}
+
+pub(super) fn add_tool_change_summary(message: &mut Message, name: &str, result: Option<&Value>) {
+    let result_stats = (name == "edit")
+        .then(|| {
+            result?
+                .pointer("/details/diff")
+                .and_then(Value::as_str)
+                .map(change_stats)
         })
-        .unwrap_or_default();
-    message.append_text(&format!(" +{additions} -{deletions}"));
+        .flatten();
+    message.tool_change_stats = result_stats.or(message.tool_change_stats);
+    if let Some((additions, deletions)) = message.tool_change_stats {
+        message.append_text(&format!(" +{additions} -{deletions}"));
+    }
 }
 
 pub(super) fn write_detail(args: &Value) -> Option<String> {
@@ -181,6 +194,7 @@ pub(super) fn tool_message(
     if name == "write" {
         message.set_detail(write_detail(args));
     }
+    message.tool_change_stats = tool_call_change_stats(name, args);
     message
 }
 
@@ -484,7 +498,7 @@ pub(super) fn push_parsed_message(
                 message.set_detail(detail);
             }
             if !is_error {
-                add_tool_change_summary(message);
+                add_tool_change_summary(message, name, Some(value));
             }
             message.finish_tool(is_error, message_timestamp_ms(value));
         } else if let Some(message) = parse_message(value) {
@@ -525,7 +539,7 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
             );
             message.set_detail(tool_result_detail(name, value, is_error));
             if !is_error {
-                add_tool_change_summary(&mut message);
+                add_tool_change_summary(&mut message, name, Some(value));
             }
             message.finish_tool(is_error, message_timestamp_ms(value));
             Some(message)

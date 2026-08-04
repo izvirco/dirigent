@@ -446,6 +446,65 @@ fn restores_edit_diff_instead_of_success_message() {
 }
 
 #[test]
+fn counts_the_full_write_when_its_detail_is_truncated() {
+    let content = "line\n".repeat(1_000);
+    let messages = parse_messages(&[
+        json!({
+            "role":"assistant",
+            "content":[{"type":"toolCall","id":"call-1","name":"write","arguments":{
+                "path":"src/main.rs",
+                "content":content
+            }}]
+        }),
+        json!({
+            "role":"toolResult",
+            "toolCallId":"call-1",
+            "toolName":"write",
+            "content":"Successfully wrote src/main.rs."
+        }),
+    ]);
+
+    assert_eq!(messages[0].text, "write src/main.rs +1000 -0");
+    assert!(
+        messages[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .ends_with("… output truncated by Dirigent")
+    );
+}
+
+#[test]
+fn counts_the_full_edit_diff_when_its_detail_is_truncated() {
+    let diff = format!(" {}\n-old\n+new", "context".repeat(600));
+    let messages = parse_messages(&[
+        json!({
+            "role":"assistant",
+            "content":[{"type":"toolCall","id":"call-1","name":"edit","arguments":{
+                "path":"src/main.rs",
+                "edits":[]
+            }}]
+        }),
+        json!({
+            "role":"toolResult",
+            "toolCallId":"call-1",
+            "toolName":"edit",
+            "content":"Successfully edited src/main.rs.",
+            "details":{"diff":diff}
+        }),
+    ]);
+
+    assert_eq!(messages[0].text, "edit src/main.rs +1 -1");
+    assert!(
+        messages[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .ends_with("… output truncated by Dirigent")
+    );
+}
+
+#[test]
 fn restores_complete_active_history_across_compaction() {
     let entries = vec![
         json!({
