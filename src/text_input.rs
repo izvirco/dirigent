@@ -128,6 +128,47 @@ fn previous_word_boundary(text: &str, mut offset: usize) -> usize {
     offset
 }
 
+fn word_range_at(text: &str, index: usize) -> Range<usize> {
+    if text.is_empty() {
+        return 0..0;
+    }
+
+    let index = index.min(text.len());
+    let character_start = if index == text.len() {
+        text.char_indices()
+            .next_back()
+            .map_or(0, |(start, _)| start)
+    } else if text.is_char_boundary(index) {
+        index
+    } else {
+        (0..index)
+            .rev()
+            .find(|offset| text.is_char_boundary(*offset))
+            .unwrap_or(0)
+    };
+    let character = text[character_start..]
+        .chars()
+        .next()
+        .expect("non-empty text has a character at a valid boundary");
+    if character_class(character) != CharacterClass::Word {
+        return character_start..character_start + character.len_utf8();
+    }
+
+    let start = text[..character_start]
+        .char_indices()
+        .rev()
+        .take_while(|(_, candidate)| character_class(*candidate) == CharacterClass::Word)
+        .last()
+        .map_or(character_start, |(start, _)| start);
+    let end = character_start
+        + text[character_start..]
+            .char_indices()
+            .take_while(|(_, candidate)| character_class(*candidate) == CharacterClass::Word)
+            .map(|(_, candidate)| candidate.len_utf8())
+            .sum::<usize>();
+    start..end
+}
+
 fn next_word_boundary(text: &str, mut offset: usize) -> usize {
     let starts_in_whitespace = text[offset..]
         .chars()
@@ -565,7 +606,11 @@ impl TextInput {
         let offset = self.index_for_position(event.position);
         self.preferred_cursor_x = None;
         self.selecting = true;
-        if event.modifiers.shift {
+        if event.click_count >= 2 {
+            let range = word_range_at(&self.content, offset);
+            self.selection_anchor = range.start;
+            self.select_to(range.end);
+        } else if event.modifiers.shift {
             self.select_to(offset);
         } else {
             self.collapse_selection(offset);
@@ -977,7 +1022,19 @@ impl Render for TextInput {
 mod tests {
     use gpui::px;
 
-    use super::{next_word_boundary, previous_word_boundary, vertical_offset_to_reveal};
+    use super::{
+        next_word_boundary, previous_word_boundary, vertical_offset_to_reveal, word_range_at,
+    };
+
+    #[test]
+    fn selects_double_clicked_words() {
+        let text = "one žoga_two.three";
+
+        assert_eq!(word_range_at(text, 1), 0..3);
+        assert_eq!(word_range_at(text, text.find("two").unwrap()), 4..13);
+        assert_eq!(word_range_at(text, text.find('.').unwrap()), 13..14);
+        assert_eq!(word_range_at(text, text.len()), 14..19);
+    }
 
     #[test]
     fn moves_between_word_boundaries() {
