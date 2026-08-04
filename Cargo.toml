@@ -7,8 +7,8 @@ edition = "2024"
 bundled-lilex = []
 
 [dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "e191dd00c7e36cfcbbdccad2babca096067777c0", default-features = false, features = ["font-kit", "wayland"] }
-gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e191dd00c7e36cfcbbdccad2babca096067777c0", features = ["font-kit", "wayland"] }
+gpui = { git = "https://forge.sebba.dev/izvir/zed.git", branch = "unstable", default-features = false, features = ["font-kit", "wayland"] }
+gpui_platform = { git = "https://forge.sebba.dev/izvir/zed.git", branch = "unstable", features = ["font-kit", "wayland"] }
 async-channel = "2.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
