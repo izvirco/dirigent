@@ -139,6 +139,20 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "windows"))]
+pub(crate) fn hide_command_window(_command: &mut Command) {}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn hide_command_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const SW_HIDE: u16 = 0;
+    command
+        .creation_flags(CREATE_NO_WINDOW)
+        .show_window(SW_HIDE);
+}
+
+#[cfg(not(target_os = "windows"))]
 pub(crate) fn pi_command(nix_enabled: bool) -> Result<Command, String> {
     let command = if nix_enabled {
         let mut command = Command::new("nix");
@@ -154,9 +168,6 @@ pub(crate) fn pi_command(nix_enabled: bool) -> Result<Command, String> {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn pi_command(_nix_enabled: bool) -> Result<Command, String> {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let path = env::var_os("PATH").and_then(|path| {
         env::split_paths(&path).find_map(|directory| {
             ["pi.exe", "pi.cmd"]
@@ -169,7 +180,7 @@ pub(crate) fn pi_command(_nix_enabled: bool) -> Result<Command, String> {
         "could not find pi.exe or pi.cmd on PATH; install pi before starting Dirigent".to_string()
     })?;
     let mut command = Command::new(path);
-    command.creation_flags(CREATE_NO_WINDOW);
+    hide_command_window(&mut command);
     Ok(command)
 }
 
@@ -181,13 +192,11 @@ pub(crate) fn stop_child(child: &mut Child) {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn stop_child(child: &mut Child) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     if child.try_wait().ok().flatten().is_none() {
-        let _ = Command::new("taskkill.exe")
+        let mut command = Command::new("taskkill.exe");
+        hide_command_window(&mut command);
+        let _ = command
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

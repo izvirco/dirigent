@@ -1,3 +1,4 @@
+#![cfg_attr(target_os = "windows", feature(windows_process_extensions_show_window))]
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"

@@ -3,7 +3,10 @@ use std::{
     process::{Command, Output},
 };
 
-use crate::model::{ManagedWorkspace, WorkspaceBackend};
+use crate::{
+    model::{ManagedWorkspace, WorkspaceBackend},
+    platform,
+};
 
 #[derive(Clone, Debug)]
 pub(crate) struct RepositorySnapshot {
@@ -21,6 +24,12 @@ impl RepositorySnapshot {
     pub(crate) fn sidebar_label(&self) -> String {
         self.source_label.clone()
     }
+}
+
+fn background_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    platform::hide_command_window(&mut command);
+    command
 }
 
 fn command_output(mut command: Command, description: &str) -> Result<Output, String> {
@@ -42,7 +51,7 @@ fn successful_text(output: Output, description: &str) -> Result<String, String> 
 }
 
 fn jj_command(project_path: &Path) -> Command {
-    let mut command = Command::new("jj");
+    let mut command = background_command("jj");
     command
         .arg("--no-pager")
         .arg("--color=never")
@@ -131,7 +140,7 @@ fn probe_jj(project_path: &Path) -> Result<Option<RepositorySnapshot>, String> {
 }
 
 fn git_text(project_path: &Path, args: &[&str], description: &str) -> Result<String, String> {
-    let mut command = Command::new("git");
+    let mut command = background_command("git");
     command.arg("-C").arg(project_path).args(args);
     successful_text(command_output(command, description)?, description)
 }
@@ -266,7 +275,7 @@ pub(crate) fn create_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
 
     let mut command = match workspace.backend {
         WorkspaceBackend::Jj => {
-            let mut command = Command::new("jj");
+            let mut command = background_command("jj");
             command
                 .arg("--no-pager")
                 .arg("--color=never")
@@ -287,7 +296,7 @@ pub(crate) fn create_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
                 .git_branch
                 .as_deref()
                 .ok_or_else(|| "managed Git workspace has no branch".to_string())?;
-            let mut command = Command::new("git");
+            let mut command = background_command("git");
             command
                 .arg("-C")
                 .arg(&workspace.source_repository)
@@ -326,7 +335,7 @@ pub(crate) fn remove_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
         WorkspaceBackend::Git => {
             if !workspace.root.exists() {
                 if workspace.source_repository.is_dir() {
-                    let mut command = Command::new("git");
+                    let mut command = background_command("git");
                     command
                         .arg("-C")
                         .arg(&workspace.source_repository)
@@ -344,7 +353,7 @@ pub(crate) fn remove_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
             } else {
                 &workspace.root
             };
-            let mut command = Command::new("git");
+            let mut command = background_command("git");
             command
                 .arg("-C")
                 .arg(command_root)
