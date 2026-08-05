@@ -481,6 +481,18 @@ impl Dirigent {
         self.enter_input_mode(false);
     }
 
+    pub(crate) fn toggle_project_active_thread_placement(&mut self, project_id: Id) {
+        let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|project| project.id == project_id)
+        else {
+            return;
+        };
+        project.keep_active_threads_in_project = !project.keep_active_threads_in_project;
+        self.persist();
+    }
+
     pub(crate) fn close_project_settings(&mut self) {
         self.project_settings = None;
         self.workspace_settings_editing = false;

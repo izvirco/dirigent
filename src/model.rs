@@ -25,6 +25,7 @@ pub(crate) struct Project {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
     pub(crate) workspace_root: Option<PathBuf>,
+    pub(crate) keep_active_threads_in_project: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]

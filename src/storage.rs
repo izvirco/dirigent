@@ -16,7 +16,7 @@ use crate::{
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
 pub(crate) const DEFAULT_DIFF_SIDEBAR_WIDTH: f32 = 560.0;
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS app_state (
@@ -34,7 +34,8 @@ const SCHEMA: &str = "
         order_index INTEGER NOT NULL UNIQUE,
         name TEXT NOT NULL,
         path_json BLOB NOT NULL,
-        workspace_root_json BLOB
+        workspace_root_json BLOB,
+        keep_active_threads_in_project INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS harnesses (
         id TEXT PRIMARY KEY,
@@ -107,6 +108,7 @@ struct StoredProject {
     name: String,
     path: PathBuf,
     workspace_root: Option<PathBuf>,
+    keep_active_threads_in_project: bool,
 }
 
 struct StoredHarness {
@@ -214,6 +216,7 @@ impl StateDatabase {
                     name: project.name.clone(),
                     path: project.path.clone(),
                     workspace_root: project.workspace_root.clone(),
+                    keep_active_threads_in_project: project.keep_active_threads_in_project,
                 })
                 .collect(),
             harnesses: harnesses
@@ -333,6 +336,11 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
             "work_group_expansion_json",
             "ALTER TABLE harnesses ADD COLUMN work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D';",
         ),
+        (
+            "projects",
+            "keep_active_threads_in_project",
+            "ALTER TABLE projects ADD COLUMN keep_active_threads_in_project INTEGER NOT NULL DEFAULT 0;",
+        ),
     ];
     for (table, column, migration) in migrations {
         if !table_has_column(connection, table, column).map_err(|error| {
@@ -411,14 +419,16 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
         transaction
             .execute(
                 "INSERT INTO projects (
-                    id, order_index, name, path_json, workspace_root_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    id, order_index, name, path_json, workspace_root_json,
+                    keep_active_threads_in_project
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     project.id.to_string(),
                     order_index(index)?,
                     &project.name,
                     path_json,
                     workspace_root_json,
+                    project.keep_active_threads_in_project,
                 ],
             )
             .map_err(|error| format!("could not store project {}: {error}", project.id))?;
@@ -534,7 +544,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut projects = Vec::new();
     let mut statement = connection
         .prepare(
-            "SELECT id, name, path_json, workspace_root_json
+            "SELECT id, name, path_json, workspace_root_json, keep_active_threads_in_project
              FROM projects ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare project state: {error}"))?;
@@ -545,11 +555,12 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, String>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
                 row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, bool>(4)?,
             ))
         })
         .map_err(|error| format!("could not read projects: {error}"))?;
     for row in rows {
-        let (id, name, path_json, workspace_root_json) =
+        let (id, name, path_json, workspace_root_json, keep_active_threads_in_project) =
             row.map_err(|error| format!("could not read project: {error}"))?;
         projects.push(StoredProject {
             id: decode_id(&id, "project id")?,
@@ -559,6 +570,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 .as_deref()
                 .map(|bytes| decode_json(bytes, "project workspace root"))
                 .transpose()?,
+            keep_active_threads_in_project,
         });
     }
     drop(statement);
@@ -721,6 +733,7 @@ impl StoredState {
                 name: project.name,
                 path: project.path,
                 workspace_root: project.workspace_root,
+                keep_active_threads_in_project: project.keep_active_threads_in_project,
             })
             .collect();
         let harnesses = self
@@ -875,6 +888,7 @@ mod tests {
             name: "project".into(),
             path: directory.clone(),
             workspace_root: None,
+            keep_active_threads_in_project: true,
         });
         let mut work_group_expansion = HashMap::new();
         work_group_expansion.insert("entry:user-1".into(), true);
@@ -895,6 +909,7 @@ mod tests {
         drop(state_database);
 
         let (_, loaded) = StateDatabase::open_at(&database).unwrap();
+        assert!(loaded.projects[0].keep_active_threads_in_project);
         assert_eq!(loaded.harnesses[0].last_vcs_label.as_deref(), Some("main"));
         assert_eq!(
             loaded.harnesses[0].work_group_expansion.get("entry:user-1"),
@@ -935,7 +950,10 @@ mod tests {
                      git_branch TEXT, state_json BLOB
                  );
                  CREATE TABLE collapsed_projects (project_id TEXT PRIMARY KEY);
-                 INSERT INTO app_state VALUES (1, '1', '1', NULL, 288);
+                 INSERT INTO app_state VALUES (1, '2', '1', NULL, 288);
+                 INSERT INTO projects VALUES (
+                     '1', 0, 'project', CAST('\"/tmp/project\"' AS BLOB), NULL
+                 );
                  PRAGMA user_version = 1;",
             )
             .unwrap();
@@ -945,6 +963,7 @@ mod tests {
         assert!(!loaded.diff_sidebar_open);
         assert_eq!(loaded.diff_sidebar_width, DEFAULT_DIFF_SIDEBAR_WIDTH);
         assert_eq!(loaded.diff_view_mode, DiffViewMode::Unified);
+        assert!(!loaded.projects[0].keep_active_threads_in_project);
 
         fs::remove_dir_all(directory).unwrap();
     }

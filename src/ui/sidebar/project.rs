@@ -100,13 +100,32 @@ impl Dirigent {
             .find(|project| project.id == id)
             .unwrap();
         let collapsed = self.collapsed_projects.contains(&id);
-        let mut harness_ids = self
+        let keep_active_threads_in_project = project.keep_active_threads_in_project;
+        let mut inbox_ids = self
+            .harnesses
+            .iter()
+            .filter(|harness| {
+                keep_active_threads_in_project && harness.project_id == id && harness.is_in_inbox()
+            })
+            .map(|harness| harness.id)
+            .collect::<Vec<_>>();
+        let mut workpool_ids = self
+            .harnesses
+            .iter()
+            .filter(|harness| {
+                keep_active_threads_in_project
+                    && harness.project_id == id
+                    && harness.is_in_workpool()
+            })
+            .map(|harness| harness.id)
+            .collect::<Vec<_>>();
+        let mut archived_ids = self
             .harnesses
             .iter()
             .filter(|harness| harness.project_id == id && harness.archived)
             .map(|harness| harness.id)
             .collect::<Vec<_>>();
-        harness_ids.sort_by_key(|harness_id| {
+        let order = |harness_id: &Id| {
             std::cmp::Reverse(
                 self.harnesses
                     .iter()
@@ -114,9 +133,12 @@ impl Dirigent {
                     .unwrap()
                     .sidebar_order,
             )
-        });
+        };
+        inbox_ids.sort_by_key(order);
+        workpool_ids.sort_by_key(order);
+        archived_ids.sort_by_key(order);
         const ARCHIVED_THREAD_LIMIT: usize = 8;
-        let hidden_thread_count = harness_ids.len().saturating_sub(ARCHIVED_THREAD_LIMIT);
+        let hidden_thread_count = archived_ids.len().saturating_sub(ARCHIVED_THREAD_LIMIT);
         let archived_threads_expanded = self.expanded_archived_projects.contains(&id);
         let selected = self.selected_project == Some(id)
             && (!self.adding_project || self.project_settings == Some(id));
@@ -201,6 +223,46 @@ impl Dirigent {
                                     .text_ellipsis()
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(name),
+                            )
+                            .when(
+                                collapsed
+                                    && !menu_open
+                                    && keep_active_threads_in_project
+                                    && !inbox_ids.is_empty(),
+                                |element| {
+                                    element.child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .text_xs()
+                                            .text_color(rgb(yellow()))
+                                            .group_hover(group.clone(), |style| style.invisible())
+                                            .child(inbox_icon(yellow()))
+                                            .child(inbox_ids.len().to_string()),
+                                    )
+                                },
+                            )
+                            .when(
+                                collapsed
+                                    && !menu_open
+                                    && keep_active_threads_in_project
+                                    && !workpool_ids.is_empty(),
+                                |element| {
+                                    element.child(
+                                        div()
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .text_xs()
+                                            .text_color(rgb(blue()))
+                                            .group_hover(group.clone(), |style| style.invisible())
+                                            .child(workpool_icon(blue()))
+                                            .child(workpool_ids.len().to_string()),
+                                    )
+                                },
                             ),
                     )
                     .child(
@@ -308,15 +370,59 @@ impl Dirigent {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .children(harness_ids.iter().take(ARCHIVED_THREAD_LIMIT).copied().map(
-                            |harness_id| {
-                                self.render_sidebar_harness(
-                                    harness_id,
-                                    ThreadPlacement::Project,
-                                    cx,
-                                )
+                        .when(!inbox_ids.is_empty(), |element| {
+                            element
+                                .child(self.render_section_header(
+                                    "Inbox",
+                                    inbox_ids.len(),
+                                    yellow(),
+                                ))
+                                .children(inbox_ids.iter().copied().map(|harness_id| {
+                                    self.render_sidebar_harness(
+                                        harness_id,
+                                        ThreadPlacement::Inbox,
+                                        cx,
+                                    )
+                                }))
+                        })
+                        .when(!workpool_ids.is_empty(), |element| {
+                            element
+                                .child(self.render_section_header(
+                                    "Workpool",
+                                    workpool_ids.len(),
+                                    blue(),
+                                ))
+                                .children(workpool_ids.iter().copied().map(|harness_id| {
+                                    self.render_sidebar_harness(
+                                        harness_id,
+                                        ThreadPlacement::Workpool,
+                                        cx,
+                                    )
+                                }))
+                        })
+                        .when(
+                            keep_active_threads_in_project && !archived_ids.is_empty(),
+                            |element| {
+                                element.child(self.render_section_header(
+                                    "Archived",
+                                    archived_ids.len(),
+                                    faint(),
+                                ))
                             },
-                        ))
+                        )
+                        .children(
+                            archived_ids
+                                .iter()
+                                .take(ARCHIVED_THREAD_LIMIT)
+                                .copied()
+                                .map(|harness_id| {
+                                    self.render_sidebar_harness(
+                                        harness_id,
+                                        ThreadPlacement::Project,
+                                        cx,
+                                    )
+                                }),
+                        )
                         .when(hidden_thread_count > 0, |element| {
                             element.child(
                                 div()
@@ -349,29 +455,36 @@ impl Dirigent {
                         })
                         .when(archived_threads_expanded, |element| {
                             element.children(
-                                harness_ids.iter().skip(ARCHIVED_THREAD_LIMIT).copied().map(
-                                    |harness_id| {
+                                archived_ids
+                                    .iter()
+                                    .skip(ARCHIVED_THREAD_LIMIT)
+                                    .copied()
+                                    .map(|harness_id| {
                                         self.render_sidebar_harness(
                                             harness_id,
                                             ThreadPlacement::Project,
                                             cx,
                                         )
-                                    },
-                                ),
+                                    }),
                             )
                         })
-                        .when(harness_ids.is_empty(), |element| {
-                            element.child(
-                                div()
-                                    .h(px(28.0))
-                                    .px_2()
-                                    .flex()
-                                    .items_center()
-                                    .text_xs()
-                                    .text_color(rgb(faint()))
-                                    .child("No archived threads"),
-                            )
-                        }),
+                        .when(
+                            archived_ids.is_empty()
+                                && inbox_ids.is_empty()
+                                && workpool_ids.is_empty(),
+                            |element| {
+                                element.child(
+                                    div()
+                                        .h(px(28.0))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .text_xs()
+                                        .text_color(rgb(faint()))
+                                        .child("No archived threads"),
+                                )
+                            },
+                        ),
                 )
             })
             .into_any_element()

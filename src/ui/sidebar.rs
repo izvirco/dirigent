@@ -65,6 +65,14 @@ fn plus_icon(color: u32) -> impl IntoElement {
     sidebar_icon("icon/plus.svg", color)
 }
 
+fn inbox_icon(color: u32) -> impl IntoElement {
+    sidebar_icon("icon/inbox.svg", color)
+}
+
+fn workpool_icon(color: u32) -> impl IntoElement {
+    sidebar_icon("icon/circle.svg", color)
+}
+
 fn chevron_icon(expanded: bool) -> impl IntoElement {
     let icon = svg()
         .path("icon/chevron-down.svg")
@@ -206,13 +214,23 @@ impl Dirigent {
         let mut inbox_ids = self
             .harnesses
             .iter()
-            .filter(|harness| harness.is_in_inbox())
+            .filter(|harness| {
+                harness.is_in_inbox()
+                    && !self.projects.iter().any(|project| {
+                        project.id == harness.project_id && project.keep_active_threads_in_project
+                    })
+            })
             .map(|harness| harness.id)
             .collect::<Vec<_>>();
         let mut workpool_ids = self
             .harnesses
             .iter()
-            .filter(|harness| harness.is_in_workpool())
+            .filter(|harness| {
+                harness.is_in_workpool()
+                    && !self.projects.iter().any(|project| {
+                        project.id == harness.project_id && project.keep_active_threads_in_project
+                    })
+            })
             .map(|harness| harness.id)
             .collect::<Vec<_>>();
         let order = |id: &Id| {

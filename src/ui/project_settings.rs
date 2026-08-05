@@ -27,6 +27,8 @@ impl Dirigent {
             .and_then(|project| project.workspace_root.as_ref())
             .map(|path| path.display().to_string())
             .unwrap_or(default_path);
+        let keep_active_threads_in_project =
+            project.is_some_and(|project| project.keep_active_threads_in_project);
 
         div()
             .id("project-settings-scroll")
@@ -194,6 +196,82 @@ impl Dirigent {
                                         ),
                                 )
                             }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgb(theme_text()))
+                                    .child("Thread placement"),
+                            )
+                            .child(
+                                div()
+                                    .id(("keep-active-threads-in-project", project_id as usize))
+                                    .w_full()
+                                    .p_3()
+                                    .flex()
+                                    .items_center()
+                                    .gap_4()
+                                    .rounded_md()
+                                    .border_1()
+                                    .border_color(rgb(border()))
+                                    .hover(|style| style.bg(rgb(surface_hover())))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_project_active_thread_placement(project_id);
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .min_w(px(0.0))
+                                            .flex_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap_1()
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                    .text_color(rgb(theme_text()))
+                                                    .child("Keep active threads inside this project"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(rgb(muted()))
+                                                    .child(
+                                                        "Show this project's Inbox and Workpool in its sidebar section instead of the global sections.",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(36.0))
+                                            .h(px(20.0))
+                                            .p(px(2.0))
+                                            .flex_none()
+                                            .flex()
+                                            .items_center()
+                                            .rounded_full()
+                                            .bg(rgb(if keep_active_threads_in_project {
+                                                blue()
+                                            } else {
+                                                border()
+                                            }))
+                                            .when(keep_active_threads_in_project, |element| {
+                                                element.justify_end()
+                                            })
+                                            .child(
+                                                div()
+                                                    .size(px(16.0))
+                                                    .rounded_full()
+                                                    .bg(rgb(crate::theme::bg())),
+                                            ),
+                                    ),
+                            ),
                     ),
             )
     }

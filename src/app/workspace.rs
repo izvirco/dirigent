@@ -466,6 +466,7 @@ impl Dirigent {
             name,
             path: path.clone(),
             workspace_root: None,
+            keep_active_threads_in_project: false,
         });
         match start_fuzzy_index(
             &path,
