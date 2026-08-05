@@ -1,5 +1,5 @@
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::Path,
     process::{Child, Stdio},
     sync::{Arc, Mutex},
@@ -50,17 +50,26 @@ impl TitleProcess {
                 "--system-prompt",
                 TITLE_SYSTEM_PROMPT,
             ])
-            // A leading newline prevents a prompt beginning with `--` from being
-            // interpreted as another CLI option without changing its content.
-            .arg(format!("\n{prompt}"))
             .current_dir(cwd)
-            .stdin(Stdio::null())
+            // Keep the untrusted prompt off the command line. In particular,
+            // Rust rejects newlines and some metacharacters when `pi` resolves
+            // to an npm-installed `pi.cmd` on Windows.
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
         let mut child = command
             .spawn()
             .map_err(|error| format!("could not start title generator: {error}"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "title generator did not provide stdin".to_string())?;
+        if let Err(error) = stdin.write_all(prompt.as_bytes()) {
+            platform::stop_child(&mut child);
+            return Err(format!("could not send title generator prompt: {error}"));
+        }
+        drop(stdin);
         let stdout = child
             .stdout
             .take()
