@@ -246,8 +246,8 @@ impl Dirigent {
     pub(super) fn remeasure_working_indicator(&mut self, index: usize) {
         if self.selected_harness == Some(self.harnesses[index].id)
             && self.harnesses[index].status == HarnessStatus::Working
+            && let Some(indicator) = self.conversation_render_cache.working_item_index()
         {
-            let indicator = self.harnesses[index].messages.len();
             self.conversation_list
                 .remeasure_items(indicator..indicator + 1);
         }

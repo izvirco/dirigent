@@ -108,16 +108,26 @@ impl Dirigent {
 
     pub(crate) fn sync_conversation_render_cache(&mut self, rebuild_from_message: usize) {
         let old_cache = std::mem::take(&mut self.conversation_render_cache);
-        let (new_cache, old_range, new_count) = if let Some(harness) = self
+        let (new_cache, old_range, new_count, remeasure_ranges) = if let Some(harness) = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
         {
             ConversationRenderCache::update(harness, old_cache, rebuild_from_message)
         } else {
             let old_len = old_cache.len();
-            (ConversationRenderCache::default(), 0..old_len, 0)
+            (
+                ConversationRenderCache::default(),
+                0..old_len,
+                0,
+                Vec::new(),
+            )
         };
-        self.conversation_list.splice(old_range, new_count);
+        if !old_range.is_empty() || new_count > 0 {
+            self.conversation_list.splice(old_range, new_count);
+        }
+        for range in remeasure_ranges {
+            self.conversation_list.remeasure_items(range);
+        }
         self.conversation_render_cache = new_cache;
     }
 

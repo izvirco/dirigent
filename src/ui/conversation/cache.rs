@@ -132,14 +132,37 @@ pub(super) enum ConversationRenderItem {
 }
 
 impl ConversationRenderItem {
-    pub(super) fn message_index(&self) -> Option<usize> {
-        match self {
+    fn same_identity(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Message {
+                    message_index: left_index,
+                    queued: left_queued,
+                },
+                Self::Message {
+                    message_index: right_index,
+                    queued: right_queued,
+                },
+            ) => left_index == right_index && left_queued == right_queued,
+            (Self::WorkGroup(left), Self::WorkGroup(right)) => left.id == right.id,
+            (Self::Working, Self::Working) => true,
+            _ => false,
+        }
+    }
+
+    fn needs_remeasurement(&self, other: &Self, rebuild_from_message: usize) -> bool {
+        if self != other {
+            return true;
+        }
+        match other {
             Self::Message {
                 message_index,
                 queued: false,
-            } => Some(*message_index),
-            Self::WorkGroup(group) => Some(group.first_message_index),
-            Self::Message { queued: true, .. } | Self::Working => None,
+            } => *message_index >= rebuild_from_message,
+            // The working indicator can change between its normal and retry layouts without
+            // changing the render-cache item itself.
+            Self::Working => true,
+            Self::Message { queued: true, .. } | Self::WorkGroup(_) => false,
         }
     }
 
@@ -299,22 +322,62 @@ impl ConversationRenderCache {
         harness: &Harness,
         old: Self,
         rebuild_from_message: usize,
-    ) -> (Self, Range<usize>, usize) {
+    ) -> (Self, Range<usize>, usize, Vec<Range<usize>>) {
         let new = Self::build(harness);
         let old_len = old.items.len();
+        let new_len = new.items.len();
+
+        // Preserve list items whose identity did not change. In particular, mutable work-group
+        // summaries and streaming messages must not cause the entire active tail to lose its
+        // measured heights.
         let prefix_len = old
             .items
             .iter()
             .zip(new.items.iter())
-            .take_while(|(old_item, new_item)| {
-                old_item == new_item
-                    && old_item
-                        .message_index()
-                        .is_some_and(|index| index < rebuild_from_message)
-            })
+            .take_while(|(old_item, new_item)| old_item.same_identity(new_item))
             .count();
-        let new_count = new.items.len() - prefix_len;
-        (new, prefix_len..old_len, new_count)
+        let suffix_len = old.items[prefix_len..]
+            .iter()
+            .rev()
+            .zip(new.items[prefix_len..].iter().rev())
+            .take_while(|(old_item, new_item)| old_item.same_identity(new_item))
+            .count();
+        let old_range = prefix_len..old_len - suffix_len;
+        let new_count = new_len - prefix_len - suffix_len;
+
+        let retained_pairs =
+            (0..prefix_len)
+                .map(|index| (index, index, index))
+                .chain((0..suffix_len).map(|offset| {
+                    (
+                        old_len - suffix_len + offset,
+                        new_len - suffix_len + offset,
+                        new_len - suffix_len + offset,
+                    )
+                }));
+        let mut remeasure_ranges: Vec<Range<usize>> = Vec::new();
+        for (old_index, new_index, rendered_index) in retained_pairs {
+            if !old.items[old_index]
+                .needs_remeasurement(&new.items[new_index], rebuild_from_message)
+            {
+                continue;
+            }
+            if let Some(range) = remeasure_ranges.last_mut()
+                && range.end == rendered_index
+            {
+                range.end += 1;
+            } else {
+                remeasure_ranges.push(rendered_index..rendered_index + 1);
+            }
+        }
+
+        (new, old_range, new_count, remeasure_ranges)
+    }
+
+    pub(crate) fn working_item_index(&self) -> Option<usize> {
+        self.items
+            .iter()
+            .position(|item| matches!(item, ConversationRenderItem::Working))
     }
 
     pub(crate) fn work_group_ids(harness: &Harness) -> Vec<String> {
@@ -479,6 +542,45 @@ mod tests {
         assert_eq!((group.additions, group.deletions), (12, 3));
         assert_eq!(group.tool_count, 1);
         assert_eq!(group.write_count, 1);
+    }
+
+    #[test]
+    fn streaming_message_is_remeasured_without_being_spliced() {
+        let mut harness = Harness::new(1, 2, "task".into(), 1);
+        harness.status = HarnessStatus::Working;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "prompt"),
+            Message::new(MessageRole::Assistant, "partial response"),
+        ];
+        let old = ConversationRenderCache::build(&harness);
+
+        harness.messages[1].append_text("\nnext line");
+        let (new, old_range, new_count, remeasure_ranges) =
+            ConversationRenderCache::update(&harness, old, 1);
+
+        assert_eq!(old_range, 3..3);
+        assert_eq!(new_count, 0);
+        assert_eq!(remeasure_ranges, vec![1..3]);
+        assert_eq!(new.working_item_index(), Some(2));
+    }
+
+    #[test]
+    fn appended_tool_preserves_the_measured_active_tail() {
+        let mut harness = settled_harness();
+        harness.status = HarnessStatus::Working;
+        let old_message_count = harness.messages.len();
+        let old = ConversationRenderCache::build(&harness);
+
+        let mut tool = Message::tool("run tests", None, true, false);
+        tool.tool_name = Some("bash".into());
+        harness.messages.push(tool);
+        let (new, old_range, new_count, remeasure_ranges) =
+            ConversationRenderCache::update(&harness, old, old_message_count);
+
+        assert_eq!(old_range, 5..5);
+        assert_eq!(new_count, 1);
+        assert_eq!(remeasure_ranges, vec![1..2, 6..7]);
+        assert_eq!(new.working_item_index(), Some(6));
     }
 
     #[test]
