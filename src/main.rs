@@ -59,7 +59,11 @@ fn main() {
             None
         }
     };
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting Dirigent");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        commit = env!("DIRIGENT_COMMIT_ID"),
+        "starting Dirigent"
+    );
 
     application().with_assets(Assets).run(|cx: &mut App| {
         cx.set_app_identity("dirigent", "Dirigent");
