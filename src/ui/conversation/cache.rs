@@ -212,28 +212,12 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
         let user = &harness.messages[user_index];
         let completed_turn = matching_turn(harness, user, &mut turn_cursor);
         let activity = &harness.messages[user_index + 1..segment_end];
-        let first_activity = activity
-            .iter()
-            .position(|message| matches!(message.role, MessageRole::Thinking | MessageRole::Tool))
-            .map(|offset| user_index + 1 + offset);
         let last_activity = activity
             .iter()
             .rposition(|message| matches!(message.role, MessageRole::Thinking | MessageRole::Tool))
             .map(|offset| user_index + 1 + offset);
-        let (Some(first_activity), Some(last_activity)) = (first_activity, last_activity) else {
+        let Some(last_activity) = last_activity else {
             continue;
-        };
-        let compaction_only = harness.messages[first_activity..=last_activity]
-            .iter()
-            .filter(|message| matches!(message.role, MessageRole::Thinking | MessageRole::Tool))
-            .all(Message::is_compaction);
-        let assistant_precedes_compaction = harness.messages[user_index + 1..first_activity]
-            .iter()
-            .any(|message| message.role == MessageRole::Assistant);
-        let range_start = if compaction_only && assistant_precedes_compaction {
-            first_activity
-        } else {
-            user_index + 1
         };
         let latest_group = user_ordinal + 1 == user_indices.len();
         let running = latest_group && harness.status == HarnessStatus::Working;
@@ -243,10 +227,82 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
             .flatten()
             .filter(|turn| turn.prompt == prompt)
             .or(completed_turn);
+        let group_id = work_group_id(user, user_index);
+
+        // Compaction can run after the agent has already emitted its final response. In that
+        // case the compaction is a separate piece of activity; extending the original work
+        // group through it would collapse the response between the two activity ranges.
+        let final_response = activity
+            .iter()
+            .rposition(|message| message.role == MessageRole::Assistant)
+            .map(|offset| user_index + 1 + offset);
+        let response_before_trailing_compaction = final_response.filter(|response_index| {
+            let mut activity_after_response = harness.messages[*response_index + 1..segment_end]
+                .iter()
+                .filter(|message| {
+                    matches!(message.role, MessageRole::Thinking | MessageRole::Tool)
+                });
+            activity_after_response.next().is_some_and(|message| {
+                message.is_compaction() && activity_after_response.all(Message::is_compaction)
+            })
+        });
+        if let Some(response_index) = response_before_trailing_compaction {
+            let mut has_pre_response_group = false;
+            if let Some(last_pre_response_activity) = harness.messages
+                [user_index + 1..response_index]
+                .iter()
+                .rposition(|message| {
+                    matches!(message.role, MessageRole::Thinking | MessageRole::Tool)
+                })
+                .map(|offset| user_index + 1 + offset)
+            {
+                groups.push(WorkGroupSummary::from_range(
+                    harness,
+                    group_id.clone(),
+                    user_index + 1..last_pre_response_activity + 1,
+                    false,
+                    turn,
+                    latest_group,
+                ));
+                has_pre_response_group = true;
+            }
+
+            let mut compaction_index = response_index + 1;
+            let mut compaction_ordinal = 0;
+            while compaction_index < segment_end {
+                if !harness.messages[compaction_index].is_compaction() {
+                    compaction_index += 1;
+                    continue;
+                }
+                let range_start = compaction_index;
+                while compaction_index < segment_end
+                    && harness.messages[compaction_index].is_compaction()
+                {
+                    compaction_index += 1;
+                }
+                let compaction_running = running && compaction_index - 1 == last_activity;
+                let id = if !has_pre_response_group && compaction_ordinal == 0 {
+                    group_id.clone()
+                } else {
+                    format!("{group_id}:compaction:{range_start}")
+                };
+                groups.push(WorkGroupSummary::from_range(
+                    harness,
+                    id,
+                    range_start..compaction_index,
+                    compaction_running,
+                    None,
+                    false,
+                ));
+                compaction_ordinal += 1;
+            }
+            continue;
+        }
+
         groups.push(WorkGroupSummary::from_range(
             harness,
-            work_group_id(user, user_index),
-            range_start..last_activity + 1,
+            group_id,
+            user_index + 1..last_activity + 1,
             running,
             turn,
             latest_group,
@@ -470,7 +526,42 @@ mod tests {
     }
 
     #[test]
-    fn compaction_after_a_response_does_not_hide_the_response() {
+    fn compaction_after_a_response_does_not_hide_the_work_trail_or_response() {
+        let mut harness = Harness::new(1, 2, "task".into(), 1);
+        harness.status = HarnessStatus::Idle;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "prompt"),
+            Message::new(MessageRole::Thinking, "plan"),
+            Message::tool("read src/main.rs", None, false, false),
+            Message::new(MessageRole::Assistant, "done"),
+            Message::compaction(None, Some("summary"), false),
+        ];
+        harness.messages[2].tool_name = Some("read".into());
+
+        let cache = ConversationRenderCache::build(&harness);
+        assert_eq!(cache.items.len(), 4);
+        let ConversationRenderItem::WorkGroup(work_group) = &cache.items[1] else {
+            panic!("missing pre-response work group");
+        };
+        assert_eq!(work_group.first_message_index, 1);
+        assert_eq!(work_group.last_message_index, 2);
+        assert!(matches!(
+            cache.items[2],
+            ConversationRenderItem::Message {
+                message_index: 3,
+                ..
+            }
+        ));
+        let ConversationRenderItem::WorkGroup(compaction_group) = &cache.items[3] else {
+            panic!("missing compaction group");
+        };
+        assert_eq!(compaction_group.first_message_index, 4);
+        assert_eq!(compaction_group.last_message_index, 4);
+        assert_ne!(work_group.id, compaction_group.id);
+    }
+
+    #[test]
+    fn compaction_after_a_response_without_prior_activity_is_its_own_group() {
         let mut harness = Harness::new(1, 2, "task".into(), 1);
         harness.status = HarnessStatus::Idle;
         harness.messages = vec![
@@ -480,6 +571,7 @@ mod tests {
         ];
 
         let cache = ConversationRenderCache::build(&harness);
+        assert_eq!(cache.items.len(), 3);
         assert!(matches!(
             cache.items[1],
             ConversationRenderItem::Message {
@@ -491,6 +583,7 @@ mod tests {
             panic!("missing compaction group");
         };
         assert_eq!(group.first_message_index, 2);
+        assert_eq!(group.last_message_index, 2);
     }
 
     #[test]
