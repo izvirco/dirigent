@@ -58,6 +58,8 @@ use crate::{
 
 const STARTUP_MODEL_REQUEST_ID: &str = "dirigent-startup-model";
 const STARTUP_THINKING_REQUEST_ID: &str = "dirigent-startup-thinking";
+const UI_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+const UI_STALL_WARNING_THRESHOLD: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogKind {
@@ -600,6 +602,22 @@ impl Dirigent {
             }
             InputEvent::Changed => {}
             _ => {}
+        })
+        .detach();
+
+        cx.spawn(async move |_, cx| {
+            loop {
+                let expected_at = Instant::now() + UI_HEARTBEAT_INTERVAL;
+                cx.background_executor().timer(UI_HEARTBEAT_INTERVAL).await;
+                let delay = Instant::now().saturating_duration_since(expected_at);
+                if delay >= UI_STALL_WARNING_THRESHOLD {
+                    tracing::warn!(
+                        delay_ms = delay.as_millis().min(u64::MAX as u128) as u64,
+                        interval_ms = UI_HEARTBEAT_INTERVAL.as_millis() as u64,
+                        "UI event loop heartbeat delayed"
+                    );
+                }
+            }
         })
         .detach();
 

@@ -1,5 +1,94 @@
 use super::*;
 
+const SLOW_MESSAGE_SEND_STAGE: Duration = Duration::from_millis(250);
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn warn_if_slow(harness_id: Id, operation: &'static str, stage: &'static str, elapsed: Duration) {
+    if elapsed >= SLOW_MESSAGE_SEND_STAGE {
+        tracing::warn!(
+            harness_id,
+            operation,
+            stage,
+            elapsed_ms = duration_ms(elapsed),
+            "slow user message send stage"
+        );
+    }
+}
+
+#[derive(Default)]
+struct ComposerSendTimings {
+    read_input: Duration,
+    unarchive: Duration,
+    process_start: Duration,
+    vcs_refresh: Duration,
+    read_images: Duration,
+    conversation_update: Duration,
+    prompt_send: Duration,
+    input_clear: Duration,
+    draft_cache: Duration,
+    workspace_provision: Duration,
+    notify: Duration,
+}
+
+impl ComposerSendTimings {
+    fn log(
+        &self,
+        harness: &Harness,
+        outcome: &'static str,
+        total: Duration,
+        prompt_bytes: usize,
+        image_count: usize,
+        was_working: bool,
+    ) {
+        let harness_id = harness.id;
+        let stages = [
+            ("read_input", self.read_input),
+            ("unarchive", self.unarchive),
+            ("process_start", self.process_start),
+            ("vcs_refresh", self.vcs_refresh),
+            ("read_images", self.read_images),
+            ("conversation_update", self.conversation_update),
+            ("prompt_send", self.prompt_send),
+            ("input_clear", self.input_clear),
+            ("draft_cache", self.draft_cache),
+            ("workspace_provision", self.workspace_provision),
+            ("notify", self.notify),
+        ];
+        for (stage, elapsed) in stages {
+            warn_if_slow(harness_id, "composer_send", stage, elapsed);
+        }
+        let measured = stages
+            .iter()
+            .fold(Duration::ZERO, |total, (_, elapsed)| total + *elapsed);
+        tracing::info!(
+            harness_id,
+            outcome,
+            total_ms = duration_ms(total),
+            read_input_ms = duration_ms(self.read_input),
+            unarchive_ms = duration_ms(self.unarchive),
+            process_start_ms = duration_ms(self.process_start),
+            vcs_refresh_ms = duration_ms(self.vcs_refresh),
+            read_images_ms = duration_ms(self.read_images),
+            conversation_update_ms = duration_ms(self.conversation_update),
+            prompt_send_ms = duration_ms(self.prompt_send),
+            input_clear_ms = duration_ms(self.input_clear),
+            draft_cache_ms = duration_ms(self.draft_cache),
+            workspace_provision_ms = duration_ms(self.workspace_provision),
+            notify_ms = duration_ms(self.notify),
+            other_ms = duration_ms(total.saturating_sub(measured)),
+            prompt_bytes,
+            image_count,
+            message_count = harness.messages.len(),
+            queued_message_count = harness.queued_messages.len(),
+            was_working,
+            "user message send timing"
+        );
+    }
+}
+
 pub(super) fn reasoning_options_for_model(
     project_id: Option<Id>,
     current_model: &str,
@@ -497,18 +586,45 @@ impl Dirigent {
         images: Vec<AttachedImage>,
         steer_if_working: bool,
     ) {
+        let started = Instant::now();
         let harness_id = self.harnesses[index].id;
+        let prompt_bytes = prompt.len();
+        let requested_image_count = images.len();
+        let message_count = self.harnesses[index].messages.len();
+        let queued_message_count = self.harnesses[index].queued_messages.len();
+        let turn_diff_capture_attempted = self.harnesses[index].active_turn_diff.is_none();
+
+        let image_started = Instant::now();
         let mut image_payloads = Vec::with_capacity(images.len());
         for attachment in images {
             let source = format!("composer attachment {}", attachment.label);
             let image = match normalize_for_harness(attachment.image, &source) {
                 Ok(image) => image,
                 Err(error) => {
+                    let image_prepare = image_started.elapsed();
+                    let total = started.elapsed();
                     tracing::error!(
                         error = %error,
                         harness_id,
                         label = attachment.label,
                         "could not prepare image attachment for prompt"
+                    );
+                    warn_if_slow(harness_id, "prompt_command", "image_prepare", image_prepare);
+                    tracing::info!(
+                        harness_id,
+                        outcome = "image_error",
+                        total_ms = duration_ms(total),
+                        image_prepare_ms = duration_ms(image_prepare),
+                        turn_diff_capture_ms = 0_u64,
+                        command_build_ms = 0_u64,
+                        process_send_ms = 0_u64,
+                        prompt_bytes,
+                        requested_image_count,
+                        encoded_image_count = image_payloads.len(),
+                        message_count,
+                        queued_message_count,
+                        turn_diff_capture_attempted,
+                        "prompt command timing"
                     );
                     self.banner = Some(format!("Could not attach {}: {error}", attachment.label));
                     return;
@@ -527,13 +643,13 @@ impl Dirigent {
                 "mimeType":image.format.mime_type(),
             }));
         }
-        tracing::info!(
-            harness_id,
-            image_count = image_payloads.len(),
-            prompt_bytes = prompt.len(),
-            "sending prompt command"
-        );
+        let image_prepare = image_started.elapsed();
+
+        let turn_diff_started = Instant::now();
         self.begin_turn_diff(index, &prompt);
+        let turn_diff_capture = turn_diff_started.elapsed();
+
+        let command_started = Instant::now();
         let mut command = json!({"type":"prompt","message":prompt});
         if !image_payloads.is_empty() {
             command["images"] = Value::Array(image_payloads);
@@ -541,11 +657,44 @@ impl Dirigent {
         if steer_if_working && self.harnesses[index].status == HarnessStatus::Working {
             command["streamingBehavior"] = Value::String("steer".into());
         }
-        if self.send_value(index, command) {
+        let command_build = command_started.elapsed();
+
+        let process_send_started = Instant::now();
+        let sent = self.send_value(index, command);
+        let process_send = process_send_started.elapsed();
+        if sent {
             self.mark_harness_working(index);
         }
+        let total = started.elapsed();
+
+        for (stage, elapsed) in [
+            ("image_prepare", image_prepare),
+            ("turn_diff_capture", turn_diff_capture),
+            ("command_build", command_build),
+            ("process_send", process_send),
+        ] {
+            warn_if_slow(harness_id, "prompt_command", stage, elapsed);
+        }
+        tracing::info!(
+            harness_id,
+            outcome = if sent { "sent" } else { "send_error" },
+            total_ms = duration_ms(total),
+            image_prepare_ms = duration_ms(image_prepare),
+            turn_diff_capture_ms = duration_ms(turn_diff_capture),
+            command_build_ms = duration_ms(command_build),
+            process_send_ms = duration_ms(process_send),
+            prompt_bytes,
+            requested_image_count,
+            encoded_image_count = requested_image_count,
+            message_count,
+            queued_message_count,
+            turn_diff_capture_attempted,
+            "prompt command timing"
+        );
     }
     pub(crate) fn send_composer(&mut self, cx: &mut Context<Self>) {
+        let started = Instant::now();
+        let mut timings = ComposerSendTimings::default();
         let Some(id) = self.selected_harness else {
             return;
         };
@@ -568,23 +717,38 @@ impl Dirigent {
             cx.notify();
             return;
         }
+        let stage_started = Instant::now();
         let message = input.read(cx).text().trim().to_string();
+        timings.read_input = stage_started.elapsed();
         if message.is_empty() {
             return;
         }
+        let prompt_bytes = message.len();
+        let was_working = self
+            .harnesses
+            .iter()
+            .find(|harness| harness.id == id)
+            .is_some_and(|harness| harness.status == HarnessStatus::Working);
         if self
             .harnesses
             .iter()
             .find(|harness| harness.id == id)
             .is_some_and(|harness| harness.archived)
         {
+            let stage_started = Instant::now();
             self.set_harness_archived(id, false);
+            timings.unarchive = stage_started.elapsed();
         }
         if let Some(source) = self.pending_workspace_sources.remove(&id) {
+            let stage_started = Instant::now();
             let images = input.read(cx).images();
+            timings.read_images = stage_started.elapsed();
+            let image_count = images.len();
             let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
                 return;
             };
+
+            let stage_started = Instant::now();
             self.harnesses[index].pending_initial_prompt = Some((message.clone(), images.clone()));
             self.harnesses[index]
                 .messages
@@ -593,27 +757,63 @@ impl Dirigent {
                     images.iter().map(|image| image.image.clone()).collect(),
                 ));
             self.sync_conversation_list(index, None);
+            timings.conversation_update = stage_started.elapsed();
+
+            let stage_started = Instant::now();
             input.update(cx, |input, cx| input.clear(cx));
+            timings.input_clear = stage_started.elapsed();
             self.harnesses[index].composer_draft.clear();
             self.harnesses[index].composer_draft_images.clear();
+            let stage_started = Instant::now();
             self.cache_harness_draft(index, true);
+            timings.draft_cache = stage_started.elapsed();
             self.composer_dropdown = None;
+            let stage_started = Instant::now();
             self.provision_harness_workspace(id, source);
+            timings.workspace_provision = stage_started.elapsed();
+            let stage_started = Instant::now();
             cx.notify();
+            timings.notify = stage_started.elapsed();
+            timings.log(
+                &self.harnesses[index],
+                "workspace_provisioning",
+                started.elapsed(),
+                prompt_bytes,
+                image_count,
+                was_working,
+            );
             return;
         }
+
+        let stage_started = Instant::now();
         self.start_harness(id, None);
+        timings.process_start = stage_started.elapsed();
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
         if self.harnesses[index].process.is_none() {
+            timings.log(
+                &self.harnesses[index],
+                "process_unavailable",
+                started.elapsed(),
+                prompt_bytes,
+                0,
+                was_working,
+            );
             return;
         }
+
+        let stage_started = Instant::now();
         if self.refresh_harness_vcs_label(index) {
             self.persist();
         }
+        timings.vcs_refresh = stage_started.elapsed();
+        let stage_started = Instant::now();
         let images = input.read(cx).images();
+        timings.read_images = stage_started.elapsed();
+        let image_count = images.len();
         if self.harnesses[index].startup_settings_pending {
+            let stage_started = Instant::now();
             self.harnesses[index].pending_initial_prompt = Some((message.clone(), images.clone()));
             self.harnesses[index]
                 .messages
@@ -622,14 +822,32 @@ impl Dirigent {
                     images.iter().map(|image| image.image.clone()).collect(),
                 ));
             self.mark_harness_working(index);
+            timings.conversation_update = stage_started.elapsed();
+
+            let stage_started = Instant::now();
             input.update(cx, |input, cx| input.clear(cx));
+            timings.input_clear = stage_started.elapsed();
             self.harnesses[index].composer_draft.clear();
             self.harnesses[index].composer_draft_images.clear();
+            let stage_started = Instant::now();
             self.cache_harness_draft(index, true);
+            timings.draft_cache = stage_started.elapsed();
+            let stage_started = Instant::now();
             cx.notify();
+            timings.notify = stage_started.elapsed();
+            timings.log(
+                &self.harnesses[index],
+                "queued_during_startup",
+                started.elapsed(),
+                prompt_bytes,
+                image_count,
+                was_working,
+            );
             return;
         }
+
         let steering = self.harnesses[index].status == HarnessStatus::Working;
+        let stage_started = Instant::now();
         let mut user_message = Message::user_with_images(
             message.clone(),
             images.iter().map(|image| image.image.clone()).collect(),
@@ -643,12 +861,30 @@ impl Dirigent {
         self.sync_conversation_list(index, None);
         self.conversation_list.scroll_to_end();
         self.composer_dropdown = None;
+        timings.conversation_update = stage_started.elapsed();
+
+        let stage_started = Instant::now();
         self.send_prompt_command(index, message, images, true);
+        timings.prompt_send = stage_started.elapsed();
+        let stage_started = Instant::now();
         input.update(cx, |input, cx| input.clear(cx));
+        timings.input_clear = stage_started.elapsed();
         self.harnesses[index].composer_draft.clear();
         self.harnesses[index].composer_draft_images.clear();
+        let stage_started = Instant::now();
         self.cache_harness_draft(index, true);
+        timings.draft_cache = stage_started.elapsed();
+        let stage_started = Instant::now();
         cx.notify();
+        timings.notify = stage_started.elapsed();
+        timings.log(
+            &self.harnesses[index],
+            if steering { "steered" } else { "sent" },
+            started.elapsed(),
+            prompt_bytes,
+            image_count,
+            was_working,
+        );
     }
     pub(crate) fn abort_selected(&mut self) {
         if let Some(index) = self
