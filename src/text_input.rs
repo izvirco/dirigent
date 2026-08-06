@@ -651,7 +651,11 @@ impl TextInput {
             "enter" => cx.emit(InputEvent::Submit),
             "backspace" => {
                 if self.selection.is_empty() && self.cursor > 0 {
-                    let previous = self.previous_boundary(self.cursor);
+                    let previous = if modifiers.control {
+                        self.previous_word_boundary(self.cursor)
+                    } else {
+                        self.previous_boundary(self.cursor)
+                    };
                     self.selection = previous..self.cursor;
                 }
                 if !self.selection.is_empty() {
