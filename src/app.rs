@@ -194,6 +194,13 @@ struct PendingFork {
     position: &'static str,
 }
 
+struct PendingDiffPrompt {
+    job_id: u64,
+    process_generation: u64,
+    commands: Vec<Value>,
+    started_at: Instant,
+}
+
 pub(crate) struct PendingDialog {
     pub(crate) harness_id: Id,
     pub(crate) request_id: String,
@@ -425,6 +432,11 @@ pub(crate) struct Dirigent {
     runtime_events: Sender<RuntimeEvent>,
     workspace_events: Sender<WorkspaceEvent>,
     title_events: Sender<TitleGenerationEvent>,
+    diff_tasks: Sender<self::diff::DiffTask>,
+    pending_diff_prompts: HashMap<Id, PendingDiffPrompt>,
+    pending_diff_previews: HashMap<Id, u64>,
+    dirty_diff_previews: HashSet<Id>,
+    next_diff_job_id: u64,
     title_processes: HashMap<Id, TitleProcess>,
 }
 
@@ -675,6 +687,27 @@ impl Dirigent {
                 if this
                     .update(cx, |this, cx| {
                         this.handle_title_generation_event(event);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        let (diff_task_tx, diff_task_rx) = async_channel::unbounded();
+        let (diff_result_tx, diff_result_rx) = async_channel::unbounded();
+        std::thread::Builder::new()
+            .name("dirigent-diff".into())
+            .spawn(move || self::diff::run_diff_worker(diff_task_rx, diff_result_tx))
+            .expect("could not start diff worker");
+        cx.spawn(async move |this, cx| {
+            while let Ok(result) = diff_result_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.handle_diff_task_result(result);
                         cx.notify();
                     })
                     .is_err()
@@ -1060,6 +1093,11 @@ impl Dirigent {
             runtime_events: event_tx,
             workspace_events: workspace_event_tx,
             title_events: title_event_tx,
+            diff_tasks: diff_task_tx,
+            pending_diff_prompts: HashMap::new(),
+            pending_diff_previews: HashMap::new(),
+            dirty_diff_previews: HashSet::new(),
+            next_diff_job_id: 1,
             title_processes: HashMap::new(),
         };
         if let Some(project_id) = selected_project {

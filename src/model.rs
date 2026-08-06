@@ -619,8 +619,10 @@ pub(crate) struct Harness {
     pub(crate) workspace_id: Option<String>,
     pub(crate) last_vcs_label: Option<String>,
     pub(crate) turn_diffs: Vec<TurnDiff>,
+    pub(crate) next_turn_diff_id: u64,
     pub(crate) active_turn_diff: Option<ActiveTurnDiff>,
     pub(crate) active_turn_preview: Option<TurnDiff>,
+    pub(crate) turn_diff_unavailable: bool,
     pub(crate) work_group_expansion: HashMap<String, bool>,
 }
 
@@ -662,8 +664,10 @@ impl Harness {
             workspace_id: None,
             last_vcs_label: None,
             turn_diffs: Vec::new(),
+            next_turn_diff_id: 1,
             active_turn_diff: None,
             active_turn_preview: None,
+            turn_diff_unavailable: false,
             work_group_expansion: HashMap::new(),
         }
     }
@@ -746,9 +750,11 @@ impl Harness {
             nix_restart_pending: false,
             workspace_id,
             last_vcs_label,
+            next_turn_diff_id: turn_diffs.iter().map(|turn| turn.id).max().unwrap_or(0) + 1,
             turn_diffs,
             active_turn_diff: None,
             active_turn_preview: None,
+            turn_diff_unavailable: false,
             work_group_expansion,
         }
     }

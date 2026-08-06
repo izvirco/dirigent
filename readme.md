@@ -8,7 +8,7 @@ Dirigent requires Pi 0.82.1 or newer. It launches Pi with a bundled, private ext
 
 Open the right-hand Changes sidebar from the thread or with `Space d`. Dirigent freezes the net workspace diff when each agent turn settles, supports unified and split views, and keeps completed turn diffs across restarts. Select diff text and use **Add reference to composer** to insert an editable code-review reference directly into the next prompt.
 
-Diff capture respects repository ignore files and excludes common generated directories. It records workspace changes made while a turn is running; concurrent edits made by another program during that interval are therefore included as well.
+Turn diffs require a Git or JJ repository and respect its ignored-file rules. They record workspace changes made while a turn is running; concurrent edits made by another program during that interval are therefore included as well.
 
 ## Linux (Nix)
 

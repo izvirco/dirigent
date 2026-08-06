@@ -196,7 +196,14 @@ fn probe_git(project_path: &Path) -> Result<Option<RepositorySnapshot>, String> 
 
 pub(crate) fn probe_repository(project_path: &Path) -> Result<Option<RepositorySnapshot>, String> {
     let jj = probe_jj(project_path)?;
-    let git = probe_git(project_path)?;
+    let git = match probe_git(project_path) {
+        Ok(git) => git,
+        Err(error) if jj.is_some() => {
+            tracing::debug!(error = %error, path = %project_path.display(), "ignoring Git probe failure inside JJ repository");
+            None
+        }
+        Err(error) => return Err(error),
+    };
     Ok(match (jj, git) {
         (Some(jj), Some(git)) if jj.repository_root == git.repository_root => Some(jj),
         (Some(jj), Some(git)) => {

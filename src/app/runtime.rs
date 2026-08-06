@@ -2,6 +2,7 @@ use super::*;
 
 impl Dirigent {
     pub(super) fn fail_harness(&mut self, index: usize, error: String) {
+        self.pending_diff_prompts.remove(&self.harnesses[index].id);
         self.finish_turn_diff(index, TurnDiffStatus::Failed);
         self.refresh_harness_vcs_label(index);
         tracing::error!(
@@ -64,6 +65,7 @@ impl Dirigent {
         {
             self.pending_dialog = None;
         }
+        self.pending_diff_prompts.remove(&harness_id);
         self.finish_turn_diff(index, TurnDiffStatus::Interrupted);
         self.harnesses[index].process.take();
         self.harnesses[index].retry_status = None;

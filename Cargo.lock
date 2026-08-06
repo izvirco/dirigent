@@ -1356,7 +1356,6 @@ dependencies = [
  "fff-search",
  "gpui",
  "gpui_platform",
- "ignore",
  "image",
  "notify 8.2.0",
  "pulldown-cmark",

@@ -771,7 +771,7 @@ impl DiffRenderCache {
 
 impl Dirigent {
     pub(super) fn render_changes_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
-        if self.diff_sidebar_open {
+        if self.diff_sidebar_open || !self.selected_harness_supports_turn_diffs() {
             return div().into_any_element();
         }
         div()

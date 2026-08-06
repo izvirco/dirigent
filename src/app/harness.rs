@@ -645,8 +645,16 @@ impl Dirigent {
         }
         let image_prepare = image_started.elapsed();
 
+        let baseline_already_pending = self.pending_diff_prompts.contains_key(&harness_id);
         let turn_diff_started = Instant::now();
-        self.begin_turn_diff(index, &prompt);
+        let baseline_job = if self.harnesses[index].active_turn_diff.is_none()
+            && !self.harnesses[index].turn_diff_unavailable
+            && !baseline_already_pending
+        {
+            self.queue_turn_diff_baseline(index, &prompt, true)
+        } else {
+            None
+        };
         let turn_diff_capture = turn_diff_started.elapsed();
 
         let command_started = Instant::now();
@@ -660,7 +668,23 @@ impl Dirigent {
         let command_build = command_started.elapsed();
 
         let process_send_started = Instant::now();
-        let sent = self.send_value(index, command);
+        let (sent, queued_for_baseline) = if let Some(job_id) = baseline_job {
+            self.pending_diff_prompts.insert(
+                harness_id,
+                PendingDiffPrompt {
+                    job_id,
+                    process_generation: self.harnesses[index].process_generation,
+                    commands: vec![command],
+                    started_at: started,
+                },
+            );
+            (true, true)
+        } else if let Some(pending) = self.pending_diff_prompts.get_mut(&harness_id) {
+            pending.commands.push(command);
+            (true, true)
+        } else {
+            (self.send_value(index, command), false)
+        };
         let process_send = process_send_started.elapsed();
         if sent {
             self.mark_harness_working(index);
@@ -677,7 +701,13 @@ impl Dirigent {
         }
         tracing::info!(
             harness_id,
-            outcome = if sent { "sent" } else { "send_error" },
+            outcome = if queued_for_baseline {
+                "queued_for_baseline"
+            } else if sent {
+                "sent"
+            } else {
+                "send_error"
+            },
             total_ms = duration_ms(total),
             image_prepare_ms = duration_ms(image_prepare),
             turn_diff_capture_ms = duration_ms(turn_diff_capture),
@@ -893,6 +923,7 @@ impl Dirigent {
             && self.send_value(index, json!({"type":"abort"}))
         {
             self.mark_turn_diff_status(index, TurnDiffStatus::Aborted);
+            self.pending_diff_prompts.remove(&self.harnesses[index].id);
             self.harnesses[index].startup_settings_pending = false;
             self.harnesses[index].pending_initial_prompt = None;
             self.harnesses[index].status = HarnessStatus::Idle;
