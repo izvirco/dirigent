@@ -1084,6 +1084,11 @@ impl Dirigent {
     }
 
     fn refresh_harness_order(&mut self, index: usize) {
+        // Starting an archived thread to display it can emit runtime lifecycle events.
+        // Those events are not new activity and must not reorder the archive.
+        if self.harnesses[index].archived {
+            return;
+        }
         self.harnesses[index].sidebar_order = self.allocate_sidebar_order();
     }
 

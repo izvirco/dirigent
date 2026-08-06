@@ -184,7 +184,9 @@ impl Dirigent {
             return;
         }
         let project_id = self.harnesses[index].project_id;
+        let sidebar_order = self.allocate_sidebar_order();
         self.harnesses[index].archived = archived;
+        self.harnesses[index].sidebar_order = sidebar_order;
         self.harnesses[index].attention_required = false;
         self.harnesses[index].run_started_at = None;
         if archived {
@@ -192,7 +194,6 @@ impl Dirigent {
             self.harnesses[index].process.take();
             self.harnesses[index].status = HarnessStatus::Stopped;
         }
-        self.refresh_harness_order(index);
         self.sidebar_menu = None;
         if archived && self.selected_harness == Some(id) {
             self.select_after_harness_hidden(project_id);
