@@ -182,7 +182,11 @@ impl Dirigent {
             .into_any_element()
     }
 
-    pub(crate) fn render_center(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_center(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .relative()
             .min_w(px(420.0))

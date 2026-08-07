@@ -252,6 +252,7 @@ impl Dirigent {
         {
             self.conversation_list
                 .remeasure_items(indicator..indicator + 1);
+            self.conversation_render_cache.invalidate_ruler_layout();
         }
     }
     pub(super) fn handle_queue_update(&mut self, index: usize, value: &Value) {

@@ -132,8 +132,14 @@ impl Dirigent {
         self.composer_dropdown = None;
         self.focus_input = true;
         self.keyboard_mode = KeyboardMode::Input;
-        self.conversation_list
-            .remeasure_items(message_index..message_index + 1);
+        if let Some(render_index) = self
+            .conversation_render_cache
+            .message_render_item_index(message_index)
+        {
+            self.conversation_list
+                .remeasure_items(render_index..render_index + 1);
+            self.conversation_render_cache.invalidate_ruler_layout();
+        }
         cx.notify();
     }
     pub(crate) fn cancel_message_edit(&mut self, cx: &mut Context<Self>) {
@@ -145,8 +151,14 @@ impl Dirigent {
             return;
         }
         self.composer_dropdown = None;
-        self.conversation_list
-            .remeasure_items(edit.message_index..edit.message_index + 1);
+        if let Some(render_index) = self
+            .conversation_render_cache
+            .message_render_item_index(edit.message_index)
+        {
+            self.conversation_list
+                .remeasure_items(render_index..render_index + 1);
+            self.conversation_render_cache.invalidate_ruler_layout();
+        }
         cx.notify();
     }
     pub(crate) fn select_edit_model(&mut self, model: String) {

@@ -388,6 +388,7 @@ pub(crate) struct Dirigent {
     conversation_list_queued_count: usize,
     conversation_list_working: bool,
     pub(crate) conversation_scroll_dragging: bool,
+    pub(crate) conversation_scroll_drag_offset: f32,
     pub(crate) model_picker_scroll: ScrollHandle,
     pub(crate) composer_dropdown: Option<ComposerDropdown>,
     pub(crate) editing_message: Option<MessageEdit>,
@@ -947,7 +948,8 @@ impl Dirigent {
             ListAlignment::Bottom,
             px(180.0),
         )
-        .with_uniform_item_height(px(conversation_render_cache.item_height_hint()));
+        .with_uniform_item_height(px(conversation_render_cache.item_height_hint()))
+        .measure_all();
         conversation_list.set_follow_mode(FollowMode::Tail);
         let entity = cx.entity();
         conversation_list.set_scroll_handler(move |_, _, cx| {
@@ -1050,6 +1052,7 @@ impl Dirigent {
             conversation_list_queued_count,
             conversation_list_working,
             conversation_scroll_dragging: false,
+            conversation_scroll_drag_offset: 0.0,
             model_picker_scroll: ScrollHandle::new(),
             composer_dropdown: None,
             editing_message: None,
@@ -1173,11 +1176,9 @@ impl Dirigent {
                 message.refresh_theme_colors();
             }
         }
-        let conversation_items = self.conversation_list_message_count
-            + self.conversation_list_queued_count
-            + usize::from(self.conversation_list_working);
         self.conversation_list
-            .remeasure_items(0..conversation_items);
+            .remeasure_items(0..self.conversation_render_cache.len());
+        self.conversation_render_cache.invalidate_ruler_layout();
         self.diff_display_key = None;
 
         let inputs = self.composer_inputs.values().cloned().chain([

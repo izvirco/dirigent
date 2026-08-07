@@ -12,7 +12,7 @@ use std::{ops::Range, time::Duration};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, FollowMode, HighlightStyle, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle,
+    ListOffset, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle,
     SharedString, StyledImage, StyledText, Transformation, Window, canvas, deferred, div, fill,
     img, list, point, prelude::*, px, radians, relative, size, svg,
 };
@@ -77,6 +77,15 @@ fn working_orange_range(delta: f32, text: &str) -> Option<Range<usize>> {
     (!range.is_empty()).then_some(range)
 }
 
+fn ruler_scroll_fraction(pointer: f32, grab_offset: f32, viewport_fraction: f32) -> f32 {
+    let travel = 1.0 - viewport_fraction;
+    if travel > 0.0 {
+        ((pointer - grab_offset) / travel).clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 fn format_retry_status(retry: &RetryStatus) -> String {
     if retry.waiting {
         let seconds = retry.delay_ms as f64 / 1_000.0;
@@ -123,7 +132,13 @@ impl Dirigent {
             )
         };
         if !old_range.is_empty() || new_count > 0 {
+            let inserted_start = old_range.start;
             self.conversation_list.splice(old_range, new_count);
+            if new_count > 0 {
+                // `measure_all` only runs again after the measuring behavior is reset.
+                self.conversation_list
+                    .remeasure_items(inserted_start..inserted_start + new_count);
+            }
         }
         for range in remeasure_ranges {
             self.conversation_list.remeasure_items(range);
@@ -186,11 +201,45 @@ impl Dirigent {
         self.sync_conversation_render_cache(rebuild_from_message);
     }
 
-    fn render_conversation_ruler(
-        &self,
-        messages: &[Message],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn refresh_conversation_ruler_layout(&mut self) {
+        if !self.conversation_render_cache.ruler_layout_pending {
+            return;
+        }
+        let item_count = self.conversation_render_cache.len();
+        if item_count == 0 {
+            self.conversation_render_cache.ruler_item_heights.clear();
+            self.conversation_render_cache.ruler_layout_pending = false;
+            return;
+        }
+
+        // `measure_all` keeps exact item sizes inside ListState. Temporarily anchor its
+        // coordinate queries at the top so bounds_for_item can expose every measured size,
+        // then restore the user's logical position before this frame is laid out.
+        let original_scroll_top = self.conversation_list.logical_scroll_top();
+        let was_following_tail = self.conversation_list.is_following_tail();
+        self.conversation_list.scroll_to(ListOffset::default());
+        let measured_heights = (0..item_count)
+            .map(|index| {
+                self.conversation_list
+                    .bounds_for_item(index)
+                    .map(|bounds| bounds.size.height.as_f32())
+            })
+            .collect::<Option<Vec<_>>>();
+        if was_following_tail {
+            self.conversation_list.set_follow_mode(FollowMode::Tail);
+        } else {
+            self.conversation_list.scroll_to(original_scroll_top);
+        }
+
+        if let Some(measured_heights) = measured_heights {
+            self.conversation_render_cache.ruler_item_heights = measured_heights;
+            self.conversation_render_cache.ruler_layout_width =
+                self.conversation_list.viewport_bounds().size.width.as_f32();
+            self.conversation_render_cache.ruler_layout_pending = false;
+        }
+    }
+
+    fn render_conversation_ruler(&self, cx: &mut Context<Self>) -> AnyElement {
         let max_offset = self.conversation_list.max_offset_for_scrollbar().y.as_f32();
         let viewport = self
             .conversation_list
@@ -216,8 +265,26 @@ impl Dirigent {
             0.0
         };
         let viewport_top = (1.0 - viewport_fraction) * scroll_fraction;
-        let message_count = messages.len().max(1) as f32;
-        let markers = self.conversation_render_cache.ruler_markers.clone();
+        let item_heights = &self.conversation_render_cache.ruler_item_heights;
+        let total_height = item_heights.iter().sum::<f32>().max(1.0);
+        let mut item_top = Vec::with_capacity(item_heights.len());
+        let mut height_before = 0.0;
+        for height in item_heights {
+            item_top.push(height_before / total_height);
+            height_before += height;
+        }
+        let markers = self
+            .conversation_render_cache
+            .ruler_markers
+            .iter()
+            .filter_map(|marker| {
+                let start = *item_top.get(marker.render_item_index)?;
+                let height = *item_heights.get(marker.render_item_index)? / total_height;
+                Some((*marker, start, (start + height).min(1.0)))
+            })
+            .collect::<Vec<_>>();
+        let request_layout_refresh = self.conversation_render_cache.ruler_layout_pending;
+        let ruler_layout_width = self.conversation_render_cache.ruler_layout_width;
         let entity = cx.entity();
 
         div()
@@ -230,7 +297,28 @@ impl Dirigent {
             .overflow_hidden()
             .child(
                 canvas(
-                    |_, _, _| (),
+                    {
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            let viewport_width = entity
+                                .read(cx)
+                                .conversation_list
+                                .viewport_bounds()
+                                .size
+                                .width
+                                .as_f32();
+                            let width_changed = ruler_layout_width > 0.0
+                                && (viewport_width - ruler_layout_width).abs() > 0.5;
+                            if request_layout_refresh || width_changed {
+                                cx.defer(move |cx| {
+                                    entity.update(cx, |this, cx| {
+                                        this.conversation_render_cache.invalidate_ruler_layout();
+                                        cx.notify();
+                                    });
+                                });
+                            }
+                        }
+                    },
                     move |track_bounds, _, window, _| {
                         window.paint_layer(track_bounds, |window| {
                             let orange_color = rgb(orange());
@@ -252,34 +340,41 @@ impl Dirigent {
                                 ));
                             }
 
-                            for marker in markers.iter() {
-                                let fraction = (marker.message_index as f32 + 0.5) / message_count;
-                                let (left, width, color) = if marker.is_compaction {
-                                    (2.0, 14.0, compaction_color)
-                                } else {
-                                    let color = match marker.role {
-                                        MessageRole::User => user_color,
-                                        MessageRole::Assistant => assistant_color,
-                                        _ => continue,
-                                    };
-                                    (6.0, 6.0, color)
-                                };
-                                let marker_quad = fill(
-                                    gpui::Bounds::new(
-                                        point(
-                                            track_bounds.left() + px(left),
-                                            track_bounds.top()
-                                                + track_bounds.size.height * fraction,
+                            for (marker, start, end) in markers.iter().copied() {
+                                if marker.is_compaction {
+                                    let center = (start + end) / 2.0;
+                                    window.paint_quad(fill(
+                                        gpui::Bounds::new(
+                                            point(
+                                                track_bounds.left() + px(2.0),
+                                                track_bounds.top()
+                                                    + track_bounds.size.height * center
+                                                    - px(1.5),
+                                            ),
+                                            size(px(14.0), px(3.0)),
                                         ),
-                                        size(px(width), px(6.0)),
-                                    ),
-                                    color,
+                                        compaction_color,
+                                    ));
+                                    continue;
+                                }
+
+                                let (left, color) = match marker.role {
+                                    MessageRole::User => (4.0, user_color),
+                                    MessageRole::Assistant => (11.0, assistant_color),
+                                    _ => continue,
+                                };
+                                let top = track_bounds.top() + track_bounds.size.height * start;
+                                let bottom = track_bounds.top() + track_bounds.size.height * end;
+                                window.paint_quad(
+                                    fill(
+                                        gpui::Bounds::new(
+                                            point(track_bounds.left() + px(left), top),
+                                            size(px(3.0), (bottom - top).max(px(3.0))),
+                                        ),
+                                        color,
+                                    )
+                                    .corner_radii(px(1.5)),
                                 );
-                                window.paint_quad(if marker.is_compaction {
-                                    marker_quad
-                                } else {
-                                    marker_quad.corner_radii(px(3.0))
-                                });
                             }
 
                             let viewport_height =
@@ -313,11 +408,21 @@ impl Dirigent {
                                 {
                                     return;
                                 }
-                                let fraction = ((event.position.y - track_bounds.top())
+                                let pointer = ((event.position.y - track_bounds.top())
                                     / track_bounds.size.height)
                                     .clamp(0.0, 1.0);
+                                let grab_offset = if pointer >= viewport_top
+                                    && pointer <= viewport_top + viewport_fraction
+                                {
+                                    pointer - viewport_top
+                                } else {
+                                    viewport_fraction / 2.0
+                                };
+                                let fraction =
+                                    ruler_scroll_fraction(pointer, grab_offset, viewport_fraction);
                                 entity.update(cx, |this, cx| {
                                     this.conversation_scroll_dragging = true;
+                                    this.conversation_scroll_drag_offset = grab_offset;
                                     this.conversation_list.scrollbar_drag_started();
                                     this.scroll_conversation_to_fraction(fraction);
                                     cx.notify();
@@ -333,10 +438,15 @@ impl Dirigent {
                                 {
                                     return;
                                 }
-                                let fraction = ((event.position.y - track_bounds.top())
+                                let pointer = ((event.position.y - track_bounds.top())
                                     / track_bounds.size.height)
                                     .clamp(0.0, 1.0);
                                 entity.update(cx, |this, cx| {
+                                    let fraction = ruler_scroll_fraction(
+                                        pointer,
+                                        this.conversation_scroll_drag_offset,
+                                        viewport_fraction,
+                                    );
                                     this.scroll_conversation_to_fraction(fraction);
                                     cx.notify();
                                 });
@@ -515,7 +625,8 @@ impl Dirigent {
         }
     }
 
-    pub(super) fn render_conversation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_conversation(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        self.refresh_conversation_ruler_layout();
         let harness = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
@@ -558,7 +669,7 @@ impl Dirigent {
                         )
                     }),
             )
-            .child(self.render_conversation_ruler(&harness.messages, cx))
+            .child(self.render_conversation_ruler(cx))
     }
 }
 
@@ -567,8 +678,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        format_retry_status, format_working_duration, tool_color, tool_label_colors,
-        working_character, working_character_is_orange, working_orange_range,
+        format_retry_status, format_working_duration, ruler_scroll_fraction, tool_color,
+        tool_label_colors, working_character, working_character_is_orange, working_orange_range,
     };
     use crate::{
         model::RetryStatus,
@@ -629,6 +740,14 @@ mod tests {
         assert_eq!(working_orange_range(0.5, text), Some(1..4));
         assert_eq!(working_orange_range(0.75, text), Some(3..4));
         assert_eq!(working_orange_range(1.0, text), None);
+    }
+
+    #[test]
+    fn ruler_drag_preserves_the_grab_offset() {
+        assert!((ruler_scroll_fraction(0.35, 0.15, 0.5) - 0.4).abs() < f32::EPSILON);
+        assert_eq!(ruler_scroll_fraction(0.0, 0.15, 0.5), 0.0);
+        assert_eq!(ruler_scroll_fraction(1.0, 0.15, 0.5), 1.0);
+        assert_eq!(ruler_scroll_fraction(0.5, 0.5, 1.0), 0.0);
     }
 
     #[test]

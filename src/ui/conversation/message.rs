@@ -448,7 +448,14 @@ impl Dirigent {
                                 }) && let Some(message) = harness.messages.get_mut(index)
                                 {
                                     message.expanded = !message.expanded;
-                                    this.conversation_list.remeasure_items(index..index + 1);
+                                    if let Some(render_index) = this
+                                        .conversation_render_cache
+                                        .message_render_item_index(index)
+                                    {
+                                        this.conversation_list
+                                            .remeasure_items(render_index..render_index + 1);
+                                        this.conversation_render_cache.invalidate_ruler_layout();
+                                    }
                                     cx.notify();
                                 }
                             }))

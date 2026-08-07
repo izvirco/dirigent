@@ -11,23 +11,54 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ConversationRulerMarker {
-    pub(super) message_index: usize,
+    pub(super) render_item_index: usize,
     pub(super) role: MessageRole,
     pub(super) is_compaction: bool,
 }
 
-fn conversation_ruler_marker(
-    message: &Message,
-    message_index: usize,
-) -> Option<ConversationRulerMarker> {
-    let is_compaction = message.role == MessageRole::Tool && message.is_compaction();
-    (matches!(message.role, MessageRole::User | MessageRole::Assistant) || is_compaction).then_some(
-        ConversationRulerMarker {
-            message_index,
-            role: message.role,
-            is_compaction,
-        },
-    )
+fn build_ruler_markers(
+    harness: &Harness,
+    items: &[ConversationRenderItem],
+) -> Arc<[ConversationRulerMarker]> {
+    let mut direct_render_items = vec![None; harness.messages.len()];
+    let mut grouped_render_items = vec![None; harness.messages.len()];
+    for (render_item_index, item) in items.iter().enumerate() {
+        match item {
+            ConversationRenderItem::Message {
+                message_index,
+                queued: false,
+            } => direct_render_items[*message_index] = Some(render_item_index),
+            ConversationRenderItem::WorkGroup(group) => grouped_render_items
+                [group.first_message_index..=group.last_message_index]
+                .fill(Some(render_item_index)),
+            ConversationRenderItem::Message { queued: true, .. }
+            | ConversationRenderItem::Working => {}
+        }
+    }
+
+    harness
+        .messages
+        .iter()
+        .enumerate()
+        .filter_map(|(message_index, message)| {
+            let is_compaction = message.role == MessageRole::Tool && message.is_compaction();
+            let render_item_index =
+                if matches!(message.role, MessageRole::User | MessageRole::Assistant) {
+                    // Hidden assistant fragments do not have a location in a collapsed thread.
+                    direct_render_items[message_index]
+                } else if is_compaction {
+                    direct_render_items[message_index].or(grouped_render_items[message_index])
+                } else {
+                    None
+                }?;
+            Some(ConversationRulerMarker {
+                render_item_index,
+                role: message.role,
+                is_compaction,
+            })
+        })
+        .collect::<Vec<_>>()
+        .into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -315,6 +346,9 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
 pub(crate) struct ConversationRenderCache {
     pub(super) items: Vec<ConversationRenderItem>,
     pub(super) ruler_markers: Arc<[ConversationRulerMarker]>,
+    pub(super) ruler_item_heights: Vec<f32>,
+    pub(super) ruler_layout_pending: bool,
+    pub(super) ruler_layout_width: f32,
     estimated_height: f32,
 }
 
@@ -360,16 +394,17 @@ impl ConversationRenderCache {
             .iter()
             .map(ConversationRenderItem::estimated_height)
             .sum();
-        let ruler_markers = harness
-            .messages
+        let ruler_markers = build_ruler_markers(harness, &items);
+        let ruler_item_heights = items
             .iter()
-            .enumerate()
-            .filter_map(|(index, message)| conversation_ruler_marker(message, index))
-            .collect::<Vec<_>>()
-            .into();
+            .map(ConversationRenderItem::estimated_height)
+            .collect();
         Self {
             items,
             ruler_markers,
+            ruler_item_heights,
+            ruler_layout_pending: true,
+            ruler_layout_width: 0.0,
             estimated_height,
         }
     }
@@ -379,7 +414,7 @@ impl ConversationRenderCache {
         old: Self,
         rebuild_from_message: usize,
     ) -> (Self, Range<usize>, usize, Vec<Range<usize>>) {
-        let new = Self::build(harness);
+        let mut new = Self::build(harness);
         let old_len = old.items.len();
         let new_len = new.items.len();
 
@@ -401,16 +436,20 @@ impl ConversationRenderCache {
         let old_range = prefix_len..old_len - suffix_len;
         let new_count = new_len - prefix_len - suffix_len;
 
-        let retained_pairs =
-            (0..prefix_len)
-                .map(|index| (index, index, index))
-                .chain((0..suffix_len).map(|offset| {
-                    (
-                        old_len - suffix_len + offset,
-                        new_len - suffix_len + offset,
-                        new_len - suffix_len + offset,
-                    )
-                }));
+        let retained_pairs = (0..prefix_len)
+            .map(|index| (index, index, index))
+            .chain((0..suffix_len).map(|offset| {
+                (
+                    old_len - suffix_len + offset,
+                    new_len - suffix_len + offset,
+                    new_len - suffix_len + offset,
+                )
+            }))
+            .collect::<Vec<_>>();
+        for &(old_index, new_index, _) in &retained_pairs {
+            new.ruler_item_heights[new_index] = old.ruler_item_heights[old_index];
+        }
+
         let mut remeasure_ranges: Vec<Range<usize>> = Vec::new();
         for (old_index, new_index, rendered_index) in retained_pairs {
             if !old.items[old_index]
@@ -428,6 +467,22 @@ impl ConversationRenderCache {
         }
 
         (new, old_range, new_count, remeasure_ranges)
+    }
+
+    pub(crate) fn invalidate_ruler_layout(&mut self) {
+        self.ruler_layout_pending = true;
+    }
+
+    pub(crate) fn message_render_item_index(&self, message_index: usize) -> Option<usize> {
+        self.items.iter().position(|item| {
+            matches!(
+                item,
+                ConversationRenderItem::Message {
+                    message_index: item_message_index,
+                    queued: false,
+                } if *item_message_index == message_index
+            )
+        })
     }
 
     pub(crate) fn working_item_index(&self) -> Option<usize> {
@@ -677,26 +732,61 @@ mod tests {
     }
 
     #[test]
-    fn ruler_markers_include_only_navigation_messages() {
+    fn ruler_markers_follow_rendered_items() {
+        let mut harness = settled_harness();
+        harness
+            .messages
+            .push(Message::compaction(None, None, false));
+        let cache = ConversationRenderCache::build(&harness);
+
         assert_eq!(
-            conversation_ruler_marker(&Message::new(MessageRole::User, "prompt"), 4),
-            Some(ConversationRulerMarker {
-                message_index: 4,
-                role: MessageRole::User,
-                is_compaction: false,
-            })
+            cache.ruler_markers.as_ref(),
+            [
+                ConversationRulerMarker {
+                    render_item_index: 0,
+                    role: MessageRole::User,
+                    is_compaction: false,
+                },
+                ConversationRulerMarker {
+                    render_item_index: 2,
+                    role: MessageRole::Assistant,
+                    is_compaction: false,
+                },
+                ConversationRulerMarker {
+                    render_item_index: 3,
+                    role: MessageRole::Tool,
+                    is_compaction: true,
+                },
+            ]
         );
-        assert_eq!(
-            conversation_ruler_marker(&Message::compaction(None, None, false), 5),
-            Some(ConversationRulerMarker {
-                message_index: 5,
-                role: MessageRole::Tool,
-                is_compaction: true,
-            })
-        );
-        assert_eq!(
-            conversation_ruler_marker(&Message::tool("read file", None, false, false), 6),
-            None
-        );
+    }
+
+    #[test]
+    fn ruler_markers_move_when_a_work_group_expands() {
+        let mut harness = settled_harness();
+        let collapsed = ConversationRenderCache::build(&harness);
+        assert_eq!(collapsed.ruler_markers[1].render_item_index, 2);
+
+        harness
+            .work_group_expansion
+            .insert("pending:0".into(), true);
+        let expanded = ConversationRenderCache::build(&harness);
+        assert_eq!(expanded.ruler_markers[1].render_item_index, 4);
+    }
+
+    #[test]
+    fn ruler_omits_assistant_fragments_hidden_in_work_groups() {
+        let mut harness = Harness::new(1, 2, "task".into(), 1);
+        harness.messages = vec![
+            Message::new(MessageRole::User, "prompt"),
+            Message::new(MessageRole::Assistant, "interim"),
+            Message::tool("read file", None, false, false),
+            Message::new(MessageRole::Assistant, "final"),
+        ];
+        let cache = ConversationRenderCache::build(&harness);
+
+        assert_eq!(cache.ruler_markers.len(), 2);
+        assert_eq!(cache.ruler_markers[0].render_item_index, 0);
+        assert_eq!(cache.ruler_markers[1].render_item_index, 2);
     }
 }
