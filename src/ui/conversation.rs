@@ -2,7 +2,7 @@ mod actions;
 mod cache;
 mod message;
 
-pub(crate) use cache::ConversationRenderCache;
+pub(crate) use cache::{ConversationRenderCache, ConversationScrollAnchor};
 use cache::{ConversationRenderItem, WorkGroupSummary};
 
 #[cfg(test)]
@@ -322,9 +322,10 @@ impl Dirigent {
                     move |track_bounds, _, window, _| {
                         window.paint_layer(track_bounds, |window| {
                             let orange_color = rgb(orange());
-                            let user_color = rgb(blue());
-                            let assistant_color = rgb(crate::theme::detail_text());
+                            let user_color = rgb(blue()).opacity(0.68);
+                            let assistant_color = rgb(crate::theme::detail_text()).opacity(0.68);
                             let compaction_color = rgb(purple());
+                            let message_line_width = window.pixel_snap(px(4.0));
                             let tick_color = orange_color.opacity(0.60);
                             let tick_span = (track_bounds.size.height - px(3.0)).max(px(0.0));
                             for index in 0..17 {
@@ -359,21 +360,29 @@ impl Dirigent {
                                 }
 
                                 let (left, color) = match marker.role {
-                                    MessageRole::User => (4.0, user_color),
-                                    MessageRole::Assistant => (11.0, assistant_color),
+                                    MessageRole::Assistant => (4.0, assistant_color),
+                                    MessageRole::User => (11.0, user_color),
                                     _ => continue,
                                 };
-                                let top = track_bounds.top() + track_bounds.size.height * start;
-                                let bottom = track_bounds.top() + track_bounds.size.height * end;
+                                let line_left = window.pixel_snap(track_bounds.left() + px(left));
+                                let top = window.pixel_snap(
+                                    track_bounds.top() + track_bounds.size.height * start,
+                                );
+                                let bottom = window.pixel_snap(
+                                    track_bounds.top() + track_bounds.size.height * end,
+                                );
                                 window.paint_quad(
                                     fill(
                                         gpui::Bounds::new(
-                                            point(track_bounds.left() + px(left), top),
-                                            size(px(3.0), (bottom - top).max(px(3.0))),
+                                            point(line_left, top),
+                                            size(
+                                                message_line_width,
+                                                (bottom - top).max(message_line_width),
+                                            ),
                                         ),
                                         color,
                                     )
-                                    .corner_radii(px(1.5)),
+                                    .corner_radii(message_line_width / 2.0),
                                 );
                             }
 

@@ -132,6 +132,9 @@ impl Dirigent {
                 Some("get_entries" | "get_messages")
             )
             && !self.harnesses[index].loaded_messages;
+        let replacement_scroll_anchor = replaces_messages
+            .then(|| self.conversation_scroll_anchor(index))
+            .flatten();
         let changed_message = match event_type {
             "agent_start" => {
                 self.begin_turn_diff(index, "Agent turn");
@@ -204,7 +207,7 @@ impl Dirigent {
             _ => None,
         };
         if replaces_messages && self.selected_harness == Some(self.harnesses[index].id) {
-            self.reset_conversation_list(index);
+            self.reset_conversation_list_preserving_scroll(index, replacement_scroll_anchor);
         } else {
             self.sync_conversation_list(index, changed_message);
         }

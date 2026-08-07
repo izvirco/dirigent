@@ -308,12 +308,70 @@ impl Dirigent {
             self.report_cache_error(error);
         }
     }
+    pub(super) fn conversation_scroll_anchor(
+        &self,
+        harness_index: usize,
+    ) -> Option<ConversationScrollAnchor> {
+        if self.selected_harness != Some(self.harnesses[harness_index].id)
+            || self.conversation_list.is_following_tail()
+        {
+            return None;
+        }
+        let scroll_top = self.conversation_list.logical_scroll_top();
+        let max_offset = self.conversation_list.max_offset_for_scrollbar().y.as_f32();
+        let fallback_fraction = if max_offset > 0.0 {
+            (-self
+                .conversation_list
+                .scroll_px_offset_for_scrollbar()
+                .y
+                .as_f32()
+                / max_offset)
+                .clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Some(ConversationScrollAnchor {
+            identity: self.conversation_render_cache.scroll_anchor_identity(
+                &self.harnesses[harness_index].messages,
+                scroll_top.item_ix,
+            ),
+            offset_in_item: scroll_top.offset_in_item.as_f32(),
+            fallback_fraction,
+        })
+    }
+
     pub(super) fn reset_conversation_list(&mut self, harness_index: usize) {
         let harness = &self.harnesses[harness_index];
         self.conversation_list_message_count = harness.messages.len();
         self.conversation_list_queued_count = harness.queued_messages.len();
         self.conversation_list_working = harness.status == HarnessStatus::Working;
         self.reset_conversation_render_cache();
+    }
+
+    pub(super) fn reset_conversation_list_preserving_scroll(
+        &mut self,
+        harness_index: usize,
+        anchor: Option<ConversationScrollAnchor>,
+    ) {
+        self.reset_conversation_list(harness_index);
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let render_item_index = anchor.identity.as_ref().and_then(|identity| {
+            self.conversation_render_cache
+                .render_item_index_for_scroll_anchor(
+                    &self.harnesses[harness_index].messages,
+                    identity,
+                )
+        });
+        if let Some(render_item_index) = render_item_index {
+            self.conversation_list.scroll_to(ListOffset {
+                item_ix: render_item_index,
+                offset_in_item: px(anchor.offset_in_item.max(0.0)),
+            });
+        } else {
+            self.scroll_conversation_to_fraction(anchor.fallback_fraction);
+        }
     }
     pub(super) fn sync_conversation_list(
         &mut self,

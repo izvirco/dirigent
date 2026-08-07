@@ -27,9 +27,9 @@ use fff_search::{
 };
 use gpui::{
     ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, Image,
-    ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListState, MouseButton,
-    ObjectFit, ScrollHandle, SharedString, StyledImage, Window, WindowBackgroundAppearance,
-    deferred, div, img, point, prelude::*, profiler, px,
+    ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListOffset, ListState,
+    MouseButton, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
+    WindowBackgroundAppearance, deferred, div, img, point, prelude::*, profiler, px,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -52,7 +52,7 @@ use crate::{
     text_input::{AttachedImage, InputEvent, TextInput},
     theme::{self, bg, border, muted, rgb, theme_text},
     title_generator::{TitleGenerationEvent, TitleProcess},
-    ui::{ConversationRenderCache, DiffRenderCache},
+    ui::{ConversationRenderCache, ConversationScrollAnchor, DiffRenderCache},
     vcs::RepositorySnapshot,
 };
 

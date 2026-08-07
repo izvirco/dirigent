@@ -16,6 +16,23 @@ pub(super) struct ConversationRulerMarker {
     pub(super) is_compaction: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConversationScrollAnchorIdentity {
+    Message {
+        entry_id: Option<String>,
+        entry_ordinal: usize,
+        fallback_message_index: usize,
+    },
+    WorkGroup(String),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConversationScrollAnchor {
+    pub(crate) identity: Option<ConversationScrollAnchorIdentity>,
+    pub(crate) offset_in_item: f32,
+    pub(crate) fallback_fraction: f32,
+}
+
 fn build_ruler_markers(
     harness: &Harness,
     items: &[ConversationRenderItem],
@@ -473,6 +490,64 @@ impl ConversationRenderCache {
         self.ruler_layout_pending = true;
     }
 
+    pub(crate) fn scroll_anchor_identity(
+        &self,
+        messages: &[Message],
+        render_item_index: usize,
+    ) -> Option<ConversationScrollAnchorIdentity> {
+        match self.items.get(render_item_index)? {
+            ConversationRenderItem::Message {
+                message_index,
+                queued: false,
+            } => {
+                let message = messages.get(*message_index)?;
+                let entry_ordinal = messages[..*message_index]
+                    .iter()
+                    .filter(|candidate| candidate.entry_id == message.entry_id)
+                    .count();
+                Some(ConversationScrollAnchorIdentity::Message {
+                    entry_id: message.entry_id.clone(),
+                    entry_ordinal,
+                    fallback_message_index: *message_index,
+                })
+            }
+            ConversationRenderItem::WorkGroup(group) => Some(
+                ConversationScrollAnchorIdentity::WorkGroup(group.id.clone()),
+            ),
+            ConversationRenderItem::Message { queued: true, .. }
+            | ConversationRenderItem::Working => None,
+        }
+    }
+
+    pub(crate) fn render_item_index_for_scroll_anchor(
+        &self,
+        messages: &[Message],
+        identity: &ConversationScrollAnchorIdentity,
+    ) -> Option<usize> {
+        match identity {
+            ConversationScrollAnchorIdentity::Message {
+                entry_id,
+                entry_ordinal,
+                fallback_message_index,
+            } => {
+                let message_index = messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, message)| &message.entry_id == entry_id)
+                    .nth(*entry_ordinal)
+                    .map(|(index, _)| index)
+                    .or_else(|| {
+                        (*fallback_message_index < messages.len())
+                            .then_some(*fallback_message_index)
+                    })?;
+                self.message_render_item_index(message_index)
+            }
+            ConversationScrollAnchorIdentity::WorkGroup(id) => self.items.iter().position(
+                |item| matches!(item, ConversationRenderItem::WorkGroup(group) if &group.id == id),
+            ),
+        }
+    }
+
     pub(crate) fn message_render_item_index(&self, message_index: usize) -> Option<usize> {
         self.items.iter().position(|item| {
             matches!(
@@ -729,6 +804,39 @@ mod tests {
         assert_eq!(new_count, 1);
         assert_eq!(remeasure_ranges, vec![1..2, 6..7]);
         assert_eq!(new.working_item_index(), Some(6));
+    }
+
+    #[test]
+    fn scroll_anchors_survive_canonical_message_replacement() {
+        let mut cached = settled_harness();
+        cached.messages[0].entry_id = Some("user-1".into());
+        cached.messages[3].entry_id = Some("response-1".into());
+        let cached_render = ConversationRenderCache::build(&cached);
+        let group_anchor = cached_render
+            .scroll_anchor_identity(&cached.messages, 1)
+            .expect("missing cached work-group anchor");
+        let response_anchor = cached_render
+            .scroll_anchor_identity(&cached.messages, 2)
+            .expect("missing cached response anchor");
+
+        let mut canonical = settled_harness();
+        canonical
+            .messages
+            .insert(0, Message::notice("canonical prelude"));
+        canonical.messages[1].entry_id = Some("user-1".into());
+        canonical.messages[4].entry_id = Some("response-1".into());
+        let canonical_render = ConversationRenderCache::build(&canonical);
+
+        assert_eq!(
+            canonical_render
+                .render_item_index_for_scroll_anchor(&canonical.messages, &group_anchor),
+            Some(2)
+        );
+        assert_eq!(
+            canonical_render
+                .render_item_index_for_scroll_anchor(&canonical.messages, &response_anchor),
+            Some(3)
+        );
     }
 
     #[test]
