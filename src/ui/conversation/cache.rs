@@ -240,7 +240,7 @@ fn matching_turn<'a>(
         .position(|turn| turn.prompt == prompt)?;
     let index = *turn_cursor + relative;
     *turn_cursor = index + 1;
-    harness.turn_diffs.get(index)
+    harness.turn_diffs.get(index).map(Arc::as_ref)
 }
 
 fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
@@ -743,7 +743,7 @@ mod tests {
         let mut harness = settled_harness();
         harness.messages[1].set_turn_settings(Some("openai/gpt-5".into()), Some("high".into()));
         harness.messages[2].tool_name = Some("write".into());
-        harness.turn_diffs.push(TurnDiff {
+        harness.turn_diffs.push(Arc::new(TurnDiff {
             id: 1,
             prompt: "prompt".into(),
             started_at: 10,
@@ -753,7 +753,7 @@ mod tests {
             additions: 12,
             deletions: 3,
             error: None,
-        });
+        }));
 
         let cache = ConversationRenderCache::build(&harness);
         let ConversationRenderItem::WorkGroup(group) = &cache.items[1] else {

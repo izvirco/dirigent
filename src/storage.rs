@@ -2,7 +2,12 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
+    thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -16,7 +21,7 @@ use crate::{
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
 pub(crate) const DEFAULT_DIFF_SIDEBAR_WIDTH: f32 = 560.0;
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS app_state (
@@ -51,6 +56,12 @@ const SCHEMA: &str = "
         turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D',
         work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D'
     );
+    CREATE TABLE IF NOT EXISTS turn_diffs (
+        harness_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        diff_json BLOB NOT NULL,
+        PRIMARY KEY (harness_id, turn_id)
+    );
     CREATE TABLE IF NOT EXISTS workspaces (
         id TEXT PRIMARY KEY,
         order_index INTEGER NOT NULL UNIQUE,
@@ -76,6 +87,20 @@ struct StoredState {
     next_sidebar_order: u64,
     projects: Vec<StoredProject>,
     harnesses: Vec<StoredHarness>,
+    workspaces: Vec<StoredWorkspace>,
+    last_used_harness: Option<Id>,
+    collapsed_projects: Vec<Id>,
+    sidebar_width: f32,
+    diff_sidebar_open: bool,
+    diff_sidebar_width: f32,
+    diff_view_mode: DiffViewMode,
+}
+
+struct StoredMetadata {
+    next_id: Id,
+    next_sidebar_order: u64,
+    projects: Vec<StoredProject>,
+    harnesses: Vec<StoredHarnessMetadata>,
     workspaces: Vec<StoredWorkspace>,
     last_used_harness: Option<Id>,
     collapsed_projects: Vec<Id>,
@@ -125,6 +150,19 @@ struct StoredHarness {
     work_group_expansion: HashMap<String, bool>,
 }
 
+struct StoredHarnessMetadata {
+    id: Id,
+    project_id: Id,
+    title: String,
+    session_file: Option<PathBuf>,
+    nix_enabled: bool,
+    workspace_id: Option<String>,
+    last_vcs_label: Option<String>,
+    archived: bool,
+    sidebar_order: u64,
+    work_group_expansion: HashMap<String, bool>,
+}
+
 struct StoredWorkspace {
     id: String,
     project_id: Id,
@@ -154,8 +192,40 @@ pub(crate) struct LoadedState {
     pub(crate) diff_view_mode: DiffViewMode,
 }
 
+enum StorageCommand {
+    SaveMetadata(StoredMetadata),
+    SaveDiffSidebar {
+        open: bool,
+        width: f32,
+        view_mode: DiffViewMode,
+    },
+    SaveSidebarLayout {
+        sidebar_width: f32,
+        diff_sidebar_width: f32,
+    },
+    SaveLastUsedHarness(Option<Id>),
+    SaveHarnessSessionFile {
+        harness_id: Id,
+        session_file: Option<PathBuf>,
+    },
+    SaveTurnDiff {
+        harness_id: Id,
+        turn: Arc<TurnDiff>,
+    },
+    RetainTurnDiffs {
+        harness_id: Id,
+        turn_ids: Vec<u64>,
+    },
+    CopyTurnDiffs {
+        source_harness_id: Id,
+        target_harness_id: Id,
+    },
+    Shutdown,
+}
+
 pub(crate) struct StateDatabase {
-    connection: Connection,
+    sender: Sender<StorageCommand>,
+    worker: Option<JoinHandle<()>>,
 }
 
 impl StateDatabase {
@@ -167,73 +237,94 @@ impl StateDatabase {
     fn open_at(database_path: &Path) -> Result<(Self, LoadedState), String> {
         let connection = open_database(database_path)?;
         let loaded = read_stored_state(&connection).map(StoredState::into_loaded)?;
-        Ok((Self { connection }, loaded))
+        let (sender, receiver) = mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("dirigent-storage".into())
+            .spawn(move || run_storage_worker(connection, receiver))
+            .map_err(|error| format!("could not start state storage worker: {error}"))?;
+        Ok((
+            Self {
+                sender,
+                worker: Some(worker),
+            },
+            loaded,
+        ))
+    }
+
+    fn send(&self, command: StorageCommand) -> Result<(), String> {
+        self.sender
+            .send(command)
+            .map_err(|_| "application state storage worker stopped unexpectedly".to_string())
     }
 
     pub(crate) fn save_diff_sidebar(
-        &mut self,
+        &self,
         open: bool,
         width: f32,
         view_mode: DiffViewMode,
     ) -> Result<(), String> {
-        self.connection
-            .execute(
-                "UPDATE app_state SET
-                     diff_sidebar_open = ?1,
-                     diff_sidebar_width = ?2,
-                     diff_view_mode_json = ?3
-                 WHERE singleton = 1",
-                params![open, width, encode_json(&view_mode, "diff view mode")?],
-            )
-            .map_err(|error| format!("could not store diff sidebar state: {error}"))?;
-        Ok(())
+        self.send(StorageCommand::SaveDiffSidebar {
+            open,
+            width,
+            view_mode,
+        })
     }
 
     pub(crate) fn save_sidebar_layout(
-        &mut self,
+        &self,
         sidebar_width: f32,
         diff_sidebar_width: f32,
     ) -> Result<(), String> {
-        self.connection
-            .execute(
-                "UPDATE app_state SET sidebar_width = ?1, diff_sidebar_width = ?2
-                 WHERE singleton = 1",
-                params![sidebar_width, diff_sidebar_width],
-            )
-            .map_err(|error| format!("could not store sidebar layout: {error}"))?;
-        Ok(())
+        self.send(StorageCommand::SaveSidebarLayout {
+            sidebar_width,
+            diff_sidebar_width,
+        })
     }
 
-    pub(crate) fn save_last_used_harness(&mut self, harness_id: Option<Id>) -> Result<(), String> {
-        self.connection
-            .execute(
-                "UPDATE app_state SET last_used_harness = ?1 WHERE singleton = 1",
-                params![harness_id.map(|id| id.to_string())],
-            )
-            .map_err(|error| format!("could not store last used thread: {error}"))?;
-        Ok(())
+    pub(crate) fn save_last_used_harness(&self, harness_id: Option<Id>) -> Result<(), String> {
+        self.send(StorageCommand::SaveLastUsedHarness(harness_id))
     }
 
     pub(crate) fn save_harness_session_file(
-        &mut self,
+        &self,
         harness_id: Id,
         session_file: Option<&Path>,
     ) -> Result<(), String> {
-        let session_file_json = session_file
-            .map(|path| encode_json(path, "harness session path"))
-            .transpose()?;
-        self.connection
-            .execute(
-                "UPDATE harnesses SET session_file_json = ?1 WHERE id = ?2",
-                params![session_file_json, harness_id.to_string()],
-            )
-            .map_err(|error| format!("could not store thread session path: {error}"))?;
-        Ok(())
+        self.send(StorageCommand::SaveHarnessSessionFile {
+            harness_id,
+            session_file: session_file.map(Path::to_path_buf),
+        })
+    }
+
+    pub(crate) fn save_turn_diff(&self, harness_id: Id, turn: Arc<TurnDiff>) -> Result<(), String> {
+        self.send(StorageCommand::SaveTurnDiff { harness_id, turn })
+    }
+
+    pub(crate) fn retain_turn_diffs(
+        &self,
+        harness_id: Id,
+        turn_ids: Vec<u64>,
+    ) -> Result<(), String> {
+        self.send(StorageCommand::RetainTurnDiffs {
+            harness_id,
+            turn_ids,
+        })
+    }
+
+    pub(crate) fn copy_turn_diffs(
+        &self,
+        source_harness_id: Id,
+        target_harness_id: Id,
+    ) -> Result<(), String> {
+        self.send(StorageCommand::CopyTurnDiffs {
+            source_harness_id,
+            target_harness_id,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save(
-        &mut self,
+        &self,
         projects: &[Project],
         harnesses: &[Harness],
         workspaces: &[ManagedWorkspace],
@@ -248,7 +339,7 @@ impl StateDatabase {
     ) -> Result<(), String> {
         let mut collapsed_projects = collapsed_projects.iter().copied().collect::<Vec<_>>();
         collapsed_projects.sort_unstable();
-        let state = StoredState {
+        self.send(StorageCommand::SaveMetadata(StoredMetadata {
             next_id,
             next_sidebar_order,
             projects: projects
@@ -263,7 +354,7 @@ impl StateDatabase {
                 .collect(),
             harnesses: harnesses
                 .iter()
-                .map(|harness| StoredHarness {
+                .map(|harness| StoredHarnessMetadata {
                     id: harness.id,
                     project_id: harness.project_id,
                     title: harness.title.clone(),
@@ -273,7 +364,6 @@ impl StateDatabase {
                     last_vcs_label: harness.last_vcs_label.clone(),
                     archived: harness.archived,
                     sidebar_order: harness.sidebar_order,
-                    turn_diffs: harness.turn_diffs.clone(),
                     work_group_expansion: harness.work_group_expansion.clone(),
                 })
                 .collect(),
@@ -300,8 +390,141 @@ impl StateDatabase {
             diff_sidebar_open,
             diff_sidebar_width,
             diff_view_mode,
-        };
-        write_stored_state(&mut self.connection, &state)
+        }))
+    }
+}
+
+impl Drop for StateDatabase {
+    fn drop(&mut self) {
+        let _ = self.sender.send(StorageCommand::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+fn run_storage_worker(mut connection: Connection, receiver: Receiver<StorageCommand>) {
+    while let Ok(command) = receiver.recv() {
+        if matches!(command, StorageCommand::Shutdown) {
+            break;
+        }
+        let started = Instant::now();
+        let operation = storage_command_name(&command);
+        let result = execute_storage_command(&mut connection, command);
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(100) {
+            tracing::warn!(
+                operation,
+                elapsed_ms = elapsed.as_millis(),
+                "slow asynchronous application state persistence"
+            );
+        }
+        if let Err(error) = result {
+            tracing::error!(operation, error = %error, "could not persist application state");
+        }
+    }
+}
+
+fn storage_command_name(command: &StorageCommand) -> &'static str {
+    match command {
+        StorageCommand::SaveMetadata(_) => "metadata",
+        StorageCommand::SaveDiffSidebar { .. } => "diff_sidebar",
+        StorageCommand::SaveSidebarLayout { .. } => "sidebar_layout",
+        StorageCommand::SaveLastUsedHarness(_) => "last_used_harness",
+        StorageCommand::SaveHarnessSessionFile { .. } => "session_file",
+        StorageCommand::SaveTurnDiff { .. } => "turn_diff",
+        StorageCommand::RetainTurnDiffs { .. } => "retain_turn_diffs",
+        StorageCommand::CopyTurnDiffs { .. } => "copy_turn_diffs",
+        StorageCommand::Shutdown => "shutdown",
+    }
+}
+
+fn execute_storage_command(
+    connection: &mut Connection,
+    command: StorageCommand,
+) -> Result<(), String> {
+    match command {
+        StorageCommand::SaveMetadata(state) => sync_stored_metadata(connection, &state),
+        StorageCommand::SaveDiffSidebar {
+            open,
+            width,
+            view_mode,
+        } => {
+            connection
+                .execute(
+                    "UPDATE app_state SET
+                         diff_sidebar_open = ?1,
+                         diff_sidebar_width = ?2,
+                         diff_view_mode_json = ?3
+                     WHERE singleton = 1",
+                    params![open, width, encode_json(&view_mode, "diff view mode")?],
+                )
+                .map_err(|error| format!("could not store diff sidebar state: {error}"))?;
+            Ok(())
+        }
+        StorageCommand::SaveSidebarLayout {
+            sidebar_width,
+            diff_sidebar_width,
+        } => {
+            connection
+                .execute(
+                    "UPDATE app_state SET sidebar_width = ?1, diff_sidebar_width = ?2
+                     WHERE singleton = 1",
+                    params![sidebar_width, diff_sidebar_width],
+                )
+                .map_err(|error| format!("could not store sidebar layout: {error}"))?;
+            Ok(())
+        }
+        StorageCommand::SaveLastUsedHarness(harness_id) => {
+            connection
+                .execute(
+                    "UPDATE app_state SET last_used_harness = ?1 WHERE singleton = 1",
+                    params![harness_id.map(|id| id.to_string())],
+                )
+                .map_err(|error| format!("could not store last used thread: {error}"))?;
+            Ok(())
+        }
+        StorageCommand::SaveHarnessSessionFile {
+            harness_id,
+            session_file,
+        } => {
+            let session_file_json = session_file
+                .as_deref()
+                .map(|path| encode_json(path, "harness session path"))
+                .transpose()?;
+            connection
+                .execute(
+                    "UPDATE harnesses SET session_file_json = ?1 WHERE id = ?2",
+                    params![session_file_json, harness_id.to_string()],
+                )
+                .map_err(|error| format!("could not store thread session path: {error}"))?;
+            Ok(())
+        }
+        StorageCommand::SaveTurnDiff { harness_id, turn } => {
+            save_turn_diff(connection, harness_id, turn.as_ref())
+        }
+        StorageCommand::RetainTurnDiffs {
+            harness_id,
+            turn_ids,
+        } => retain_turn_diffs(connection, harness_id, &turn_ids),
+        StorageCommand::CopyTurnDiffs {
+            source_harness_id,
+            target_harness_id,
+        } => {
+            connection
+                .execute(
+                    "INSERT OR REPLACE INTO turn_diffs (harness_id, turn_id, diff_json)
+                     SELECT ?1, turn_id, diff_json FROM turn_diffs WHERE harness_id = ?2",
+                    params![target_harness_id.to_string(), source_harness_id.to_string()],
+                )
+                .map_err(|error| {
+                    format!(
+                        "could not copy thread {source_harness_id} turns to {target_harness_id}: {error}"
+                    )
+                })?;
+            Ok(())
+        }
+        StorageCommand::Shutdown => Ok(()),
     }
 }
 
@@ -396,9 +619,83 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
             })?;
         }
     }
+    if version < 6 {
+        migrate_normalized_turn_diffs(connection, database_path)?;
+    }
     connection
         .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
         .map_err(|error| format!("could not update {}: {error}", database_path.display()))
+}
+
+fn migrate_normalized_turn_diffs(
+    connection: &Connection,
+    database_path: &Path,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare("SELECT id, turn_diffs_json FROM harnesses")
+        .map_err(|error| {
+            format!(
+                "could not prepare {} turn diff migration: {error}",
+                database_path.display()
+            )
+        })?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| {
+            format!(
+                "could not read {} turn diffs for migration: {error}",
+                database_path.display()
+            )
+        })?;
+    let mut migrated = Vec::new();
+    for row in rows {
+        let (harness_id, bytes) = row.map_err(|error| {
+            format!(
+                "could not read {} turn diff migration row: {error}",
+                database_path.display()
+            )
+        })?;
+        migrated.push((harness_id, decode_turn_diffs(&bytes)?));
+    }
+    drop(statement);
+    let transaction = connection.unchecked_transaction().map_err(|error| {
+        format!(
+            "could not begin {} turn diff migration: {error}",
+            database_path.display()
+        )
+    })?;
+    for (harness_id, turns) in migrated {
+        for turn in turns {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO turn_diffs (harness_id, turn_id, diff_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![harness_id, turn.id.to_string(), encode_turn_diff(&turn)?],
+                )
+                .map_err(|error| {
+                    format!(
+                        "could not migrate {} turn diff: {error}",
+                        database_path.display()
+                    )
+                })?;
+        }
+    }
+    transaction
+        .execute("UPDATE harnesses SET turn_diffs_json = X'5B5D'", [])
+        .map_err(|error| {
+            format!(
+                "could not clear {} legacy turn diffs after migration: {error}",
+                database_path.display()
+            )
+        })?;
+    transaction.commit().map_err(|error| {
+        format!(
+            "could not commit {} turn diff migration: {error}",
+            database_path.display()
+        )
+    })
 }
 
 fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -426,6 +723,7 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
     transaction
         .execute_batch(
             "DELETE FROM collapsed_projects;
+             DELETE FROM turn_diffs;
              DELETE FROM harnesses;
              DELETE FROM workspaces;
              DELETE FROM projects;
@@ -486,9 +784,9 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
             .execute(
                 "INSERT INTO harnesses (
                     id, order_index, project_id, title, session_file_json, nix_enabled,
-                    workspace_id, last_vcs_label, archived, sidebar_order, turn_diffs_json,
+                    workspace_id, last_vcs_label, archived, sidebar_order,
                     work_group_expansion_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     harness.id.to_string(),
                     order_index(index)?,
@@ -500,11 +798,28 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
                     &harness.last_vcs_label,
                     harness.archived,
                     harness.sidebar_order.to_string(),
-                    encode_turn_diffs(&harness.turn_diffs)?,
                     encode_json(&harness.work_group_expansion, "work group expansion")?,
                 ],
             )
             .map_err(|error| format!("could not store harness {}: {error}", harness.id))?;
+        for turn in &harness.turn_diffs {
+            transaction
+                .execute(
+                    "INSERT INTO turn_diffs (harness_id, turn_id, diff_json)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        harness.id.to_string(),
+                        turn.id.to_string(),
+                        encode_turn_diff(turn)?
+                    ],
+                )
+                .map_err(|error| {
+                    format!(
+                        "could not store harness {} turn {}: {error}",
+                        harness.id, turn.id
+                    )
+                })?;
+        }
     }
 
     for (index, workspace) in state.workspaces.iter().enumerate() {
@@ -541,6 +856,379 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
                 params![project_id.to_string()],
             )
             .map_err(|error| format!("could not store collapsed project {project_id}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("could not begin metadata transaction: {error}"))?;
+    transaction
+        .execute(
+            "UPDATE app_state SET
+                 next_id = ?1, next_sidebar_order = ?2, last_used_harness = ?3,
+                 sidebar_width = ?4, diff_sidebar_open = ?5, diff_sidebar_width = ?6,
+                 diff_view_mode_json = ?7
+             WHERE singleton = 1",
+            params![
+                state.next_id.to_string(),
+                state.next_sidebar_order.to_string(),
+                state.last_used_harness.map(|id| id.to_string()),
+                state.sidebar_width,
+                state.diff_sidebar_open,
+                state.diff_sidebar_width,
+                encode_json(&state.diff_view_mode, "diff view mode")?,
+            ],
+        )
+        .map_err(|error| format!("could not update application metadata: {error}"))?;
+
+    prepare_table_order(
+        &transaction,
+        "projects",
+        state
+            .projects
+            .iter()
+            .enumerate()
+            .map(|(index, project)| Ok((project.id.to_string(), order_index(index)?)))
+            .collect::<Result<Vec<_>, String>>()?,
+    )?;
+    for (index, project) in state.projects.iter().enumerate() {
+        let path_json = encode_json(&project.path, "project path")?;
+        let workspace_root_json = project
+            .workspace_root
+            .as_ref()
+            .map(|path| encode_json(path, "project workspace root"))
+            .transpose()?;
+        transaction
+            .execute(
+                "INSERT INTO projects (
+                     id, order_index, name, path_json, workspace_root_json,
+                     keep_active_threads_in_project
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(id) DO UPDATE SET
+                     order_index = excluded.order_index,
+                     name = excluded.name,
+                     path_json = excluded.path_json,
+                     workspace_root_json = excluded.workspace_root_json,
+                     keep_active_threads_in_project = excluded.keep_active_threads_in_project
+                 WHERE projects.order_index IS NOT excluded.order_index
+                    OR projects.name IS NOT excluded.name
+                    OR projects.path_json IS NOT excluded.path_json
+                    OR projects.workspace_root_json IS NOT excluded.workspace_root_json
+                    OR projects.keep_active_threads_in_project IS NOT excluded.keep_active_threads_in_project",
+                params![
+                    project.id.to_string(),
+                    order_index(index)?,
+                    &project.name,
+                    path_json,
+                    workspace_root_json,
+                    project.keep_active_threads_in_project,
+                ],
+            )
+            .map_err(|error| format!("could not update project {}: {error}", project.id))?;
+    }
+
+    prepare_table_order(
+        &transaction,
+        "harnesses",
+        state
+            .harnesses
+            .iter()
+            .enumerate()
+            .map(|(index, harness)| Ok((harness.id.to_string(), order_index(index)?)))
+            .collect::<Result<Vec<_>, String>>()?,
+    )?;
+    transaction
+        .execute(
+            "DELETE FROM turn_diffs WHERE harness_id NOT IN (SELECT id FROM harnesses)",
+            [],
+        )
+        .map_err(|error| format!("could not remove deleted thread diffs: {error}"))?;
+    for (index, harness) in state.harnesses.iter().enumerate() {
+        let session_file_json = harness
+            .session_file
+            .as_ref()
+            .map(|path| encode_json(path, "harness session path"))
+            .transpose()?;
+        let work_group_expansion_json =
+            encode_json(&harness.work_group_expansion, "work group expansion")?;
+        transaction
+            .execute(
+                "INSERT INTO harnesses (
+                     id, order_index, project_id, title, session_file_json, nix_enabled,
+                     workspace_id, last_vcs_label, archived, sidebar_order,
+                     work_group_expansion_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                 ON CONFLICT(id) DO UPDATE SET
+                     order_index = excluded.order_index,
+                     project_id = excluded.project_id,
+                     title = excluded.title,
+                     session_file_json = excluded.session_file_json,
+                     nix_enabled = excluded.nix_enabled,
+                     workspace_id = excluded.workspace_id,
+                     last_vcs_label = excluded.last_vcs_label,
+                     archived = excluded.archived,
+                     sidebar_order = excluded.sidebar_order,
+                     work_group_expansion_json = excluded.work_group_expansion_json
+                 WHERE harnesses.order_index IS NOT excluded.order_index
+                    OR harnesses.project_id IS NOT excluded.project_id
+                    OR harnesses.title IS NOT excluded.title
+                    OR harnesses.session_file_json IS NOT excluded.session_file_json
+                    OR harnesses.nix_enabled IS NOT excluded.nix_enabled
+                    OR harnesses.workspace_id IS NOT excluded.workspace_id
+                    OR harnesses.last_vcs_label IS NOT excluded.last_vcs_label
+                    OR harnesses.archived IS NOT excluded.archived
+                    OR harnesses.sidebar_order IS NOT excluded.sidebar_order
+                    OR harnesses.work_group_expansion_json IS NOT excluded.work_group_expansion_json",
+                params![
+                    harness.id.to_string(),
+                    order_index(index)?,
+                    harness.project_id.to_string(),
+                    &harness.title,
+                    session_file_json,
+                    harness.nix_enabled,
+                    &harness.workspace_id,
+                    &harness.last_vcs_label,
+                    harness.archived,
+                    harness.sidebar_order.to_string(),
+                    work_group_expansion_json,
+                ],
+            )
+            .map_err(|error| format!("could not update thread {}: {error}", harness.id))?;
+    }
+
+    prepare_table_order(
+        &transaction,
+        "workspaces",
+        state
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(index, workspace)| Ok((workspace.id.clone(), order_index(index)?)))
+            .collect::<Result<Vec<_>, String>>()?,
+    )?;
+    for (index, workspace) in state.workspaces.iter().enumerate() {
+        let backend_json = encode_json(&workspace.backend, "workspace backend")?;
+        let root_json = encode_json(&workspace.root, "workspace root")?;
+        let working_directory_json =
+            encode_json(&workspace.working_directory, "workspace working directory")?;
+        let source_repository_json =
+            encode_json(&workspace.source_repository, "workspace source repository")?;
+        let jj_parent_revisions_json =
+            encode_json(&workspace.jj_parent_revisions, "workspace parent revisions")?;
+        let state_json = encode_json(&workspace.state, "workspace state")?;
+        transaction
+            .execute(
+                "INSERT INTO workspaces (
+                     id, order_index, project_id, backend_json, root_json,
+                     working_directory_json, source_repository_json, source_id, source_label,
+                     source_revision, jj_parent_revisions_json, git_branch, state_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                 ON CONFLICT(id) DO UPDATE SET
+                     order_index = excluded.order_index,
+                     project_id = excluded.project_id,
+                     backend_json = excluded.backend_json,
+                     root_json = excluded.root_json,
+                     working_directory_json = excluded.working_directory_json,
+                     source_repository_json = excluded.source_repository_json,
+                     source_id = excluded.source_id,
+                     source_label = excluded.source_label,
+                     source_revision = excluded.source_revision,
+                     jj_parent_revisions_json = excluded.jj_parent_revisions_json,
+                     git_branch = excluded.git_branch,
+                     state_json = excluded.state_json
+                 WHERE workspaces.order_index IS NOT excluded.order_index
+                    OR workspaces.project_id IS NOT excluded.project_id
+                    OR workspaces.backend_json IS NOT excluded.backend_json
+                    OR workspaces.root_json IS NOT excluded.root_json
+                    OR workspaces.working_directory_json IS NOT excluded.working_directory_json
+                    OR workspaces.source_repository_json IS NOT excluded.source_repository_json
+                    OR workspaces.source_id IS NOT excluded.source_id
+                    OR workspaces.source_label IS NOT excluded.source_label
+                    OR workspaces.source_revision IS NOT excluded.source_revision
+                    OR workspaces.jj_parent_revisions_json IS NOT excluded.jj_parent_revisions_json
+                    OR workspaces.git_branch IS NOT excluded.git_branch
+                    OR workspaces.state_json IS NOT excluded.state_json",
+                params![
+                    &workspace.id,
+                    order_index(index)?,
+                    workspace.project_id.to_string(),
+                    backend_json,
+                    root_json,
+                    working_directory_json,
+                    source_repository_json,
+                    &workspace.source_id,
+                    &workspace.source_label,
+                    &workspace.source_revision,
+                    jj_parent_revisions_json,
+                    &workspace.git_branch,
+                    state_json,
+                ],
+            )
+            .map_err(|error| format!("could not update workspace {}: {error}", workspace.id))?;
+    }
+
+    let desired_collapsed = state
+        .collapsed_projects
+        .iter()
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
+    let existing_collapsed =
+        query_string_set(&transaction, "SELECT project_id FROM collapsed_projects")?;
+    for project_id in existing_collapsed.difference(&desired_collapsed) {
+        transaction
+            .execute(
+                "DELETE FROM collapsed_projects WHERE project_id = ?1",
+                params![project_id],
+            )
+            .map_err(|error| format!("could not remove expanded project {project_id}: {error}"))?;
+    }
+    for project_id in desired_collapsed.difference(&existing_collapsed) {
+        transaction
+            .execute(
+                "INSERT INTO collapsed_projects (project_id) VALUES (?1)",
+                params![project_id],
+            )
+            .map_err(|error| format!("could not collapse project {project_id}: {error}"))?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("could not commit metadata transaction: {error}"))
+}
+
+fn prepare_table_order(
+    transaction: &Transaction<'_>,
+    table: &str,
+    desired: Vec<(String, i64)>,
+) -> Result<(), String> {
+    let mut statement = transaction
+        .prepare(&format!("SELECT id, order_index FROM {table}"))
+        .map_err(|error| format!("could not inspect {table} order: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| format!("could not read {table} order: {error}"))?;
+    let mut existing = HashMap::new();
+    for row in rows {
+        let (id, order) =
+            row.map_err(|error| format!("could not read {table} order row: {error}"))?;
+        existing.insert(id, order);
+    }
+    drop(statement);
+
+    let desired_ids = desired
+        .iter()
+        .map(|(id, _)| id.clone())
+        .collect::<HashSet<_>>();
+    for id in existing.keys().filter(|id| !desired_ids.contains(*id)) {
+        transaction
+            .execute(&format!("DELETE FROM {table} WHERE id = ?1"), params![id])
+            .map_err(|error| format!("could not remove {table} row {id}: {error}"))?;
+    }
+    for (temporary_index, (id, order)) in desired.iter().enumerate() {
+        if existing.get(id).is_some_and(|current| current != order) {
+            let temporary_order = -1_i64
+                .checked_sub(
+                    i64::try_from(temporary_index)
+                        .map_err(|_| "too many state records to reorder".to_string())?,
+                )
+                .ok_or_else(|| "too many state records to reorder".to_string())?;
+            transaction
+                .execute(
+                    &format!("UPDATE {table} SET order_index = ?1 WHERE id = ?2"),
+                    params![temporary_order, id],
+                )
+                .map_err(|error| format!("could not prepare {table} row {id} reorder: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn query_string_set(transaction: &Transaction<'_>, query: &str) -> Result<HashSet<String>, String> {
+    let mut statement = transaction
+        .prepare(query)
+        .map_err(|error| format!("could not prepare stored id query: {error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("could not read stored ids: {error}"))?;
+    let mut values = HashSet::new();
+    for row in rows {
+        values.insert(row.map_err(|error| format!("could not read stored id: {error}"))?);
+    }
+    Ok(values)
+}
+
+fn save_turn_diff(connection: &Connection, harness_id: Id, turn: &TurnDiff) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO turn_diffs (harness_id, turn_id, diff_json) VALUES (?1, ?2, ?3)
+             ON CONFLICT(harness_id, turn_id) DO UPDATE SET diff_json = excluded.diff_json
+             WHERE turn_diffs.diff_json IS NOT excluded.diff_json",
+            params![
+                harness_id.to_string(),
+                turn.id.to_string(),
+                encode_turn_diff(turn)?
+            ],
+        )
+        .map_err(|error| {
+            format!(
+                "could not store thread {harness_id} turn {}: {error}",
+                turn.id
+            )
+        })?;
+    Ok(())
+}
+
+fn retain_turn_diffs(
+    connection: &mut Connection,
+    harness_id: Id,
+    turn_ids: &[u64],
+) -> Result<(), String> {
+    let transaction = connection
+        .transaction()
+        .map_err(|error| format!("could not begin thread {harness_id} turn pruning: {error}"))?;
+    retain_turn_diffs_in_transaction(&transaction, harness_id, turn_ids)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("could not commit thread {harness_id} turn pruning: {error}"))
+}
+
+fn retain_turn_diffs_in_transaction(
+    transaction: &Transaction<'_>,
+    harness_id: Id,
+    turn_ids: &[u64],
+) -> Result<(), String> {
+    let retained = turn_ids
+        .iter()
+        .map(ToString::to_string)
+        .collect::<HashSet<_>>();
+    let mut statement = transaction
+        .prepare("SELECT turn_id FROM turn_diffs WHERE harness_id = ?1")
+        .map_err(|error| format!("could not inspect thread {harness_id} turns: {error}"))?;
+    let rows = statement
+        .query_map(params![harness_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| format!("could not read thread {harness_id} turns: {error}"))?;
+    let mut removed = Vec::new();
+    for row in rows {
+        let turn_id =
+            row.map_err(|error| format!("could not read thread {harness_id} turn id: {error}"))?;
+        if !retained.contains(&turn_id) {
+            removed.push(turn_id);
+        }
+    }
+    drop(statement);
+    for turn_id in removed {
+        transaction
+            .execute(
+                "DELETE FROM turn_diffs WHERE harness_id = ?1 AND turn_id = ?2",
+                params![harness_id.to_string(), turn_id],
+            )
+            .map_err(|error| format!("could not remove thread {harness_id} turn: {error}"))?;
     }
     Ok(())
 }
@@ -621,8 +1309,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, project_id, title, session_file_json, nix_enabled, workspace_id,
-                    last_vcs_label, archived, sidebar_order, turn_diffs_json,
-                    work_group_expansion_json
+                    last_vcs_label, archived, sidebar_order, work_group_expansion_json
              FROM harnesses ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare harness state: {error}"))?;
@@ -639,7 +1326,6 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, bool>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, Vec<u8>>(9)?,
-                row.get::<_, Vec<u8>>(10)?,
             ))
         })
         .map_err(|error| format!("could not read harnesses: {error}"))?;
@@ -654,7 +1340,6 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
             last_vcs_label,
             archived,
             sidebar_order,
-            turn_diffs_json,
             work_group_expansion_json,
         ) = row.map_err(|error| format!("could not read harness: {error}"))?;
         harnesses.push(StoredHarness {
@@ -670,9 +1355,36 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
             last_vcs_label,
             archived,
             sidebar_order: decode_id(&sidebar_order, "harness sidebar order")?,
-            turn_diffs: decode_turn_diffs(&turn_diffs_json)?,
+            turn_diffs: Vec::new(),
             work_group_expansion: decode_json(&work_group_expansion_json, "work group expansion")?,
         });
+    }
+    drop(statement);
+
+    let harness_indices = harnesses
+        .iter()
+        .enumerate()
+        .map(|(index, harness)| (harness.id.to_string(), index))
+        .collect::<HashMap<_, _>>();
+    let mut statement = connection
+        .prepare("SELECT harness_id, diff_json FROM turn_diffs")
+        .map_err(|error| format!("could not prepare turn diff state: {error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| format!("could not read turn diffs: {error}"))?;
+    for row in rows {
+        let (harness_id, diff_json) =
+            row.map_err(|error| format!("could not read turn diff: {error}"))?;
+        if let Some(index) = harness_indices.get(&harness_id) {
+            harnesses[*index]
+                .turn_diffs
+                .push(decode_turn_diff(&diff_json)?);
+        }
+    }
+    for harness in &mut harnesses {
+        harness.turn_diffs.sort_by_key(|turn| turn.id);
     }
     drop(statement);
 
@@ -792,7 +1504,7 @@ impl StoredState {
                     harness.last_vcs_label,
                     harness.archived,
                     harness.sidebar_order,
-                    harness.turn_diffs,
+                    harness.turn_diffs.into_iter().map(Arc::new).collect(),
                     harness.work_group_expansion,
                 )
             })
@@ -831,13 +1543,24 @@ impl StoredState {
     }
 }
 
-fn encode_turn_diffs(turns: &[TurnDiff]) -> Result<Vec<u8>, String> {
-    let json = serde_json::to_vec(turns)
-        .map_err(|error| format!("could not encode turn diffs: {error}"))?;
+fn encode_turn_diff(turn: &TurnDiff) -> Result<Vec<u8>, String> {
+    let json =
+        serde_json::to_vec(turn).map_err(|error| format!("could not encode turn diff: {error}"))?;
     zstd::stream::encode_all(json.as_slice(), 3)
-        .map_err(|error| format!("could not compress turn diffs: {error}"))
+        .map_err(|error| format!("could not compress turn diff: {error}"))
 }
 
+fn decode_turn_diff(bytes: &[u8]) -> Result<TurnDiff, String> {
+    let json = if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        zstd::stream::decode_all(bytes)
+            .map_err(|error| format!("could not decompress turn diff: {error}"))?
+    } else {
+        bytes.to_vec()
+    };
+    serde_json::from_slice(&json).map_err(|error| format!("could not decode turn diff: {error}"))
+}
+
+// Legacy schema decoder used only while migrating the old per-harness blob.
 fn decode_turn_diffs(bytes: &[u8]) -> Result<Vec<TurnDiff>, String> {
     let json = if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         zstd::stream::decode_all(bytes)
@@ -871,10 +1594,10 @@ fn order_index(index: usize) -> Result<i64, String> {
 mod tests {
     use super::{
         DEFAULT_DIFF_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, StateDatabase, StoredHarness,
-        StoredProject, StoredState, decode_turn_diffs, encode_turn_diffs, write_stored_state,
+        StoredProject, StoredState, decode_turn_diffs, open_database, write_stored_state,
     };
-    use crate::diff::DiffViewMode;
-    use std::{collections::HashMap, fs, path::PathBuf};
+    use crate::diff::{DiffViewMode, TurnDiff, TurnDiffStatus};
+    use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 
     fn temporary_directory(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -923,7 +1646,7 @@ mod tests {
     fn persists_harness_metadata() {
         let directory = temporary_directory("harness-metadata");
         let database = directory.join("state.sqlite3");
-        let (mut state_database, _) = StateDatabase::open_at(&database).unwrap();
+        let mut connection = open_database(&database).unwrap();
         let mut state = StoredState::empty();
         state.projects.push(StoredProject {
             id: 1,
@@ -944,15 +1667,58 @@ mod tests {
             last_vcs_label: Some("main".into()),
             archived: false,
             sidebar_order: 1,
-            turn_diffs: Vec::new(),
+            turn_diffs: vec![TurnDiff {
+                id: 7,
+                prompt: "persist this diff".into(),
+                started_at: 1,
+                finished_at: 2,
+                status: TurnDiffStatus::Completed,
+                files: Vec::new(),
+                additions: 0,
+                deletions: 0,
+                error: None,
+            }],
             work_group_expansion,
         });
-        write_stored_state(&mut state_database.connection, &state).unwrap();
+        write_stored_state(&mut connection, &state).unwrap();
+        drop(connection);
+        let (state_database, loaded_before_update) = StateDatabase::open_at(&database).unwrap();
+        state_database
+            .save(
+                &loaded_before_update.projects,
+                &loaded_before_update.harnesses,
+                &loaded_before_update.workspaces,
+                loaded_before_update.next_id,
+                loaded_before_update.next_sidebar_order,
+                loaded_before_update.last_used_harness,
+                &loaded_before_update.collapsed_projects,
+                loaded_before_update.sidebar_width,
+                loaded_before_update.diff_sidebar_open,
+                loaded_before_update.diff_sidebar_width,
+                loaded_before_update.diff_view_mode,
+            )
+            .unwrap();
         let session_file = directory.join("session.jsonl");
         state_database.save_sidebar_layout(336.0, 720.0).unwrap();
         state_database.save_last_used_harness(Some(2)).unwrap();
         state_database
             .save_harness_session_file(2, Some(&session_file))
+            .unwrap();
+        state_database
+            .save_turn_diff(
+                2,
+                Arc::new(TurnDiff {
+                    id: 8,
+                    prompt: "new incremental diff".into(),
+                    started_at: 3,
+                    finished_at: 4,
+                    status: TurnDiffStatus::Completed,
+                    files: Vec::new(),
+                    additions: 0,
+                    deletions: 0,
+                    error: None,
+                }),
+            )
             .unwrap();
         drop(state_database);
 
@@ -966,6 +1732,9 @@ mod tests {
             Some(&session_file)
         );
         assert_eq!(loaded.harnesses[0].last_vcs_label.as_deref(), Some("main"));
+        assert_eq!(loaded.harnesses[0].turn_diffs.len(), 2);
+        assert_eq!(loaded.harnesses[0].turn_diffs[0].id, 7);
+        assert_eq!(loaded.harnesses[0].turn_diffs[1].id, 8);
         assert_eq!(
             loaded.harnesses[0].work_group_expansion.get("entry:user-1"),
             Some(&true)
@@ -1024,8 +1793,67 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_harness_turn_diff_blobs() {
+        let directory = temporary_directory("turn-diff-migration");
+        let database = directory.join("state.sqlite3");
+        let mut connection = open_database(&database).unwrap();
+        let mut state = StoredState::empty();
+        state.projects.push(StoredProject {
+            id: 1,
+            name: "project".into(),
+            path: directory.clone(),
+            workspace_root: None,
+            keep_active_threads_in_project: false,
+        });
+        let turn = TurnDiff {
+            id: 9,
+            prompt: "legacy turn".into(),
+            started_at: 1,
+            finished_at: 2,
+            status: TurnDiffStatus::Completed,
+            files: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            error: None,
+        };
+        state.harnesses.push(StoredHarness {
+            id: 2,
+            project_id: 1,
+            title: "thread".into(),
+            session_file: None,
+            nix_enabled: false,
+            workspace_id: None,
+            last_vcs_label: None,
+            archived: false,
+            sidebar_order: 1,
+            turn_diffs: vec![turn.clone()],
+            work_group_expansion: HashMap::new(),
+        });
+        write_stored_state(&mut connection, &state).unwrap();
+        let legacy_json = serde_json::to_vec(&[turn]).unwrap();
+        let legacy_blob = zstd::stream::encode_all(legacy_json.as_slice(), 3).unwrap();
+        connection.execute("DELETE FROM turn_diffs", []).unwrap();
+        connection
+            .execute(
+                "UPDATE harnesses SET turn_diffs_json = ?1 WHERE id = '2'",
+                rusqlite::params![legacy_blob],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 5;")
+            .unwrap();
+        drop(connection);
+
+        let (_, loaded) = StateDatabase::open_at(&database).unwrap();
+        assert_eq!(loaded.harnesses[0].turn_diffs.len(), 1);
+        assert_eq!(loaded.harnesses[0].turn_diffs[0].id, 9);
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn compresses_persisted_turn_diffs() {
-        let encoded = encode_turn_diffs(&[]).unwrap();
+        let encoded = zstd::stream::encode_all(b"[]".as_slice(), 3).unwrap();
         assert!(encoded.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]));
         assert!(decode_turn_diffs(&encoded).unwrap().is_empty());
         assert!(decode_turn_diffs(b"[]").unwrap().is_empty());

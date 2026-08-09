@@ -618,7 +618,7 @@ pub(crate) struct Harness {
     pub(crate) nix_restart_pending: bool,
     pub(crate) workspace_id: Option<String>,
     pub(crate) last_vcs_label: Option<String>,
-    pub(crate) turn_diffs: Vec<TurnDiff>,
+    pub(crate) turn_diffs: Vec<Arc<TurnDiff>>,
     pub(crate) next_turn_diff_id: u64,
     pub(crate) active_turn_diff: Option<ActiveTurnDiff>,
     pub(crate) active_turn_preview: Option<TurnDiff>,
@@ -712,7 +712,7 @@ impl Harness {
         last_vcs_label: Option<String>,
         archived: bool,
         sidebar_order: u64,
-        turn_diffs: Vec<TurnDiff>,
+        turn_diffs: Vec<Arc<TurnDiff>>,
         work_group_expansion: HashMap<String, bool>,
     ) -> Self {
         Self {

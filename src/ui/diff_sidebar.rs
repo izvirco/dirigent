@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
@@ -918,7 +918,7 @@ impl Dirigent {
 
     fn render_diff_turn_picker(
         &self,
-        turns: &[TurnDiff],
+        turns: &[Arc<TurnDiff>],
         active_preview: Option<&TurnDiff>,
         selected_turn_id: Option<u64>,
         cx: &mut Context<Self>,
@@ -927,7 +927,7 @@ impl Dirigent {
         let selected = selected_turn_id.and_then(|id| {
             active_preview
                 .filter(|preview| preview.id == id)
-                .or_else(|| turns.iter().find(|turn| turn.id == id))
+                .or_else(|| turns.iter().find(|turn| turn.id == id).map(Arc::as_ref))
         });
         let label = selected
             .map(|turn| format!("Turn {}", turn.id))

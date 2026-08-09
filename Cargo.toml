@@ -50,6 +50,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [build-dependencies]
 embed-resource = "3"
 
+# Optimized build with Windows PDBs for hang-dump analysis.
+[profile.diagnostic]
+inherits = "release"
+debug = 2
+strip = "none"
+
 [patch.crates-io]
 # Includes the unreleased fix for Rust's `pub_use_of_private_extern_crate` warning.
 proc-macro-error2 = { git = "https://github.com/fgardt/proc-macro-error-2", rev = "53ff94b61c678593158db1a3d50269c6f0de0db7" }

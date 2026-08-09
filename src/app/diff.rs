@@ -230,7 +230,13 @@ impl Dirigent {
     }
 
     fn apply_finished_turn_diff(&mut self, index: usize, turn: TurnDiff) {
+        let harness_id = self.harnesses[index].id;
         let turn_id = turn.id;
+        let turn = Arc::new(turn);
+        if let Err(error) = self.state_database.save_turn_diff(harness_id, turn.clone()) {
+            tracing::error!(error = %error, harness_id, turn_id, "could not queue turn diff persistence");
+            self.banner = Some(error);
+        }
         self.harnesses[index].turn_diffs.push(turn);
         self.harnesses[index].turn_diffs.sort_by_key(|turn| turn.id);
         if self.diff_sidebar_open
@@ -243,7 +249,6 @@ impl Dirigent {
         {
             self.selected_diff_turn = Some((self.harnesses[index].id, turn_id));
         }
-        self.persist();
     }
 
     pub(super) fn handle_diff_task_result(&mut self, result: DiffTaskResult) {
@@ -448,7 +453,7 @@ impl Dirigent {
         self.selected_diff_turn = harness
             .active_turn_preview
             .as_ref()
-            .or_else(|| harness.turn_diffs.last())
+            .or_else(|| harness.turn_diffs.last().map(Arc::as_ref))
             .map(|turn| (harness.id, turn.id));
         self.diff_display_key = None;
     }
@@ -483,7 +488,7 @@ impl Dirigent {
             self.diff_display = match self.diff_scope {
                 DiffScope::Cumulative => {
                     let mut turns = harness.turn_diffs.clone();
-                    turns.push(preview.clone());
+                    turns.push(Arc::new(preview.clone()));
                     diff::combine_turn_diffs(&turns)
                 }
                 DiffScope::Turn => Some(preview.clone()),
@@ -498,7 +503,7 @@ impl Dirigent {
             };
             self.diff_display = match self.diff_scope {
                 DiffScope::Cumulative => diff::combine_turn_diffs(&harness.turn_diffs[..=index]),
-                DiffScope::Turn => Some(harness.turn_diffs[index].clone()),
+                DiffScope::Turn => Some(harness.turn_diffs[index].as_ref().clone()),
             };
         }
         self.diff_display_key = Some(key);
@@ -523,7 +528,7 @@ impl Dirigent {
                 harness
                     .active_turn_preview
                     .as_ref()
-                    .or_else(|| harness.turn_diffs.last())
+                    .or_else(|| harness.turn_diffs.last().map(Arc::as_ref))
                     .map(|turn| turn.id)
             })
     }
@@ -550,9 +555,22 @@ impl Dirigent {
         if prompts.is_empty() {
             return;
         }
+        let previous_len = self.harnesses[index].turn_diffs.len();
         self.harnesses[index]
             .turn_diffs
             .retain(|turn| turn.prompt == "Agent turn" || prompts.contains(&turn.prompt));
+        if self.harnesses[index].turn_diffs.len() != previous_len {
+            let harness_id = self.harnesses[index].id;
+            let retained = self.harnesses[index]
+                .turn_diffs
+                .iter()
+                .map(|turn| turn.id)
+                .collect();
+            if let Err(error) = self.state_database.retain_turn_diffs(harness_id, retained) {
+                tracing::error!(error = %error, harness_id, "could not queue turn diff pruning");
+                self.banner = Some(error);
+            }
+        }
         if self.selected_harness == Some(self.harnesses[index].id) {
             self.diff_display_key = None;
         }

@@ -1017,7 +1017,7 @@ impl Dirigent {
         } = loaded;
         for harness in &mut harnesses {
             for turn in &mut harness.turn_diffs {
-                turn.refresh_highlights();
+                Arc::make_mut(turn).refresh_highlights();
             }
         }
         for workspace in &mut workspaces {
@@ -1623,7 +1623,7 @@ impl Dirigent {
         self.font = appearance.font.into();
         for harness in &mut self.harnesses {
             for turn in &mut harness.turn_diffs {
-                turn.refresh_highlights();
+                Arc::make_mut(turn).refresh_highlights();
             }
             if let Some(preview) = harness.active_turn_preview.as_mut() {
                 preview.refresh_highlights();

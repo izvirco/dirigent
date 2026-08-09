@@ -2,6 +2,7 @@ use ropey::{Rope, RopeSlice};
 use serde::{Deserialize, Serialize};
 use similar::{DiffTag, TextDiff};
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::Read as _,
@@ -271,10 +272,14 @@ fn finish_combined_file(file: CombinedFile) -> Option<FileDiff> {
 }
 
 /// Collapse consecutive per-turn snapshots into the net workspace change through the last turn.
-pub(crate) fn combine_turn_diffs(turns: &[TurnDiff]) -> Option<TurnDiff> {
-    let last = turns.last()?;
+pub(crate) fn combine_turn_diffs<T>(turns: &[T]) -> Option<TurnDiff>
+where
+    T: Borrow<TurnDiff>,
+{
+    let last = turns.last()?.borrow();
     let mut combined = BTreeMap::<String, CombinedFile>::new();
     for turn in turns {
+        let turn = turn.borrow();
         for file in &turn.files {
             let source_path = file.old_path.as_deref().unwrap_or(&file.path);
             let old = combined
@@ -304,7 +309,7 @@ pub(crate) fn combine_turn_diffs(turns: &[TurnDiff]) -> Option<TurnDiff> {
         prompt: last.prompt.clone(),
         started_at: turns
             .first()
-            .map_or(last.started_at, |turn| turn.started_at),
+            .map_or(last.started_at, |turn| turn.borrow().started_at),
         finished_at: last.finished_at,
         status: last.status,
         error: files

@@ -322,6 +322,12 @@ impl Dirigent {
         harness.model = model;
         harness.thinking_level = thinking;
         self.harnesses.push(harness);
+        if !root_user_fork
+            && let Err(error) = self.state_database.copy_turn_diffs(source_harness_id, id)
+        {
+            tracing::error!(error = %error, source_harness_id, harness_id = id, "could not queue fork turn diff persistence");
+            self.banner = Some(error);
+        }
         self.add_composer_input(id, cx);
         if let Some((text, images)) = prefill
             && let Some(input) = self.composer_inputs.get(&id)
