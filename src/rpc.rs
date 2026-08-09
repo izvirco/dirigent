@@ -4,6 +4,7 @@ use std::{
     process::{Child, ChildStdin, Stdio},
     sync::{Arc, Mutex},
     thread,
+    time::Instant,
 };
 
 use async_channel::Sender;
@@ -17,7 +18,12 @@ pub(crate) enum RuntimeTarget {
     Project(Id),
 }
 
-pub(crate) enum RuntimeEvent {
+pub(crate) struct RuntimeEvent {
+    pub(crate) queued_at: Instant,
+    pub(crate) kind: RuntimeEventKind,
+}
+
+pub(crate) enum RuntimeEventKind {
     Json {
         target: RuntimeTarget,
         value: Value,
@@ -33,6 +39,43 @@ pub(crate) enum RuntimeEvent {
     Exited {
         target: RuntimeTarget,
     },
+}
+
+impl RuntimeEvent {
+    fn new(kind: RuntimeEventKind) -> Self {
+        Self {
+            queued_at: Instant::now(),
+            kind,
+        }
+    }
+
+    pub(crate) fn target(&self) -> RuntimeTarget {
+        match &self.kind {
+            RuntimeEventKind::Json { target, .. }
+            | RuntimeEventKind::Error { target, .. }
+            | RuntimeEventKind::Diagnostic { target, .. }
+            | RuntimeEventKind::Exited { target } => *target,
+        }
+    }
+
+    pub(crate) fn diagnostic_kind(&self) -> &str {
+        let RuntimeEventKind::Json { value, .. } = &self.kind else {
+            return match &self.kind {
+                RuntimeEventKind::Error { .. } => "error",
+                RuntimeEventKind::Diagnostic { .. } => "diagnostic",
+                RuntimeEventKind::Exited { .. } => "exited",
+                RuntimeEventKind::Json { .. } => unreachable!(),
+            };
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("message_update") => value
+                .pointer("/assistantMessageEvent/type")
+                .and_then(Value::as_str)
+                .unwrap_or("message_update"),
+            Some(kind) => kind,
+            None => "unknown",
+        }
+    }
 }
 
 pub(crate) struct PiProcess {
@@ -156,7 +199,10 @@ fn read_stdout(target: RuntimeTarget, stdout: impl Read, events: Sender<RuntimeE
                 match serde_json::from_slice(&buffer) {
                     Ok(value) => {
                         if events
-                            .send_blocking(RuntimeEvent::Json { target, value })
+                            .send_blocking(RuntimeEvent::new(RuntimeEventKind::Json {
+                                target,
+                                value,
+                            }))
                             .is_err()
                         {
                             return;
@@ -164,23 +210,23 @@ fn read_stdout(target: RuntimeTarget, stdout: impl Read, events: Sender<RuntimeE
                     }
                     Err(error) => {
                         let line = String::from_utf8_lossy(&buffer);
-                        let _ = events.send_blocking(RuntimeEvent::Error {
+                        let _ = events.send_blocking(RuntimeEvent::new(RuntimeEventKind::Error {
                             target,
                             message: format!("invalid JSON from pi: {error} ({line})"),
-                        });
+                        }));
                     }
                 }
             }
             Err(error) => {
-                let _ = events.send_blocking(RuntimeEvent::Error {
+                let _ = events.send_blocking(RuntimeEvent::new(RuntimeEventKind::Error {
                     target,
                     message: format!("could not read pi output: {error}"),
-                });
+                }));
                 break;
             }
         }
     }
-    let _ = events.send_blocking(RuntimeEvent::Exited { target });
+    let _ = events.send_blocking(RuntimeEvent::new(RuntimeEventKind::Exited { target }));
 }
 
 fn read_stderr(target: RuntimeTarget, stderr: impl Read, events: Sender<RuntimeEvent>) {
@@ -191,10 +237,10 @@ fn read_stderr(target: RuntimeTarget, stderr: impl Read, events: Sender<RuntimeE
                 // unstructured diagnostic output from Pi and extensions, so it must not
                 // fail a harness or add an error message to the conversation.
                 if events
-                    .send_blocking(RuntimeEvent::Diagnostic {
+                    .send_blocking(RuntimeEvent::new(RuntimeEventKind::Diagnostic {
                         target,
                         message: line,
-                    })
+                    }))
                     .is_err()
                 {
                     break;
@@ -202,10 +248,10 @@ fn read_stderr(target: RuntimeTarget, stderr: impl Read, events: Sender<RuntimeE
             }
             Ok(_) => {}
             Err(error) => {
-                let _ = events.send_blocking(RuntimeEvent::Error {
+                let _ = events.send_blocking(RuntimeEvent::new(RuntimeEventKind::Error {
                     target,
                     message: format!("could not read pi diagnostics: {error}"),
-                });
+                }));
                 break;
             }
         }
@@ -224,7 +270,7 @@ fn rpc_command_path(session_file: Option<&Path>) -> (String, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RuntimeEvent, RuntimeTarget, read_stderr, rpc_command_path};
+    use super::{RuntimeEventKind, RuntimeTarget, read_stderr, rpc_command_path};
     use async_channel::unbounded;
     use std::{io::Cursor, path::Path};
 
@@ -247,10 +293,10 @@ mod tests {
         );
 
         for expected in ["extension warning", "provider error"] {
-            let RuntimeEvent::Diagnostic {
+            let RuntimeEventKind::Diagnostic {
                 target: actual_target,
                 message,
-            } = received.recv_blocking().unwrap()
+            } = received.recv_blocking().unwrap().kind
             else {
                 panic!("stderr was reported as a runtime error");
             };

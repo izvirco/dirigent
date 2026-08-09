@@ -4,6 +4,41 @@ use crate::{
     vcs::{self, RepositorySnapshot},
 };
 
+pub(super) struct RepositoryRefreshTask {
+    project_id: Id,
+    path: PathBuf,
+    queued_at: Instant,
+}
+
+pub(super) struct RepositoryRefreshResult {
+    project_id: Id,
+    path: PathBuf,
+    snapshot: Result<Option<RepositorySnapshot>, String>,
+    queue_wait: Duration,
+    probe: Duration,
+}
+
+pub(super) fn run_repository_worker(
+    tasks: async_channel::Receiver<RepositoryRefreshTask>,
+    results: async_channel::Sender<RepositoryRefreshResult>,
+) {
+    while let Ok(task) = tasks.recv_blocking() {
+        let queue_wait = task.queued_at.elapsed();
+        let probe_started = Instant::now();
+        let snapshot = vcs::probe_repository(&task.path);
+        let result = RepositoryRefreshResult {
+            project_id: task.project_id,
+            path: task.path,
+            snapshot,
+            queue_wait,
+            probe: probe_started.elapsed(),
+        };
+        if results.send_blocking(result).is_err() {
+            break;
+        }
+    }
+}
+
 impl Dirigent {
     pub(crate) fn refresh_repository(&mut self, project_id: Id) {
         let Some(path) = self
@@ -14,18 +49,96 @@ impl Dirigent {
         else {
             return;
         };
-        match vcs::probe_repository(&path) {
-            Ok(Some(snapshot)) => {
-                self.repository_snapshots.insert(project_id, snapshot);
+        if !self.pending_repository_refreshes.insert(project_id) {
+            self.dirty_repository_refreshes.insert(project_id);
+            return;
+        }
+        let task = RepositoryRefreshTask {
+            project_id,
+            path,
+            queued_at: Instant::now(),
+        };
+        if self.repository_tasks.try_send(task).is_err() {
+            self.pending_repository_refreshes.remove(&project_id);
+            tracing::warn!(project_id, "could not queue repository refresh");
+        }
+    }
+
+    pub(super) fn handle_repository_refresh(&mut self, result: RepositoryRefreshResult) {
+        self.pending_repository_refreshes.remove(&result.project_id);
+        let current_path = self
+            .projects
+            .iter()
+            .find(|project| project.id == result.project_id)
+            .map(|project| project.path.as_path());
+        let stale = current_path != Some(result.path.as_path());
+        let mut labels_changed = false;
+        let outcome = if stale {
+            "stale"
+        } else {
+            match result.snapshot {
+                Ok(Some(snapshot)) => {
+                    self.repository_snapshots
+                        .insert(result.project_id, snapshot);
+                    "repository"
+                }
+                Ok(None) => {
+                    self.repository_snapshots.remove(&result.project_id);
+                    "not_repository"
+                }
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        project_id = result.project_id,
+                        path = %result.path.display(),
+                        "could not inspect project repository"
+                    );
+                    self.repository_snapshots.remove(&result.project_id);
+                    "error"
+                }
             }
-            Ok(None) => {
-                self.repository_snapshots.remove(&project_id);
+        };
+        if !stale {
+            let label = self
+                .repository_snapshots
+                .get(&result.project_id)
+                .map(RepositorySnapshot::sidebar_label);
+            for harness in self.harnesses.iter_mut().filter(|harness| {
+                harness.project_id == result.project_id && harness.workspace_id.is_none()
+            }) {
+                if harness.last_vcs_label != label {
+                    harness.last_vcs_label = label.clone();
+                    labels_changed = true;
+                }
             }
-            Err(error) => {
-                tracing::error!(error = %error, project_id, "could not inspect project repository");
-                self.repository_snapshots.remove(&project_id);
-                self.banner = Some(error);
+            if labels_changed {
+                self.persist();
             }
+        }
+        let total = result.queue_wait + result.probe;
+        if total >= Duration::from_millis(250) {
+            tracing::warn!(
+                project_id = result.project_id,
+                path = %result.path.display(),
+                outcome,
+                queue_wait_ms = duration_ms(result.queue_wait),
+                probe_ms = duration_ms(result.probe),
+                total_ms = duration_ms(total),
+                labels_changed,
+                "slow asynchronous repository refresh"
+            );
+        } else {
+            tracing::info!(
+                project_id = result.project_id,
+                outcome,
+                queue_wait_ms = duration_ms(result.queue_wait),
+                probe_ms = duration_ms(result.probe),
+                labels_changed,
+                "asynchronous repository refresh timing"
+            );
+        }
+        if self.dirty_repository_refreshes.remove(&result.project_id) {
+            self.refresh_repository(result.project_id);
         }
     }
 
@@ -35,17 +148,14 @@ impl Dirigent {
         }
         let project_id = self.harnesses[index].project_id;
         self.refresh_repository(project_id);
-        let Some(label) = self
+        let label = self
             .repository_snapshots
             .get(&project_id)
-            .map(RepositorySnapshot::sidebar_label)
-        else {
-            return false;
-        };
-        if self.harnesses[index].last_vcs_label.as_ref() == Some(&label) {
+            .map(RepositorySnapshot::sidebar_label);
+        if self.harnesses[index].last_vcs_label == label {
             return false;
         }
-        self.harnesses[index].last_vcs_label = Some(label);
+        self.harnesses[index].last_vcs_label = label;
         true
     }
 
@@ -97,7 +207,11 @@ impl Dirigent {
         };
         self.refresh_repository(project_id);
         let Some(snapshot) = self.repository_snapshots.get(&project_id).cloned() else {
-            self.banner = Some("This project is not in a supported JJ or Git repository.".into());
+            self.banner = Some(if self.pending_repository_refreshes.contains(&project_id) {
+                "The repository is still being inspected. Try again in a moment.".into()
+            } else {
+                "This project is not in a supported JJ or Git repository.".into()
+            });
             return;
         };
         if self.creating_harness {

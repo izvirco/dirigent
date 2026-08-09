@@ -8,7 +8,10 @@ use cache::{ConversationRenderItem, WorkGroupSummary};
 #[cfg(test)]
 use message::{tool_color, tool_label_colors};
 
-use std::{ops::Range, time::Duration};
+use std::{
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, FollowMode, HighlightStyle, IntoElement,
@@ -27,6 +30,13 @@ use crate::{
         thinking_text, yellow,
     },
 };
+
+const SLOW_CONVERSATION_SYNC: Duration = Duration::from_millis(16);
+const STREAMING_RULER_LAYOUT_INTERVAL: Duration = Duration::from_millis(250);
+
+fn performance_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
 
 fn format_working_duration(duration: Duration) -> String {
     let elapsed = duration.as_secs();
@@ -103,34 +113,67 @@ fn format_retry_status(retry: &RetryStatus) -> String {
 
 impl Dirigent {
     pub(crate) fn reset_conversation_render_cache(&mut self) {
+        let total_started = Instant::now();
+        let cache_started = Instant::now();
         self.conversation_render_cache = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
             .map(ConversationRenderCache::build)
             .unwrap_or_default();
+        let cache_elapsed = cache_started.elapsed();
+        let list_started = Instant::now();
         self.conversation_list.reset_with_uniform_height(
             self.conversation_render_cache.len(),
             px(self.conversation_render_cache.item_height_hint()),
         );
         self.conversation_list.set_follow_mode(FollowMode::Tail);
+        let list_elapsed = list_started.elapsed();
+        let total_elapsed = total_started.elapsed();
+        if total_elapsed >= SLOW_CONVERSATION_SYNC {
+            let (harness_id, message_count) = self
+                .selected_harness
+                .and_then(|id| {
+                    self.harnesses
+                        .iter()
+                        .find(|harness| harness.id == id)
+                        .map(|harness| (Some(harness.id), harness.messages.len()))
+                })
+                .unwrap_or((None, 0));
+            tracing::warn!(
+                ?harness_id,
+                message_count,
+                render_item_count = self.conversation_render_cache.len(),
+                cache_build_us = performance_us(cache_elapsed),
+                list_reset_us = performance_us(list_elapsed),
+                total_us = performance_us(total_elapsed),
+                "slow conversation render cache reset"
+            );
+        }
     }
 
     pub(crate) fn sync_conversation_render_cache(&mut self, rebuild_from_message: usize) {
+        let total_started = Instant::now();
         let old_cache = std::mem::take(&mut self.conversation_render_cache);
+        let old_item_count = old_cache.len();
+        let cache_started = Instant::now();
         let (new_cache, old_range, new_count, remeasure_ranges) = if let Some(harness) = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
         {
             ConversationRenderCache::update(harness, old_cache, rebuild_from_message)
         } else {
-            let old_len = old_cache.len();
             (
                 ConversationRenderCache::default(),
-                0..old_len,
+                0..old_item_count,
                 0,
                 Vec::new(),
             )
         };
+        let cache_elapsed = cache_started.elapsed();
+        let new_item_count = new_cache.len();
+        let splice_range_start = old_range.start;
+        let splice_removed = old_range.len();
+        let list_started = Instant::now();
         if !old_range.is_empty() || new_count > 0 {
             let inserted_start = old_range.start;
             self.conversation_list.splice(old_range, new_count);
@@ -140,10 +183,49 @@ impl Dirigent {
                     .remeasure_items(inserted_start..inserted_start + new_count);
             }
         }
+        let remeasure_range_count = remeasure_ranges.len();
+        let remeasured_items = remeasure_ranges.iter().map(Range::len).sum::<usize>();
         for range in remeasure_ranges {
             self.conversation_list.remeasure_items(range);
         }
+        let list_elapsed = list_started.elapsed();
         self.conversation_render_cache = new_cache;
+        let total_elapsed = total_started.elapsed();
+        if total_elapsed >= SLOW_CONVERSATION_SYNC {
+            let (harness_id, message_count, queued_message_count) = self
+                .selected_harness
+                .and_then(|id| {
+                    self.harnesses
+                        .iter()
+                        .find(|harness| harness.id == id)
+                        .map(|harness| {
+                            (
+                                harness.id,
+                                harness.messages.len(),
+                                harness.queued_messages.len(),
+                            )
+                        })
+                })
+                .map(|(id, messages, queued)| (Some(id), messages, queued))
+                .unwrap_or((None, 0, 0));
+            tracing::warn!(
+                ?harness_id,
+                message_count,
+                queued_message_count,
+                rebuild_from_message,
+                old_item_count,
+                new_item_count,
+                splice_range_start,
+                splice_removed,
+                splice_inserted = new_count,
+                remeasure_range_count,
+                remeasured_items,
+                cache_update_us = performance_us(cache_elapsed),
+                list_update_us = performance_us(list_elapsed),
+                total_us = performance_us(total_elapsed),
+                "slow conversation render cache synchronization"
+            );
+        }
     }
 
     pub(crate) fn toggle_work_group(&mut self, id: String, expanded: bool) {
@@ -205,6 +287,18 @@ impl Dirigent {
         if !self.conversation_render_cache.ruler_layout_pending {
             return;
         }
+        let started = Instant::now();
+        let streaming = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+            .is_some_and(|harness| harness.status == HarnessStatus::Working);
+        if streaming
+            && started.saturating_duration_since(self.conversation_ruler_last_layout_at)
+                < STREAMING_RULER_LAYOUT_INTERVAL
+        {
+            return;
+        }
+        self.conversation_ruler_last_layout_at = started;
         let item_count = self.conversation_render_cache.len();
         if item_count == 0 {
             self.conversation_render_cache.ruler_item_heights.clear();
@@ -231,11 +325,21 @@ impl Dirigent {
             self.conversation_list.scroll_to(original_scroll_top);
         }
 
+        let fully_measured = measured_heights.is_some();
         if let Some(measured_heights) = measured_heights {
             self.conversation_render_cache.ruler_item_heights = measured_heights;
             self.conversation_render_cache.ruler_layout_width =
                 self.conversation_list.viewport_bounds().size.width.as_f32();
             self.conversation_render_cache.ruler_layout_pending = false;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= SLOW_CONVERSATION_SYNC {
+            tracing::warn!(
+                item_count,
+                fully_measured,
+                elapsed_us = performance_us(elapsed),
+                "slow conversation ruler layout refresh"
+            );
         }
     }
 

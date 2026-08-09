@@ -92,17 +92,17 @@ impl Dirigent {
         self.sync_conversation_list(index, None);
     }
     pub(super) fn handle_runtime_event(&mut self, event: RuntimeEvent, cx: &mut Context<Self>) {
-        let (target, value) = match event {
-            RuntimeEvent::Json { target, value } => (target, value),
-            RuntimeEvent::Error { target, message } => {
+        let (target, value) = match event.kind {
+            RuntimeEventKind::Json { target, value } => (target, value),
+            RuntimeEventKind::Error { target, message } => {
                 self.handle_runtime_error(target, message);
                 return;
             }
-            RuntimeEvent::Diagnostic { target, message } => {
+            RuntimeEventKind::Diagnostic { target, message } => {
                 tracing::warn!(diagnostic = %message, ?target, "Pi diagnostic");
                 return;
             }
-            RuntimeEvent::Exited { target } => {
+            RuntimeEventKind::Exited { target } => {
                 self.handle_runtime_exit(target);
                 return;
             }

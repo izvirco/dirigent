@@ -1,18 +1,91 @@
 use super::{
-    FrameTiming, FrameTimingSample, assistant_failure, composer_path_query, content_text,
-    directory_path_query, effective_settings_before_entry, entries_through_leaf,
-    parse_available_model, parse_cached_draft_images, parse_codex_usage, parse_context_usage,
-    parse_entries, parse_message, parse_messages, reconcile_queued_messages,
+    FrameTiming, FrameTimingSample, assistant_failure, coalesce_runtime_events,
+    composer_path_query, content_text, directory_path_query, effective_settings_before_entry,
+    entries_through_leaf, parse_available_model, parse_cached_draft_images, parse_codex_usage,
+    parse_context_usage, parse_entries, parse_message, parse_messages, reconcile_queued_messages,
     reconcile_work_group_expansion, resolve_tilde_path, rpc_string_array, tool_expanded,
     tool_label, tool_result_detail, truncate_output, write_detail,
 };
-use crate::model::{CodexUsageWindow, Message, MessageRole};
+use crate::{
+    model::{CodexUsageWindow, Message, MessageRole},
+    rpc::{RuntimeEvent, RuntimeEventKind, RuntimeTarget},
+};
 use serde_json::json;
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+fn runtime_json(value: serde_json::Value) -> RuntimeEvent {
+    RuntimeEvent {
+        queued_at: Instant::now(),
+        kind: RuntimeEventKind::Json {
+            target: RuntimeTarget::Harness(7, 2),
+            value,
+        },
+    }
+}
+
+#[test]
+fn coalesces_adjacent_streaming_deltas() {
+    let events = vec![
+        runtime_json(json!({
+            "type":"message_update",
+            "assistantMessageEvent":{"type":"text_delta","delta":"hello "}
+        })),
+        runtime_json(json!({
+            "type":"message_update",
+            "assistantMessageEvent":{"type":"text_delta","delta":"world"}
+        })),
+        runtime_json(json!({
+            "type":"message_update",
+            "assistantMessageEvent":{"type":"thinking_delta","delta":"plan"}
+        })),
+    ];
+
+    let events = coalesce_runtime_events(events);
+
+    assert_eq!(events.len(), 2);
+    let RuntimeEventKind::Json { value, .. } = &events[0].kind else {
+        panic!("expected JSON event");
+    };
+    assert_eq!(
+        value
+            .pointer("/assistantMessageEvent/delta")
+            .and_then(|value| value.as_str()),
+        Some("hello world")
+    );
+}
+
+#[test]
+fn keeps_only_the_latest_adjacent_tool_update() {
+    let events = vec![
+        runtime_json(json!({
+            "type":"tool_execution_update",
+            "toolCallId":"call-1",
+            "partialResult":{"content":[{"type":"text","text":"old"}]}
+        })),
+        runtime_json(json!({
+            "type":"tool_execution_update",
+            "toolCallId":"call-1",
+            "partialResult":{"content":[{"type":"text","text":"new"}]}
+        })),
+    ];
+
+    let events = coalesce_runtime_events(events);
+
+    assert_eq!(events.len(), 1);
+    let RuntimeEventKind::Json { value, .. } = &events[0].kind else {
+        panic!("expected JSON event");
+    };
+    assert_eq!(
+        value
+            .pointer("/partialResult/content/0/text")
+            .and_then(|value| value.as_str()),
+        Some("new")
+    );
+}
 
 #[test]
 fn finds_the_active_composer_file_mention() {

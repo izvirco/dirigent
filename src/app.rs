@@ -47,7 +47,7 @@ use crate::{
         Message, MessageRole, Project, RetryStatus, WorkspaceState,
     },
     platform,
-    rpc::{PiProcess, RuntimeEvent, RuntimeTarget},
+    rpc::{PiProcess, RuntimeEvent, RuntimeEventKind, RuntimeTarget},
     storage,
     text_input::{AttachedImage, InputEvent, TextInput},
     theme::{self, bg, border, muted, rgb, theme_text},
@@ -60,6 +60,14 @@ const STARTUP_MODEL_REQUEST_ID: &str = "dirigent-startup-model";
 const STARTUP_THINKING_REQUEST_ID: &str = "dirigent-startup-thinking";
 const UI_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
 const UI_STALL_WARNING_THRESHOLD: Duration = Duration::from_secs(2);
+const UI_PERFORMANCE_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const RUNTIME_EVENT_CHANNEL_CAPACITY: usize = 2_048;
+const RUNTIME_EVENT_BATCH_LIMIT: usize = 64;
+const RUNTIME_EVENT_QUEUE_WARNING_THRESHOLD: usize = 512;
+const RUNTIME_EVENT_BATCH_WINDOW: Duration = Duration::from_millis(2);
+const RUNTIME_EVENT_YIELD_INTERVAL: Duration = Duration::from_millis(16);
+const SLOW_RUNTIME_EVENT_BATCH: Duration = Duration::from_millis(16);
+const OLD_RUNTIME_EVENT_THRESHOLD: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DialogKind {
@@ -343,6 +351,162 @@ impl FrameTiming {
     }
 }
 
+#[derive(Default)]
+struct RuntimeEventLoopStats {
+    batches: u64,
+    received_events: u64,
+    handled_events: u64,
+    max_queue_depth: usize,
+    max_queue_age: Duration,
+    max_collect: Duration,
+    max_handle: Duration,
+    last_log_at: Option<Instant>,
+}
+
+impl RuntimeEventLoopStats {
+    fn record(
+        &mut self,
+        raw_count: usize,
+        handled_count: usize,
+        queue_depth: usize,
+        oldest_age: Duration,
+        collect: Duration,
+        handle: Duration,
+    ) {
+        self.batches += 1;
+        self.received_events += raw_count as u64;
+        self.handled_events += handled_count as u64;
+        self.max_queue_depth = self.max_queue_depth.max(queue_depth);
+        self.max_queue_age = self.max_queue_age.max(oldest_age);
+        self.max_collect = self.max_collect.max(collect);
+        self.max_handle = self.max_handle.max(handle);
+    }
+
+    fn log_periodic(&mut self, now: Instant, queue_depth: usize) {
+        let last_log_at = self.last_log_at.get_or_insert(now);
+        if now.saturating_duration_since(*last_log_at) < UI_PERFORMANCE_LOG_INTERVAL {
+            return;
+        }
+        tracing::info!(
+            batches = self.batches,
+            received_events = self.received_events,
+            handled_events = self.handled_events,
+            coalesced_events = self.received_events.saturating_sub(self.handled_events),
+            queue_depth,
+            max_queue_depth = self.max_queue_depth,
+            max_queue_age_ms = duration_ms(self.max_queue_age),
+            max_collect_us = duration_us(self.max_collect),
+            max_handle_us = duration_us(self.max_handle),
+            "runtime event loop performance"
+        );
+        self.batches = 0;
+        self.received_events = 0;
+        self.handled_events = 0;
+        self.max_queue_depth = queue_depth;
+        self.max_queue_age = Duration::ZERO;
+        self.max_collect = Duration::ZERO;
+        self.max_handle = Duration::ZERO;
+        *last_log_at = now;
+    }
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn duration_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+fn try_coalesce_runtime_delta(previous: &mut RuntimeEvent, next: &RuntimeEvent) -> bool {
+    if previous.target() != next.target() {
+        return false;
+    }
+    let (
+        RuntimeEventKind::Json {
+            value: previous_value,
+            ..
+        },
+        RuntimeEventKind::Json {
+            value: next_value, ..
+        },
+    ) = (&mut previous.kind, &next.kind)
+    else {
+        return false;
+    };
+    let previous_event_type = previous_value.get("type").and_then(Value::as_str);
+    let next_event_type = next_value.get("type").and_then(Value::as_str);
+    if previous_event_type == Some("tool_execution_update")
+        && next_event_type == previous_event_type
+        && previous_value.get("toolCallId") == next_value.get("toolCallId")
+    {
+        *previous_value = next_value.clone();
+        return true;
+    }
+
+    if previous_event_type != Some("message_update") || next_event_type != previous_event_type {
+        return false;
+    }
+    let previous_kind = previous_value
+        .pointer("/assistantMessageEvent/type")
+        .and_then(Value::as_str);
+    let next_kind = next_value
+        .pointer("/assistantMessageEvent/type")
+        .and_then(Value::as_str);
+    if !matches!(previous_kind, Some("text_delta" | "thinking_delta")) || previous_kind != next_kind
+    {
+        return false;
+    }
+    let Some(delta) = next_value
+        .pointer("/assistantMessageEvent/delta")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Some(Value::String(previous_delta)) =
+        previous_value.pointer_mut("/assistantMessageEvent/delta")
+    else {
+        return false;
+    };
+    previous_delta.push_str(delta);
+    true
+}
+
+fn coalesce_runtime_events(events: Vec<RuntimeEvent>) -> Vec<RuntimeEvent> {
+    let mut coalesced: Vec<RuntimeEvent> = Vec::with_capacity(events.len());
+    for event in events {
+        // Streams from separate harnesses may be interleaved. Cross-harness ordering has no
+        // semantic meaning, so merge with the latest event for this target until a same-target
+        // protocol boundary is encountered.
+        let mut merged = false;
+        for previous in coalesced.iter_mut().rev() {
+            if previous.target() != event.target() {
+                continue;
+            }
+            merged = try_coalesce_runtime_delta(previous, &event);
+            break;
+        }
+        if !merged {
+            coalesced.push(event);
+        }
+    }
+    coalesced
+}
+
+fn runtime_event_kinds(events: &[RuntimeEvent]) -> String {
+    let mut counts = HashMap::<&str, usize>::new();
+    for event in events {
+        *counts.entry(event.diagnostic_kind()).or_default() += 1;
+    }
+    let mut counts = counts.into_iter().collect::<Vec<_>>();
+    counts.sort_unstable_by_key(|(kind, _)| *kind);
+    counts
+        .into_iter()
+        .map(|(kind, count)| format!("{kind}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub(crate) struct Dirigent {
     pub(crate) projects: Vec<Project>,
     pub(crate) harnesses: Vec<Harness>,
@@ -387,6 +551,7 @@ pub(crate) struct Dirigent {
     conversation_list_message_count: usize,
     conversation_list_queued_count: usize,
     conversation_list_working: bool,
+    pub(crate) conversation_ruler_last_layout_at: Instant,
     pub(crate) conversation_scroll_dragging: bool,
     pub(crate) conversation_scroll_drag_offset: f32,
     pub(crate) model_picker_scroll: ScrollHandle,
@@ -399,6 +564,9 @@ pub(crate) struct Dirigent {
     workspace_file_pickers: HashMap<String, SharedFilePicker>,
     fuzzy_index_events: Sender<FuzzyIndexReady>,
     repository_snapshots: HashMap<Id, RepositorySnapshot>,
+    repository_tasks: Sender<self::managed_workspace::RepositoryRefreshTask>,
+    pending_repository_refreshes: HashSet<Id>,
+    dirty_repository_refreshes: HashSet<Id>,
     pub(crate) draft_workspace_source: Option<RepositorySnapshot>,
     pending_workspace_sources: HashMap<Id, RepositorySnapshot>,
     pub(crate) pending_workspace_deletion: Option<Id>,
@@ -618,17 +786,29 @@ impl Dirigent {
         })
         .detach();
 
-        cx.spawn(async move |_, cx| {
+        cx.spawn(async move |this, cx| {
+            let mut last_performance_log = Instant::now();
             loop {
                 let expected_at = Instant::now() + UI_HEARTBEAT_INTERVAL;
                 cx.background_executor().timer(UI_HEARTBEAT_INTERVAL).await;
-                let delay = Instant::now().saturating_duration_since(expected_at);
-                if delay >= UI_STALL_WARNING_THRESHOLD {
-                    tracing::warn!(
-                        delay_ms = delay.as_millis().min(u64::MAX as u128) as u64,
-                        interval_ms = UI_HEARTBEAT_INTERVAL.as_millis() as u64,
-                        "UI event loop heartbeat delayed"
-                    );
+                let now = Instant::now();
+                let delay = now.saturating_duration_since(expected_at);
+                let periodic = now.saturating_duration_since(last_performance_log)
+                    >= UI_PERFORMANCE_LOG_INTERVAL;
+                if delay >= UI_STALL_WARNING_THRESHOLD || periodic {
+                    if this
+                        .update(cx, |this, _| {
+                            this.log_ui_performance_snapshot(
+                                (delay >= UI_STALL_WARNING_THRESHOLD).then_some(delay),
+                            );
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if periodic {
+                        last_performance_log = now;
+                    }
                 }
             }
         })
@@ -666,18 +846,108 @@ impl Dirigent {
         })
         .detach();
 
-        let (event_tx, event_rx) = async_channel::unbounded();
+        let (repository_task_tx, repository_task_rx) = async_channel::bounded(64);
+        let (repository_result_tx, repository_result_rx) = async_channel::bounded(64);
+        std::thread::Builder::new()
+            .name("dirigent-repository".into())
+            .spawn(move || {
+                self::managed_workspace::run_repository_worker(
+                    repository_task_rx,
+                    repository_result_tx,
+                )
+            })
+            .expect("could not start repository worker");
         cx.spawn(async move |this, cx| {
-            while let Ok(event) = event_rx.recv().await {
+            while let Ok(result) = repository_result_rx.recv().await {
                 if this
                     .update(cx, |this, cx| {
-                        this.handle_runtime_event(event, cx);
+                        this.handle_repository_refresh(result);
                         cx.notify();
                     })
                     .is_err()
                 {
                     break;
                 }
+            }
+        })
+        .detach();
+
+        let (event_tx, event_rx) = async_channel::bounded(RUNTIME_EVENT_CHANNEL_CAPACITY);
+        cx.spawn(async move |this, cx| {
+            let mut stats = RuntimeEventLoopStats::default();
+            let mut last_slow_log_at: Option<Instant> = None;
+            while let Ok(first) = event_rx.recv().await {
+                let collect_started = Instant::now();
+                let queue_depth_at_start = event_rx.len() + 1;
+                let mut events: Vec<RuntimeEvent> =
+                    Vec::with_capacity(queue_depth_at_start.min(RUNTIME_EVENT_BATCH_LIMIT));
+                events.push(first);
+                while events.len() < RUNTIME_EVENT_BATCH_LIMIT
+                    && collect_started.elapsed() < RUNTIME_EVENT_BATCH_WINDOW
+                {
+                    let Ok(event) = event_rx.try_recv() else {
+                        break;
+                    };
+                    events.push(event);
+                }
+                let collect_elapsed = collect_started.elapsed();
+                let raw_count = events.len();
+                let oldest_age = events
+                    .iter()
+                    .map(|event| event.queued_at.elapsed())
+                    .max()
+                    .unwrap_or_default();
+                let events = coalesce_runtime_events(events);
+                let handled_count = events.len();
+                let event_kinds = runtime_event_kinds(&events);
+                let handle_started = Instant::now();
+                if this
+                    .update(cx, |this, cx| {
+                        for event in events {
+                            this.handle_runtime_event(event, cx);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                let handle_elapsed = handle_started.elapsed();
+                let queue_depth_after = event_rx.len();
+                stats.record(
+                    raw_count,
+                    handled_count,
+                    queue_depth_at_start,
+                    oldest_age,
+                    collect_elapsed,
+                    handle_elapsed,
+                );
+                let slow = handle_elapsed >= SLOW_RUNTIME_EVENT_BATCH
+                    || oldest_age >= OLD_RUNTIME_EVENT_THRESHOLD
+                    || queue_depth_at_start >= RUNTIME_EVENT_QUEUE_WARNING_THRESHOLD;
+                let log_slow = slow
+                    && last_slow_log_at.is_none_or(|last| last.elapsed() >= Duration::from_secs(1));
+                if log_slow {
+                    last_slow_log_at = Some(Instant::now());
+                    tracing::warn!(
+                        raw_events = raw_count,
+                        handled_events = handled_count,
+                        coalesced_events = raw_count.saturating_sub(handled_count),
+                        event_kinds,
+                        queue_depth_at_start,
+                        queue_depth_after,
+                        oldest_event_age_ms = duration_ms(oldest_age),
+                        collect_us = duration_us(collect_elapsed),
+                        handle_us = duration_us(handle_elapsed),
+                        "slow runtime event batch"
+                    );
+                }
+                stats.log_periodic(Instant::now(), queue_depth_after);
+                // Give GPUI a chance to draw and process input, and allow nearby token
+                // deltas to accumulate so the next batch can coalesce them.
+                cx.background_executor()
+                    .timer(RUNTIME_EVENT_YIELD_INTERVAL)
+                    .await;
             }
         })
         .detach();
@@ -1051,6 +1321,7 @@ impl Dirigent {
             conversation_list_message_count,
             conversation_list_queued_count,
             conversation_list_working,
+            conversation_ruler_last_layout_at: Instant::now(),
             conversation_scroll_dragging: false,
             conversation_scroll_drag_offset: 0.0,
             model_picker_scroll: ScrollHandle::new(),
@@ -1063,6 +1334,9 @@ impl Dirigent {
             workspace_file_pickers,
             fuzzy_index_events: fuzzy_index_tx,
             repository_snapshots: HashMap::new(),
+            repository_tasks: repository_task_tx,
+            pending_repository_refreshes: HashSet::new(),
+            dirty_repository_refreshes: HashSet::new(),
             draft_workspace_source: None,
             pending_workspace_sources: HashMap::new(),
             pending_workspace_deletion: None,
@@ -1112,6 +1386,108 @@ impl Dirigent {
         this
     }
 
+    fn log_ui_performance_snapshot(&mut self, stall_delay: Option<Duration>) {
+        self.frame_timing.collect_frames(Instant::now());
+        let frame = self.frame_timing.summary;
+        let selected = self.selected_harness.and_then(|id| {
+            self.harnesses
+                .iter()
+                .find(|harness| harness.id == id)
+                .map(|harness| {
+                    let status = match harness.status {
+                        HarnessStatus::Starting => "starting",
+                        HarnessStatus::Idle => "idle",
+                        HarnessStatus::Working => "working",
+                        HarnessStatus::Failed => "failed",
+                        HarnessStatus::Stopped => "stopped",
+                    };
+                    (
+                        harness.id,
+                        status,
+                        harness.messages.len(),
+                        harness.queued_messages.len(),
+                    )
+                })
+        });
+        let (selected_harness_id, selected_status, message_count, queued_message_count) = selected
+            .map(|(id, status, messages, queued)| (Some(id), Some(status), messages, queued))
+            .unwrap_or((None, None, 0, 0));
+        let working_harnesses = self
+            .harnesses
+            .iter()
+            .filter(|harness| harness.status == HarnessStatus::Working)
+            .count();
+        let draw_average_ms = frame.map(|summary| summary.draw_average_ms);
+        let draw_p99_ms = frame.map(|summary| summary.draw_p99_ms);
+        let draw_maximum_ms = frame.map(|summary| summary.draw_maximum_ms);
+        let response_p99_ms = frame.and_then(|summary| summary.response_p99_ms);
+        let invalidations_average = frame.map(|summary| summary.invalidations_average);
+        let frame_samples = frame.map_or(0, |summary| summary.sample_count);
+        let runtime_queue_depth = self.runtime_events.len();
+        let workspace_queue_depth = self.workspace_events.len();
+        let title_queue_depth = self.title_events.len();
+        let diff_queue_depth = self.diff_tasks.len();
+        let render_item_count = self.conversation_render_cache.len();
+        let pending_diff_prompts = self.pending_diff_prompts.len();
+        let pending_diff_previews = self.pending_diff_previews.len();
+        let repository_queue_depth = self.repository_tasks.len();
+        let pending_repository_refreshes = self.pending_repository_refreshes.len();
+
+        if let Some(delay) = stall_delay {
+            tracing::warn!(
+                delay_ms = duration_ms(delay),
+                interval_ms = duration_ms(UI_HEARTBEAT_INTERVAL),
+                ?selected_harness_id,
+                ?selected_status,
+                message_count,
+                queued_message_count,
+                render_item_count,
+                harness_count = self.harnesses.len(),
+                working_harnesses,
+                runtime_queue_depth,
+                workspace_queue_depth,
+                title_queue_depth,
+                diff_queue_depth,
+                pending_diff_prompts,
+                pending_diff_previews,
+                repository_queue_depth,
+                pending_repository_refreshes,
+                ?draw_average_ms,
+                ?draw_p99_ms,
+                ?draw_maximum_ms,
+                ?response_p99_ms,
+                ?invalidations_average,
+                frame_samples,
+                "UI event loop heartbeat delayed"
+            );
+        } else {
+            tracing::info!(
+                ?selected_harness_id,
+                ?selected_status,
+                message_count,
+                queued_message_count,
+                render_item_count,
+                harness_count = self.harnesses.len(),
+                working_harnesses,
+                runtime_queue_depth,
+                workspace_queue_depth,
+                title_queue_depth,
+                diff_queue_depth,
+                pending_diff_prompts,
+                pending_diff_previews,
+                repository_queue_depth,
+                pending_repository_refreshes,
+                ?draw_average_ms,
+                ?draw_p99_ms,
+                ?draw_maximum_ms,
+                ?response_p99_ms,
+                ?invalidations_average,
+                frame_samples,
+                "UI performance snapshot"
+            );
+        }
+    }
+
     fn allocate_id(&mut self) -> Id {
         let id = self.next_id;
         self.next_id += 1;
@@ -1134,7 +1510,8 @@ impl Dirigent {
     }
 
     pub(crate) fn persist(&mut self) {
-        if let Err(error) = self.state_database.save(
+        let started = Instant::now();
+        let result = self.state_database.save(
             &self.projects,
             &self.harnesses,
             &self.workspaces,
@@ -1146,7 +1523,18 @@ impl Dirigent {
             self.diff_sidebar_open,
             self.diff_sidebar_width,
             self.diff_view_mode,
-        ) {
+        );
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(16) {
+            tracing::warn!(
+                elapsed_ms = duration_ms(elapsed),
+                project_count = self.projects.len(),
+                harness_count = self.harnesses.len(),
+                workspace_count = self.workspaces.len(),
+                "slow application state persistence"
+            );
+        }
+        if let Err(error) = result {
             tracing::error!(error = %error, "could not persist application state");
             self.banner = Some(error);
         }

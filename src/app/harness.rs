@@ -63,6 +63,13 @@ impl ComposerSendTimings {
         let measured = stages
             .iter()
             .fold(Duration::ZERO, |total, (_, elapsed)| total + *elapsed);
+        let other = total.saturating_sub(measured);
+        warn_if_slow(
+            harness_id,
+            "composer_send",
+            "unmeasured_or_descheduled",
+            other,
+        );
         tracing::info!(
             harness_id,
             outcome,
@@ -78,7 +85,7 @@ impl ComposerSendTimings {
             draft_cache_ms = duration_ms(self.draft_cache),
             workspace_provision_ms = duration_ms(self.workspace_provision),
             notify_ms = duration_ms(self.notify),
-            other_ms = duration_ms(total.saturating_sub(measured)),
+            other_ms = duration_ms(other),
             prompt_bytes,
             image_count,
             message_count = harness.messages.len(),
@@ -386,12 +393,30 @@ impl Dirigent {
         let new_queued_count = harness.queued_messages.len();
         let new_working = harness.status == HarnessStatus::Working;
         let old_message_count = self.conversation_list_message_count;
-        let rebuild_from_message = if new_message_count < old_message_count {
-            0
+        let content_only_update = changed_message.is_some()
+            && new_message_count == old_message_count
+            && new_queued_count == self.conversation_list_queued_count
+            && new_working == self.conversation_list_working;
+        if content_only_update {
+            // Streaming text and tool-output updates do not change render-item identities or
+            // work-group structure. Rebuilding the full conversation cache for every token made
+            // long sessions progressively more expensive.
+            if let Some(render_item) = changed_message.and_then(|message_index| {
+                self.conversation_render_cache
+                    .message_render_item_index(message_index)
+            }) {
+                self.conversation_list
+                    .remeasure_items(render_item..render_item + 1);
+                self.conversation_render_cache.invalidate_ruler_layout();
+            }
         } else {
-            changed_message.unwrap_or(old_message_count.min(new_message_count))
-        };
-        self.sync_conversation_render_cache(rebuild_from_message);
+            let rebuild_from_message = if new_message_count < old_message_count {
+                0
+            } else {
+                changed_message.unwrap_or(old_message_count.min(new_message_count))
+            };
+            self.sync_conversation_render_cache(rebuild_from_message);
+        }
         self.conversation_list_message_count = new_message_count;
         self.conversation_list_queued_count = new_queued_count;
         self.conversation_list_working = new_working;
@@ -749,14 +774,25 @@ impl Dirigent {
         }
         let total = started.elapsed();
 
-        for (stage, elapsed) in [
+        let stages = [
             ("image_prepare", image_prepare),
             ("turn_diff_capture", turn_diff_capture),
             ("command_build", command_build),
             ("process_send", process_send),
-        ] {
+        ];
+        for &(stage, elapsed) in &stages {
             warn_if_slow(harness_id, "prompt_command", stage, elapsed);
         }
+        let measured = stages
+            .iter()
+            .fold(Duration::ZERO, |total, (_, elapsed)| total + *elapsed);
+        let other = total.saturating_sub(measured);
+        warn_if_slow(
+            harness_id,
+            "prompt_command",
+            "unmeasured_or_descheduled",
+            other,
+        );
         tracing::info!(
             harness_id,
             outcome = if queued_for_baseline {
@@ -771,6 +807,7 @@ impl Dirigent {
             turn_diff_capture_ms = duration_ms(turn_diff_capture),
             command_build_ms = duration_ms(command_build),
             process_send_ms = duration_ms(process_send),
+            other_ms = duration_ms(other),
             prompt_bytes,
             requested_image_count,
             encoded_image_count = requested_image_count,
