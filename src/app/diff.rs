@@ -2,6 +2,49 @@ use super::*;
 
 use crate::diff::{self, ActiveTurnDiff, DiffScope, DiffViewMode, TurnDiff, TurnDiffStatus};
 
+pub(super) struct TurnHighlightTask {
+    pub(super) generation: u64,
+    pub(super) harness_id: Id,
+    pub(super) turn: Arc<TurnDiff>,
+}
+
+pub(super) struct TurnHighlightResult {
+    generation: u64,
+    harness_id: Id,
+    turn: Arc<TurnDiff>,
+}
+
+pub(super) fn run_turn_highlight_worker(
+    tasks: async_channel::Receiver<TurnHighlightTask>,
+    results: async_channel::Sender<TurnHighlightResult>,
+) {
+    while let Ok(task) = tasks.recv_blocking() {
+        let started = Instant::now();
+        let turn_id = task.turn.id;
+        let mut turn = task.turn.as_ref().clone();
+        turn.refresh_highlights();
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(100) {
+            tracing::info!(
+                harness_id = task.harness_id,
+                turn_id,
+                elapsed_ms = elapsed.as_millis(),
+                "asynchronous turn diff highlighting completed"
+            );
+        }
+        if results
+            .send_blocking(TurnHighlightResult {
+                generation: task.generation,
+                harness_id: task.harness_id,
+                turn: Arc::new(turn),
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
 pub(super) enum DiffTask {
     Begin {
         job_id: u64,
@@ -93,6 +136,51 @@ pub(super) fn run_diff_worker(
 }
 
 impl Dirigent {
+    pub(super) fn queue_turn_diff_highlights(&mut self) {
+        self.turn_highlight_generation = self.turn_highlight_generation.wrapping_add(1).max(1);
+        let generation = self.turn_highlight_generation;
+        for harness in &self.harnesses {
+            for turn in &harness.turn_diffs {
+                if self
+                    .turn_highlight_tasks
+                    .try_send(TurnHighlightTask {
+                        generation,
+                        harness_id: harness.id,
+                        turn: turn.clone(),
+                    })
+                    .is_err()
+                {
+                    tracing::warn!("could not queue asynchronous turn diff highlighting");
+                    return;
+                }
+            }
+        }
+    }
+
+    pub(super) fn handle_turn_highlight_result(&mut self, result: TurnHighlightResult) {
+        if result.generation != self.turn_highlight_generation {
+            return;
+        }
+        let Some(harness) = self
+            .harnesses
+            .iter_mut()
+            .find(|harness| harness.id == result.harness_id)
+        else {
+            return;
+        };
+        let Some(turn) = harness
+            .turn_diffs
+            .iter_mut()
+            .find(|turn| turn.id == result.turn.id)
+        else {
+            return;
+        };
+        *turn = result.turn;
+        if self.selected_harness == Some(harness.id) {
+            self.diff_display_key = None;
+        }
+    }
+
     fn persist_diff_sidebar(&mut self) {
         if let Err(error) = self.state_database.save_diff_sidebar(
             self.diff_sidebar_open,

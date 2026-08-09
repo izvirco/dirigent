@@ -604,6 +604,8 @@ pub(crate) struct Dirigent {
     workspace_events: Sender<WorkspaceEvent>,
     title_events: Sender<TitleGenerationEvent>,
     diff_tasks: Sender<self::diff::DiffTask>,
+    turn_highlight_tasks: Sender<self::diff::TurnHighlightTask>,
+    turn_highlight_generation: u64,
     pending_diff_prompts: HashMap<Id, PendingDiffPrompt>,
     pending_diff_previews: HashMap<Id, u64>,
     dirty_diff_previews: HashSet<Id>,
@@ -991,6 +993,32 @@ impl Dirigent {
         })
         .detach();
 
+        let (turn_highlight_task_tx, turn_highlight_task_rx) = async_channel::unbounded();
+        let (turn_highlight_result_tx, turn_highlight_result_rx) = async_channel::unbounded();
+        std::thread::Builder::new()
+            .name("dirigent-turn-highlights".into())
+            .spawn(move || {
+                self::diff::run_turn_highlight_worker(
+                    turn_highlight_task_rx,
+                    turn_highlight_result_tx,
+                )
+            })
+            .expect("could not start turn highlight worker");
+        cx.spawn(async move |this, cx| {
+            while let Ok(result) = turn_highlight_result_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.handle_turn_highlight_result(result);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let mut banner = config_error.clone();
         let pi_bridge_extension = match platform::materialize_pi_bridge() {
             Ok(path) => Some(path),
@@ -1015,11 +1043,6 @@ impl Dirigent {
             diff_sidebar_width,
             diff_view_mode,
         } = loaded;
-        for harness in &mut harnesses {
-            for turn in &mut harness.turn_diffs {
-                Arc::make_mut(turn).refresh_highlights();
-            }
-        }
         for workspace in &mut workspaces {
             workspace.state = match crate::vcs::validate_workspace(workspace) {
                 Ok(()) => WorkspaceState::Ready,
@@ -1375,12 +1398,15 @@ impl Dirigent {
             workspace_events: workspace_event_tx,
             title_events: title_event_tx,
             diff_tasks: diff_task_tx,
+            turn_highlight_tasks: turn_highlight_task_tx,
+            turn_highlight_generation: 0,
             pending_diff_prompts: HashMap::new(),
             pending_diff_previews: HashMap::new(),
             dirty_diff_previews: HashSet::new(),
             next_diff_job_id: 1,
             title_processes: HashMap::new(),
         };
+        this.queue_turn_diff_highlights();
         if let Some(project_id) = selected_project {
             this.refresh_repository(project_id);
         }
@@ -1621,13 +1647,8 @@ impl Dirigent {
 
     fn apply_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
         self.font = appearance.font.into();
+        self.queue_turn_diff_highlights();
         for harness in &mut self.harnesses {
-            for turn in &mut harness.turn_diffs {
-                Arc::make_mut(turn).refresh_highlights();
-            }
-            if let Some(preview) = harness.active_turn_preview.as_mut() {
-                preview.refresh_highlights();
-            }
             for message in harness
                 .messages
                 .iter_mut()

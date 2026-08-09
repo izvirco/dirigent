@@ -73,6 +73,13 @@ try {
         Set-Content -LiteralPath (Join-Path $captureRoot "display-adapters.txt") -Encoding UTF8
 }
 
+Write-Step "Waiting 30 seconds for Dirigent to finish starting"
+Start-Sleep -Seconds 30
+$process.Refresh()
+if ($process.HasExited) {
+    throw "Dirigent exited during startup."
+}
+
 Write-Step "Waiting for a window hang of at least five seconds"
 Write-Host "Use Dirigent normally. Leave this window open. Dumps will be automatic."
 $firstDump = Join-Path $captureRoot "hang-1.dmp"
