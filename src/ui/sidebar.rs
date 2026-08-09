@@ -400,7 +400,7 @@ impl Dirigent {
                         |this, event: &DragMoveEvent<SidebarResizeDrag>, _, cx| {
                             let drag = event.drag(cx);
                             let delta = event.event.position.x - drag.mouse_x;
-                            this.resize_sidebar(drag.width + delta.as_f32());
+                            this.resize_sidebar(drag.width + delta.as_f32(), cx);
                             cx.notify();
                         },
                     )),

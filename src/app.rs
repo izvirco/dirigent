@@ -28,7 +28,7 @@ use fff_search::{
 use gpui::{
     ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, Image,
     ImageFormat, IntoElement, KeyDownEvent, KeyUpEvent, ListAlignment, ListOffset, ListState,
-    MouseButton, ObjectFit, ScrollHandle, SharedString, StyledImage, Window,
+    MouseButton, ObjectFit, ScrollHandle, SharedString, StyledImage, Task, Window,
     WindowBackgroundAppearance, deferred, div, img, point, prelude::*, profiler, px,
 };
 use serde::{Deserialize, Serialize};
@@ -387,7 +387,7 @@ impl RuntimeEventLoopStats {
         if now.saturating_duration_since(*last_log_at) < UI_PERFORMANCE_LOG_INTERVAL {
             return;
         }
-        tracing::info!(
+        tracing::debug!(
             batches = self.batches,
             received_events = self.received_events,
             handled_events = self.handled_events,
@@ -519,6 +519,7 @@ pub(crate) struct Dirigent {
     pub(crate) project_settings: Option<Id>,
     pub(crate) workspace_settings_editing: bool,
     pub(crate) sidebar_width: f32,
+    sidebar_layout_persist_task: Option<Task<()>>,
     pub(crate) diff_sidebar_open: bool,
     pub(crate) diff_sidebar_width: f32,
     pub(crate) diff_view_mode: DiffViewMode,
@@ -567,6 +568,7 @@ pub(crate) struct Dirigent {
     repository_tasks: Sender<self::managed_workspace::RepositoryRefreshTask>,
     pending_repository_refreshes: HashSet<Id>,
     dirty_repository_refreshes: HashSet<Id>,
+    repository_refreshed_at: HashMap<Id, Instant>,
     pub(crate) draft_workspace_source: Option<RepositorySnapshot>,
     pending_workspace_sources: HashMap<Id, RepositorySnapshot>,
     pub(crate) pending_workspace_deletion: Option<Id>,
@@ -1288,6 +1290,7 @@ impl Dirigent {
             project_settings: None,
             workspace_settings_editing: false,
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
+            sidebar_layout_persist_task: None,
             diff_sidebar_open,
             diff_sidebar_width: diff_sidebar_width.clamp(420.0, 1_600.0),
             diff_view_mode,
@@ -1337,6 +1340,7 @@ impl Dirigent {
             repository_tasks: repository_task_tx,
             pending_repository_refreshes: HashSet::new(),
             dirty_repository_refreshes: HashSet::new(),
+            repository_refreshed_at: HashMap::new(),
             draft_workspace_source: None,
             pending_workspace_sources: HashMap::new(),
             pending_workspace_deletion: None,
@@ -1461,7 +1465,7 @@ impl Dirigent {
                 "UI event loop heartbeat delayed"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 ?selected_harness_id,
                 ?selected_status,
                 message_count,
@@ -1507,6 +1511,74 @@ impl Dirigent {
             return;
         }
         self.harnesses[index].sidebar_order = self.allocate_sidebar_order();
+    }
+
+    pub(crate) fn schedule_sidebar_layout_persist(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_layout_persist_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let _ = this.update(cx, |this, _| this.persist_sidebar_layout());
+        }));
+    }
+
+    fn persist_sidebar_layout(&mut self) {
+        let started = Instant::now();
+        let result = self
+            .state_database
+            .save_sidebar_layout(self.sidebar_width, self.diff_sidebar_width);
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(16) {
+            tracing::warn!(
+                elapsed_ms = duration_ms(elapsed),
+                sidebar_width = self.sidebar_width,
+                diff_sidebar_width = self.diff_sidebar_width,
+                "slow sidebar layout persistence"
+            );
+        }
+        if let Err(error) = result {
+            tracing::error!(error = %error, "could not persist sidebar layout");
+            self.banner = Some(error);
+        }
+    }
+
+    pub(crate) fn persist_last_used_harness(&mut self) {
+        let started = Instant::now();
+        let result = self
+            .state_database
+            .save_last_used_harness(self.last_used_harness);
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(16) {
+            tracing::warn!(
+                elapsed_ms = duration_ms(elapsed),
+                last_used_harness = ?self.last_used_harness,
+                "slow selected thread persistence"
+            );
+        }
+        if let Err(error) = result {
+            tracing::error!(error = %error, "could not persist selected thread");
+            self.banner = Some(error);
+        }
+    }
+
+    pub(crate) fn persist_harness_session_file(&mut self, index: usize) {
+        let harness = &self.harnesses[index];
+        let started = Instant::now();
+        let result = self
+            .state_database
+            .save_harness_session_file(harness.id, harness.session_file.as_deref());
+        let elapsed = started.elapsed();
+        if elapsed >= Duration::from_millis(16) {
+            tracing::warn!(
+                elapsed_ms = duration_ms(elapsed),
+                harness_id = harness.id,
+                "slow thread session path persistence"
+            );
+        }
+        if let Err(error) = result {
+            tracing::error!(error = %error, harness_id = harness.id, "could not persist thread session path");
+            self.banner = Some(error);
+        }
     }
 
     pub(crate) fn persist(&mut self) {

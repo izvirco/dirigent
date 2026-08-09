@@ -1,13 +1,13 @@
 use super::*;
 
 impl Dirigent {
-    pub(crate) fn resize_sidebar(&mut self, width: f32) {
+    pub(crate) fn resize_sidebar(&mut self, width: f32, cx: &mut Context<Self>) {
         let width = width.clamp(200.0, 520.0);
         if self.sidebar_width == width {
             return;
         }
         self.sidebar_width = width;
-        self.persist();
+        self.schedule_sidebar_layout_persist(cx);
     }
     pub(crate) fn toggle_project_collapsed(&mut self, project_id: Id) {
         if !self.collapsed_projects.remove(&project_id) {
@@ -581,7 +581,7 @@ impl Dirigent {
         self.draft_model = None;
         self.draft_thinking_level = None;
         self.reset_conversation_list(index);
-        self.persist();
+        self.persist_last_used_harness();
         self.refresh_repository(self.harnesses[index].project_id);
         self.start_harness(id, None);
     }

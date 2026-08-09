@@ -4,6 +4,8 @@ use crate::{
     vcs::{self, RepositorySnapshot},
 };
 
+const REPOSITORY_REFRESH_CACHE_TTL: Duration = Duration::from_secs(10);
+
 pub(super) struct RepositoryRefreshTask {
     project_id: Id,
     path: PathBuf,
@@ -41,6 +43,18 @@ pub(super) fn run_repository_worker(
 
 impl Dirigent {
     pub(crate) fn refresh_repository(&mut self, project_id: Id) {
+        self.queue_repository_refresh(project_id, false);
+    }
+
+    fn queue_repository_refresh(&mut self, project_id: Id, force: bool) {
+        if !force
+            && self
+                .repository_refreshed_at
+                .get(&project_id)
+                .is_some_and(|refreshed| refreshed.elapsed() < REPOSITORY_REFRESH_CACHE_TTL)
+        {
+            return;
+        }
         let Some(path) = self
             .projects
             .iter()
@@ -50,7 +64,9 @@ impl Dirigent {
             return;
         };
         if !self.pending_repository_refreshes.insert(project_id) {
-            self.dirty_repository_refreshes.insert(project_id);
+            if force {
+                self.dirty_repository_refreshes.insert(project_id);
+            }
             return;
         }
         let task = RepositoryRefreshTask {
@@ -99,6 +115,8 @@ impl Dirigent {
             }
         };
         if !stale {
+            self.repository_refreshed_at
+                .insert(result.project_id, Instant::now());
             let label = self
                 .repository_snapshots
                 .get(&result.project_id)
@@ -128,7 +146,7 @@ impl Dirigent {
                 "slow asynchronous repository refresh"
             );
         } else {
-            tracing::info!(
+            tracing::debug!(
                 project_id = result.project_id,
                 outcome,
                 queue_wait_ms = duration_ms(result.queue_wait),
@@ -138,7 +156,7 @@ impl Dirigent {
             );
         }
         if self.dirty_repository_refreshes.remove(&result.project_id) {
-            self.refresh_repository(result.project_id);
+            self.queue_repository_refresh(result.project_id, true);
         }
     }
 
@@ -147,7 +165,7 @@ impl Dirigent {
             return false;
         }
         let project_id = self.harnesses[index].project_id;
-        self.refresh_repository(project_id);
+        self.queue_repository_refresh(project_id, true);
         let label = self
             .repository_snapshots
             .get(&project_id)

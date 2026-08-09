@@ -123,8 +123,8 @@ impl Dirigent {
             (KeyboardMenu::Projects, "k" | "p") => self.select_relative_project(-1),
             (KeyboardMenu::Projects, "g") => self.select_edge_project(true),
             (KeyboardMenu::Projects, "e") => self.select_edge_project(false),
-            (KeyboardMenu::Projects, "[") => self.resize_sidebar(self.sidebar_width - 24.0),
-            (KeyboardMenu::Projects, "]") => self.resize_sidebar(self.sidebar_width + 24.0),
+            (KeyboardMenu::Projects, "[") => self.resize_sidebar(self.sidebar_width - 24.0, cx),
+            (KeyboardMenu::Projects, "]") => self.resize_sidebar(self.sidebar_width + 24.0, cx),
 
             (KeyboardMenu::Goto, "g") => self.scroll_conversation_to_fraction(0.0),
             (KeyboardMenu::Goto, "e") => self.scroll_conversation_to_fraction(1.0),
@@ -211,11 +211,11 @@ impl Dirigent {
                     true
                 }
                 "[" if !command && !modifiers.alt => {
-                    self.resize_sidebar(self.sidebar_width - 24.0);
+                    self.resize_sidebar(self.sidebar_width - 24.0, cx);
                     true
                 }
                 "]" if !command && !modifiers.alt => {
-                    self.resize_sidebar(self.sidebar_width + 24.0);
+                    self.resize_sidebar(self.sidebar_width + 24.0, cx);
                     true
                 }
                 "j" | "down" if !command && !modifiers.alt => {

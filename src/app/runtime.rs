@@ -686,10 +686,12 @@ impl Dirigent {
         match command {
             Some("get_state") => {
                 let data = value.get("data").unwrap_or(&Value::Null);
-                self.harnesses[index].session_file = data
+                let session_file = data
                     .get("sessionFile")
                     .and_then(Value::as_str)
                     .map(PathBuf::from);
+                let session_file_changed = self.harnesses[index].session_file != session_file;
+                self.harnesses[index].session_file = session_file;
                 let thinking_level = data
                     .get("thinkingLevel")
                     .and_then(Value::as_str)
@@ -725,14 +727,16 @@ impl Dirigent {
                 {
                     self.harnesses[index].status = reported_status;
                 }
-                if reported_status == HarnessStatus::Working
-                    && self.harnesses[index].run_started_at.is_none()
-                {
+                let order_changed = reported_status == HarnessStatus::Working
+                    && self.harnesses[index].run_started_at.is_none();
+                if order_changed {
                     self.harnesses[index].run_started_at = Some(Instant::now());
                     self.harnesses[index].last_run_duration = None;
                     self.refresh_harness_order(index);
+                    self.persist();
+                } else if session_file_changed {
+                    self.persist_harness_session_file(index);
                 }
-                self.persist();
                 self.cache_harness_state(index);
                 self.cache_harness_draft(index, true);
                 self.request_thinking_levels(index);

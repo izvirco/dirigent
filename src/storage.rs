@@ -189,6 +189,48 @@ impl StateDatabase {
         Ok(())
     }
 
+    pub(crate) fn save_sidebar_layout(
+        &mut self,
+        sidebar_width: f32,
+        diff_sidebar_width: f32,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE app_state SET sidebar_width = ?1, diff_sidebar_width = ?2
+                 WHERE singleton = 1",
+                params![sidebar_width, diff_sidebar_width],
+            )
+            .map_err(|error| format!("could not store sidebar layout: {error}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn save_last_used_harness(&mut self, harness_id: Option<Id>) -> Result<(), String> {
+        self.connection
+            .execute(
+                "UPDATE app_state SET last_used_harness = ?1 WHERE singleton = 1",
+                params![harness_id.map(|id| id.to_string())],
+            )
+            .map_err(|error| format!("could not store last used thread: {error}"))?;
+        Ok(())
+    }
+
+    pub(crate) fn save_harness_session_file(
+        &mut self,
+        harness_id: Id,
+        session_file: Option<&Path>,
+    ) -> Result<(), String> {
+        let session_file_json = session_file
+            .map(|path| encode_json(path, "harness session path"))
+            .transpose()?;
+        self.connection
+            .execute(
+                "UPDATE harnesses SET session_file_json = ?1 WHERE id = ?2",
+                params![session_file_json, harness_id.to_string()],
+            )
+            .map_err(|error| format!("could not store thread session path: {error}"))?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save(
         &mut self,
@@ -906,10 +948,23 @@ mod tests {
             work_group_expansion,
         });
         write_stored_state(&mut state_database.connection, &state).unwrap();
+        let session_file = directory.join("session.jsonl");
+        state_database.save_sidebar_layout(336.0, 720.0).unwrap();
+        state_database.save_last_used_harness(Some(2)).unwrap();
+        state_database
+            .save_harness_session_file(2, Some(&session_file))
+            .unwrap();
         drop(state_database);
 
         let (_, loaded) = StateDatabase::open_at(&database).unwrap();
         assert!(loaded.projects[0].keep_active_threads_in_project);
+        assert_eq!(loaded.sidebar_width, 336.0);
+        assert_eq!(loaded.diff_sidebar_width, 720.0);
+        assert_eq!(loaded.last_used_harness, Some(2));
+        assert_eq!(
+            loaded.harnesses[0].session_file.as_ref(),
+            Some(&session_file)
+        );
         assert_eq!(loaded.harnesses[0].last_vcs_label.as_deref(), Some("main"));
         assert_eq!(
             loaded.harnesses[0].work_group_expansion.get("entry:user-1"),

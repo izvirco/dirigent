@@ -401,11 +401,11 @@ impl Dirigent {
         }
     }
 
-    pub(crate) fn resize_diff_sidebar(&mut self, width: f32) {
+    pub(crate) fn resize_diff_sidebar(&mut self, width: f32, cx: &mut Context<Self>) {
         let width = width.clamp(420.0, 1_600.0);
         if self.diff_sidebar_width != width {
             self.diff_sidebar_width = width;
-            self.persist_diff_sidebar();
+            self.schedule_sidebar_layout_persist(cx);
         }
     }
 
