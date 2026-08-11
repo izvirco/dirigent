@@ -1,11 +1,12 @@
-use std::{ops::Range, sync::Arc};
+use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, Pixels,
-    ScrollHandle, SharedString, StyledText, Window, deferred, div, list, prelude::*, px, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, MouseButton,
+    Pixels, ScrollHandle, SharedString, StyledText, Window, deferred, div, list, point, prelude::*,
+    px, svg,
 };
 
-use super::composer::dropdown_arrow;
+use super::{composer::dropdown_arrow, scrollbar_drag_offset};
 
 use crate::{
     app::Dirigent,
@@ -26,6 +27,15 @@ struct DiffSidebarResizeDrag {
 }
 
 struct DiffSidebarResizePreview;
+
+#[derive(Clone)]
+struct DiffListScrollbarDrag {
+    list: gpui::ListState,
+    start_pointer: Rc<Cell<Pixels>>,
+    start_offset: f32,
+    max_offset: f32,
+    thumb_travel: f32,
+}
 
 const MIN_THREAD_WIDTH: f32 = 420.0;
 const MIN_DIFF_SIDEBAR_WIDTH: f32 = 420.0;
@@ -1050,7 +1060,7 @@ impl Dirigent {
         (columns as f32 * 7.4 + 20.0).max(120.0)
     }
 
-    fn render_diff_list_scrollbar(&self) -> AnyElement {
+    fn render_diff_list_scrollbar(&self, cx: &mut Context<Self>) -> AnyElement {
         let max_offset = self.diff_list.max_offset_for_scrollbar().y.as_f32();
         let viewport = self.diff_list.viewport_bounds().size.height.as_f32();
         let thumb_fraction = if viewport > 0.0 && max_offset > 0.0 {
@@ -1066,6 +1076,13 @@ impl Dirigent {
             0.0
         };
         let thumb_top = (1.0 - thumb_fraction) * scroll_fraction;
+        let drag = DiffListScrollbarDrag {
+            list: self.diff_list.clone(),
+            start_pointer: Rc::new(Cell::new(px(0.0))),
+            start_offset: self.diff_list.scroll_px_offset_for_scrollbar().y.as_f32(),
+            max_offset,
+            thumb_travel: (viewport - 6.0).max(0.0) * (1.0 - thumb_fraction),
+        };
 
         div()
             .id("diff-list-scrollbar")
@@ -1078,13 +1095,49 @@ impl Dirigent {
             .when(max_offset > 0.0, |element| {
                 element.bg(gpui::rgba(0xffffff16)).child(
                     div()
+                        .id("diff-list-scrollbar-thumb")
+                        .group("diff-list-scrollbar-thumb")
                         .absolute()
                         .top(gpui::relative(thumb_top))
+                        .right(px(-3.0))
                         .h(gpui::relative(thumb_fraction))
                         .min_h(px(10.0))
-                        .w_full()
-                        .rounded_full()
-                        .bg(rgb(muted())),
+                        .w(px(8.0))
+                        .cursor(CursorStyle::Arrow)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                        )
+                        .on_drag(drag, |drag, _, window, cx| {
+                            drag.start_pointer.set(window.mouse_position().y);
+                            cx.new(|_| DiffSidebarResizePreview)
+                        })
+                        .on_drag_move::<DiffListScrollbarDrag>(cx.listener(
+                            |_, event: &DragMoveEvent<DiffListScrollbarDrag>, _, cx| {
+                                let drag = event.drag(cx);
+                                let offset = scrollbar_drag_offset(
+                                    drag.start_offset,
+                                    (event.event.position.y - drag.start_pointer.get()).as_f32(),
+                                    drag.max_offset,
+                                    drag.thumb_travel,
+                                );
+                                drag.list
+                                    .set_offset_from_scrollbar(point(px(0.0), px(offset)));
+                                cx.notify();
+                                cx.stop_propagation();
+                            },
+                        ))
+                        .child(
+                            div()
+                                .ml(px(3.0))
+                                .h_full()
+                                .w(px(2.0))
+                                .rounded_full()
+                                .bg(rgb(muted()))
+                                .group_hover("diff-list-scrollbar-thumb", |style| {
+                                    style.bg(rgb(orange()))
+                                }),
+                        ),
                 )
             })
             .into_any_element()
@@ -1189,7 +1242,7 @@ impl Dirigent {
             .child(div().relative().flex_1().min_w_0().child(code_scroll).when(
                 show_scrollbar,
                 |element| {
-                    element.child(self.render_thin_horizontal_scrollbar(scrollbar_id, scroll))
+                    element.child(self.render_thin_horizontal_scrollbar(scrollbar_id, scroll, cx))
                 },
             ))
             .into_any_element()
@@ -1593,7 +1646,7 @@ impl Dirigent {
                                 .child(message),
                         )
                     })
-                    .child(self.render_diff_list_scrollbar()),
+                    .child(self.render_diff_list_scrollbar(cx)),
             )
             .when(has_diff_selection, |element| {
                 element.child(

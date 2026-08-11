@@ -304,6 +304,7 @@ impl Dirigent {
                             .child(self.render_thin_scrollbar(
                                 "model-dropdown-scrollbar",
                                 &self.model_picker_scroll,
+                                cx,
                             )),
                     )
                     .priority(2),

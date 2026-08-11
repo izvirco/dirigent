@@ -392,7 +392,7 @@ impl Dirigent {
                             .children(cells),
                     ),
             )
-            .child(self.render_thin_horizontal_scrollbar(scrollbar_id, &table.scroll))
+            .child(self.render_thin_horizontal_scrollbar(scrollbar_id, &table.scroll, cx))
             .into_any_element()
     }
 

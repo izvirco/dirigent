@@ -83,7 +83,7 @@ impl Dirigent {
                         cx,
                     )),
             )
-            .child(self.render_thin_scrollbar(scrollbar_id, scroll))
+            .child(self.render_thin_scrollbar(scrollbar_id, scroll, cx))
             .into_any_element()
     }
     pub(super) fn render_work_group(
