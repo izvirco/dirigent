@@ -192,6 +192,7 @@ impl Dirigent {
         if archived {
             self.harnesses[index].has_unread_completion = false;
             self.harnesses[index].process.take();
+            self.harnesses[index].process_state = PiProcessState::Stopped;
             self.harnesses[index].status = HarnessStatus::Stopped;
         }
         self.sidebar_menu = None;

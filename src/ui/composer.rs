@@ -1,19 +1,43 @@
+use std::time::Duration;
+
 use gpui::{
-    AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement, ObjectFit, StyledImage,
-    Transformation, Window, deferred, div, img, prelude::*, px, radians, rgba, svg,
+    Animation, AnimationExt as _, AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement,
+    ObjectFit, StyledImage, Transformation, Window, deferred, div, img, percentage, prelude::*, px,
+    radians, rgba, svg,
 };
 
 use crate::{
     app::{ComposerDropdown, Dirigent},
-    model::{ContextUsage, HarnessStatus, WorkspaceBackend, WorkspaceState},
+    model::{ContextUsage, HarnessStatus, PiProcessState, WorkspaceBackend, WorkspaceState},
     text_input::TextInput,
-    theme::{bg, blue, border, muted, orange, rgb, surface, surface_hover, theme_text},
+    theme::{bg, blue, border, muted, orange, red, rgb, surface, surface_hover, theme_text},
 };
 
 fn format_context_usage(usage: ContextUsage) -> String {
     let used = usage.used_tokens / 1_000;
     let total = usage.context_window / 1_000;
     format!("{used}k/{total}k")
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NixBadgeState {
+    Disabled,
+    Enabled,
+    Initializing,
+    Errored,
+}
+
+impl NixBadgeState {
+    fn for_process(enabled: bool, process_state: PiProcessState) -> Self {
+        if !enabled {
+            return Self::Disabled;
+        }
+        match process_state {
+            PiProcessState::Initializing => Self::Initializing,
+            PiProcessState::Errored => Self::Errored,
+            PiProcessState::Stopped | PiProcessState::Ready => Self::Enabled,
+        }
+    }
 }
 
 fn format_queue_state(steering: usize, follow_up: usize) -> Option<String> {
@@ -596,7 +620,7 @@ impl Dirigent {
         working: bool,
         creating: bool,
         nix_available: bool,
-        nix_enabled: bool,
+        nix_state: NixBadgeState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -732,6 +756,12 @@ impl Dirigent {
                         )
                     })
                     .when(nix_available, |element| {
+                        let initializing = nix_state == NixBadgeState::Initializing;
+                        let color = match nix_state {
+                            NixBadgeState::Disabled => muted(),
+                            NixBadgeState::Enabled | NixBadgeState::Initializing => blue(),
+                            NixBadgeState::Errored => red(),
+                        };
                         element.child(
                             div()
                                 .id("nix-toggle")
@@ -739,18 +769,41 @@ impl Dirigent {
                                 .px_2()
                                 .flex()
                                 .items_center()
+                                .gap_1()
                                 .rounded_md()
                                 .text_xs()
-                                .text_color(rgb(if nix_enabled { blue() } else { muted() }))
-                                .when(nix_enabled, |style| {
-                                    style.bg(rgb(crate::theme::accent_surface()))
-                                })
+                                .text_color(rgb(color))
+                                .when(
+                                    matches!(
+                                        nix_state,
+                                        NixBadgeState::Enabled | NixBadgeState::Initializing
+                                    ),
+                                    |style| style.bg(rgb(crate::theme::accent_surface())),
+                                )
                                 .hover(|style| style.bg(rgb(surface_hover())))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.toggle_nix();
                                     cx.notify();
                                 }))
-                                .child("nix"),
+                                .child("nix")
+                                .when(initializing, |badge| {
+                                    badge.child(
+                                        svg()
+                                            .path("icon/loader-circle.svg")
+                                            .size(px(11.0))
+                                            .flex_none()
+                                            .text_color(rgb(blue()))
+                                            .with_animation(
+                                                "nix-spinner",
+                                                Animation::new(Duration::from_millis(900)).repeat(),
+                                                |icon, delta| {
+                                                    icon.with_transformation(
+                                                        Transformation::rotate(percentage(delta)),
+                                                    )
+                                                },
+                                            ),
+                                    )
+                                }),
                         )
                     })
                     .child(div().flex_1())
@@ -826,7 +879,9 @@ impl Dirigent {
             format_queue_state(harness.steering_queue.len(), harness.follow_up_queue.len())
         });
         let nix_available = harness.is_some_and(|harness| self.harness_has_devshell(harness.id));
-        let nix_enabled = harness.is_some_and(|harness| harness.nix_enabled);
+        let nix_state = harness.map_or(NixBadgeState::Disabled, |harness| {
+            NixBadgeState::for_process(harness.nix_enabled, harness.process_state)
+        });
 
         div()
             .w_full()
@@ -845,7 +900,7 @@ impl Dirigent {
                 working,
                 false,
                 nix_available,
-                nix_enabled,
+                nix_state,
                 window,
                 cx,
             ))
@@ -896,7 +951,7 @@ impl Dirigent {
                         false,
                         true,
                         nix_available,
-                        self.draft_nix_enabled,
+                        NixBadgeState::for_process(self.draft_nix_enabled, PiProcessState::Stopped),
                         window,
                         cx,
                     )),

@@ -12,6 +12,7 @@ impl Dirigent {
             "harness failed"
         );
         self.harnesses[index].status = HarnessStatus::Failed;
+        self.harnesses[index].process_state = PiProcessState::Errored;
         self.harnesses[index].run_started_at = None;
         self.harnesses[index].attention_required = false;
         self.harnesses[index].error = Some(error.clone());
@@ -27,6 +28,7 @@ impl Dirigent {
                 if let Some(index) = self.harnesses.iter().position(|harness| {
                     harness.id == harness_id && harness.process_generation == generation
                 }) {
+                    self.harnesses[index].process_state = PiProcessState::Errored;
                     self.harnesses[index].error = Some(message.clone());
                     self.harnesses[index].messages.push(Message::error(message));
                     if self.harnesses[index].status == HarnessStatus::Starting {
@@ -68,6 +70,7 @@ impl Dirigent {
         self.pending_diff_prompts.remove(&harness_id);
         self.finish_turn_diff(index, TurnDiffStatus::Interrupted);
         self.harnesses[index].process.take();
+        self.harnesses[index].process_state = PiProcessState::Errored;
         self.harnesses[index].retry_status = None;
         self.harnesses[index].steering_queue.clear();
         self.harnesses[index].follow_up_queue.clear();
@@ -121,6 +124,9 @@ impl Dirigent {
         }) else {
             return;
         };
+        if self.harnesses[index].process_state == PiProcessState::Initializing {
+            self.harnesses[index].process_state = PiProcessState::Ready;
+        }
         let event_type = value
             .get("type")
             .and_then(Value::as_str)

@@ -322,6 +322,7 @@ impl Dirigent {
             if let Some(process) = harness.process.take() {
                 process.stop();
             }
+            harness.process_state = PiProcessState::Stopped;
             harness.status = HarnessStatus::Stopped;
             harness.run_started_at = None;
         }
@@ -430,6 +431,7 @@ impl Dirigent {
         if let Some(process) = self.harnesses[index].process.take() {
             process.stop();
         }
+        self.harnesses[index].process_state = PiProcessState::Stopped;
         self.harnesses[index].workspace_id = Some(workspace_id.clone());
         self.harnesses[index].status = HarnessStatus::Starting;
         self.harnesses[index].run_started_at = None;

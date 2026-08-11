@@ -44,7 +44,7 @@ use crate::{
     image_attachment::normalize_for_harness,
     model::{
         CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
-        Message, MessageRole, Project, RetryStatus, WorkspaceState,
+        Message, MessageRole, PiProcessState, Project, RetryStatus, WorkspaceState,
     },
     platform,
     rpc::{PiProcess, RuntimeEvent, RuntimeEventKind, RuntimeTarget},

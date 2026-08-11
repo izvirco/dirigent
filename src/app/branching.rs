@@ -598,6 +598,7 @@ impl Dirigent {
                     leaf_id.as_deref(),
                 );
                 self.harnesses[index].process.take();
+                self.harnesses[index].process_state = PiProcessState::Stopped;
                 self.harnesses[index].status = HarnessStatus::Stopped;
                 self.harnesses[index].run_started_at = None;
                 let Some(target_index) = self

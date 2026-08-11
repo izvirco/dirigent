@@ -544,6 +544,7 @@ impl Dirigent {
         let title = self.harnesses[index].title.clone();
         self.harnesses[index].error = None;
         self.harnesses[index].process_generation += 1;
+        self.harnesses[index].process_state = PiProcessState::Initializing;
         let process_generation = self.harnesses[index].process_generation;
         self.sync_conversation_list(index, None);
         match PiProcess::spawn(
@@ -1223,6 +1224,7 @@ impl Dirigent {
         if let Some(process) = self.harnesses[index].process.take() {
             process.stop();
         }
+        self.harnesses[index].process_state = PiProcessState::Stopped;
         if self.harnesses[index].run_started_at.take().is_some() {
             self.harnesses[index].attention_required = false;
             self.refresh_harness_order(index);

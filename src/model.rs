@@ -67,6 +67,14 @@ pub(crate) enum HarnessStatus {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PiProcessState {
+    Stopped,
+    Initializing,
+    Ready,
+    Errored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MessageRole {
     User,
     Assistant,
@@ -609,6 +617,7 @@ pub(crate) struct Harness {
     pub(crate) error: Option<String>,
     pub(crate) process: Option<PiProcess>,
     pub(crate) process_generation: u64,
+    pub(crate) process_state: PiProcessState,
     pub(crate) loaded_messages: bool,
     pub(crate) cached_entries: Option<Vec<serde_json::Value>>,
     pub(crate) cached_leaf_id: Option<String>,
@@ -650,6 +659,7 @@ impl Harness {
             error: None,
             process: None,
             process_generation: 0,
+            process_state: PiProcessState::Stopped,
             loaded_messages: true,
             cached_entries: None,
             cached_leaf_id: None,
@@ -737,6 +747,7 @@ impl Harness {
             error: None,
             process: None,
             process_generation: 0,
+            process_state: PiProcessState::Stopped,
             loaded_messages: false,
             cached_entries: None,
             cached_leaf_id: None,
