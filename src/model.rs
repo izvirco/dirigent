@@ -241,7 +241,12 @@ impl Message {
     }
 
     pub(crate) fn set_detail(&mut self, detail: Option<String>) {
-        self.detail = detail;
+        // TODO: Upstream this to GPUI. Its Linux renderer tries to rasterize carriage
+        // returns through the emoji fallback font, flooding logs with Swash errors.
+        self.detail = detail.map(|mut detail| {
+            detail.retain(|character| character != '\r');
+            detail
+        });
         self.refresh_detail_cache();
         self.refresh_copy_cache();
     }
