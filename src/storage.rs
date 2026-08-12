@@ -1,3 +1,5 @@
+//! Persists durable application state and turn diffs in SQLite.
+
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -235,6 +237,8 @@ impl StateDatabase {
     }
 
     fn open_at(database_path: &Path) -> Result<(Self, LoadedState), String> {
+        // Startup reads synchronously once, then transfers sole connection ownership to the
+        // worker so later GPUI updates only enqueue commands.
         let connection = open_database(database_path)?;
         let loaded = read_stored_state(&connection).map(StoredState::into_loaded)?;
         let (sender, receiver) = mpsc::channel();
@@ -322,6 +326,7 @@ impl StateDatabase {
         })
     }
 
+    /// Queues a full metadata reconciliation; normalized turn diffs are persisted separately.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save(
         &self,
@@ -403,6 +408,7 @@ impl Drop for StateDatabase {
     }
 }
 
+/// Owns the SQLite connection and executes persistence commands in application order.
 fn run_storage_worker(mut connection: Connection, receiver: Receiver<StorageCommand>) {
     while let Ok(command) = receiver.recv() {
         if matches!(command, StorageCommand::Shutdown) {
@@ -860,6 +866,7 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
     Ok(())
 }
 
+/// Reconciles mutable metadata without rewriting potentially large normalized turn diffs.
 fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> Result<(), String> {
     let transaction = connection
         .transaction()
@@ -1128,6 +1135,8 @@ fn prepare_table_order(
             .execute(&format!("DELETE FROM {table} WHERE id = ?1"), params![id])
             .map_err(|error| format!("could not remove {table} row {id}: {error}"))?;
     }
+    // `order_index` is unique. Move changing rows into a disjoint negative range first so swaps
+    // cannot collide before their later upserts assign final non-negative positions.
     for (temporary_index, (id, order)) in desired.iter().enumerate() {
         if existing.get(id).is_some_and(|current| current != order) {
             let temporary_order = (-1_i64)
@@ -1543,6 +1552,7 @@ impl StoredState {
     }
 }
 
+/// Compresses large source snapshots while retaining JSON as the schema's logical format.
 fn encode_turn_diff(turn: &TurnDiff) -> Result<Vec<u8>, String> {
     let json =
         serde_json::to_vec(turn).map_err(|error| format!("could not encode turn diff: {error}"))?;
@@ -1551,6 +1561,7 @@ fn encode_turn_diff(turn: &TurnDiff) -> Result<Vec<u8>, String> {
 }
 
 fn decode_turn_diff(bytes: &[u8]) -> Result<TurnDiff, String> {
+    // Uncompressed JSON remains readable for databases created before diff compression.
     let json = if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
         zstd::stream::decode_all(bytes)
             .map_err(|error| format!("could not decompress turn diff: {error}"))?

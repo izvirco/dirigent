@@ -1,3 +1,5 @@
+//! Composes the application's top-level GPUI layout.
+
 use super::*;
 
 impl Render for Dirigent {

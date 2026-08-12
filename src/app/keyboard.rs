@@ -1,3 +1,5 @@
+//! Handles keyboard modes, menus, and application shortcuts.
+
 use super::*;
 
 impl Dirigent {
@@ -63,6 +65,7 @@ impl Dirigent {
         ));
         true
     }
+    /// Dispatches one key within the active prefix menu, preserving the menu on unknown keys.
     pub(super) fn perform_keyboard_menu_key(
         &mut self,
         key: &str,
@@ -179,6 +182,8 @@ impl Dirigent {
         }
 
         if self.keyboard_menu_activation.is_some() {
+            // Ignore key-repeat and chord input until the prefix key is released; otherwise the
+            // activation key itself could immediately be interpreted as a menu command.
             cx.stop_propagation();
             return;
         }

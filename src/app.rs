@@ -1,3 +1,5 @@
+//! Defines the central application state and shared application-level helpers.
+
 mod branching;
 mod diff;
 mod harness;
@@ -417,6 +419,7 @@ fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
 }
 
+/// Merges protocol updates only when dropping the boundary between them is lossless.
 fn try_coalesce_runtime_delta(previous: &mut RuntimeEvent, next: &RuntimeEvent) -> bool {
     if previous.target() != next.target() {
         return false;
@@ -435,6 +438,7 @@ fn try_coalesce_runtime_delta(previous: &mut RuntimeEvent, next: &RuntimeEvent) 
     };
     let previous_event_type = previous_value.get("type").and_then(Value::as_str);
     let next_event_type = next_value.get("type").and_then(Value::as_str);
+    // Partial tool results are snapshots, so only the newest update is useful.
     if previous_event_type == Some("tool_execution_update")
         && next_event_type == previous_event_type
         && previous_value.get("toolCallId") == next_value.get("toolCallId")
@@ -467,10 +471,12 @@ fn try_coalesce_runtime_delta(previous: &mut RuntimeEvent, next: &RuntimeEvent) 
     else {
         return false;
     };
+    // Text and thinking updates are deltas rather than snapshots and must be concatenated.
     previous_delta.push_str(delta);
     true
 }
 
+/// Reduces high-frequency streaming traffic before it reaches GPUI's update loop.
 fn coalesce_runtime_events(events: Vec<RuntimeEvent>) -> Vec<RuntimeEvent> {
     let mut coalesced: Vec<RuntimeEvent> = Vec::with_capacity(events.len());
     for event in events {
@@ -756,6 +762,7 @@ impl Dirigent {
         self.harnesses[index].sidebar_order = self.allocate_sidebar_order();
     }
 
+    /// Debounces resize writes so dragging a sidebar does not flood the storage worker.
     pub(crate) fn schedule_sidebar_layout_persist(&mut self, cx: &mut Context<Self>) {
         self.sidebar_layout_persist_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -864,6 +871,8 @@ impl Dirigent {
 
     fn apply_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
         self.font = appearance.font.into();
+        // Color values are resolved into cached messages and diff spans, so a theme reload must
+        // invalidate more than the top-level GPUI view.
         self.queue_turn_diff_highlights();
         for harness in &mut self.harnesses {
             for message in harness

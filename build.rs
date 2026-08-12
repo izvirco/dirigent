@@ -1,3 +1,5 @@
+//! Packages platform resources and optional bundled font assets.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},

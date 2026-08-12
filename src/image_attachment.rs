@@ -1,3 +1,5 @@
+//! Validates and normalizes image attachments for Pi harnesses.
+
 use std::{io::Cursor, path::Path, sync::Arc};
 
 use gpui::{Image, ImageFormat};

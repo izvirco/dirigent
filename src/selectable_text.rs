@@ -1,3 +1,5 @@
+//! Renders text with mouse selection and clipboard support.
+
 use std::ops::Range;
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]

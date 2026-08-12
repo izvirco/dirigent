@@ -1,3 +1,5 @@
+//! Runs Pi in RPC mode and transports newline-delimited events.
+
 use std::{
     io::{BufRead, BufReader, Read, Write},
     path::Path,
@@ -84,6 +86,7 @@ pub(crate) struct PiProcess {
 }
 
 impl PiProcess {
+    /// Starts Pi and dedicates reader threads to its structured stdout and diagnostic stderr.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         target: RuntimeTarget,
@@ -153,6 +156,7 @@ impl PiProcess {
         Ok(process)
     }
 
+    /// Writes one complete newline-delimited JSON command while holding the shared stdin lock.
     pub(crate) fn send(&self, command: Value) -> Result<(), String> {
         let mut stdin = self
             .stdin
@@ -179,6 +183,7 @@ impl Drop for PiProcess {
     }
 }
 
+/// Decodes Pi's newline-delimited stdout without terminating the stream on one malformed record.
 fn read_stdout(target: RuntimeTarget, stdout: impl Read, events: Sender<RuntimeEvent>) {
     let mut reader = BufReader::new(stdout);
     let mut buffer = Vec::new();

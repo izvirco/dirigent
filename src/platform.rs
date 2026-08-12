@@ -1,3 +1,5 @@
+//! Centralizes platform paths and child-process behavior.
+
 use std::{
     env, fs,
     path::PathBuf,
@@ -103,6 +105,7 @@ pub(crate) fn cache_path() -> Result<PathBuf, String> {
     Ok(cache_home.join("dirigent/v0/cache.sqlite3"))
 }
 
+/// Atomically updates the private bridge extension bundled with this Dirigent build.
 pub(crate) fn materialize_pi_bridge() -> Result<PathBuf, String> {
     let database = state_database_path()?;
     let directory = database
@@ -154,6 +157,7 @@ pub(crate) fn hide_command_window(command: &mut Command) {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn pi_command(nix_enabled: bool) -> Result<Command, String> {
+    // `nix develop --command pi` resolves the project dev shell without mutating its lock file.
     let command = if nix_enabled {
         let mut command = Command::new("nix");
         command.args(["develop", "--no-write-lock-file", "--command", "pi"]);
@@ -192,6 +196,7 @@ pub(crate) fn stop_child(child: &mut Child) {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn stop_child(child: &mut Child) {
+    // Pi may be launched through a cmd/npm shim; taskkill is needed to stop that entire tree.
     if child.try_wait().ok().flatten().is_none() {
         let mut command = Command::new("taskkill.exe");
         hide_command_window(&mut command);

@@ -1,3 +1,5 @@
+//! Renders individual conversation messages and tool calls.
+
 use super::*;
 
 pub(super) fn tool_color(tool: &str) -> u32 {

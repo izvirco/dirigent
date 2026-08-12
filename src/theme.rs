@@ -1,3 +1,5 @@
+//! Loads, watches, and exposes the application's visual theme.
+
 use std::{
     fs::{self, OpenOptions},
     io::Write as _,
@@ -486,6 +488,7 @@ fn generate_config(config_dir: &Path) -> Result<(), String> {
     )
 }
 
+/// Seeds defaults without ever overwriting a file the user already owns.
 fn write_new_file(path: &Path, contents: &str) -> Result<(), String> {
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => file.write_all(contents.as_bytes()).map_err(|error| {
@@ -533,6 +536,7 @@ pub(crate) fn reload(config_dir: &Path) -> Result<Appearance, String> {
     Ok(Appearance { font: config.font })
 }
 
+/// Restricts theme names to one normal path component inside the theme directory.
 fn validate_theme_name(name: &str) -> Result<(), String> {
     let mut components = Path::new(name).components();
     let valid = !name.is_empty()

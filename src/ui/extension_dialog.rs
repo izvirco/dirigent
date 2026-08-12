@@ -1,3 +1,5 @@
+//! Renders input requested by Pi extensions.
+
 use gpui::{AnyElement, Context, IntoElement, div, prelude::*, px};
 
 use crate::{

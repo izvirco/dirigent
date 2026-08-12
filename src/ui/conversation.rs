@@ -1,3 +1,5 @@
+//! Renders the virtualized conversation and its scroll controls.
+
 mod actions;
 mod cache;
 mod message;

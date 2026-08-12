@@ -1,3 +1,5 @@
+//! Renders confirmation for deleting a thread and its managed workspace.
+
 use gpui::{Context, IntoElement, div, prelude::*, px};
 
 use crate::{

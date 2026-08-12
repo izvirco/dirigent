@@ -1,3 +1,5 @@
+//! Renders the normal-mode keyboard command menus.
+
 use gpui::{Context, IntoElement, deferred, div, prelude::*, px};
 
 use crate::{

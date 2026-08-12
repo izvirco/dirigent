@@ -1,3 +1,5 @@
+//! Handles projects, threads, navigation, and sidebar-backed workspace state.
+
 use super::*;
 
 impl Dirigent {
@@ -326,6 +328,7 @@ impl Dirigent {
         }
         self.enter_input_mode(true);
     }
+    /// Returns visible threads in keyboard-navigation order: inbox first, then active work.
     pub(super) fn harness_navigation_ids(&self) -> Vec<Id> {
         let mut inbox = self
             .harnesses
@@ -501,6 +504,7 @@ impl Dirigent {
         self.start_project_probe(id);
         cx.notify();
     }
+    /// Creates the local thread immediately, then starts Pi or provisions its chosen workspace.
     pub(crate) fn create_harness(&mut self, cx: &mut Context<Self>) {
         let prompt = self.harness_input.read(cx).text().trim().to_string();
         let images = self.harness_input.read(cx).images();
@@ -557,6 +561,7 @@ impl Dirigent {
         }
         cx.notify();
     }
+    /// Switches the complete conversation context and lazily starts the selected Pi process.
     pub(crate) fn select_harness(&mut self, id: Id) {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
@@ -587,6 +592,8 @@ impl Dirigent {
         self.start_harness(id, None);
     }
     pub(crate) fn start_new_harness(&mut self, project_id: Id) {
+        // New threads inherit model settings from a visible sibling, avoiding an ephemeral probe
+        // when a project Pi process has already resolved its local configuration.
         let source_id = self
             .selected_harness
             .filter(|id| {

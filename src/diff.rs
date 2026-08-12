@@ -1,3 +1,5 @@
+//! Captures, combines, and renders repository changes made by each agent turn.
+
 mod highlight;
 mod repository;
 
@@ -208,6 +210,7 @@ fn combined_version(file: &FileDiff, old: bool) -> CombinedFileVersion {
     }
 }
 
+/// Re-diffs a file's first old version against its latest new version.
 fn finish_combined_file(file: CombinedFile) -> Option<FileDiff> {
     if !file.old.exists && !file.new.exists {
         return None;
@@ -288,6 +291,8 @@ where
     let mut combined = BTreeMap::<String, CombinedFile>::new();
     for turn in turns {
         let turn = turn.borrow();
+        // Removing by the source path carries identity across renames; reinserting under the
+        // destination lets a later turn continue from the renamed file.
         for file in &turn.files {
             let source_path = file.old_path.as_deref().unwrap_or(&file.path);
             let old = combined
@@ -338,6 +343,7 @@ fn source_lines(text: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Builds display hunks with fixed context and pairs replacement rows for split rendering.
 fn diff_text(old: &str, new: &str) -> (Vec<DiffHunk>, usize, usize) {
     let old_lines = source_lines(old);
     let new_lines = source_lines(new);

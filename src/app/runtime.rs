@@ -1,3 +1,5 @@
+//! Applies Pi RPC events to harness and conversation state.
+
 use super::*;
 
 impl Dirigent {
@@ -94,6 +96,7 @@ impl Dirigent {
         }
         self.sync_conversation_list(index, None);
     }
+    /// Routes one process event, ignoring harness generations that have already been replaced.
     pub(super) fn handle_runtime_event(&mut self, event: RuntimeEvent, cx: &mut Context<Self>) {
         let (target, value) = match event.kind {
             RuntimeEventKind::Json { target, value } => (target, value),
@@ -131,6 +134,8 @@ impl Dirigent {
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        // Initial cached messages are replaced by Pi's canonical session tree. Capture the user's
+        // semantic scroll position before that replacement changes render-item identities.
         let replaces_messages = event_type == "response"
             && value.get("success").and_then(Value::as_bool) != Some(false)
             && matches!(
@@ -395,6 +400,7 @@ impl Dirigent {
         }
         None
     }
+    /// Finalizes a run, promotes queued messages, and marks background completions unread.
     pub(super) fn settle_harness(&mut self, index: usize) -> Option<usize> {
         self.finish_turn_diff(index, TurnDiffStatus::Completed);
         if self.harnesses[index].status != HarnessStatus::Failed {
@@ -752,6 +758,8 @@ impl Dirigent {
                 self.request_thinking_levels(index);
             }
             Some("get_entries") => {
+                // RPC stream updates optimize responsiveness, but this session-tree response is
+                // canonical and also accounts for navigation, compaction, and external changes.
                 let incoming = value
                     .pointer("/data/entries")
                     .and_then(Value::as_array)
@@ -1040,6 +1048,8 @@ impl Dirigent {
                     _ => DialogKind::Editor,
                 };
                 if self.pending_dialog.is_some() {
+                    // There is one application-level dialog surface. Explicitly cancel concurrent
+                    // requests so an extension is never left waiting for invisible input.
                     let request_id = value.get("id").and_then(Value::as_str).unwrap_or_default();
                     self.send_value(
                         index,

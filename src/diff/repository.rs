@@ -1,3 +1,5 @@
+//! Captures Git and JJ checkpoints and turns them into per-turn file diffs.
+
 use super::*;
 
 #[derive(Clone, Debug)]
@@ -162,6 +164,8 @@ fn command_output(mut command: Command, description: &str) -> Result<Output, Str
         .map_err(|error| format!("could not {description}: {error}"))?;
     let stdout = child.stdout.take().expect("piped VCS stdout");
     let stderr = child.stderr.take().expect("piped VCS stderr");
+    // Drain both pipes concurrently: waiting for process exit first can deadlock when either pipe
+    // fills. The surrounding worker remains responsible for the overall command timeout.
     let stdout = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let mut stdout = stdout;
@@ -225,6 +229,7 @@ enum DiffBackend {
     Jj,
 }
 
+/// Chooses the innermost repository, preferring JJ when Git describes the same root.
 fn diff_repository(root: &Path) -> Result<Option<(DiffBackend, PathBuf, PathBuf)>, String> {
     let root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let jj_root = if root.ancestors().any(|path| path.join(".jj").exists()) {
@@ -333,6 +338,7 @@ fn git_status_paths(root: &Path, scope: &Path) -> Result<HashSet<String>, String
     Ok(paths)
 }
 
+/// Captures worktree bytes only for paths already dirty; clean paths can be recovered from HEAD.
 fn capture_git_baseline(
     repository_root: PathBuf,
     project_relative_path: PathBuf,
@@ -400,6 +406,8 @@ fn finish_git_turn(
     let endpoint_revision = git_head(&baseline.repository_root)?;
     let endpoint_dirty =
         git_status_paths(&baseline.repository_root, &baseline.project_relative_path)?;
+    // A turn can edit pre-existing dirty files, create new dirt, or commit changes and leave a
+    // clean worktree. The union covers all three without snapshotting the whole repository.
     let mut candidates = baseline.dirty_paths.clone();
     candidates.extend(endpoint_dirty);
     candidates.extend(git_changed_paths(
@@ -466,6 +474,8 @@ fn snapshot_path(path: &Path, stored_bytes: &mut u64) -> Result<Option<SnapshotF
         return Ok(None);
     }
     let len = metadata.len();
+    // Hash every file for change and rename detection, but cap retained bytes so one turn cannot
+    // make the UI or state database grow without bound.
     let can_store =
         len <= MAX_TEXT_FILE_BYTES && stored_bytes.saturating_add(len) <= MAX_SNAPSHOT_BYTES;
     if !can_store {
@@ -812,6 +822,7 @@ fn file_mode(metadata: &fs::Metadata) -> u32 {
     u32::from(metadata.permissions().readonly())
 }
 
+/// Compares snapshots and recognizes exact-content renames before constructing file diffs.
 fn build_turn(
     id: u64,
     prompt: String,
@@ -834,6 +845,8 @@ fn build_turn(
         .map(|(path, file)| (path.clone(), file.hash))
         .collect::<Vec<_>>();
     let mut used_additions = HashSet::new();
+    // Rename detection is intentionally conservative: only exact hashes match, and each added
+    // destination can satisfy at most one deletion.
     for (old_path, old_hash) in &deleted {
         if let Some((new_path, _)) = added
             .iter()

@@ -1,3 +1,5 @@
+//! Renders the project connection form and path completions.
+
 use gpui::{Context, IntoElement, div, prelude::*, px};
 
 use crate::{

@@ -1,3 +1,5 @@
+//! Implements the editable GPUI text composer and image attachments.
+
 use std::{ops::Range, path::PathBuf, sync::Arc};
 
 use gpui::{
@@ -38,6 +40,7 @@ fn clipboard_path(value: &str) -> Option<PathBuf> {
     (path.is_absolute() && path.exists()).then_some(path)
 }
 
+/// Parses common `text/uri-list` and copied-file clipboard representations.
 fn clipboard_text_paths(text: &str) -> Option<Vec<PathBuf>> {
     let mut paths = Vec::new();
     for line in text.lines() {
@@ -451,10 +454,12 @@ impl TextInput {
     }
 
     fn prune_images(&mut self) {
+        // Text markers are the source of truth: deleting `[image-N]` also removes its payload.
         self.images
             .retain(|image| self.content.contains(&format!("[{}]", image.label)));
     }
 
+    /// Prefers image/file clipboard entries, falling back to plain text when none are attachable.
     fn paste(&mut self, cx: &mut Context<Self>) {
         let item = cx.read_from_clipboard();
         if item.is_none() {

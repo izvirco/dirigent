@@ -1,3 +1,5 @@
+//! Renders diff-sidebar controls, files, hunks, and code rows.
+
 use super::*;
 
 impl Dirigent {

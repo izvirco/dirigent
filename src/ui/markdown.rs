@@ -1,3 +1,5 @@
+//! Renders parsed Markdown documents as GPUI elements.
+
 use gpui::{
     AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
     StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgba,

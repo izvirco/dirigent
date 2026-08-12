@@ -1,3 +1,5 @@
+//! Exposes embedded application assets to GPUI.
+
 use std::borrow::Cow;
 
 use gpui::{AssetSource, Result, SharedString};

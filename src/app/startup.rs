@@ -1,3 +1,5 @@
+//! Restores persisted state and wires the application's background workers.
+
 use super::*;
 
 impl Dirigent {
@@ -217,6 +219,8 @@ impl Dirigent {
         })
         .detach();
 
+        // Repository and diff operations invoke external VCS commands, so each subsystem gets a
+        // serial worker and returns plain results to the GPUI task.
         let (repository_task_tx, repository_task_rx) = async_channel::bounded(64);
         let (repository_result_tx, repository_result_rx) = async_channel::bounded(64);
         std::thread::Builder::new()
@@ -243,6 +247,8 @@ impl Dirigent {
         })
         .detach();
 
+        // Pi can produce token deltas much faster than the display should redraw. Bounded,
+        // coalesced batches provide backpressure while preserving protocol boundaries.
         let (event_tx, event_rx) = async_channel::bounded(RUNTIME_EVENT_CHANNEL_CAPACITY);
         cx.spawn(async move |this, cx| {
             let mut stats = RuntimeEventLoopStats::default();
@@ -419,6 +425,8 @@ impl Dirigent {
                 }
             };
         }
+        // Durable metadata is already loaded above; this disposable cache restores conversation
+        // content and composer state without making it part of the state database transaction.
         let session_cache = match SessionCache::open() {
             Ok(cache) => Some(cache),
             Err(error) => {
@@ -563,6 +571,8 @@ impl Dirigent {
             }
         }
 
+        // Prefer the explicitly persisted thread, then the newest visible thread, and finally a
+        // thread from the first project. This keeps startup deterministic after deletions.
         let fallback_project = projects.first().map(|project| project.id);
         let selected_harness = last_used_harness
             .filter(|id| harnesses.iter().any(|harness| harness.id == *id))

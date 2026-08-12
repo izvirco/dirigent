@@ -1,3 +1,5 @@
+//! Coordinates asynchronous turn-diff capture, highlighting, and selection.
+
 use super::*;
 
 use crate::diff::{self, ActiveTurnDiff, DiffScope, DiffViewMode, TurnDiff, TurnDiffStatus};
@@ -14,6 +16,7 @@ pub(super) struct TurnHighlightResult {
     turn: Arc<TurnDiff>,
 }
 
+/// Recomputes theme-dependent syntax spans away from the UI thread.
 pub(super) fn run_turn_highlight_worker(
     tasks: async_channel::Receiver<TurnHighlightTask>,
     results: async_channel::Sender<TurnHighlightResult>,
@@ -88,6 +91,7 @@ pub(super) enum DiffTaskResult {
     },
 }
 
+/// Serializes repository checkpoint work on a dedicated worker thread.
 pub(super) fn run_diff_worker(
     tasks: async_channel::Receiver<DiffTask>,
     results: async_channel::Sender<DiffTaskResult>,
@@ -137,6 +141,8 @@ pub(super) fn run_diff_worker(
 
 impl Dirigent {
     pub(super) fn queue_turn_diff_highlights(&mut self) {
+        // A generation makes every result from the previous theme obsolete without needing to
+        // cancel work that is already running.
         self.turn_highlight_generation = self.turn_highlight_generation.wrapping_add(1).max(1);
         let generation = self.turn_highlight_generation;
         for harness in &self.harnesses {
@@ -198,6 +204,7 @@ impl Dirigent {
         id
     }
 
+    /// Starts checkpoint capture and optionally holds the prompt until that checkpoint exists.
     pub(super) fn queue_turn_diff_baseline(
         &mut self,
         index: usize,
@@ -249,6 +256,8 @@ impl Dirigent {
         }
         let harness_id = self.harnesses[index].id;
         if self.pending_diff_previews.contains_key(&harness_id) {
+            // At most one expensive preview runs per harness. One dirty bit is enough because
+            // each preview captures the complete endpoint state rather than an incremental diff.
             self.dirty_diff_previews.insert(harness_id);
             return;
         }
@@ -371,6 +380,8 @@ impl Dirigent {
                     .pending_diff_prompts
                     .get(&harness_id)
                     .map(|pending| (pending.job_id, pending.process_generation));
+                // Prompt-holding captures must match exactly. Opportunistic captures are also
+                // obsolete if a newer prompt capture has claimed the harness.
                 let stale = if awaiting_prompt {
                     pending_job != Some((job_id, process_generation))
                 } else {
@@ -628,6 +639,7 @@ impl Dirigent {
             })
     }
 
+    /// Drops persisted turns that no longer correspond to the active Pi session branch.
     pub(super) fn prune_turn_diffs_to_active_branch(&mut self, index: usize) {
         let entries = entries_through_leaf(
             self.harnesses[index]
@@ -636,6 +648,8 @@ impl Dirigent {
                 .unwrap_or_default(),
             self.harnesses[index].cached_leaf_id.as_deref(),
         );
+        // Turn records predate direct entry linkage, so normalized prompt excerpts are the stable
+        // key available for reconciling them after navigation or a fork.
         let prompts = entries
             .iter()
             .filter_map(|entry| {

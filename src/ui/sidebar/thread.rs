@@ -1,3 +1,5 @@
+//! Renders thread entries, status, and contextual menus.
+
 use super::*;
 
 impl Dirigent {

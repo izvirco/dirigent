@@ -1,3 +1,5 @@
+//! Manages Pi harness startup, composer submission, and session-side caches.
+
 use super::*;
 
 const SLOW_MESSAGE_SEND_STAGE: Duration = Duration::from_millis(250);
@@ -96,6 +98,7 @@ impl ComposerSendTimings {
     }
 }
 
+/// Uses Pi-reported levels when available, otherwise derives the provider's conventional set.
 pub(super) fn reasoning_options_for_model(
     project_id: Option<Id>,
     current_model: &str,
@@ -241,6 +244,7 @@ impl Dirigent {
             self.report_cache_error(error);
         }
     }
+    /// Queues a draft write; unchanged image payloads can be omitted from frequent text updates.
     pub(super) fn cache_harness_draft(&mut self, index: usize, include_images: bool) {
         let Some(cache) = self.session_cache.as_ref() else {
             return;
@@ -315,6 +319,7 @@ impl Dirigent {
             self.report_cache_error(error);
         }
     }
+    /// Captures a semantic message anchor, with a scrollbar fraction as a fallback.
     pub(super) fn conversation_scroll_anchor(
         &self,
         harness_index: usize,
@@ -441,6 +446,7 @@ impl Dirigent {
         };
         self.scroll_conversation_to_fraction(current + delta);
     }
+    /// Runs an ephemeral Pi process to resolve project-local defaults before a thread exists.
     pub(super) fn start_project_probe(&mut self, project_id: Id) {
         if self
             .project_probe
@@ -511,6 +517,7 @@ impl Dirigent {
         }
         self.sync_conversation_list(index, None);
     }
+    /// Starts Pi if needed and defers any initial prompt until startup settings are acknowledged.
     pub(super) fn start_harness(
         &mut self,
         id: Id,
@@ -632,6 +639,8 @@ impl Dirigent {
         self.send_value(index, json!({"type":"get_session_stats"}));
     }
     pub(super) fn request_entries(&mut self, index: usize) {
+        // Pi's session tree is append-only during normal operation, so request only entries after
+        // the newest cached ID. The response handler falls back to a full read if Pi rejects it.
         let cursor = self.harnesses[index]
             .cached_entries
             .as_ref()
@@ -663,6 +672,7 @@ impl Dirigent {
             self.send_value(index, json!({"type":"get_available_thinking_levels"}));
         }
     }
+    /// Encodes a prompt and holds it behind asynchronous diff-baseline capture when necessary.
     pub(super) fn send_prompt_command(
         &mut self,
         index: usize,
@@ -752,6 +762,8 @@ impl Dirigent {
         let command_build = command_started.elapsed();
 
         let process_send_started = Instant::now();
+        // No prompt may reach Pi before its baseline. Additional prompts arriving during capture
+        // join the same pending command list and preserve their local order.
         let (sent, queued_for_baseline) = if let Some(job_id) = baseline_job {
             self.pending_diff_prompts.insert(
                 harness_id,
@@ -866,6 +878,8 @@ impl Dirigent {
             timings.unarchive = stage_started.elapsed();
         }
         if let Some(source) = self.pending_workspace_sources.remove(&id) {
+            // Workspace choice is intentionally deferred until the first prompt. Keep that prompt
+            // visible locally while provisioning, then startup will submit it in the new checkout.
             let stage_started = Instant::now();
             let images = input.read(cx).images();
             timings.read_images = stage_started.elapsed();
@@ -939,6 +953,8 @@ impl Dirigent {
         timings.read_images = stage_started.elapsed();
         let image_count = images.len();
         if self.harnesses[index].startup_settings_pending {
+            // The process exists but cannot safely accept a prompt yet. Mirror it immediately in
+            // the conversation and let finish_harness_startup send the pending initial prompt.
             let stage_started = Instant::now();
             self.harnesses[index].pending_initial_prompt = Some((message.clone(), images.clone()));
             self.harnesses[index]
@@ -972,6 +988,8 @@ impl Dirigent {
             return;
         }
 
+        // Pi treats prompts sent during a turn as steering input. They stay in a separate local
+        // queue until a queue update confirms which messages Pi accepted.
         let steering = self.harnesses[index].status == HarnessStatus::Working;
         let stage_started = Instant::now();
         let mut user_message = Message::user_with_images(

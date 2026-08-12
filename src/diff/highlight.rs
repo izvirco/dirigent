@@ -1,3 +1,5 @@
+//! Applies tree-sitter syntax highlighting to stored diff text.
+
 use super::*;
 
 struct HighlightLoader {
@@ -256,6 +258,8 @@ fn capture_for_scope(scope: &str) -> Option<SyntaxCapture> {
 }
 
 fn highlight_for_capture(capture: &str) -> Option<Highlight> {
+    // Queries often emit specific scopes not present in the theme. Walk toward the Helix-style
+    // parent scope before deciding that a capture has no color.
     let mut scope = capture;
     loop {
         if let Some(capture) = capture_for_scope(scope) {
@@ -303,6 +307,7 @@ fn capture_color(index: usize) -> u32 {
         .map_or_else(theme::code_text, |color| color())
 }
 
+/// Highlights known file extensions with a bounded parse and no-error fallback.
 pub(super) fn highlight_text(path: &str, text: &str) -> Vec<SyntaxSpan> {
     static LOADER: std::sync::OnceLock<HighlightLoader> = std::sync::OnceLock::new();
     let loader = LOADER.get_or_init(HighlightLoader::new);

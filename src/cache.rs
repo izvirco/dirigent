@@ -1,3 +1,5 @@
+//! Caches Pi sessions, drafts, models, and reasoning levels in SQLite.
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -70,6 +72,7 @@ impl SessionCache {
         self.errors.clone()
     }
 
+    /// Runs a read on the SQLite owner thread and waits for its result.
     fn request<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&CacheDatabase) -> Result<T, String> + Send + 'static,
@@ -87,6 +90,7 @@ impl SessionCache {
             .map_err(|_| "cache worker stopped unexpectedly".to_string())?
     }
 
+    /// Queues a best-effort write; failures are delivered asynchronously to the UI.
     fn execute(
         &self,
         operation: impl FnOnce(&CacheDatabase) -> Result<(), String> + Send + 'static,
@@ -466,6 +470,8 @@ impl CacheDatabase {
 }
 
 fn path_key(path: &Path) -> Vec<u8> {
+    // Keep the platform-native encoded path rather than a lossy display string. The cache is
+    // local to this machine, so portability of these keys is neither needed nor desirable.
     path.as_os_str().as_encoded_bytes().to_vec()
 }
 

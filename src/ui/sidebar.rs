@@ -1,3 +1,5 @@
+//! Renders project and thread navigation in the application sidebar.
+
 mod project;
 mod thread;
 

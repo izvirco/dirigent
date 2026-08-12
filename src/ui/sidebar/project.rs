@@ -1,3 +1,5 @@
+//! Renders project sections and project drag-and-drop behavior.
+
 use super::*;
 
 #[derive(Clone)]

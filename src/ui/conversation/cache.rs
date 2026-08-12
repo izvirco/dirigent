@@ -1,3 +1,5 @@
+//! Builds cached render items and work-group summaries for conversations.
+
 use std::{
     ops::Range,
     sync::Arc,

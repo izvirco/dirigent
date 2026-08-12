@@ -1,3 +1,5 @@
+//! Builds and interacts with the virtualized turn-diff sidebar.
+
 mod render;
 
 use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};

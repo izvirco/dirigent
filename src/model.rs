@@ -1,3 +1,5 @@
+//! Defines the projects, harnesses, messages, and workspace domain model.
+
 use std::{
     collections::HashMap,
     ops::Range,
@@ -252,6 +254,8 @@ impl Message {
     }
 
     pub(crate) fn refresh_text_cache(&mut self) {
+        // Thinking streams often use bold one-line headings. The thinking treatment already
+        // supplies emphasis, so strip that wrapper for a quieter plain-text display cache.
         self.display_text = if self.role == MessageRole::Thinking {
             self.text
                 .lines()
@@ -419,6 +423,7 @@ fn line_tokens(text: &str) -> Vec<Range<usize>> {
     tokens
 }
 
+/// Finds changed token ranges with LCS, falling back to shared edges for pathological lines.
 fn token_diff_ranges(removed: &str, added: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     const MAX_LCS_CELLS: usize = 65_536;
 
@@ -426,6 +431,7 @@ fn token_diff_ranges(removed: &str, added: &str) -> (Vec<Range<usize>>, Vec<Rang
     let added_tokens = line_tokens(added);
     let rows = removed_tokens.len() + 1;
     let columns = added_tokens.len() + 1;
+    // Bound the quadratic matrix: tool output is untrusted and a generated line can be huge.
     if rows.saturating_mul(columns) > MAX_LCS_CELLS {
         return token_edge_diff_ranges(removed, added, &removed_tokens, &added_tokens);
     }
@@ -720,6 +726,7 @@ impl Harness {
         !self.archived && !self.is_in_workpool()
     }
 
+    /// Restores metadata eagerly while leaving session messages for the cache or Pi to load.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn restored(
         id: Id,

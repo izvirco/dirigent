@@ -1,3 +1,5 @@
+//! Probes repositories and creates or removes managed Git and JJ workspaces.
+
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -194,6 +196,7 @@ fn probe_git(project_path: &Path) -> Result<Option<RepositorySnapshot>, String> 
     }))
 }
 
+/// Selects the innermost repository, treating JJ as authoritative when roots coincide.
 pub(crate) fn probe_repository(project_path: &Path) -> Result<Option<RepositorySnapshot>, String> {
     let jj = probe_jj(project_path)?;
     let git = match probe_git(project_path) {
@@ -268,6 +271,7 @@ pub(crate) fn validate_workspace(workspace: &ManagedWorkspace) -> Result<(), Str
     Ok(())
 }
 
+/// Creates a JJ workspace or Git worktree from the snapshot recorded at selection time.
 pub(crate) fn create_workspace(workspace: &ManagedWorkspace) -> Result<(), String> {
     if workspace.root.exists() {
         return Err(format!(
@@ -331,6 +335,8 @@ pub(crate) fn create_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
 }
 
 pub(crate) fn remove_workspace(workspace: &ManagedWorkspace) -> Result<(), String> {
+    // The random workspace ID must remain the final path component. Refuse destructive VCS or
+    // filesystem operations if persisted metadata points anywhere less constrained.
     if workspace.root.file_name().and_then(|name| name.to_str()) != Some(workspace.id.as_str()) {
         return Err(format!(
             "refusing to remove unexpected workspace path: {}",
@@ -376,6 +382,8 @@ pub(crate) fn remove_workspace(workspace: &ManagedWorkspace) -> Result<(), Strin
             if !workspace.root.exists() {
                 return Ok(());
             }
+            // Force JJ to snapshot outstanding changes before forgetting its workspace record.
+            // `workspace forget` alone does not remove the checkout directory.
             let mut snapshot = jj_command(&workspace.root);
             snapshot.arg("status");
             successful_text(

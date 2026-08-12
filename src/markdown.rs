@@ -1,3 +1,5 @@
+//! Parses Markdown into a render-friendly document model.
+
 use std::ops::Range;
 
 use gpui::ScrollHandle;
@@ -11,6 +13,7 @@ pub(crate) struct MarkdownDocument {
 }
 
 impl MarkdownDocument {
+    /// Preserves table scroll handles across reparses of a streaming message.
     pub(crate) fn reuse_table_scrolls(&mut self, previous: &Self) {
         reuse_table_scrolls(&mut self.blocks, &previous.blocks);
     }
@@ -107,6 +110,7 @@ pub(crate) struct MarkdownSpanStyle {
     pub(crate) link: Option<String>,
 }
 
+/// Flattens visible Markdown leaves into the text used by cross-block selection.
 pub(crate) fn markdown_selection_text(blocks: &[MarkdownBlock]) -> String {
     let mut leaves = Vec::new();
     for block in blocks {
@@ -236,6 +240,7 @@ enum Frame {
     Footnote(Vec<MarkdownBlock>),
 }
 
+/// Converts pulldown-cmark's event stream into the nested block model consumed by the UI.
 pub(crate) fn parse_markdown(source: &str) -> MarkdownDocument {
     let options = Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TABLES

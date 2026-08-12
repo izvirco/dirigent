@@ -1,3 +1,5 @@
+//! Manages repository metadata and isolated Git or JJ workspaces.
+
 use super::*;
 use crate::{
     model::{ManagedWorkspace, WorkspaceBackend, WorkspaceState},
@@ -20,6 +22,7 @@ pub(super) struct RepositoryRefreshResult {
     probe: Duration,
 }
 
+/// Probes repositories serially so VCS commands never block GPUI.
 pub(super) fn run_repository_worker(
     tasks: async_channel::Receiver<RepositoryRefreshTask>,
     results: async_channel::Sender<RepositoryRefreshResult>,
@@ -46,6 +49,7 @@ impl Dirigent {
         self.queue_repository_refresh(project_id, false);
     }
 
+    /// Coalesces repository probes; a forced refresh during an active probe schedules one rerun.
     fn queue_repository_refresh(&mut self, project_id: Id, force: bool) {
         if !force
             && self
@@ -87,6 +91,8 @@ impl Dirigent {
             .iter()
             .find(|project| project.id == result.project_id)
             .map(|project| project.path.as_path());
+        // A project can be deleted and re-added while a probe runs. Never apply a result to a
+        // project ID whose path no longer matches the task input.
         let stale = current_path != Some(result.path.as_path());
         let mut labels_changed = false;
         let outcome = if stale {
@@ -219,6 +225,7 @@ impl Dirigent {
             .and_then(|project_id| self.repository_snapshot_for_project(project_id))
     }
 
+    /// Records a workspace source; actual provisioning waits for the first submitted prompt.
     pub(crate) fn choose_new_workspace(&mut self) {
         let Some(project_id) = self.selected_project else {
             return;
@@ -269,6 +276,7 @@ impl Dirigent {
             .find(|workspace| workspace.id == workspace_id)
     }
 
+    /// Allows destructive removal only when the thread is the workspace's sole owner.
     pub(crate) fn can_delete_workspace_for_harness(&self, harness_id: Id) -> bool {
         let Some(workspace) = self.workspace_for_harness(harness_id) else {
             return false;
@@ -380,6 +388,7 @@ impl Dirigent {
         Ok(platform::workspace_root()?.join(vcs::project_slug(&project.name)))
     }
 
+    /// Builds persisted workspace metadata without touching the filesystem.
     fn make_managed_workspace(
         &self,
         project_id: Id,
@@ -437,6 +446,8 @@ impl Dirigent {
         self.harnesses[index].run_started_at = None;
         self.pending_workspace_sources.remove(&harness_id);
         self.workspaces.push(workspace.clone());
+        // Persist Provisioning before starting the thread so a crash cannot leave an untracked
+        // checkout that the application still considers the project directory.
         self.persist();
 
         let events = self.workspace_events.clone();
@@ -548,6 +559,7 @@ impl Dirigent {
         cx.notify();
     }
 
+    /// Resolves a thread to its ready managed checkout or its project's original directory.
     pub(crate) fn working_directory_for_harness(&self, harness_id: Id) -> Result<PathBuf, String> {
         let harness = self
             .harnesses

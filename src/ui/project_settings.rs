@@ -1,3 +1,5 @@
+//! Renders project behavior and managed-workspace settings.
+
 use gpui::{Context, IntoElement, div, prelude::*, px};
 
 use crate::{

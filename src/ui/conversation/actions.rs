@@ -1,3 +1,5 @@
+//! Renders message actions for copying, editing, and forking.
+
 use super::*;
 
 impl Dirigent {

@@ -1,3 +1,5 @@
+//! Renders the message composer and its model, reasoning, and workspace controls.
+
 use std::time::Duration;
 
 use gpui::{

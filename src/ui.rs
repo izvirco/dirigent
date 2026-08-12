@@ -1,3 +1,5 @@
+//! Collects GPUI views and shared UI rendering helpers.
+
 mod composer;
 mod conversation;
 mod diff_sidebar;

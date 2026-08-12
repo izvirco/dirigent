@@ -1,3 +1,5 @@
+//! Converts Pi RPC and session data into conversation messages.
+
 use super::*;
 
 pub(super) fn parse_cached_draft_images(bytes: &[u8]) -> Result<Vec<AttachedImage>, String> {
@@ -212,6 +214,7 @@ pub(super) fn truncate_output(value: &str) -> String {
     }
 }
 
+/// Extracts concise display output, preferring edit diffs over generic result text.
 pub(super) fn tool_result_detail(name: &str, result: &Value, is_error: bool) -> Option<String> {
     if name == "edit"
         && !is_error
@@ -266,6 +269,7 @@ pub(super) fn content_images(value: &Value) -> Vec<Arc<Image>> {
         .collect()
 }
 
+/// Coalesces adjacent blocks of the same role and entry into one rendered message.
 pub(super) fn push_assistant_block(
     messages: &mut Vec<Message>,
     role: MessageRole,
@@ -288,6 +292,7 @@ pub(super) fn push_assistant_block(
     messages.push(Message::new(role, text).with_entry_id(entry_id));
 }
 
+/// Reconstructs the active root-to-leaf path from Pi's flat session-tree entries.
 pub(super) fn entries_through_leaf(values: &[Value], leaf_id: Option<&str>) -> Vec<Value> {
     let by_id = values
         .iter()
@@ -310,6 +315,7 @@ pub(super) fn entries_through_leaf(values: &[Value], leaf_id: Option<&str>) -> V
     entries
 }
 
+/// Parses only the active branch and annotates messages with settings effective at each entry.
 pub(super) fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Message> {
     let entries_by_id = values
         .iter()
@@ -399,6 +405,7 @@ pub(super) fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// Re-keys expansion state once an optimistic user message receives its persisted entry ID.
 pub(super) fn reconcile_work_group_expansion(
     previous: &[Message],
     canonical: &[Message],
@@ -437,6 +444,8 @@ pub(super) fn reconcile_queued_messages(
     messages: &mut Vec<Message>,
     steering: &[String],
 ) -> Vec<Message> {
+    // Match from the end so duplicate steering prompts retain the newest optimistic messages,
+    // which is the ordering represented by Pi's queue.
     let mut pending = steering
         .iter()
         .fold(HashMap::new(), |mut pending, message| {
@@ -490,6 +499,7 @@ pub(super) fn assistant_failure(value: &Value) -> Option<String> {
     }
 }
 
+/// Appends one protocol message, joining tool results to earlier calls by tool-call ID.
 pub(super) fn push_parsed_message(
     messages: &mut Vec<Message>,
     value: &Value,

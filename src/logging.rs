@@ -1,3 +1,5 @@
+//! Configures rolling diagnostics and panic reporting.
+
 use std::{fs, io, panic};
 
 use tracing::{Event, Subscriber, field::Visit};

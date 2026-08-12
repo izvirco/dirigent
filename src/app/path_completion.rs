@@ -1,5 +1,8 @@
+//! Provides project-path and composer file-reference completion.
+
 use super::*;
 
+/// Starts a shared file index and reports readiness after its initial scan completes or times out.
 pub(super) fn start_fuzzy_index(
     path: &std::path::Path,
     watch: bool,
@@ -29,6 +32,7 @@ pub(super) fn start_fuzzy_index(
     Ok(picker)
 }
 
+/// Finds the whitespace-delimited `@path` token immediately before the cursor.
 pub(super) fn composer_path_query(text: &str, cursor: usize) -> Option<(Range<usize>, String)> {
     let prefix = text.get(..cursor)?;
     let at = prefix.rfind('@')?;
@@ -55,6 +59,7 @@ pub(super) fn resolve_tilde_path(raw: &str, home: &std::path::Path) -> Option<Pa
     (!raw.starts_with('~')).then(|| PathBuf::from(raw))
 }
 
+/// Splits an absolute partial directory path into an existing parent and fuzzy child query.
 pub(super) fn directory_path_query(raw: &str) -> Option<(PathBuf, String)> {
     if raw.is_empty() {
         return None;
@@ -308,6 +313,8 @@ impl Dirigent {
             return;
         };
         let mut replacement = completion.replacement;
+        // Composer completions consume one existing separator and add exactly one trailing space;
+        // project completions replace the complete path input verbatim.
         let value = if completion.target == PathCompletionTarget::Project {
             value
         } else {

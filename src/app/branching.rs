@@ -1,5 +1,8 @@
+//! Implements historical message editing and session forking.
+
 use super::*;
 
+/// Replays setting changes along the target entry's ancestry, excluding the target itself.
 pub(super) fn effective_settings_before_entry(
     entries: &[Value],
     target_id: &str,
@@ -216,6 +219,8 @@ impl Dirigent {
         if let Some(edit) = self.editing_message.as_mut() {
             edit.submitting = true;
         }
+        // Editing is a protocol chain: navigate to the original parent, restore the chosen
+        // model and thinking level, then submit the replacement as a new branch.
         let command = format!("/dirigent-navigate {}", pending.entry_id);
         self.pending_edit_submit = Some(pending);
         self.send_value(
@@ -276,6 +281,8 @@ impl Dirigent {
                 .collect::<Vec<_>>();
             (message.text.clone(), images)
         });
+        // Forking before the root user entry has no history to copy. Represent it as a fresh
+        // harness with a prefilled composer instead of asking Pi to create an empty fork.
         let root_user_fork = position == "before"
             && self.harnesses[source_index]
                 .cached_entries
@@ -477,6 +484,7 @@ impl Dirigent {
         }
         self.persist();
     }
+    /// Advances multi-response operations reported by Dirigent's private Pi extension.
     pub(super) fn handle_bridge_status(
         &mut self,
         index: usize,
@@ -597,6 +605,8 @@ impl Dirigent {
                         .unwrap_or_default(),
                     leaf_id.as_deref(),
                 );
+                // Pi writes the fork while the source process owns the original session. Stop
+                // that process before the target opens the newly reported session file.
                 self.harnesses[index].process.take();
                 self.harnesses[index].process_state = PiProcessState::Stopped;
                 self.harnesses[index].status = HarnessStatus::Stopped;

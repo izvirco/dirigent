@@ -1,3 +1,5 @@
+//! Generates concise thread titles with an isolated Pi process.
+
 use std::{
     io::{Read, Write},
     path::Path,
@@ -116,6 +118,7 @@ fn drain(mut stream: impl Read) {
     let _ = std::io::copy(&mut stream, &mut std::io::sink());
 }
 
+/// Extracts the final assistant payload from Pi's JSON event stream.
 fn parse_generated_title(output: &str) -> Result<String, String> {
     let mut assistant_text = None;
     for line in output.lines().filter(|line| !line.trim().is_empty()) {
@@ -156,6 +159,7 @@ fn message_text(content: Option<&Value>) -> Option<String> {
     }
 }
 
+/// Defensively reduces model output to one printable, length-bounded plain-text line.
 fn sanitize_title(raw: &str) -> Option<String> {
     let line = raw.lines().find(|line| !line.trim().is_empty())?.trim();
     let line = line
