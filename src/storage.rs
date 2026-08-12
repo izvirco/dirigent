@@ -1130,7 +1130,7 @@ fn prepare_table_order(
     }
     for (temporary_index, (id, order)) in desired.iter().enumerate() {
         if existing.get(id).is_some_and(|current| current != order) {
-            let temporary_order = -1_i64
+            let temporary_order = (-1_i64)
                 .checked_sub(
                     i64::try_from(temporary_index)
                         .map_err(|_| "too many state records to reorder".to_string())?,
@@ -1594,7 +1594,8 @@ fn order_index(index: usize) -> Result<i64, String> {
 mod tests {
     use super::{
         DEFAULT_DIFF_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, StateDatabase, StoredHarness,
-        StoredProject, StoredState, decode_turn_diffs, open_database, write_stored_state,
+        StoredProject, StoredState, decode_turn_diffs, open_database, prepare_table_order,
+        write_stored_state,
     };
     use crate::diff::{DiffViewMode, TurnDiff, TurnDiffStatus};
     use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
@@ -1640,6 +1641,35 @@ mod tests {
 
         drop(state_database);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn prepares_table_order_after_middle_row_deletion() {
+        let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE items (
+                     id TEXT PRIMARY KEY,
+                     order_index INTEGER NOT NULL UNIQUE
+                 );
+                 INSERT INTO items VALUES ('a', 0), ('b', 1), ('c', 2);",
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+
+        prepare_table_order(
+            &transaction,
+            "items",
+            vec![("a".into(), 0), ("c".into(), 1)],
+        )
+        .unwrap();
+
+        let temporary_order = transaction
+            .query_row("SELECT order_index FROM items WHERE id = 'c'", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(temporary_order, -2);
     }
 
     #[test]
