@@ -220,11 +220,9 @@ impl Message {
             }
         }
         self.running = running;
-        if running {
-            self.markdown = None;
-        } else {
-            self.refresh_markdown_cache();
-        }
+        // Reparse the full accumulated source so Markdown constructs can span stream chunks.
+        // The transition to not running provides one final authoritative parse.
+        self.refresh_markdown_cache();
     }
 
     pub(crate) fn set_tool_started_timestamp(&mut self, timestamp_ms: Option<u64>) {
@@ -274,8 +272,7 @@ impl Message {
     }
 
     fn refresh_markdown_cache(&mut self) {
-        self.markdown = (matches!(self.role, MessageRole::User | MessageRole::Assistant)
-            && !self.running)
+        self.markdown = matches!(self.role, MessageRole::User | MessageRole::Assistant)
             .then(|| parse_markdown(&self.text));
     }
 
@@ -807,23 +804,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_assistant_markdown_only_after_streaming_finishes() {
+    fn reparses_assistant_markdown_while_streaming() {
         let mut message = Message::new(MessageRole::Assistant, "**partial");
         message.set_running(true);
+
+        assert!(message.markdown.is_some());
         message.append_text(" answer**");
 
-        assert!(message.markdown.is_none());
-        message.set_running(false);
-
-        let markdown = message
-            .markdown
-            .as_ref()
-            .expect("markdown should be cached");
-        let crate::markdown::MarkdownBlock::Paragraph(text) = &markdown.blocks[0] else {
+        let expected = crate::markdown::parse_markdown("**partial answer**");
+        assert_eq!(message.markdown.as_ref(), Some(&expected));
+        let crate::markdown::MarkdownBlock::Paragraph(text) = &expected.blocks[0] else {
             panic!("expected a paragraph")
         };
         assert_eq!(text.text, "partial answer");
         assert!(text.spans[0].style.strong);
+
+        message.set_running(false);
+        assert_eq!(message.markdown.as_ref(), Some(&expected));
         assert_eq!(message.copy_text.as_ref(), "**partial answer**");
     }
 
