@@ -272,8 +272,15 @@ impl Message {
     }
 
     fn refresh_markdown_cache(&mut self) {
-        self.markdown = matches!(self.role, MessageRole::User | MessageRole::Assistant)
-            .then(|| parse_markdown(&self.text));
+        if matches!(self.role, MessageRole::User | MessageRole::Assistant) {
+            let mut markdown = parse_markdown(&self.text);
+            if let Some(previous) = &self.markdown {
+                markdown.reuse_table_scrolls(previous);
+            }
+            self.markdown = Some(markdown);
+        } else {
+            self.markdown = None;
+        }
     }
 
     pub(crate) fn refresh_theme_colors(&mut self) {
@@ -822,6 +829,32 @@ mod tests {
         message.set_running(false);
         assert_eq!(message.markdown.as_ref(), Some(&expected));
         assert_eq!(message.copy_text.as_ref(), "**partial answer**");
+    }
+
+    #[test]
+    fn preserves_table_scroll_while_streaming_markdown() {
+        let mut message = Message::new(
+            MessageRole::Assistant,
+            "| A | B |\n| --- | --- |\n| 1 | 2 |",
+        );
+        message.set_running(true);
+        let crate::markdown::MarkdownBlock::Table(table) =
+            &message.markdown.as_ref().unwrap().blocks[0]
+        else {
+            panic!("expected a table")
+        };
+        table
+            .scroll
+            .set_offset(gpui::point(gpui::px(-20.0), gpui::px(0.0)));
+
+        message.append_text("\n| 3 | 4 |");
+
+        let crate::markdown::MarkdownBlock::Table(table) =
+            &message.markdown.as_ref().unwrap().blocks[0]
+        else {
+            panic!("expected a table")
+        };
+        assert_eq!(table.scroll.offset().x, gpui::px(-20.0));
     }
 
     #[test]

@@ -56,6 +56,7 @@ use crate::{
     vcs::RepositorySnapshot,
 };
 
+const COMPOSER_PLACEHOLDER: &str = "Little Dragon - Little Man (Marcus Intalex Remix)";
 const STARTUP_MODEL_REQUEST_ID: &str = "dirigent-startup-model";
 const STARTUP_THINKING_REQUEST_ID: &str = "dirigent-startup-thinking";
 const UI_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
@@ -686,7 +687,7 @@ impl Dirigent {
                 .compact()
         });
         let harness_input = cx.new(|cx| {
-            TextInput::new("Send a message to pi…", cx)
+            TextInput::new(COMPOSER_PLACEHOLDER, cx)
                 .borderless()
                 .multiline()
         });
@@ -1257,7 +1258,7 @@ impl Dirigent {
             let draft = harness.composer_draft.clone();
             let draft_images = harness.composer_draft_images.clone();
             let input = cx.new(move |cx| {
-                let mut input = TextInput::new("Make no mistakes, or else...", cx)
+                let mut input = TextInput::new(COMPOSER_PLACEHOLDER, cx)
                     .borderless()
                     .multiline();
                 if !draft.is_empty() || !draft_images.is_empty() {

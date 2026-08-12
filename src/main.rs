@@ -78,7 +78,7 @@ fn main() {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("Dirigent — pi workspace")),
+                    title: Some(SharedString::from("Dirigent")),
                     ..Default::default()
                 }),
                 app_id: Some("dirigent".into()),

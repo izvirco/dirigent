@@ -10,6 +10,12 @@ pub(crate) struct MarkdownDocument {
     pub(crate) blocks: Vec<MarkdownBlock>,
 }
 
+impl MarkdownDocument {
+    pub(crate) fn reuse_table_scrolls(&mut self, previous: &Self) {
+        reuse_table_scrolls(&mut self.blocks, &previous.blocks);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum MarkdownBlock {
     Paragraph(MarkdownText),
@@ -47,6 +53,30 @@ impl PartialEq for MarkdownTable {
 }
 
 impl Eq for MarkdownTable {}
+
+fn reuse_table_scrolls(blocks: &mut [MarkdownBlock], previous: &[MarkdownBlock]) {
+    for (block, previous) in blocks.iter_mut().zip(previous) {
+        match (block, previous) {
+            (MarkdownBlock::Table(table), MarkdownBlock::Table(previous)) => {
+                table.scroll = previous.scroll.clone();
+            }
+            (MarkdownBlock::BlockQuote(blocks), MarkdownBlock::BlockQuote(previous)) => {
+                reuse_table_scrolls(blocks, previous);
+            }
+            (
+                MarkdownBlock::List { items, .. },
+                MarkdownBlock::List {
+                    items: previous, ..
+                },
+            ) => {
+                for (blocks, previous) in items.iter_mut().zip(previous) {
+                    reuse_table_scrolls(blocks, previous);
+                }
+            }
+            _ => {}
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TableAlignment {

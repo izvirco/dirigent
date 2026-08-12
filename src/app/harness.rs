@@ -133,7 +133,7 @@ pub(super) fn reasoning_options_for_model(
 impl Dirigent {
     pub(super) fn add_composer_input(&mut self, harness_id: Id, cx: &mut Context<Self>) {
         let input = cx.new(|cx| {
-            TextInput::new("Make no mistakes, or else...", cx)
+            TextInput::new(COMPOSER_PLACEHOLDER, cx)
                 .borderless()
                 .multiline()
         });
