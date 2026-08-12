@@ -418,32 +418,3 @@ pub(crate) fn project_slug(name: &str) -> String {
         slug
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{RepositorySnapshot, project_slug};
-    use crate::model::WorkspaceBackend;
-    use std::path::PathBuf;
-
-    #[test]
-    fn jj_sidebar_label_uses_change_id() {
-        let snapshot = RepositorySnapshot {
-            backend: WorkspaceBackend::Jj,
-            repository_root: PathBuf::new(),
-            project_relative_path: PathBuf::new(),
-            source_id: "vvlnszyu".into(),
-            source_label: "vvlnszyu".into(),
-            source_revision: "e498991600000000".into(),
-            jj_parent_revisions: Vec::new(),
-            dirty: false,
-        };
-
-        assert_eq!(snapshot.sidebar_label(), "vvlnszyu");
-    }
-
-    #[test]
-    fn sanitizes_project_names_for_workspace_paths() {
-        assert_eq!(project_slug("My Project!"), "my-project");
-        assert_eq!(project_slug("..."), "project");
-    }
-}

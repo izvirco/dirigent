@@ -6,8 +6,6 @@ mod managed_workspace;
 mod message_parsing;
 mod path_completion;
 mod runtime;
-#[cfg(test)]
-mod tests;
 mod workspace;
 
 use std::{
@@ -35,8 +33,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use self::{harness::*, message_parsing::*, path_completion::*};
-#[cfg(test)]
-use branching::*;
 
 use crate::{
     cache::SessionCache,

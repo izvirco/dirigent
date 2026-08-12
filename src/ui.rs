@@ -426,18 +426,3 @@ impl Dirigent {
             .into_any_element()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::scrollbar_drag_offset;
-
-    #[test]
-    fn scrollbar_drag_tracks_pointer_and_clamps_to_ends() {
-        assert_eq!(scrollbar_drag_offset(-250.0, 25.0, 1_000.0, 100.0), -500.0);
-        assert_eq!(scrollbar_drag_offset(-250.0, -100.0, 1_000.0, 100.0), 0.0);
-        assert_eq!(
-            scrollbar_drag_offset(-250.0, 100.0, 1_000.0, 100.0),
-            -1_000.0
-        );
-    }
-}

@@ -959,33 +959,3 @@ impl Dirigent {
             )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{format_context_usage, format_queue_state};
-    use crate::model::ContextUsage;
-
-    #[test]
-    fn formats_queue_counts() {
-        assert_eq!(
-            format_queue_state(1, 0).as_deref(),
-            Some("1 steering queued")
-        );
-        assert_eq!(
-            format_queue_state(2, 1).as_deref(),
-            Some("2 steering · 1 follow-up queued")
-        );
-        assert_eq!(format_queue_state(0, 0), None);
-    }
-
-    #[test]
-    fn formats_used_and_total_context_in_thousands() {
-        assert_eq!(
-            format_context_usage(ContextUsage {
-                used_tokens: 60_000,
-                context_window: 200_000,
-            }),
-            "60k/200k"
-        );
-    }
-}

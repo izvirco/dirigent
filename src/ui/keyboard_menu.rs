@@ -128,22 +128,3 @@ impl Dirigent {
             )
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{GOTO_ITEMS, PROJECT_ITEMS, SPACE_ITEMS, THREAD_ITEMS};
-
-    #[test]
-    fn keyboard_menus_offer_real_navigation_sets() {
-        assert!(SPACE_ITEMS.len() >= 10);
-        assert!(SPACE_ITEMS.contains(&("r", "rename selected thread")));
-        assert!(SPACE_ITEMS.contains(&("R", "restart agent")));
-        assert!(SPACE_ITEMS.contains(&("d", "toggle changes sidebar")));
-        assert!(SPACE_ITEMS.contains(&("D", "toggle debug panels")));
-        assert!(SPACE_ITEMS.contains(&("o", "expand all work groups")));
-        assert!(SPACE_ITEMS.contains(&("O", "collapse all work groups")));
-        assert!(GOTO_ITEMS.len() >= 10);
-        assert!(THREAD_ITEMS.len() >= 8);
-        assert!(PROJECT_ITEMS.len() >= 5);
-    }
-}

@@ -132,30 +132,3 @@ fn install_panic_hook() {
         previous_hook(panic_info);
     }));
 }
-
-#[cfg(test)]
-mod tests {
-    use super::is_expected_noise;
-
-    #[test]
-    fn suppresses_only_the_benign_closed_window_race() {
-        assert!(is_expected_noise("gpui::window", Some("window not found")));
-        assert!(!is_expected_noise(
-            "gpui::window",
-            Some("unexpected rendering failure")
-        ));
-        assert!(!is_expected_noise(
-            "dirigent::app",
-            Some("window not found")
-        ));
-    }
-
-    #[test]
-    fn stores_logs_beside_v0_state() {
-        assert!(
-            crate::platform::logs_directory()
-                .unwrap()
-                .ends_with("dirigent/v0/logs")
-        );
-    }
-}

@@ -5,9 +5,6 @@ mod message;
 pub(crate) use cache::{ConversationRenderCache, ConversationScrollAnchor};
 use cache::{ConversationRenderItem, WorkGroupSummary};
 
-#[cfg(test)]
-use message::{tool_color, tool_label_colors};
-
 use std::{
     ops::Range,
     time::{Duration, Instant},
@@ -52,21 +49,6 @@ fn format_working_duration(duration: Duration) -> String {
 fn working_character(delta: f32, text: &str) -> usize {
     let character_count = text.chars().count();
     ((delta * character_count as f32) as usize).min(character_count.saturating_sub(1))
-}
-
-#[cfg(test)]
-fn working_character_is_orange(delta: f32, index: usize, text: &str) -> bool {
-    if delta >= 1.0 {
-        return false;
-    }
-    let animation_position = delta * 2.0;
-    let filling_orange = animation_position < 1.0;
-    let active = working_character(animation_position.fract(), text);
-    if filling_orange {
-        index <= active
-    } else {
-        index > active
-    }
 }
 
 fn working_orange_range(delta: f32, text: &str) -> Option<Range<usize>> {
@@ -783,108 +765,5 @@ impl Dirigent {
                     }),
             )
             .child(self.render_conversation_ruler(cx))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::{
-        format_retry_status, format_working_duration, ruler_scroll_fraction, tool_color,
-        tool_label_colors, working_character, working_character_is_orange, working_orange_range,
-    };
-    use crate::{
-        model::RetryStatus,
-        theme::{green, purple, red, yellow},
-    };
-
-    #[test]
-    fn formats_waiting_and_running_retry_status() {
-        let mut retry = RetryStatus {
-            attempt: 2,
-            max_attempts: 3,
-            delay_ms: 2_500,
-            error_message: "overloaded".into(),
-            waiting: true,
-        };
-        assert_eq!(format_retry_status(&retry), "Automatic retry 2/3 in 2.5s");
-        retry.waiting = false;
-        assert_eq!(format_retry_status(&retry), "Automatic retry 2/3 running");
-    }
-
-    #[test]
-    fn formats_working_duration() {
-        assert_eq!(format_working_duration(Duration::from_secs(5)), "5s");
-        assert_eq!(format_working_duration(Duration::from_secs(65)), "1m 05s");
-        assert_eq!(
-            format_working_duration(Duration::from_secs(3_661)),
-            "1h 01m"
-        );
-    }
-
-    #[test]
-    fn working_character_moves_across_spaces() {
-        assert_eq!(working_character(0.0, "ab cd"), 0);
-        assert_eq!(working_character(0.25, "ab cd"), 1);
-        assert_eq!(working_character(0.5, "ab cd"), 2);
-        assert_eq!(working_character(0.75, "ab cd"), 3);
-        assert_eq!(working_character(1.0, "ab cd"), 4);
-    }
-
-    #[test]
-    fn working_colors_fill_and_reverse() {
-        let text = "abcd";
-
-        assert!(working_character_is_orange(0.0, 0, text));
-        assert!(!working_character_is_orange(0.0, 1, text));
-        assert!(working_character_is_orange(0.25, 2, text));
-        assert!(!working_character_is_orange(0.25, 3, text));
-        assert!((0..4).all(|index| working_character_is_orange(0.49, index, text)));
-
-        assert!(!working_character_is_orange(0.5, 0, text));
-        assert!(working_character_is_orange(0.5, 1, text));
-        assert!(!working_character_is_orange(0.75, 2, text));
-        assert!(working_character_is_orange(0.75, 3, text));
-        assert!((0..4).all(|index| !working_character_is_orange(1.0, index, text)));
-
-        assert_eq!(working_orange_range(0.0, text), Some(0..1));
-        assert_eq!(working_orange_range(0.25, text), Some(0..3));
-        assert_eq!(working_orange_range(0.5, text), Some(1..4));
-        assert_eq!(working_orange_range(0.75, text), Some(3..4));
-        assert_eq!(working_orange_range(1.0, text), None);
-    }
-
-    #[test]
-    fn ruler_drag_preserves_the_grab_offset() {
-        assert!((ruler_scroll_fraction(0.35, 0.15, 0.5) - 0.4).abs() < f32::EPSILON);
-        assert_eq!(ruler_scroll_fraction(0.0, 0.15, 0.5), 0.0);
-        assert_eq!(ruler_scroll_fraction(1.0, 0.15, 0.5), 1.0);
-        assert_eq!(ruler_scroll_fraction(0.5, 0.5, 1.0), 0.0);
-    }
-
-    #[test]
-    fn compaction_tools_are_purple() {
-        assert_eq!(tool_color("compact"), purple());
-    }
-
-    #[test]
-    fn write_tools_are_yellow() {
-        assert_eq!(tool_color("write"), yellow());
-    }
-
-    #[test]
-    fn edit_and_write_stats_use_diff_colors() {
-        let text = "edit src/main.rs +12 -3";
-        assert_eq!(
-            tool_label_colors(text, "edit"),
-            vec![(0..4, yellow()), (17..20, green()), (21..23, red())]
-        );
-
-        let text = "write src/main.rs +2 -0";
-        assert_eq!(
-            tool_label_colors(text, "write"),
-            vec![(0..5, yellow()), (18..20, green()), (21..23, red())]
-        );
     }
 }

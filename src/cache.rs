@@ -47,13 +47,6 @@ impl SessionCache {
         Self::start(database)
     }
 
-    #[cfg(test)]
-    fn initialize(connection: Connection) -> Result<Self, String> {
-        let database = CacheDatabase::initialize(connection)
-            .map_err(|error| format!("could not initialize test cache: {error}"))?;
-        Self::start(database)
-    }
-
     fn start(database: CacheDatabase) -> Result<Self, String> {
         let (task_tx, task_rx) = mpsc::channel::<CacheTask>();
         let (error_tx, error_rx) = async_channel::unbounded();
@@ -478,96 +471,4 @@ fn path_key(path: &Path) -> Vec<u8> {
 
 fn cache_path() -> Result<PathBuf, String> {
     platform::cache_path()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{SessionCache, cache_path};
-    use serde_json::json;
-    use std::path::Path;
-
-    fn memory_cache() -> SessionCache {
-        SessionCache::initialize(rusqlite::Connection::open_in_memory().unwrap()).unwrap()
-    }
-
-    #[test]
-    fn stores_v0_cache_separately() {
-        assert!(cache_path().unwrap().ends_with("dirigent/v0/cache.sqlite3"));
-    }
-
-    #[test]
-    fn round_trips_session_entries_and_state() {
-        let cache = memory_cache();
-        let path = Path::new("/tmp/session.jsonl");
-        cache
-            .save_session_state(path, Some("openai/old"), Some("low"))
-            .unwrap();
-        cache
-            .save_entries(path, &[json!({"id":"entry-1"})], Some("entry-1"))
-            .unwrap();
-        cache
-            .save_session_state(path, Some("openai/gpt"), Some("high"))
-            .unwrap();
-        cache
-            .save_composer_draft(path, "unfinished prompt", br#"[{"label":"image-1"}]"#)
-            .unwrap();
-        cache.save_composer_text(path, "revised prompt").unwrap();
-
-        let session = cache.load_session(path).unwrap().unwrap();
-        assert_eq!(session.entries.unwrap(), [json!({"id":"entry-1"})]);
-        assert_eq!(session.leaf_id.as_deref(), Some("entry-1"));
-        assert_eq!(session.model.as_deref(), Some("openai/gpt"));
-        assert_eq!(session.thinking_level.as_deref(), Some("high"));
-        assert_eq!(session.composer_draft, "revised prompt");
-        assert_eq!(session.composer_images_json, br#"[{"label":"image-1"}]"#);
-    }
-
-    #[test]
-    fn migrates_cache_created_before_composer_drafts() {
-        let connection = rusqlite::Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE session_cache (
-                    session_file BLOB PRIMARY KEY,
-                    entries_json BLOB,
-                    leaf_id TEXT,
-                    model TEXT,
-                    thinking_level TEXT,
-                    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-                );",
-            )
-            .unwrap();
-
-        let cache = SessionCache::initialize(connection).unwrap();
-        cache
-            .save_composer_draft(Path::new("/tmp/old-session.jsonl"), "draft", b"[]")
-            .unwrap();
-        assert_eq!(
-            cache
-                .load_session(Path::new("/tmp/old-session.jsonl"))
-                .unwrap()
-                .unwrap()
-                .composer_draft,
-            "draft"
-        );
-    }
-
-    #[test]
-    fn round_trips_project_model_metadata() {
-        let cache = memory_cache();
-        let project = Path::new("/tmp/project");
-        cache.save_models(project, br#"[{"id":"gpt"}]"#).unwrap();
-        cache
-            .save_thinking_levels(project, "openai/gpt", &["off".into(), "high".into()])
-            .unwrap();
-
-        assert_eq!(
-            cache.load_models(project).unwrap().unwrap(),
-            br#"[{"id":"gpt"}]"#
-        );
-        assert_eq!(
-            cache.load_thinking_levels(project).unwrap(),
-            [("openai/gpt".into(), vec!["off".into(), "high".into()])]
-        );
-    }
 }

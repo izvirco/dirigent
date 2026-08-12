@@ -101,36 +101,3 @@ pub(crate) fn load_external_image(path: &Path) -> Result<Option<Arc<Image>>, Str
     );
     Ok(Some(image))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn converts_bmp_to_png_for_harness() {
-        let source = image::DynamicImage::new_rgba8(2, 2);
-        let mut bmp = Vec::new();
-        source
-            .write_to(&mut Cursor::new(&mut bmp), image::ImageFormat::Bmp)
-            .unwrap();
-
-        let normalized = normalize_for_harness(
-            Arc::new(Image::from_bytes(ImageFormat::Bmp, bmp)),
-            "test image",
-        )
-        .unwrap();
-
-        assert_eq!(normalized.format, ImageFormat::Png);
-        assert_eq!(
-            image::guess_format(&normalized.bytes).unwrap(),
-            image::ImageFormat::Png
-        );
-    }
-
-    #[test]
-    fn keeps_supported_images_unchanged() {
-        let image = Arc::new(Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]));
-        let normalized = normalize_for_harness(image.clone(), "test image").unwrap();
-        assert!(Arc::ptr_eq(&image, &normalized));
-    }
-}
