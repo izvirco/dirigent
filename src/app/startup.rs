@@ -368,12 +368,15 @@ impl Dirigent {
 
         let (turn_highlight_task_tx, turn_highlight_task_rx) = async_channel::unbounded();
         let (turn_highlight_result_tx, turn_highlight_result_rx) = async_channel::unbounded();
+        let turn_highlight_generation = Arc::new(AtomicU64::new(1));
+        let worker_highlight_generation = turn_highlight_generation.clone();
         std::thread::Builder::new()
             .name("dirigent-turn-highlights".into())
             .spawn(move || {
                 self::diff::run_turn_highlight_worker(
                     turn_highlight_task_rx,
                     turn_highlight_result_tx,
+                    worker_highlight_generation,
                 )
             })
             .expect("could not start turn highlight worker");
@@ -776,14 +779,15 @@ impl Dirigent {
             title_events: title_event_tx,
             diff_tasks: diff_task_tx,
             turn_highlight_tasks: turn_highlight_task_tx,
-            turn_highlight_generation: 0,
+            turn_highlight_generation,
+            pending_turn_highlight: None,
+            highlighted_diff_display: None,
             pending_diff_prompts: HashMap::new(),
             pending_diff_previews: HashMap::new(),
             dirty_diff_previews: HashSet::new(),
             next_diff_job_id: 1,
             title_processes: HashMap::new(),
         };
-        this.queue_turn_diff_highlights();
         if let Some(project_id) = selected_project {
             this.refresh_repository(project_id);
         }

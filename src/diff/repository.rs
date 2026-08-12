@@ -979,7 +979,7 @@ fn build_file_diff(
         );
         (requested_kind, hunks, additions, deletions, None)
     };
-    let mut file = FileDiff {
+    FileDiff {
         path,
         old_path,
         kind,
@@ -995,7 +995,5 @@ fn build_file_diff(
         message,
         old_highlights: Vec::new(),
         new_highlights: Vec::new(),
-    };
-    file.refresh_highlights();
-    file
+    }
 }

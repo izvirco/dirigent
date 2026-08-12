@@ -721,11 +721,14 @@ impl Dirigent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if !self.diff_sidebar_open || self.selected_harness.is_none() {
+        if !self.diff_sidebar_open {
+            return div().into_any_element();
+        }
+        self.sync_diff_display();
+        if self.selected_harness.is_none() {
             return div().into_any_element();
         }
         let replaces_thread = self.diff_sidebar_replaces_thread(window);
-        self.sync_diff_display();
         let harness = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))

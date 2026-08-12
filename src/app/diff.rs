@@ -5,41 +5,47 @@ use super::*;
 use crate::diff::{self, ActiveTurnDiff, DiffScope, DiffViewMode, TurnDiff, TurnDiffStatus};
 
 pub(super) struct TurnHighlightTask {
-    pub(super) generation: u64,
-    pub(super) harness_id: Id,
-    pub(super) turn: Arc<TurnDiff>,
+    generation: u64,
+    key: DiffDisplayKey,
+    turn: TurnDiff,
 }
 
 pub(super) struct TurnHighlightResult {
     generation: u64,
-    harness_id: Id,
-    turn: Arc<TurnDiff>,
+    key: DiffDisplayKey,
+    turn: TurnDiff,
 }
 
-/// Recomputes theme-dependent syntax spans away from the UI thread.
+/// Recomputes theme-dependent syntax spans for the visible diff away from the UI thread.
 pub(super) fn run_turn_highlight_worker(
     tasks: async_channel::Receiver<TurnHighlightTask>,
     results: async_channel::Sender<TurnHighlightResult>,
+    current_generation: Arc<AtomicU64>,
 ) {
-    while let Ok(task) = tasks.recv_blocking() {
+    while let Ok(mut task) = tasks.recv_blocking() {
+        if task.generation != current_generation.load(Ordering::Relaxed) {
+            continue;
+        }
         let started = Instant::now();
-        let turn_id = task.turn.id;
-        let mut turn = task.turn.as_ref().clone();
-        turn.refresh_highlights();
+        task.turn.refresh_highlights();
+        if task.generation != current_generation.load(Ordering::Relaxed) {
+            continue;
+        }
         let elapsed = started.elapsed();
         if elapsed >= Duration::from_millis(100) {
             tracing::info!(
-                harness_id = task.harness_id,
-                turn_id,
+                harness_id = task.key.0,
+                turn_id = task.key.1,
+                scope = ?task.key.2,
                 elapsed_ms = elapsed.as_millis(),
-                "asynchronous turn diff highlighting completed"
+                "asynchronous diff display highlighting completed"
             );
         }
         if results
             .send_blocking(TurnHighlightResult {
                 generation: task.generation,
-                harness_id: task.harness_id,
-                turn: Arc::new(turn),
+                key: task.key,
+                turn: task.turn,
             })
             .is_err()
         {
@@ -140,51 +146,57 @@ pub(super) fn run_diff_worker(
 }
 
 impl Dirigent {
-    pub(super) fn queue_turn_diff_highlights(&mut self) {
-        // A generation makes every result from the previous theme obsolete without needing to
-        // cancel work that is already running.
-        self.turn_highlight_generation = self.turn_highlight_generation.wrapping_add(1).max(1);
-        let generation = self.turn_highlight_generation;
-        for harness in &self.harnesses {
-            for turn in &harness.turn_diffs {
-                if self
-                    .turn_highlight_tasks
-                    .try_send(TurnHighlightTask {
-                        generation,
-                        harness_id: harness.id,
-                        turn: turn.clone(),
-                    })
-                    .is_err()
-                {
-                    tracing::warn!("could not queue asynchronous turn diff highlighting");
-                    return;
-                }
-            }
+    /// Invalidates only the disposable syntax cache. Persisted turn data remains untouched.
+    pub(super) fn invalidate_diff_display_highlights(&mut self) {
+        let generation = self
+            .turn_highlight_generation
+            .load(Ordering::Relaxed)
+            .wrapping_add(1)
+            .max(1);
+        self.turn_highlight_generation
+            .store(generation, Ordering::Relaxed);
+        self.pending_turn_highlight = None;
+        self.highlighted_diff_display = None;
+    }
+
+    fn queue_diff_display_highlights(&mut self, key: DiffDisplayKey) {
+        let generation = self.turn_highlight_generation.load(Ordering::Relaxed);
+        let request = (generation, key);
+        if self.pending_turn_highlight == Some(request)
+            || self.highlighted_diff_display == Some(request)
+        {
+            return;
         }
+        let Some(turn) = self.diff_display.clone() else {
+            return;
+        };
+        if self
+            .turn_highlight_tasks
+            .try_send(TurnHighlightTask {
+                generation,
+                key,
+                turn,
+            })
+            .is_err()
+        {
+            tracing::warn!("could not queue asynchronous diff display highlighting");
+            return;
+        }
+        self.pending_turn_highlight = Some(request);
     }
 
     pub(super) fn handle_turn_highlight_result(&mut self, result: TurnHighlightResult) {
-        if result.generation != self.turn_highlight_generation {
+        let request = (result.generation, result.key);
+        if result.generation != self.turn_highlight_generation.load(Ordering::Relaxed)
+            || self.diff_display_key != Some(result.key)
+            || self.pending_turn_highlight != Some(request)
+        {
             return;
         }
-        let Some(harness) = self
-            .harnesses
-            .iter_mut()
-            .find(|harness| harness.id == result.harness_id)
-        else {
-            return;
-        };
-        let Some(turn) = harness
-            .turn_diffs
-            .iter_mut()
-            .find(|turn| turn.id == result.turn.id)
-        else {
-            return;
-        };
-        *turn = result.turn;
-        if self.selected_harness == Some(harness.id) {
-            self.diff_display_key = None;
-        }
+        self.pending_turn_highlight = None;
+        self.highlighted_diff_display = Some(request);
+        self.diff_display = Some(result.turn);
+        self.rebuild_diff_render_cache();
     }
 
     fn persist_diff_sidebar(&mut self) {
@@ -500,6 +512,8 @@ impl Dirigent {
         self.diff_turn_dropdown_open = false;
         if self.diff_sidebar_open {
             self.select_latest_diff_turn();
+        } else {
+            self.invalidate_diff_display_highlights();
         }
         self.persist_diff_sidebar();
     }
@@ -508,6 +522,7 @@ impl Dirigent {
         if self.diff_sidebar_open {
             self.diff_sidebar_open = false;
             self.diff_turn_dropdown_open = false;
+            self.invalidate_diff_display_highlights();
             self.persist_diff_sidebar();
         }
     }
@@ -564,56 +579,68 @@ impl Dirigent {
         self.diff_display_key = None;
     }
 
+    fn clear_diff_display(&mut self) {
+        let had_display = self.diff_display.take().is_some();
+        if self.diff_display_key.take().is_some()
+            || self.pending_turn_highlight.is_some()
+            || self.highlighted_diff_display.is_some()
+        {
+            self.invalidate_diff_display_highlights();
+        }
+        if had_display {
+            self.rebuild_diff_render_cache();
+        }
+    }
+
     pub(crate) fn sync_diff_display(&mut self) {
         let Some(harness) = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
         else {
-            if self.diff_display.take().is_some() {
-                self.rebuild_diff_render_cache();
-            }
-            self.diff_display_key = None;
+            self.clear_diff_display();
             return;
         };
         let Some(turn_id) = self.selected_diff_turn_id() else {
-            if self.diff_display.take().is_some() {
-                self.rebuild_diff_render_cache();
-            }
-            self.diff_display_key = None;
+            self.clear_diff_display();
             return;
         };
         let key = (harness.id, turn_id, self.diff_scope);
         if self.diff_display_key == Some(key) {
+            self.queue_diff_display_highlights(key);
             return;
         }
-        if let Some(preview) = harness
+        let display = if let Some(preview) = harness
             .active_turn_preview
             .as_ref()
             .filter(|preview| preview.id == turn_id)
         {
-            self.diff_display = match self.diff_scope {
+            match self.diff_scope {
                 DiffScope::Cumulative => {
                     let mut turns = harness.turn_diffs.clone();
                     turns.push(Arc::new(preview.clone()));
                     diff::combine_turn_diffs(&turns)
                 }
                 DiffScope::Turn => Some(preview.clone()),
-            };
+            }
         } else {
             let Some(index) = harness
                 .turn_diffs
                 .iter()
                 .position(|turn| turn.id == turn_id)
             else {
+                self.clear_diff_display();
                 return;
             };
-            self.diff_display = match self.diff_scope {
+            match self.diff_scope {
                 DiffScope::Cumulative => diff::combine_turn_diffs(&harness.turn_diffs[..=index]),
                 DiffScope::Turn => Some(harness.turn_diffs[index].as_ref().clone()),
-            };
-        }
+            }
+        };
+        self.invalidate_diff_display_highlights();
+        self.diff_display = display;
         self.diff_display_key = Some(key);
         self.rebuild_diff_render_cache();
+        self.queue_diff_display_highlights(key);
     }
 
     pub(crate) fn selected_diff_turn_id(&self) -> Option<u64> {

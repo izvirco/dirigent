@@ -17,7 +17,10 @@ use std::{
     fs,
     ops::Range,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -512,6 +515,8 @@ fn runtime_event_kinds(events: &[RuntimeEvent]) -> String {
         .join(",")
 }
 
+pub(crate) type DiffDisplayKey = (Id, u64, DiffScope);
+
 pub(crate) struct Dirigent {
     pub(crate) projects: Vec<Project>,
     pub(crate) harnesses: Vec<Harness>,
@@ -532,7 +537,7 @@ pub(crate) struct Dirigent {
     pub(crate) selected_diff_turn: Option<(Id, u64)>,
     pub(crate) diff_turn_dropdown_open: bool,
     pub(crate) diff_list: ListState,
-    pub(crate) diff_display_key: Option<(Id, u64, DiffScope)>,
+    pub(crate) diff_display_key: Option<DiffDisplayKey>,
     pub(crate) diff_display: Option<TurnDiff>,
     pub(crate) diff_render_cache: DiffRenderCache,
     pub(crate) diff_code_scrolls: std::cell::RefCell<HashMap<String, ScrollHandle>>,
@@ -610,7 +615,9 @@ pub(crate) struct Dirigent {
     title_events: Sender<TitleGenerationEvent>,
     diff_tasks: Sender<self::diff::DiffTask>,
     turn_highlight_tasks: Sender<self::diff::TurnHighlightTask>,
-    turn_highlight_generation: u64,
+    turn_highlight_generation: Arc<AtomicU64>,
+    pending_turn_highlight: Option<(u64, DiffDisplayKey)>,
+    highlighted_diff_display: Option<(u64, DiffDisplayKey)>,
     pending_diff_prompts: HashMap<Id, PendingDiffPrompt>,
     pending_diff_previews: HashMap<Id, u64>,
     dirty_diff_previews: HashSet<Id>,
@@ -871,9 +878,9 @@ impl Dirigent {
 
     fn apply_appearance(&mut self, appearance: theme::Appearance, cx: &mut Context<Self>) {
         self.font = appearance.font.into();
-        // Color values are resolved into cached messages and diff spans, so a theme reload must
-        // invalidate more than the top-level GPUI view.
-        self.queue_turn_diff_highlights();
+        // Color values are resolved into cached messages and the visible diff, so a theme reload
+        // must invalidate more than the top-level GPUI view.
+        self.invalidate_diff_display_highlights();
         for harness in &mut self.harnesses {
             for message in harness
                 .messages
@@ -886,7 +893,6 @@ impl Dirigent {
         self.conversation_list
             .remeasure_items(0..self.conversation_render_cache.len());
         self.conversation_render_cache.invalidate_ruler_layout();
-        self.diff_display_key = None;
 
         let inputs = self.composer_inputs.values().cloned().chain([
             self.project_input.clone(),
