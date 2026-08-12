@@ -378,6 +378,7 @@ impl Dirigent {
                     .w_full()
                     .min_w(px(0.0))
                     .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
                     .track_scroll(&table.scroll)
                     .child(
                         div()
