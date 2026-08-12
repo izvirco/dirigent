@@ -210,13 +210,14 @@ impl Dirigent {
         &self,
         message: &Message,
         index: usize,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.editing_message.as_ref().is_some_and(|edit| {
             edit.harness_id == self.selected_harness.unwrap_or_default()
                 && edit.message_index == index
         }) {
-            return self.render_message_edit_composer(cx);
+            return self.render_message_edit_composer(window, cx);
         }
         let hover_key = self.selected_harness.map(|harness_id| (harness_id, index));
         let actions_visible = self.hovered_copy_message == hover_key

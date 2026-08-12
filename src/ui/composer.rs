@@ -56,6 +56,26 @@ fn format_queue_state(steering: usize, follow_up: usize) -> Option<String> {
     (!parts.is_empty()).then(|| format!("{} queued", parts.join(" · ")))
 }
 
+pub(super) fn composer_border_rings(window: &Window) -> [gpui::Div; 3] {
+    let ring_step = window.pixel_snap(px(1.0));
+    [
+        (ring_step, 0.30),
+        (ring_step * 2.0, 0.20),
+        (ring_step * 3.0, 0.10),
+    ]
+    .map(|(offset, opacity)| {
+        div()
+            .absolute()
+            .top(-offset)
+            .right(-offset)
+            .bottom(-offset)
+            .left(-offset)
+            .rounded(px(12.0) + offset)
+            .border_1()
+            .border_color(rgb(blue()).opacity(opacity))
+    })
+}
+
 pub(super) fn dropdown_arrow(open: bool) -> impl IntoElement {
     let icon = svg()
         .path("icon/chevron-down.svg")
@@ -96,7 +116,7 @@ impl Dirigent {
                     .bg(rgb(surface()))
                     .text_xs()
                     .cursor_pointer()
-                    .when(open, |style| style.border_color(rgb(blue())))
+                    .when(open, |style| style.border_color(rgb(blue()).opacity(0.30)))
                     .hover(|style| style.bg(rgb(surface_hover())))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if open {
@@ -646,7 +666,9 @@ impl Dirigent {
             .border_1()
             .border_color(rgba(0x00000000))
             .bg(rgb(surface()))
-            .when(focused, |element| element.border_color(rgb(blue())))
+            .when(focused, |element| {
+                element.children(composer_border_rings(window))
+            })
             .when(!images.is_empty(), |element| {
                 element.child(
                     div()

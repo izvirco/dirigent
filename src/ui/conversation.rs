@@ -16,10 +16,10 @@ use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, FollowMode, HighlightStyle, IntoElement,
     ListOffset, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit, ScrollHandle,
     SharedString, StyledImage, StyledText, Transformation, Window, canvas, deferred, div, fill,
-    img, list, point, prelude::*, px, radians, relative, size, svg,
+    img, list, point, prelude::*, px, radians, relative, rgba, size, svg,
 };
 
-use super::composer::dropdown_arrow;
+use super::composer::{composer_border_rings, dropdown_arrow};
 
 use crate::{
     app::{ComposerDropdown, Dirigent},
@@ -571,7 +571,7 @@ impl Dirigent {
     fn render_conversation_item(
         &mut self,
         index: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let harness = self
@@ -614,7 +614,7 @@ impl Dirigent {
                             .when(*message_index > 0 && !follows_activity, |element| {
                                 element.mt_2()
                             })
-                            .child(self.render_message(message, *message_index, cx)),
+                            .child(self.render_message(message, *message_index, window, cx)),
                     )
                     .into_any_element()
             }
@@ -650,7 +650,7 @@ impl Dirigent {
                             .mx_auto()
                             .px_7()
                             .mt_2()
-                            .child(self.render_message(message, render_index, cx)),
+                            .child(self.render_message(message, render_index, window, cx)),
                     )
                     .into_any_element()
             }

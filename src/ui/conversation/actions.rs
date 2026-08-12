@@ -127,7 +127,11 @@ impl Dirigent {
             }))
             .into_any_element()
     }
-    pub(super) fn render_message_edit_composer(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_message_edit_composer(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let edit = self.editing_message.as_ref().expect("edit must exist");
         let index = edit.message_index;
         let input = edit.input.clone();
@@ -321,16 +325,18 @@ impl Dirigent {
                 )
             });
         div()
+            .relative()
             .w_full()
             .max_w(px(820.0))
             .p_2()
             .flex()
             .flex_col()
             .gap_1()
-            .rounded_lg()
+            .rounded_xl()
             .border_1()
-            .border_color(rgb(blue()).opacity(0.55))
+            .border_color(rgba(0x00000000))
             .bg(rgb(crate::theme::surface()))
+            .children(composer_border_rings(window))
             .child(input)
             .child(
                 div()
