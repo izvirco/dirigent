@@ -72,7 +72,6 @@ jobs:
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           $executable = Join-Path "dist" $env:DIRIGENT_ASSET_NAME
           Copy-Item target/release/dirigent.exe $executable
-          Copy-Item licenses/Lilex-OFL.txt dist/Lilex-OFL.txt
 
           $checksum = (Get-FileHash -Path $executable -Algorithm SHA256).Hash.ToLowerInvariant()
           "$checksum  $env:DIRIGENT_ASSET_NAME" | Set-Content -Path "$executable.sha256" -Encoding ascii
@@ -151,7 +150,6 @@ jobs:
           mkdir -p dist
           executable="dist/$DIRIGENT_ASSET_NAME"
           cp target/release/dirigent "$executable"
-          cp licenses/Lilex-OFL.txt dist/Lilex-OFL.txt
           (cd dist && sha256sum "$DIRIGENT_ASSET_NAME" > "$DIRIGENT_ASSET_NAME.sha256")
 
       - name: Upload Arch Linux artifact
