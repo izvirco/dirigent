@@ -337,6 +337,13 @@ impl Dirigent {
         {
             self.selected_diff_turn = Some((self.harnesses[index].id, turn_id));
         }
+        if self.selected_harness == Some(harness_id) {
+            // Turn completion is infrequent, so rebuild the lightweight summary cache once and
+            // let the exact diff replace its per-tool estimate. Keeping the rebuild point past
+            // the message tail avoids remeasuring unchanged conversation messages.
+            let rebuild_from_message = self.harnesses[index].messages.len();
+            self.sync_conversation_render_cache(rebuild_from_message);
+        }
     }
 
     pub(super) fn handle_diff_task_result(&mut self, result: DiffTaskResult) {

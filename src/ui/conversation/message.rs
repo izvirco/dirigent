@@ -134,6 +134,8 @@ impl Dirigent {
             categories.push(format!("{} misc", group.misc_count));
         }
         let tool_stats = (!categories.is_empty()).then(|| categories.join(" · "));
+        let (additions, deletions) = group.diff_stats.counts();
+        let approximate = group.diff_stats.is_optimistic();
         let chevron = svg()
             .path("icon/chevron-down.svg")
             .size(px(12.0))
@@ -173,20 +175,21 @@ impl Dirigent {
             .when_some(duration, |element, duration| {
                 element.child("·").child(duration)
             })
-            .when(group.additions > 0 || group.deletions > 0, |element| {
+            .when(additions > 0 || deletions > 0, |element| {
+                let approximation = if approximate { "~" } else { "" };
                 element
                     .child("·")
                     .child(
                         div()
                             .flex_none()
                             .text_color(rgb(green()))
-                            .child(format!("+{}", group.additions)),
+                            .child(format!("{approximation}+{additions}")),
                     )
                     .child(
                         div()
                             .flex_none()
                             .text_color(rgb(red()))
-                            .child(format!("-{}", group.deletions)),
+                            .child(format!("{approximation}-{deletions}")),
                     )
             })
             .when_some(tool_stats, |element, tool_stats| {

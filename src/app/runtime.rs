@@ -498,6 +498,10 @@ impl Dirigent {
             }
         }
         if !is_error && matches!(name, "write" | "edit") {
+            if self.selected_harness == Some(self.harnesses[index].id) {
+                self.conversation_render_cache
+                    .refresh_optimistic_diff_stats(&self.harnesses[index].messages, message_index);
+            }
             self.refresh_active_turn_diff(index);
         }
         Some(message_index)

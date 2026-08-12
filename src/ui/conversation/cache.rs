@@ -78,6 +78,52 @@ fn build_ruler_markers(
         .into()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkGroupDiffStats {
+    Optimistic { additions: usize, deletions: usize },
+    Exact { additions: usize, deletions: usize },
+}
+
+impl WorkGroupDiffStats {
+    pub(crate) fn counts(self) -> (usize, usize) {
+        match self {
+            Self::Optimistic {
+                additions,
+                deletions,
+            }
+            | Self::Exact {
+                additions,
+                deletions,
+            } => (additions, deletions),
+        }
+    }
+
+    pub(crate) fn is_optimistic(self) -> bool {
+        matches!(self, Self::Optimistic { .. })
+    }
+}
+
+// Per-tool changes are immediate but not a net workspace diff: later calls can overlap or
+// reverse them, and writes do not know the previous file contents.
+fn optimistic_diff_stats(messages: &[Message]) -> WorkGroupDiffStats {
+    let (additions, deletions) = messages
+        .iter()
+        .filter(|message| {
+            message.role == MessageRole::Tool && !message.running && !message.tool_failed
+        })
+        .filter_map(|message| message.tool_change_stats)
+        .fold((0_usize, 0_usize), |(additions, deletions), stats| {
+            (
+                additions.saturating_add(stats.0),
+                deletions.saturating_add(stats.1),
+            )
+        });
+    WorkGroupDiffStats::Optimistic {
+        additions,
+        deletions,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkGroupSummary {
     pub(crate) id: String,
@@ -89,8 +135,7 @@ pub(crate) struct WorkGroupSummary {
     pub(crate) thinking_level: Option<String>,
     pub(crate) started_at: Option<Instant>,
     pub(crate) duration: Option<Duration>,
-    pub(crate) additions: usize,
-    pub(crate) deletions: usize,
+    pub(crate) diff_stats: WorkGroupDiffStats,
     pub(crate) tool_count: usize,
     pub(crate) write_count: usize,
     pub(crate) edit_count: usize,
@@ -105,6 +150,7 @@ impl WorkGroupSummary {
         range: Range<usize>,
         running: bool,
         turn: Option<&TurnDiff>,
+        completed_turn: Option<&TurnDiff>,
         latest_group: bool,
     ) -> Self {
         let messages = &harness.messages[range.clone()];
@@ -132,9 +178,15 @@ impl WorkGroupSummary {
                 _ => misc_count += 1,
             }
         }
-        let (additions, deletions) = turn
-            .map(|turn| (turn.additions, turn.deletions))
-            .unwrap_or_default();
+        let diff_stats = completed_turn
+            .filter(|turn| turn.error.is_none())
+            .map_or_else(
+                || optimistic_diff_stats(messages),
+                |turn| WorkGroupDiffStats::Exact {
+                    additions: turn.additions,
+                    deletions: turn.deletions,
+                },
+            );
         let duration = if !running && latest_group {
             harness.last_run_duration.or_else(|| {
                 turn.map(|turn| {
@@ -161,8 +213,7 @@ impl WorkGroupSummary {
             thinking_level,
             started_at: running.then_some(harness.run_started_at).flatten(),
             duration,
-            additions,
-            deletions,
+            diff_stats,
             tool_count: write_count + edit_count + compaction_count + misc_count,
             write_count,
             edit_count,
@@ -310,6 +361,7 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
                     user_index + 1..last_pre_response_activity + 1,
                     false,
                     turn,
+                    completed_turn,
                     latest_group,
                 ));
                 has_pre_response_group = true;
@@ -340,6 +392,7 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
                     range_start..compaction_index,
                     compaction_running,
                     None,
+                    None,
                     false,
                 ));
                 compaction_ordinal += 1;
@@ -353,6 +406,7 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
             user_index + 1..last_activity + 1,
             running,
             turn,
+            completed_turn,
             latest_group,
         ));
     }
@@ -484,6 +538,27 @@ impl ConversationRenderCache {
         }
 
         (new, old_range, new_count, remeasure_ranges)
+    }
+
+    pub(crate) fn refresh_optimistic_diff_stats(
+        &mut self,
+        messages: &[Message],
+        message_index: usize,
+    ) {
+        let Some(group) = self.items.iter_mut().find_map(|item| match item {
+            ConversationRenderItem::WorkGroup(group)
+                if group.first_message_index <= message_index
+                    && message_index <= group.last_message_index
+                    && group.diff_stats.is_optimistic() =>
+            {
+                Some(group)
+            }
+            _ => None,
+        }) else {
+            return;
+        };
+        group.diff_stats =
+            optimistic_diff_stats(&messages[group.first_message_index..=group.last_message_index]);
     }
 
     pub(crate) fn invalidate_ruler_layout(&mut self) {
