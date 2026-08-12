@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, BoxShadow, Context, Entity, Focusable, IntoElement,
-    ObjectFit, StyledImage, Transformation, Window, deferred, div, img, percentage, prelude::*, px,
-    radians, rgba, svg,
+    Animation, AnimationExt as _, AnyElement, Context, Entity, Focusable, IntoElement, ObjectFit,
+    StyledImage, Transformation, Window, deferred, div, img, percentage, prelude::*, px, radians,
+    rgba, svg,
 };
 
 use crate::{
@@ -90,7 +90,7 @@ impl Dirigent {
                     .gap_1()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(border()))
+                    .border_color(rgba(0x00000000))
                     .bg(rgb(surface()))
                     .text_xs()
                     .cursor_pointer()
@@ -105,7 +105,12 @@ impl Dirigent {
                         cx.notify();
                         cx.stop_propagation();
                     }))
-                    .child(div().text_color(rgb(muted())).child("Create thread in"))
+                    .child(
+                        div()
+                            .mr_1()
+                            .text_color(rgb(muted()))
+                            .child("Create thread in"),
+                    )
                     .child(
                         div()
                             .min_w(px(0.0))
@@ -639,12 +644,7 @@ impl Dirigent {
             .border_1()
             .border_color(rgba(0x00000000))
             .bg(rgb(surface()))
-            .when(focused, |element| {
-                element.border_color(rgb(blue()).opacity(0.5)).shadow(vec![
-                    BoxShadow::new(px(0.0), px(0.0), rgb(blue()).opacity(0.19).into())
-                        .blur_radius(px(5.0)),
-                ])
-            })
+            .when(focused, |element| element.border_color(rgb(blue())))
             .when(!images.is_empty(), |element| {
                 element.child(
                     div()
