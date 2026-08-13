@@ -40,7 +40,7 @@ pub(crate) enum DiffViewMode {
     Split,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum DiffScope {
     Cumulative,
     Turn,

@@ -705,6 +705,7 @@ impl Dirigent {
             diff_display_key: None,
             diff_display: None,
             diff_render_cache: DiffRenderCache::default(),
+            diff_file_collapse_overrides: HashMap::new(),
             diff_code_scrolls: std::cell::RefCell::new(HashMap::new()),
             collapsed_projects,
             expanded_archived_projects: HashSet::new(),

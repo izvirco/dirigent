@@ -471,7 +471,79 @@ impl Dirigent {
             .into_any_element()
     }
 
-    fn render_diff_file_header(&self, file_index: usize, last_in_file: bool) -> AnyElement {
+    fn diff_file_collapsed(&self, file: &FileDiff) -> bool {
+        self.diff_display_key
+            .and_then(|key| self.diff_file_collapse_overrides.get(&key))
+            .and_then(|overrides| overrides.get(&file.path))
+            .copied()
+            .unwrap_or_else(|| is_common_lock_file(&file.path))
+    }
+
+    fn toggle_diff_file(&mut self, file_index: usize) {
+        let Some(key) = self.diff_display_key else {
+            return;
+        };
+        let Some(file) = self
+            .diff_display
+            .as_ref()
+            .and_then(|turn| turn.files.get(file_index))
+        else {
+            return;
+        };
+        let Some(old_header) = self.diff_render_cache.file_header_item_index(file_index) else {
+            return;
+        };
+        let old_end = self
+            .diff_render_cache
+            .file_header_item_index(file_index + 1)
+            .unwrap_or(self.diff_render_cache.items.len());
+        let header_y = self
+            .diff_list
+            .bounds_for_item(old_header)
+            .map(|bounds| {
+                (bounds.top() - self.diff_list.viewport_bounds().top())
+                    .as_f32()
+                    .max(0.0)
+            })
+            .unwrap_or(0.0);
+        let path = file.path.clone();
+        let collapsed = self.diff_file_collapsed(file);
+
+        // Anchor the list before changing its item count so the clicked header keeps its
+        // viewport position. A sticky header has no item bounds, so it remains at the top.
+        self.diff_list.scroll_to(ListOffset {
+            item_ix: old_header,
+            offset_in_item: px(0.0),
+        });
+        self.diff_list.scroll_by(px(-header_y));
+
+        self.diff_file_collapse_overrides
+            .entry(key)
+            .or_default()
+            .insert(path, !collapsed);
+        self.thread_text_selection = None;
+
+        let new_cache = self.build_diff_render_cache();
+        let new_header = new_cache
+            .file_header_item_index(file_index)
+            .expect("rebuilt diff contains toggled file");
+        let new_end = new_cache
+            .file_header_item_index(file_index + 1)
+            .unwrap_or(new_cache.items.len());
+        self.diff_render_cache = new_cache;
+        self.diff_list
+            .splice(old_header + 1..old_end, new_end - new_header - 1);
+        self.diff_list.remeasure_items(old_header..old_header + 1);
+    }
+
+    fn render_diff_file_header(
+        &self,
+        file_index: usize,
+        last_in_file: bool,
+        collapsed: bool,
+        sticky: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(file) = self
             .diff_display
             .as_ref()
@@ -479,20 +551,49 @@ impl Dirigent {
         else {
             return div().into_any_element();
         };
+        let chevron = svg()
+            .path("icon/chevron-down.svg")
+            .size(px(12.0))
+            .text_color(rgb(muted()))
+            .flex_none();
+        let chevron = if collapsed {
+            chevron.with_transformation(Transformation::rotate(radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+        } else {
+            chevron
+        };
+
         div()
             .w_full()
-            .when(last_in_file, |element| {
+            .when(last_in_file || sticky, |element| {
                 element.border_b_1().border_color(rgb(border()))
             })
             .child(
                 div()
+                    .id((
+                        if sticky {
+                            "sticky-diff-file-header"
+                        } else {
+                            "diff-file-header"
+                        },
+                        file_index,
+                    ))
                     .h(px(34.0))
                     .px_3()
                     .flex()
                     .items_center()
                     .gap_2()
+                    .cursor_pointer()
                     .bg(rgb(surface()))
                     .text_xs()
+                    .hover(|style| style.bg(rgb(surface_hover())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_diff_file(file_index);
+                        cx.notify();
+                        cx.stop_propagation();
+                    }))
+                    .child(chevron)
                     .child(
                         div()
                             .w(px(14.0))
@@ -515,15 +616,17 @@ impl Dirigent {
                     )
                     .child(render_diff_stats(file.additions, file.deletions)),
             )
-            .when_some(file.message.clone(), |element, message| {
-                element.child(
-                    div()
-                        .px_3()
-                        .py_3()
-                        .text_xs()
-                        .text_color(rgb(muted()))
-                        .child(message),
-                )
+            .when(!collapsed && !sticky, |element| {
+                element.when_some(file.message.clone(), |element, message| {
+                    element.child(
+                        div()
+                            .px_3()
+                            .py_3()
+                            .text_xs()
+                            .text_color(rgb(muted()))
+                            .child(message),
+                    )
+                })
             })
             .into_any_element()
     }
@@ -649,8 +752,9 @@ impl Dirigent {
         match item {
             DiffRenderItem::FileHeader {
                 file_index,
+                collapsed,
                 last_in_file,
-            } => self.render_diff_file_header(*file_index, *last_in_file),
+            } => self.render_diff_file_header(*file_index, *last_in_file, *collapsed, false, cx),
             DiffRenderItem::UnifiedChunk {
                 file_index,
                 hunk_index,
@@ -694,12 +798,66 @@ impl Dirigent {
         }
     }
 
-    pub(crate) fn rebuild_diff_render_cache(&mut self) {
-        self.diff_render_cache = self
+    fn render_sticky_diff_file_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(item_index) = self
+            .diff_render_cache
+            .items
+            .len()
+            .checked_sub(1)
+            .map(|last| self.diff_list.logical_scroll_top().item_ix.min(last))
+        else {
+            return div().into_any_element();
+        };
+        let file_index = self.diff_render_cache.items[item_index].file_index();
+        let collapsed = self
             .diff_display
             .as_ref()
-            .map(|turn| DiffRenderCache::build(turn, self.diff_view_mode))
+            .and_then(|turn| turn.files.get(file_index))
+            .is_some_and(|file| self.diff_file_collapsed(file));
+        let next_header = self
+            .diff_render_cache
+            .file_header_item_index(file_index + 1);
+        let viewport_top = self.diff_list.viewport_bounds().top();
+        let top = next_header
+            .and_then(|index| self.diff_list.bounds_for_item(index))
+            .map(|bounds| {
+                (bounds.top() - viewport_top - px(34.0))
+                    .as_f32()
+                    .clamp(-34.0, 0.0)
+            })
+            .unwrap_or(0.0);
+
+        div()
+            .absolute()
+            .top(px(top))
+            .left_0()
+            .right_0()
+            .occlude()
+            .child(self.render_diff_file_header(file_index, false, collapsed, true, cx))
+            .into_any_element()
+    }
+
+    fn build_diff_render_cache(&self) -> DiffRenderCache {
+        let collapsed_files = self
+            .diff_display
+            .as_ref()
+            .map(|turn| {
+                turn.files
+                    .iter()
+                    .map(|file| self.diff_file_collapsed(file))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
+        self.diff_display
+            .as_ref()
+            .map(|turn| {
+                DiffRenderCache::build(turn, self.diff_view_mode, collapsed_files.as_slice())
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn rebuild_diff_render_cache(&mut self) {
+        self.diff_render_cache = self.build_diff_render_cache();
         self.diff_list.reset_with_uniform_height(
             self.diff_render_cache.items.len(),
             px(self.diff_render_cache.item_height_hint()),
@@ -841,6 +999,7 @@ impl Dirigent {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .overflow_hidden()
                     .whitespace_nowrap()
                     .text_xs()
                     .text_color(rgb(code_text()))
@@ -871,6 +1030,9 @@ impl Dirigent {
                                 .text_color(rgb(muted()))
                                 .child(message),
                         )
+                    })
+                    .when(!display_empty, |element| {
+                        element.child(self.render_sticky_diff_file_header(cx))
                     })
                     .child(self.render_diff_list_scrollbar(cx)),
             )

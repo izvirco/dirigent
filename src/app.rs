@@ -540,6 +540,7 @@ pub(crate) struct Dirigent {
     pub(crate) diff_display_key: Option<DiffDisplayKey>,
     pub(crate) diff_display: Option<TurnDiff>,
     pub(crate) diff_render_cache: DiffRenderCache,
+    pub(crate) diff_file_collapse_overrides: HashMap<DiffDisplayKey, HashMap<String, bool>>,
     pub(crate) diff_code_scrolls: std::cell::RefCell<HashMap<String, ScrollHandle>>,
     pub(crate) collapsed_projects: HashSet<Id>,
     pub(crate) expanded_archived_projects: HashSet<Id>,

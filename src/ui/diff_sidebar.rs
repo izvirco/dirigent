@@ -5,9 +5,9 @@ mod render;
 use std::{cell::Cell, ops::Range, rc::Rc, sync::Arc};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, MouseButton,
-    Pixels, ScrollHandle, SharedString, StyledText, Window, deferred, div, list, point, prelude::*,
-    px, svg,
+    AnyElement, Context, CursorStyle, DragMoveEvent, HighlightStyle, IntoElement, ListOffset,
+    MouseButton, Pixels, ScrollHandle, SharedString, StyledText, Transformation, Window, deferred,
+    div, list, point, prelude::*, px, radians, svg,
 };
 
 use super::{composer::dropdown_arrow, scrollbar_drag_offset};
@@ -78,6 +78,23 @@ fn file_kind_label(kind: FileDiffKind) -> &'static str {
         FileDiffKind::Omitted => "…",
         FileDiffKind::ModeChanged => "↕",
     }
+}
+
+fn is_common_lock_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path).to_ascii_lowercase();
+    name.ends_with(".lock")
+        || name.ends_with(".lockb")
+        || matches!(
+            name.as_str(),
+            "package-lock.json"
+                | "packages.lock.json"
+                | "npm-shrinkwrap.json"
+                | "pnpm-lock.yaml"
+                | "pnpm-lock.yml"
+                | "go.sum"
+                | "cartfile.resolved"
+                | "package.resolved"
+        )
 }
 
 fn render_diff_stats(additions: usize, deletions: usize) -> AnyElement {
@@ -619,6 +636,7 @@ struct PreparedDiffFile {
 enum DiffRenderItem {
     FileHeader {
         file_index: usize,
+        collapsed: bool,
         last_in_file: bool,
     },
     UnifiedChunk {
@@ -644,6 +662,14 @@ enum DiffRenderItem {
 }
 
 impl DiffRenderItem {
+    fn file_index(&self) -> usize {
+        match self {
+            Self::FileHeader { file_index, .. }
+            | Self::UnifiedChunk { file_index, .. }
+            | Self::SplitChunk { file_index, .. } => *file_index,
+        }
+    }
+
     fn mark_last_in_file(&mut self) {
         match self {
             Self::FileHeader { last_in_file, .. }
@@ -669,25 +695,38 @@ impl DiffRenderItem {
 pub(crate) struct DiffRenderCache {
     files: Vec<PreparedDiffFile>,
     items: Vec<DiffRenderItem>,
+    file_header_items: Vec<usize>,
     estimated_height: f32,
 }
 
 impl DiffRenderCache {
-    fn build(turn: &TurnDiff, mode: DiffViewMode) -> Self {
+    fn build(turn: &TurnDiff, mode: DiffViewMode, collapsed_files: &[bool]) -> Self {
         let mut cache = Self::default();
         for (file_index, file) in turn.files.iter().enumerate() {
-            let old_offsets = line_offsets(file.old_text.as_deref());
-            let new_offsets = line_offsets(file.new_text.as_deref());
+            let collapsed = collapsed_files.get(file_index).copied().unwrap_or(false);
             cache.files.push(PreparedDiffFile {
-                content_width: Dirigent::diff_file_code_width(file),
+                content_width: if collapsed {
+                    120.0
+                } else {
+                    Dirigent::diff_file_code_width(file)
+                },
                 language: language_for_path(&file.path),
             });
             let first_item = cache.items.len();
+            cache.file_header_items.push(first_item);
             cache.items.push(DiffRenderItem::FileHeader {
                 file_index,
+                collapsed,
                 last_in_file: false,
             });
 
+            if collapsed {
+                cache.items.last_mut().unwrap().mark_last_in_file();
+                continue;
+            }
+
+            let old_offsets = line_offsets(file.old_text.as_deref());
+            let new_offsets = line_offsets(file.new_text.as_deref());
             for (hunk_index, hunk) in file.hunks.iter().enumerate() {
                 let top_gap = hunk_index > 0;
                 match mode {
@@ -780,5 +819,30 @@ impl DiffRenderCache {
         } else {
             (self.estimated_height / self.items.len() as f32).max(18.0)
         }
+    }
+
+    fn file_header_item_index(&self, file_index: usize) -> Option<usize> {
+        self.file_header_items.get(file_index).copied()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_common_lock_file;
+
+    #[test]
+    fn recognizes_common_lock_files() {
+        for path in [
+            "Cargo.lock",
+            "frontend/package-lock.json",
+            "pnpm-lock.yaml",
+            "ios/Package.resolved",
+            "go.sum",
+        ] {
+            assert!(is_common_lock_file(path), "{path}");
+        }
+
+        assert!(!is_common_lock_file("Cargo.toml"));
+        assert!(!is_common_lock_file("src/package.rs"));
     }
 }
