@@ -1,6 +1,6 @@
 //! Parses Markdown into a render-friendly document model.
 
-use std::ops::Range;
+use std::{borrow::Cow, ops::Range};
 
 use gpui::ScrollHandle;
 use pulldown_cmark::{
@@ -29,6 +29,9 @@ pub(crate) enum MarkdownBlock {
     CodeBlock {
         language: Option<String>,
         code: String,
+    },
+    Math {
+        source: String,
     },
     BlockQuote(Vec<MarkdownBlock>),
     List {
@@ -130,6 +133,11 @@ fn collect_selection_leaves<'a>(block: &'a MarkdownBlock, leaves: &mut Vec<&'a s
             let code = code.strip_suffix('\n').unwrap_or(code);
             if !code.is_empty() {
                 leaves.push(code);
+            }
+        }
+        MarkdownBlock::Math { source } => {
+            if !source.is_empty() {
+                leaves.push(source);
             }
         }
         MarkdownBlock::BlockQuote(blocks) => {
@@ -240,13 +248,94 @@ enum Frame {
     Footnote(Vec<MarkdownBlock>),
 }
 
+/// Accept the display-math delimiters commonly emitted by language models in addition to
+/// pulldown-cmark's native `$$` syntax. Only complete pairs outside fenced code are rewritten.
+fn normalize_display_math(source: &str) -> Cow<'_, str> {
+    let lines = source.split_inclusive('\n').collect::<Vec<_>>();
+    let mut replacements = vec![None; lines.len()];
+    let mut open_math = None;
+    let mut fence: Option<(char, usize)> = None;
+
+    for (index, line) in lines.iter().enumerate() {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let leading = body.len() - body.trim_start().len();
+        let trimmed = body.trim();
+
+        if let Some((marker, minimum_length)) = fence {
+            if fence_marker(body).is_some_and(|(candidate, length, rest)| {
+                candidate == marker && length >= minimum_length && rest.trim().is_empty()
+            }) {
+                fence = None;
+            }
+            continue;
+        }
+        if leading <= 3
+            && let Some((marker, length, _)) = fence_marker(body)
+        {
+            fence = Some((marker, length));
+            continue;
+        }
+
+        if let Some(content) = trimmed
+            .strip_prefix(r"\[")
+            .and_then(|content| content.strip_suffix(r"\]"))
+        {
+            replacements[index] = Some(format!("$${content}$$"));
+            continue;
+        }
+        match (open_math, trimmed) {
+            (None, r"\[") => open_math = Some(index),
+            (Some(open), r"\]") => {
+                replacements[open] = Some("$$".to_string());
+                replacements[index] = Some("$$".to_string());
+                open_math = None;
+            }
+            _ => {}
+        }
+    }
+
+    if replacements.iter().all(Option::is_none) {
+        return Cow::Borrowed(source);
+    }
+    let mut normalized = String::with_capacity(source.len());
+    for (line, replacement) in lines.into_iter().zip(replacements) {
+        let Some(replacement) = replacement else {
+            normalized.push_str(line);
+            continue;
+        };
+        let body = line.trim_end_matches(['\r', '\n']);
+        let leading = body.len() - body.trim_start().len();
+        let trailing = body.trim_end().len();
+        normalized.push_str(&body[..leading]);
+        normalized.push_str(&replacement);
+        normalized.push_str(&body[trailing..]);
+        normalized.push_str(&line[body.len()..]);
+    }
+    Cow::Owned(normalized)
+}
+
+fn fence_marker(line: &str) -> Option<(char, usize, &str)> {
+    let trimmed = line.trim_start();
+    let marker = trimmed
+        .chars()
+        .next()
+        .filter(|marker| matches!(marker, '`' | '~'))?;
+    let length = trimmed
+        .chars()
+        .take_while(|candidate| *candidate == marker)
+        .count();
+    (length >= 3).then(|| (marker, length, &trimmed[length..]))
+}
+
 /// Converts pulldown-cmark's event stream into the nested block model consumed by the UI.
 pub(crate) fn parse_markdown(source: &str) -> MarkdownDocument {
     let options = Options::ENABLE_STRIKETHROUGH
         | Options::ENABLE_TABLES
         | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_FOOTNOTES;
-    let parser = Parser::new_ext(source, options);
+        | Options::ENABLE_FOOTNOTES
+        | Options::ENABLE_MATH;
+    let source = normalize_display_math(source);
+    let parser = Parser::new_ext(&source, options);
     let mut frames = vec![Frame::Root(Vec::new())];
 
     for event in parser {
@@ -290,13 +379,7 @@ pub(crate) fn parse_markdown(source: &str) -> MarkdownDocument {
                     inline.push_code(&math);
                 }
             }
-            Event::DisplayMath(math) => append_block(
-                &mut frames,
-                MarkdownBlock::CodeBlock {
-                    language: Some("math".to_string()),
-                    code: math.into_string(),
-                },
-            ),
+            Event::DisplayMath(math) => append_display_math(&mut frames, math.trim().to_string()),
         }
     }
 
@@ -438,7 +521,12 @@ fn finish_top_frame(frames: &mut Vec<Frame>) {
     };
     match frame {
         Frame::Root(blocks) => frames.push(Frame::Root(blocks)),
-        Frame::Paragraph(inline) => append_block(frames, MarkdownBlock::Paragraph(inline.finish())),
+        Frame::Paragraph(inline) => {
+            let text = inline.finish();
+            if !text.text.is_empty() {
+                append_block(frames, MarkdownBlock::Paragraph(text));
+            }
+        }
         Frame::Heading(level, inline) => append_block(
             frames,
             MarkdownBlock::Heading {
@@ -476,6 +564,32 @@ fn finish_top_frame(frames: &mut Vec<Frame>) {
         }
         Frame::HtmlBlock(inline) => append_block(frames, MarkdownBlock::Paragraph(inline.finish())),
         Frame::Footnote(blocks) => append_block(frames, MarkdownBlock::BlockQuote(blocks)),
+    }
+}
+
+fn append_display_math(frames: &mut [Frame], source: String) {
+    let block = MarkdownBlock::Math { source };
+    let parent_len = frames.len().saturating_sub(1);
+    match frames.last_mut() {
+        Some(Frame::Paragraph(inline)) => {
+            let text = std::mem::take(&mut inline.value);
+            let parent = &mut frames[..parent_len];
+            if !text.text.is_empty() {
+                append_block(parent, MarkdownBlock::Paragraph(text));
+            }
+            append_block(parent, block);
+        }
+        Some(Frame::Item { .. }) => {
+            flush_item_inline(frames);
+            append_block(frames, block);
+        }
+        Some(Frame::Heading(_, inline) | Frame::TableCell(inline) | Frame::HtmlBlock(inline)) => {
+            inline.push_code(match &block {
+                MarkdownBlock::Math { source } => source,
+                _ => unreachable!(),
+            })
+        }
+        _ => append_block(frames, block),
     }
 }
 
@@ -541,5 +655,39 @@ fn table_alignment(alignment: CmarkAlignment) -> TableAlignment {
         CmarkAlignment::None | CmarkAlignment::Left => TableAlignment::Left,
         CmarkAlignment::Center => TableAlignment::Center,
         CmarkAlignment::Right => TableAlignment::Right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_language_model_display_math_delimiters() {
+        let document = parse_markdown("Before\n\n\\[\nr=\\sqrt{x^2+y^2}\n\\]\n\nAfter");
+        assert_eq!(document.blocks.len(), 3);
+        assert!(matches!(
+            &document.blocks[1],
+            MarkdownBlock::Math { source } if source == r"r=\sqrt{x^2+y^2}"
+        ));
+    }
+
+    #[test]
+    fn parses_native_dollar_display_math() {
+        let document = parse_markdown("$$\\frac{a}{b}$$");
+        assert!(matches!(
+            document.blocks.as_slice(),
+            [MarkdownBlock::Math { source }] if source == r"\frac{a}{b}"
+        ));
+    }
+
+    #[test]
+    fn leaves_math_delimiters_in_fenced_code_untouched() {
+        let document = parse_markdown("```text\n\\[\nx^2\n\\]\n```");
+        assert!(matches!(
+            document.blocks.as_slice(),
+            [MarkdownBlock::CodeBlock { code, .. }]
+                if code.contains(r"\[") && code.contains(r"\]")
+        ));
     }
 }

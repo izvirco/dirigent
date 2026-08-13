@@ -2,15 +2,17 @@
 
 use gpui::{
     AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
-    StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgba,
+    StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgba, svg,
 };
 
 use crate::{
     app::Dirigent,
+    assets::insert_generated_svg,
     markdown::{
         MarkdownBlock, MarkdownDocument, MarkdownTable, MarkdownText, TableAlignment,
         markdown_selection_text,
     },
+    math::{MathRenderResult, MathRenderState, MathRenderTask},
     theme::{accent, blue, border, muted, rgb, surface, surface_hover, theme_text},
 };
 
@@ -51,13 +53,14 @@ impl Dirigent {
             next_offset: 0,
             has_leaf: false,
         };
-        self.render_markdown_blocks(&document.blocks, &id, &mut selection, cx)
+        self.render_markdown_blocks(&document.blocks, &id, message_index, &mut selection, cx)
     }
 
     fn render_markdown_blocks(
         &self,
         blocks: &[MarkdownBlock],
         path: &str,
+        message_index: usize,
         selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -66,6 +69,7 @@ impl Dirigent {
             children.push(self.render_markdown_block(
                 block,
                 &format!("{path}-{index}"),
+                message_index,
                 selection,
                 cx,
             ));
@@ -84,6 +88,7 @@ impl Dirigent {
         &self,
         block: &MarkdownBlock,
         path: &str,
+        message_index: usize,
         selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -108,6 +113,9 @@ impl Dirigent {
             MarkdownBlock::CodeBlock { code, .. } => {
                 self.render_markdown_code_block(path, code, selection, cx)
             }
+            MarkdownBlock::Math { source } => {
+                self.render_markdown_math(path, source, message_index, selection, cx)
+            }
             MarkdownBlock::BlockQuote(blocks) => div()
                 .w_full()
                 .min_w(px(0.0))
@@ -116,7 +124,13 @@ impl Dirigent {
                 .border_l_2()
                 .border_color(rgb(muted()))
                 .text_color(rgb(muted()))
-                .child(self.render_markdown_blocks(blocks, &format!("{path}-quote"), selection, cx))
+                .child(self.render_markdown_blocks(
+                    blocks,
+                    &format!("{path}-quote"),
+                    message_index,
+                    selection,
+                    cx,
+                ))
                 .into_any_element(),
             MarkdownBlock::List { start, items } => {
                 let children = items
@@ -145,6 +159,7 @@ impl Dirigent {
                                 self.render_markdown_blocks(
                                     blocks,
                                     &format!("{path}-item-{item_index}"),
+                                    message_index,
                                     selection,
                                     cx,
                                 ),
@@ -223,6 +238,136 @@ impl Dirigent {
             selection_range,
             cx,
         )
+    }
+
+    fn render_markdown_math(
+        &self,
+        path: &str,
+        source: &str,
+        message_index: usize,
+        selection: &mut MarkdownSelectionContext,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let waiter = self
+            .selected_harness
+            .map(|harness_id| (harness_id, message_index));
+        let (mut state, should_queue) = {
+            let mut renders = self.math_renders.borrow_mut();
+            match renders.get_mut(source) {
+                Some(MathRenderState::Pending { messages }) => {
+                    messages.extend(waiter);
+                    (
+                        MathRenderState::Pending {
+                            messages: messages.clone(),
+                        },
+                        false,
+                    )
+                }
+                Some(state) => (state.clone(), false),
+                None => {
+                    let messages = waiter.into_iter().collect();
+                    let state = MathRenderState::Pending { messages };
+                    renders.insert(source.to_string(), state.clone());
+                    (state, true)
+                }
+            }
+        };
+        if should_queue
+            && let Err(error) = self.math_render_tasks.try_send(MathRenderTask {
+                source: source.to_string(),
+            })
+        {
+            tracing::warn!(error = %error, "could not queue math rendering");
+            state = MathRenderState::Failed;
+            self.math_renders
+                .borrow_mut()
+                .insert(source.to_string(), state.clone());
+        }
+
+        let selection_range = selection.range_for(source);
+        match state {
+            MathRenderState::Ready {
+                asset_path,
+                width,
+                height,
+            } => div()
+                .id(format!("{path}-math-scroll"))
+                .w_full()
+                .min_w(px(0.0))
+                .overflow_x_scroll()
+                .child(
+                    svg()
+                        .path(asset_path)
+                        .w(px(width.ceil()))
+                        .h(px(height.ceil()))
+                        .flex_none()
+                        .text_color(rgb(theme_text())),
+                )
+                .into_any_element(),
+            MathRenderState::Pending { .. } | MathRenderState::Failed => {
+                let font_overrides = [(0..source.len(), self.font.clone())];
+                self.render_grouped_styled_selectable_text(
+                    format!("{path}-math"),
+                    SharedString::from(source.to_string()),
+                    &[],
+                    &font_overrides,
+                    &[],
+                    selection.id.clone(),
+                    selection.text.clone(),
+                    selection_range,
+                    cx,
+                )
+            }
+        }
+    }
+
+    pub(crate) fn handle_math_render_result(&mut self, result: MathRenderResult) {
+        let messages = {
+            let mut renders = self.math_renders.borrow_mut();
+            let Some(MathRenderState::Pending { messages }) = renders.get(&result.source) else {
+                return;
+            };
+            let messages = messages.clone();
+            let state = match result.rendered {
+                Ok(rendered) => {
+                    let asset_path = format!(
+                        "generated/math-{}.svg",
+                        blake3::hash(result.source.as_bytes()).to_hex()
+                    );
+                    insert_generated_svg(asset_path.clone(), rendered.svg);
+                    MathRenderState::Ready {
+                        asset_path,
+                        width: rendered.width,
+                        height: rendered.height,
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "could not render math");
+                    MathRenderState::Failed
+                }
+            };
+            renders.insert(result.source, state);
+            messages
+        };
+
+        let Some(selected_harness) = self.selected_harness else {
+            return;
+        };
+        let render_items = messages
+            .into_iter()
+            .filter(|(harness_id, _)| *harness_id == selected_harness)
+            .filter_map(|(_, message_index)| {
+                self.conversation_render_cache
+                    .message_render_item_index(message_index)
+            })
+            .collect::<std::collections::HashSet<_>>();
+        for render_item in &render_items {
+            self.conversation_list
+                .remeasure_items(*render_item..*render_item + 1);
+        }
+        if !render_items.is_empty() {
+            self.conversation_render_cache.invalidate_ruler_layout();
+        }
     }
 
     fn render_markdown_code_block(

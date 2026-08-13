@@ -345,6 +345,29 @@ impl Dirigent {
         })
         .detach();
 
+        let (math_render_task_tx, math_render_task_rx) = async_channel::unbounded();
+        let (math_render_result_tx, math_render_result_rx) = async_channel::unbounded();
+        std::thread::Builder::new()
+            .name("dirigent-math-render".into())
+            .spawn(move || {
+                crate::math::run_math_render_worker(math_render_task_rx, math_render_result_tx)
+            })
+            .expect("could not start math render worker");
+        cx.spawn(async move |this, cx| {
+            while let Ok(result) = math_render_result_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.handle_math_render_result(result);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let (diff_task_tx, diff_task_rx) = async_channel::unbounded();
         let (diff_result_tx, diff_result_rx) = async_channel::unbounded();
         std::thread::Builder::new()
@@ -775,6 +798,8 @@ impl Dirigent {
             frame_timing: FrameTiming::new(Instant::now()),
             next_id,
             next_sidebar_order,
+            math_renders: std::cell::RefCell::new(HashMap::new()),
+            math_render_tasks: math_render_task_tx,
             runtime_events: event_tx,
             workspace_events: workspace_event_tx,
             title_events: title_event_tx,

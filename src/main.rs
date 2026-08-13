@@ -13,6 +13,7 @@ mod diff;
 mod image_attachment;
 mod logging;
 mod markdown;
+mod math;
 mod model;
 mod platform;
 mod rpc;
