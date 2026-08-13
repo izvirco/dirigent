@@ -307,23 +307,23 @@ impl Dirigent {
     pub(super) fn finish_turn_diff(&mut self, index: usize, status: TurnDiffStatus) {
         let harness_id = self.harnesses[index].id;
         self.harnesses[index].turn_diff_unavailable = false;
-        self.harnesses[index].active_turn_preview = None;
         self.pending_diff_previews.remove(&harness_id);
         self.dirty_diff_previews.remove(&harness_id);
-        if self.selected_harness == Some(harness_id) {
-            self.diff_display_key = None;
-        }
         let Some(active) = self.harnesses[index].active_turn_diff.take() else {
             return;
         };
+        let turn_id = active.id;
         let status = active.status_override.unwrap_or(status);
         let root = match self.working_directory_for_harness(harness_id) {
             Ok(root) => root,
             Err(error) => {
+                self.clear_turn_diff_preview(index, turn_id);
                 tracing::warn!(error = %error, harness_id, "could not finish turn diff");
                 return;
             }
         };
+        // Keep the last live preview visible while the final repository snapshot is computed;
+        // discard it only if completion cannot be queued.
         if self
             .diff_tasks
             .try_send(DiffTask::Finish {
@@ -334,13 +334,28 @@ impl Dirigent {
             })
             .is_err()
         {
+            self.clear_turn_diff_preview(index, turn_id);
             tracing::warn!(harness_id, "could not queue turn diff completion");
+        }
+    }
+
+    fn clear_turn_diff_preview(&mut self, index: usize, turn_id: u64) {
+        if self.harnesses[index]
+            .active_turn_preview
+            .as_ref()
+            .is_some_and(|preview| preview.id == turn_id)
+        {
+            self.harnesses[index].active_turn_preview = None;
+            if self.selected_harness == Some(self.harnesses[index].id) {
+                self.diff_display_key = None;
+            }
         }
     }
 
     fn apply_finished_turn_diff(&mut self, index: usize, turn: TurnDiff) {
         let harness_id = self.harnesses[index].id;
         let turn_id = turn.id;
+        self.clear_turn_diff_preview(index, turn_id);
         let turn = Arc::new(turn);
         if let Err(error) = self.state_database.save_turn_diff(harness_id, turn.clone()) {
             tracing::error!(error = %error, harness_id, turn_id, "could not queue turn diff persistence");
@@ -359,6 +374,9 @@ impl Dirigent {
             self.selected_diff_turn = Some((self.harnesses[index].id, turn_id));
         }
         if self.selected_harness == Some(harness_id) {
+            // The preview and completed turn share a display key, so force the sidebar to replace
+            // its cached preview even if it was already showing this turn.
+            self.diff_display_key = None;
             // Turn completion is infrequent, so rebuild the lightweight summary cache once and
             // let the exact diff replace its per-tool estimate. Keeping the rebuild point past
             // the message tail avoids remeasuring unchanged conversation messages.

@@ -609,6 +609,25 @@ fn jj_command(root: &Path, ignore_working_copy: bool) -> Command {
     command
 }
 
+/// JJ parses path arguments as fileset expressions even after `--`. Wrap repository paths in an
+/// exact, quoted pattern so route names containing `$`, `~`, or other operators stay literal.
+fn jj_file_fileset(path: &str) -> String {
+    let mut fileset = String::with_capacity(path.len() + 12);
+    fileset.push_str("root-file:\"");
+    for character in path.chars() {
+        match character {
+            '"' => fileset.push_str("\\\""),
+            '\\' => fileset.push_str("\\\\"),
+            character if character.is_ascii_control() => {
+                fileset.push_str(&format!("\\x{:02x}", character as u8));
+            }
+            character => fileset.push(character),
+        }
+    }
+    fileset.push('"');
+    fileset
+}
+
 fn jj_snapshot_revision(root: &Path) -> Result<String, String> {
     let mut command = jj_command(root, false);
     command.args(["log", "--no-graph", "-r", "@", "-T", "commit_id ++ \"\\n\""]);
@@ -780,7 +799,8 @@ fn jj_file(
         });
     }
     let mut command = jj_command(root, true);
-    command.args(["file", "show", "-r", revision, "--", path]);
+    command.args(["file", "show", "-r", revision, "--"]);
+    command.arg(jj_file_fileset(path));
     let bytes = successful_output(
         command_output(command, "read a file from a JJ checkpoint")?,
         "read a file from a JJ checkpoint",
