@@ -1,0 +1,57 @@
+[package]
+name = "dirigent_desktop"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dirigent"
+path = "src/main.rs"
+
+[features]
+bundled-lilex = []
+
+[dependencies]
+dirigent_server = { path = "../dirigent_server", default-features = false }
+gpui = { git = "https://forge.sebba.dev/izvir/zed.git", branch = "unstable", default-features = false, features = ["font-kit", "wayland"] }
+gpui_platform = { git = "https://forge.sebba.dev/izvir/zed.git", branch = "unstable", features = ["font-kit", "wayland"] }
+async-channel = "2.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+clipboard-rs = { version = "0.3.5", default-features = false, features = ["wayland"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
+fff-search = "=0.10.1"
+pulldown-cmark = { version = "0.13", default-features = false }
+notify = "8"
+toml = "0.9"
+fastrand = "2.5"
+image = { version = "0.25", default-features = false, features = ["bmp", "dds", "exr", "ff", "gif", "hdr", "ico", "jpeg", "png", "pnm", "qoi", "tga", "tiff", "webp"] }
+url = "2"
+similar = "2.7"
+blake3 = "1.8"
+zstd = "0.13"
+ropey = { version = "1.6", default-features = false }
+tree-house = { version = "=0.4.0", default-features = false }
+tree-house-bindings = { version = "=0.3.2", features = ["tree-sitter-language"] }
+tree-sitter-rust = "0.24.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-json = "0.24.8"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-bash = "0.25.1"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25.0"
+tree-sitter-md = "0.5.3"
+tree-sitter-yaml = "0.7.2"
+rust-embed = { version = "8", features = ["debug-embed", "include-exclude"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+mathjax-svg-rs = "0.4.0"
+
+[build-dependencies]
+embed-resource = "3"

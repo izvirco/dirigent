@@ -1505,13 +1505,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "dirigent"
+name = "dirigent_desktop"
 version = "0.0.0"
 dependencies = [
  "async-channel",
  "base64",
  "blake3",
  "clipboard-rs",
+ "dirigent_server",
  "embed-resource",
  "fastrand",
  "fff-search",
@@ -1550,6 +1551,10 @@ dependencies = [
  "url",
  "zstd",
 ]
+
+[[package]]
+name = "dirigent_server"
+version = "0.0.0"
 
 [[package]]
 name = "dirs"
