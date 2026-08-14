@@ -1,6 +1,6 @@
 //! Renders TeX expressions to SVG away from the UI thread.
 
-use std::collections::HashSet;
+use std::{borrow::Cow, collections::HashSet};
 
 use async_channel::{Receiver, Sender};
 use mathjax_svg_rs::{HorizontalAlign, MathJax, Options};
@@ -60,8 +60,9 @@ pub(crate) fn run_math_render_worker(
 }
 
 fn render_math(renderer: &MathJax, source: &str) -> Result<RenderedMath, String> {
+    let source = normalize_siunitx(source);
     let rendered = renderer.render_tex(
-        source,
+        &source,
         &Options {
             font_size: MATH_FONT_SIZE,
             horizontal_align: HorizontalAlign::Left,
@@ -70,6 +71,99 @@ fn render_math(renderer: &MathJax, source: &str) -> Result<RenderedMath, String>
     let svg = extract_svg(&rendered)?;
     let (width, height) = svg_dimensions(&svg)?;
     Ok(RenderedMath { svg, width, height })
+}
+
+/// MathJax does not ship siunitx. Translate its common quantity command to core TeX while
+/// leaving unsupported or malformed uses untouched for MathJax to report.
+fn normalize_siunitx(source: &str) -> Cow<'_, str> {
+    let mut output = String::new();
+    let mut search_from = 0;
+    let mut copied_until = 0;
+
+    while let Some(relative_start) = source[search_from..].find(r"\qty") {
+        let start = search_from + relative_start;
+        let after_command = start + r"\qty".len();
+        let preceding_backslashes = source.as_bytes()[..start]
+            .iter()
+            .rev()
+            .take_while(|byte| **byte == b'\\')
+            .count();
+        if preceding_backslashes % 2 == 1 {
+            search_from = after_command;
+            continue;
+        }
+        if source[after_command..]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic())
+        {
+            search_from = after_command;
+            continue;
+        }
+
+        let first_start = skip_ascii_whitespace(source, after_command);
+        let Some((value, first_end)) = braced_group(source, first_start) else {
+            search_from = after_command;
+            continue;
+        };
+        let second_start = skip_ascii_whitespace(source, first_end);
+        let Some((unit, second_end)) = braced_group(source, second_start) else {
+            search_from = after_command;
+            continue;
+        };
+
+        output.push_str(&source[copied_until..start]);
+        output.push_str(value);
+        output.push_str(r"\,\mathrm{");
+        output.push_str(unit);
+        output.push('}');
+        copied_until = second_end;
+        search_from = second_end;
+    }
+
+    if output.is_empty() {
+        Cow::Borrowed(source)
+    } else {
+        output.push_str(&source[copied_until..]);
+        Cow::Owned(output)
+    }
+}
+
+fn skip_ascii_whitespace(source: &str, mut index: usize) -> usize {
+    while source
+        .as_bytes()
+        .get(index)
+        .is_some_and(u8::is_ascii_whitespace)
+    {
+        index += 1;
+    }
+    index
+}
+
+fn braced_group(source: &str, start: usize) -> Option<(&str, usize)> {
+    if source.as_bytes().get(start) != Some(&b'{') {
+        return None;
+    }
+    let mut depth = 1;
+    let mut index = start + 1;
+    while index < source.len() {
+        match source.as_bytes()[index] {
+            b'\\' if matches!(source.as_bytes().get(index + 1), Some(b'{' | b'}')) => index += 2,
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&source[start + 1..index], index + 1));
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
 }
 
 // MathJax may wrap its SVG in an mjx-container. GPUI's SVG parser needs the SVG itself as root.
@@ -148,6 +242,33 @@ fn css_length(value: &str, font_size: f32) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translates_siunitx_quantities_to_core_tex() {
+        assert_eq!(normalize_siunitx(r"\qty{3}{cm}"), r"3\,\mathrm{cm}");
+        assert_eq!(
+            normalize_siunitx(r"v=\qty {\frac{1}{2}} {m/s}"),
+            r"v=\frac{1}{2}\,\mathrm{m/s}"
+        );
+        assert_eq!(
+            normalize_siunitx(r"\qty{3}{m}+\qty{4}{s}"),
+            r"3\,\mathrm{m}+4\,\mathrm{s}"
+        );
+    }
+
+    #[test]
+    fn leaves_other_qty_commands_untouched() {
+        assert!(matches!(normalize_siunitx(r"\qty{x}"), Cow::Borrowed(_)));
+        assert_eq!(
+            normalize_siunitx(r"\qtyrange{1}{2}{m}"),
+            r"\qtyrange{1}{2}{m}"
+        );
+        assert_eq!(normalize_siunitx(r"\\qty{3}{cm}"), r"\\qty{3}{cm}");
+        assert_eq!(
+            normalize_siunitx(r"\qty{x}+\qty{3}{cm}"),
+            r"\qty{x}+3\,\mathrm{cm}"
+        );
+    }
 
     #[test]
     fn extracts_wrapped_svg_and_uses_ex_dimensions() {

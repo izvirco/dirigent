@@ -96,6 +96,8 @@ pub(crate) enum TableAlignment {
 pub(crate) struct MarkdownText {
     pub(crate) text: String,
     pub(crate) spans: Vec<MarkdownSpan>,
+    /// Byte ranges in `text` whose contents are TeX expressions.
+    pub(crate) inline_math: Vec<Range<usize>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +198,15 @@ impl InlineBuilder {
         let mut style = self.style();
         style.code = true;
         self.push_with_style(text, style);
+    }
+
+    fn push_math(&mut self, source: &str) {
+        if source.is_empty() {
+            return;
+        }
+        let start = self.value.text.len();
+        self.value.text.push_str(source);
+        self.value.inline_math.push(start..self.value.text.len());
     }
 
     fn push_with_style(&mut self, text: &str, style: MarkdownSpanStyle) {
@@ -376,7 +387,7 @@ pub(crate) fn parse_markdown(source: &str) -> MarkdownDocument {
             }
             Event::InlineMath(math) => {
                 if let Some(inline) = current_inline(&mut frames) {
-                    inline.push_code(&math);
+                    inline.push_math(&math);
                 }
             }
             Event::DisplayMath(math) => append_display_math(&mut frames, math.trim().to_string()),
@@ -679,6 +690,18 @@ mod tests {
             document.blocks.as_slice(),
             [MarkdownBlock::Math { source }] if source == r"\frac{a}{b}"
         ));
+    }
+
+    #[test]
+    fn records_inline_dollar_math_separately_from_text_styles() {
+        let document = parse_markdown("Energy is $E=mc^2$.");
+        let [MarkdownBlock::Paragraph(text)] = document.blocks.as_slice() else {
+            panic!("expected one paragraph");
+        };
+        assert_eq!(text.text, "Energy is E=mc^2.");
+        assert_eq!(text.inline_math.len(), 1);
+        assert_eq!(&text.text[text.inline_math[0].clone()], "E=mc^2");
+        assert!(text.spans.is_empty());
     }
 
     #[test]

@@ -1,5 +1,7 @@
 //! Renders parsed Markdown documents as GPUI elements.
 
+use std::ops::Range;
+
 use gpui::{
     AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
     StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgba, svg,
@@ -93,7 +95,9 @@ impl Dirigent {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match block {
-            MarkdownBlock::Paragraph(text) => self.render_markdown_text(path, text, selection, cx),
+            MarkdownBlock::Paragraph(text) => {
+                self.render_markdown_text(path, text, message_index, selection, cx)
+            }
             MarkdownBlock::Heading { level, text } => div()
                 .w_full()
                 .mt_1()
@@ -108,7 +112,7 @@ impl Dirigent {
                 .when(*level >= 3, |element| {
                     element.text_sm().line_height(px(23.0))
                 })
-                .child(self.render_markdown_text(path, text, selection, cx))
+                .child(self.render_markdown_text(path, text, message_index, selection, cx))
                 .into_any_element(),
             MarkdownBlock::CodeBlock { code, .. } => {
                 self.render_markdown_code_block(path, code, selection, cx)
@@ -182,7 +186,9 @@ impl Dirigent {
                 .h(px(1.0))
                 .bg(rgb(border()))
                 .into_any_element(),
-            MarkdownBlock::Table(table) => self.render_markdown_table(path, table, selection, cx),
+            MarkdownBlock::Table(table) => {
+                self.render_markdown_table(path, table, message_index, selection, cx)
+            }
         }
     }
 
@@ -190,13 +196,78 @@ impl Dirigent {
         &self,
         id: &str,
         text: &MarkdownText,
+        message_index: usize,
         selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let mut highlights = Vec::with_capacity(text.spans.len());
+        let selection_range = selection.range_for(&text.text);
+        if text.inline_math.is_empty() {
+            return self.render_markdown_text_fragment(
+                id,
+                text,
+                0..text.text.len(),
+                selection,
+                selection_range,
+                true,
+                cx,
+            );
+        }
+
+        let children = inline_fragments(text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, fragment)| match fragment {
+                InlineFragment::Text(range) => self.render_markdown_text_fragment(
+                    &format!("{id}-text-{index}"),
+                    text,
+                    range,
+                    selection,
+                    selection_range.clone(),
+                    false,
+                    cx,
+                ),
+                InlineFragment::Math(range) => self.render_markdown_inline_math(
+                    &format!("{id}-inline-math-{index}"),
+                    &text.text[range.clone()],
+                    message_index,
+                    selection,
+                    selection_range.start + range.start..selection_range.start + range.end,
+                    cx,
+                ),
+            })
+            .collect::<Vec<_>>();
+
+        div()
+            .w_full()
+            .min_w(px(0.0))
+            .flex()
+            .flex_wrap()
+            .items_baseline()
+            .children(children)
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_markdown_text_fragment(
+        &self,
+        id: &str,
+        text: &MarkdownText,
+        range: Range<usize>,
+        selection: &MarkdownSelectionContext,
+        selection_range: Range<usize>,
+        full_width: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut highlights = Vec::new();
         let mut font_overrides = Vec::new();
         let mut links = Vec::new();
         for span in &text.spans {
+            let start = span.range.start.max(range.start);
+            let end = span.range.end.min(range.end);
+            if start >= end {
+                continue;
+            }
+            let local_range = start - range.start..end - range.start;
             let mut highlight = HighlightStyle::default();
             if span.style.strong {
                 highlight.font_weight = Some(FontWeight::BOLD);
@@ -213,7 +284,7 @@ impl Dirigent {
             if span.style.code {
                 highlight.color = Some(rgb(theme_text()).into());
                 highlight.background_color = Some(rgba(0xffffff0f).into());
-                font_overrides.push((span.range.clone(), self.font.clone()));
+                font_overrides.push((local_range.clone(), self.font.clone()));
             }
             if let Some(url) = span.style.link.as_ref() {
                 highlight.color = Some(rgb(accent()).into());
@@ -222,32 +293,42 @@ impl Dirigent {
                     color: Some(rgb(accent()).into()),
                     wavy: false,
                 });
-                links.push((span.range.clone(), SharedString::from(url.clone())));
+                links.push((local_range.clone(), SharedString::from(url.clone())));
             }
-            highlights.push((span.range.clone(), highlight));
+            highlights.push((local_range, highlight));
         }
-        let selection_range = selection.range_for(&text.text);
-        self.render_grouped_styled_selectable_text(
-            id.to_string(),
-            SharedString::from(text.text.clone()),
-            &highlights,
-            &font_overrides,
-            &links,
-            selection.id.clone(),
-            selection.text.clone(),
-            selection_range,
-            cx,
-        )
+
+        let source = SharedString::from(text.text[range.clone()].to_string());
+        let fragment_selection =
+            selection_range.start + range.start..selection_range.start + range.end;
+        if full_width {
+            self.render_grouped_styled_selectable_text(
+                id.to_string(),
+                source,
+                &highlights,
+                &font_overrides,
+                &links,
+                selection.id.clone(),
+                selection.text.clone(),
+                fragment_selection,
+                cx,
+            )
+        } else {
+            self.render_grouped_styled_selectable_text_inline(
+                id.to_string(),
+                source,
+                &highlights,
+                &font_overrides,
+                &links,
+                selection.id.clone(),
+                selection.text.clone(),
+                fragment_selection,
+                cx,
+            )
+        }
     }
 
-    fn render_markdown_math(
-        &self,
-        path: &str,
-        source: &str,
-        message_index: usize,
-        selection: &mut MarkdownSelectionContext,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn math_render_state(&self, source: &str, message_index: usize) -> MathRenderState {
         let waiter = self
             .selected_harness
             .map(|harness_id| (harness_id, message_index));
@@ -283,7 +364,18 @@ impl Dirigent {
                 .borrow_mut()
                 .insert(source.to_string(), state.clone());
         }
+        state
+    }
 
+    fn render_markdown_math(
+        &self,
+        path: &str,
+        source: &str,
+        message_index: usize,
+        selection: &mut MarkdownSelectionContext,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let state = self.math_render_state(source, message_index);
         let selection_range = selection.range_for(source);
         match state {
             MathRenderState::Ready {
@@ -308,6 +400,50 @@ impl Dirigent {
                 let font_overrides = [(0..source.len(), self.font.clone())];
                 self.render_grouped_styled_selectable_text(
                     format!("{path}-math"),
+                    SharedString::from(source.to_string()),
+                    &[],
+                    &font_overrides,
+                    &[],
+                    selection.id.clone(),
+                    selection.text.clone(),
+                    selection_range,
+                    cx,
+                )
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_markdown_inline_math(
+        &self,
+        path: &str,
+        source: &str,
+        message_index: usize,
+        selection: &MarkdownSelectionContext,
+        selection_range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        match self.math_render_state(source, message_index) {
+            MathRenderState::Ready {
+                asset_path,
+                width,
+                height,
+            } => div()
+                .id(path.to_string())
+                .flex_none()
+                .child(
+                    svg()
+                        .path(asset_path)
+                        .w(px(width.ceil()))
+                        .h(px(height.ceil()))
+                        .flex_none()
+                        .text_color(rgb(theme_text())),
+                )
+                .into_any_element(),
+            MathRenderState::Pending { .. } | MathRenderState::Failed => {
+                let font_overrides = [(0..source.len(), self.font.clone())];
+                self.render_grouped_styled_selectable_text_inline(
+                    path.to_string(),
                     SharedString::from(source.to_string()),
                     &[],
                     &font_overrides,
@@ -464,6 +600,7 @@ impl Dirigent {
         &self,
         path: &str,
         table: &MarkdownTable,
+        message_index: usize,
         selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -489,6 +626,7 @@ impl Dirigent {
                     true,
                     row_count == 1,
                     column + 1 == column_count,
+                    message_index,
                     selection,
                     cx,
                 ));
@@ -506,6 +644,7 @@ impl Dirigent {
                     false,
                     row + row_offset + 1 == row_count,
                     column + 1 == column_count,
+                    message_index,
                     selection,
                     cx,
                 ));
@@ -555,6 +694,7 @@ impl Dirigent {
         header: bool,
         last_row: bool,
         last_column: bool,
+        message_index: usize,
         selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -564,6 +704,7 @@ impl Dirigent {
                 self.render_markdown_text(
                     &format!("{path}-cell-{row}-{column}"),
                     text,
+                    message_index,
                     selection,
                     cx,
                 )
@@ -592,6 +733,42 @@ impl Dirigent {
             .child(content)
             .into_any_element()
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InlineFragment {
+    Text(Range<usize>),
+    Math(Range<usize>),
+}
+
+/// Splitting prose into word-sized flex children lets inline SVGs participate in normal wrapping.
+fn inline_fragments(text: &MarkdownText) -> Vec<InlineFragment> {
+    let mut fragments = Vec::new();
+    let mut cursor = 0;
+    for math in &text.inline_math {
+        push_text_fragments(&text.text, cursor..math.start, &mut fragments);
+        fragments.push(InlineFragment::Math(math.clone()));
+        cursor = math.end;
+    }
+    push_text_fragments(&text.text, cursor..text.text.len(), &mut fragments);
+    fragments
+}
+
+fn push_text_fragments(text: &str, range: Range<usize>, fragments: &mut Vec<InlineFragment>) {
+    if range.is_empty() {
+        return;
+    }
+    let mut start = range.start;
+    let mut previous_was_whitespace = false;
+    for (offset, character) in text[range.clone()].char_indices() {
+        let index = range.start + offset;
+        if previous_was_whitespace && !character.is_whitespace() {
+            fragments.push(InlineFragment::Text(start..index));
+            start = index;
+        }
+        previous_was_whitespace = character.is_whitespace();
+    }
+    fragments.push(InlineFragment::Text(start..range.end));
 }
 
 fn table_alignment(table: &MarkdownTable, column: usize) -> TableAlignment {

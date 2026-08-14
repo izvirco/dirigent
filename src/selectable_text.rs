@@ -265,6 +265,36 @@ impl Dirigent {
             font_overrides,
             links,
             false,
+            true,
+            selection_id.into(),
+            selection_text,
+            selection_range,
+            None,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_grouped_styled_selectable_text_inline(
+        &self,
+        element_id: impl Into<String>,
+        text: impl Into<SharedString>,
+        highlights: &[(Range<usize>, HighlightStyle)],
+        font_overrides: &[(Range<usize>, SharedString)],
+        links: &[(Range<usize>, SharedString)],
+        selection_id: impl Into<String>,
+        selection_text: SharedString,
+        selection_range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_styled_selectable_text_internal(
+            element_id.into(),
+            text.into(),
+            highlights,
+            font_overrides,
+            links,
+            false,
+            false,
             selection_id.into(),
             selection_text,
             selection_range,
@@ -295,6 +325,7 @@ impl Dirigent {
             font_overrides,
             links,
             single_line,
+            true,
             id,
             text,
             0..text_len,
@@ -312,6 +343,7 @@ impl Dirigent {
         font_overrides: &[(Range<usize>, SharedString)],
         links: &[(Range<usize>, SharedString)],
         single_line: bool,
+        full_width: bool,
         selection_id: String,
         selection_text: SharedString,
         selection_range: Range<usize>,
@@ -353,7 +385,7 @@ impl Dirigent {
         let up_links = links.to_vec();
         div()
             .id(element_id)
-            .w_full()
+            .when(full_width, |element| element.w_full())
             .min_w(gpui::px(0.0))
             .when(single_line, |element| {
                 element
