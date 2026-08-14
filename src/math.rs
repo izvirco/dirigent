@@ -7,14 +7,36 @@ use mathjax_svg_rs::{HorizontalAlign, MathJax, Options};
 
 use crate::model::Id;
 
-const MATH_FONT_SIZE: f64 = 16.0;
+const DISPLAY_MATH_FONT_SIZE: f32 = 16.0;
+const INLINE_MATH_FONT_SIZE: f32 = 14.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum MathRenderMode {
+    Display,
+    Inline,
+}
+
+impl MathRenderMode {
+    fn font_size(self) -> f32 {
+        match self {
+            Self::Display => DISPLAY_MATH_FONT_SIZE,
+            Self::Inline => INLINE_MATH_FONT_SIZE,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct MathRenderKey {
+    pub(crate) source: String,
+    pub(crate) mode: MathRenderMode,
+}
 
 pub(crate) struct MathRenderTask {
-    pub(crate) source: String,
+    pub(crate) key: MathRenderKey,
 }
 
 pub(crate) struct MathRenderResult {
-    pub(crate) source: String,
+    pub(crate) key: MathRenderKey,
     pub(crate) rendered: Result<RenderedMath, String>,
 }
 
@@ -22,6 +44,8 @@ pub(crate) struct RenderedMath {
     pub(crate) svg: String,
     pub(crate) width: f32,
     pub(crate) height: f32,
+    /// Distance from the bottom of the SVG to MathJax's internal baseline.
+    pub(crate) baseline_offset: f32,
 }
 
 #[derive(Clone)]
@@ -33,6 +57,7 @@ pub(crate) enum MathRenderState {
         asset_path: String,
         width: f32,
         height: f32,
+        baseline_offset: f32,
     },
     Failed,
 }
@@ -46,10 +71,10 @@ pub(crate) fn run_math_render_worker(
     let mut renderer = None;
     while let Ok(task) = tasks.recv_blocking() {
         let renderer = renderer.get_or_insert_with(MathJax::new);
-        let rendered = render_math(renderer, &task.source);
+        let rendered = render_math(renderer, &task.key);
         if results
             .send_blocking(MathRenderResult {
-                source: task.source,
+                key: task.key,
                 rendered,
             })
             .is_err()
@@ -59,18 +84,25 @@ pub(crate) fn run_math_render_worker(
     }
 }
 
-fn render_math(renderer: &MathJax, source: &str) -> Result<RenderedMath, String> {
-    let source = normalize_siunitx(source);
+fn render_math(renderer: &MathJax, key: &MathRenderKey) -> Result<RenderedMath, String> {
+    let source = normalize_siunitx(&key.source);
+    let font_size = key.mode.font_size();
     let rendered = renderer.render_tex(
         &source,
         &Options {
-            font_size: MATH_FONT_SIZE,
+            font_size: font_size.into(),
             horizontal_align: HorizontalAlign::Left,
         },
     )?;
     let svg = extract_svg(&rendered)?;
-    let (width, height) = svg_dimensions(&svg)?;
-    Ok(RenderedMath { svg, width, height })
+    let (width, height) = svg_dimensions(&svg, font_size)?;
+    let baseline_offset = -svg_vertical_align(&svg, font_size).unwrap_or(0.0);
+    Ok(RenderedMath {
+        svg,
+        width,
+        height,
+        baseline_offset,
+    })
 }
 
 /// MathJax does not ship siunitx. Translate its common quantity command to core TeX while
@@ -178,17 +210,15 @@ fn extract_svg(rendered: &str) -> Result<String, String> {
     Ok(rendered[start..end].to_string())
 }
 
-fn svg_dimensions(svg: &str) -> Result<(f32, f32), String> {
+fn svg_dimensions(svg: &str, font_size: f32) -> Result<(f32, f32), String> {
     let header_end = svg
         .find('>')
         .ok_or_else(|| "MathJax SVG had no opening tag".to_string())?;
     let header = &svg[..header_end];
 
     let explicit_size = attribute(header, "width")
-        .and_then(|value| css_length(value, MATH_FONT_SIZE as f32))
-        .zip(
-            attribute(header, "height").and_then(|value| css_length(value, MATH_FONT_SIZE as f32)),
-        );
+        .and_then(|value| css_length(value, font_size))
+        .zip(attribute(header, "height").and_then(|value| css_length(value, font_size)));
     let view_box_size = attribute(header, "viewBox").and_then(|view_box| {
         let values = view_box
             .split(|character: char| character.is_ascii_whitespace() || character == ',')
@@ -198,8 +228,8 @@ fn svg_dimensions(svg: &str) -> Result<(f32, f32), String> {
             .ok()?;
         (values.len() == 4).then(|| {
             (
-                values[2] / 1_000.0 * MATH_FONT_SIZE as f32,
-                values[3] / 1_000.0 * MATH_FONT_SIZE as f32,
+                values[2] / 1_000.0 * font_size,
+                values[3] / 1_000.0 * font_size,
             )
         })
     });
@@ -210,6 +240,15 @@ fn svg_dimensions(svg: &str) -> Result<(f32, f32), String> {
         return Err("MathJax SVG had invalid dimensions".to_string());
     }
     Ok((width.min(8_192.0), height.min(4_096.0)))
+}
+
+fn svg_vertical_align(svg: &str, font_size: f32) -> Option<f32> {
+    let header = &svg[..svg.find('>')?];
+    let style = attribute(header, "style")?;
+    style.split(';').find_map(|declaration| {
+        let (property, value) = declaration.split_once(':')?;
+        (property.trim() == "vertical-align").then(|| css_length(value.trim(), font_size))?
+    })
 }
 
 fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
@@ -274,12 +313,24 @@ mod tests {
     fn extracts_wrapped_svg_and_uses_ex_dimensions() {
         let rendered = r#"<mjx-container><svg width="5.5ex" height="2ex" viewBox="0 0 5500 2000"><path/></svg></mjx-container>"#;
         let svg = extract_svg(rendered).unwrap();
-        assert_eq!(svg_dimensions(&svg).unwrap(), (44.0, 16.0));
+        assert_eq!(
+            svg_dimensions(&svg, DISPLAY_MATH_FONT_SIZE).unwrap(),
+            (44.0, 16.0)
+        );
     }
 
     #[test]
     fn falls_back_to_mathjax_view_box_dimensions() {
         let svg = r#"<svg width="100%" viewBox="0 -800 2500 1250"></svg>"#;
-        assert_eq!(svg_dimensions(svg).unwrap(), (40.0, 20.0));
+        assert_eq!(
+            svg_dimensions(svg, DISPLAY_MATH_FONT_SIZE).unwrap(),
+            (40.0, 20.0)
+        );
+    }
+
+    #[test]
+    fn reads_mathjax_svg_baseline_at_the_requested_font_size() {
+        let svg = r#"<svg style="vertical-align: -0.5ex;" width="2ex" height="2ex"></svg>"#;
+        assert_eq!(svg_vertical_align(svg, INLINE_MATH_FONT_SIZE), Some(-3.5));
     }
 }

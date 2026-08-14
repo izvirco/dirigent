@@ -45,7 +45,7 @@ use crate::{
     cache::SessionCache,
     diff::{DiffScope, DiffSelectionReference, DiffViewMode, TurnDiff, TurnDiffStatus},
     image_attachment::normalize_for_harness,
-    math::{MathRenderState, MathRenderTask},
+    math::{MathRenderKey, MathRenderState, MathRenderTask},
     model::{
         CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
         Message, MessageRole, PiProcessState, Project, RetryStatus, WorkspaceState,
@@ -612,7 +612,7 @@ pub(crate) struct Dirigent {
     frame_timing: FrameTiming,
     next_id: Id,
     next_sidebar_order: u64,
-    pub(crate) math_renders: std::cell::RefCell<HashMap<String, MathRenderState>>,
+    pub(crate) math_renders: std::cell::RefCell<HashMap<MathRenderKey, MathRenderState>>,
     pub(crate) math_render_tasks: Sender<MathRenderTask>,
     runtime_events: Sender<RuntimeEvent>,
     workspace_events: Sender<WorkspaceEvent>,

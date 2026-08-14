@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, Context, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
-    StrikethroughStyle, UnderlineStyle, div, prelude::*, px, rgba, svg,
+    StrikethroughStyle, UnderlineStyle, div, font, prelude::*, px, rgba, svg,
 };
 
 use crate::{
@@ -14,9 +14,12 @@ use crate::{
         MarkdownBlock, MarkdownDocument, MarkdownTable, MarkdownText, TableAlignment,
         markdown_selection_text,
     },
-    math::{MathRenderResult, MathRenderState, MathRenderTask},
+    math::{MathRenderKey, MathRenderMode, MathRenderResult, MathRenderState, MathRenderTask},
     theme::{accent, blue, border, muted, rgb, surface, surface_hover, theme_text},
 };
+
+const MARKDOWN_FONT_SIZE: f32 = 14.0;
+const MARKDOWN_LINE_HEIGHT: f32 = 22.0;
 
 struct MarkdownSelectionContext {
     id: String,
@@ -328,13 +331,22 @@ impl Dirigent {
         }
     }
 
-    fn math_render_state(&self, source: &str, message_index: usize) -> MathRenderState {
+    fn math_render_state(
+        &self,
+        source: &str,
+        message_index: usize,
+        mode: MathRenderMode,
+    ) -> MathRenderState {
+        let key = MathRenderKey {
+            source: source.to_string(),
+            mode,
+        };
         let waiter = self
             .selected_harness
             .map(|harness_id| (harness_id, message_index));
         let (mut state, should_queue) = {
             let mut renders = self.math_renders.borrow_mut();
-            match renders.get_mut(source) {
+            match renders.get_mut(&key) {
                 Some(MathRenderState::Pending { messages }) => {
                     messages.extend(waiter);
                     (
@@ -348,21 +360,19 @@ impl Dirigent {
                 None => {
                     let messages = waiter.into_iter().collect();
                     let state = MathRenderState::Pending { messages };
-                    renders.insert(source.to_string(), state.clone());
+                    renders.insert(key.clone(), state.clone());
                     (state, true)
                 }
             }
         };
         if should_queue
-            && let Err(error) = self.math_render_tasks.try_send(MathRenderTask {
-                source: source.to_string(),
-            })
+            && let Err(error) = self
+                .math_render_tasks
+                .try_send(MathRenderTask { key: key.clone() })
         {
             tracing::warn!(error = %error, "could not queue math rendering");
             state = MathRenderState::Failed;
-            self.math_renders
-                .borrow_mut()
-                .insert(source.to_string(), state.clone());
+            self.math_renders.borrow_mut().insert(key, state.clone());
         }
         state
     }
@@ -375,13 +385,14 @@ impl Dirigent {
         selection: &mut MarkdownSelectionContext,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let state = self.math_render_state(source, message_index);
+        let state = self.math_render_state(source, message_index, MathRenderMode::Display);
         let selection_range = selection.range_for(source);
         match state {
             MathRenderState::Ready {
                 asset_path,
                 width,
                 height,
+                ..
             } => div()
                 .id(format!("{path}-math-scroll"))
                 .w_full()
@@ -423,23 +434,42 @@ impl Dirigent {
         selection_range: Range<usize>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match self.math_render_state(source, message_index) {
+        match self.math_render_state(source, message_index, MathRenderMode::Inline) {
             MathRenderState::Ready {
                 asset_path,
                 width,
                 height,
-            } => div()
-                .id(path.to_string())
-                .flex_none()
-                .child(
-                    svg()
-                        .path(asset_path)
-                        .w(px(width.ceil()))
-                        .h(px(height.ceil()))
-                        .flex_none()
-                        .text_color(rgb(theme_text())),
-                )
-                .into_any_element(),
+                baseline_offset,
+            } => {
+                // Flex aligns the bottoms of these wrapper divs, not their text baselines.
+                // Account for the space below the surrounding font's baseline as well as the
+                // depth below MathJax's baseline inside the SVG.
+                let text_system = cx.text_system();
+                let font_id = text_system.resolve_font(&font(self.font.clone()));
+                let ascent = text_system.ascent(font_id, px(MARKDOWN_FONT_SIZE)).as_f32();
+                // Font files conventionally store descenders as negative values.
+                let descent = text_system
+                    .descent(font_id, px(MARKDOWN_FONT_SIZE))
+                    .as_f32()
+                    .abs();
+                let leading = ((MARKDOWN_LINE_HEIGHT - ascent - descent) / 2.0).max(0.0);
+                let below_text_baseline = px(descent + leading);
+
+                div()
+                    .id(path.to_string())
+                    .relative()
+                    .top(px(baseline_offset) - below_text_baseline)
+                    .flex_none()
+                    .child(
+                        svg()
+                            .path(asset_path)
+                            .w(px(width.ceil()))
+                            .h(px(height.ceil()))
+                            .flex_none()
+                            .text_color(rgb(theme_text())),
+                    )
+                    .into_any_element()
+            }
             MathRenderState::Pending { .. } | MathRenderState::Failed => {
                 let font_overrides = [(0..source.len(), self.font.clone())];
                 self.render_grouped_styled_selectable_text_inline(
@@ -460,21 +490,26 @@ impl Dirigent {
     pub(crate) fn handle_math_render_result(&mut self, result: MathRenderResult) {
         let messages = {
             let mut renders = self.math_renders.borrow_mut();
-            let Some(MathRenderState::Pending { messages }) = renders.get(&result.source) else {
+            let Some(MathRenderState::Pending { messages }) = renders.get(&result.key) else {
                 return;
             };
             let messages = messages.clone();
             let state = match result.rendered {
                 Ok(rendered) => {
+                    let mode = match result.key.mode {
+                        MathRenderMode::Display => "display",
+                        MathRenderMode::Inline => "inline",
+                    };
                     let asset_path = format!(
-                        "generated/math-{}.svg",
-                        blake3::hash(result.source.as_bytes()).to_hex()
+                        "generated/math-{mode}-{}.svg",
+                        blake3::hash(result.key.source.as_bytes()).to_hex()
                     );
                     insert_generated_svg(asset_path.clone(), rendered.svg);
                     MathRenderState::Ready {
                         asset_path,
                         width: rendered.width,
                         height: rendered.height,
+                        baseline_offset: rendered.baseline_offset,
                     }
                 }
                 Err(error) => {
@@ -482,7 +517,7 @@ impl Dirigent {
                     MathRenderState::Failed
                 }
             };
-            renders.insert(result.source, state);
+            renders.insert(result.key, state);
             messages
         };
 
