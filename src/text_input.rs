@@ -212,6 +212,50 @@ pub(crate) struct AttachedImage {
     pub(crate) image: Arc<Image>,
 }
 
+#[derive(Clone)]
+struct InputSnapshot {
+    content: String,
+    cursor: usize,
+    selection: Range<usize>,
+    selection_anchor: usize,
+    images: Vec<AttachedImage>,
+    next_image_number: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EditKind {
+    Typing,
+    Backspace,
+    Delete,
+}
+
+#[derive(Clone, Copy)]
+struct CoalescingEdit {
+    kind: EditKind,
+    separator_seen: bool,
+    cursor_after: usize,
+}
+
+const UNDO_LIMIT: usize = 100;
+
+fn can_coalesce_edit(
+    previous: Option<CoalescingEdit>,
+    kind: EditKind,
+    cursor: usize,
+    affected_text: &str,
+    can_continue_existing: bool,
+) -> bool {
+    let contains_word = affected_text
+        .chars()
+        .any(|character| !character.is_whitespace());
+    can_continue_existing
+        && previous.is_some_and(|edit| {
+            edit.kind == kind
+                && edit.cursor_after == cursor
+                && !(edit.separator_seen && contains_word)
+        })
+}
+
 pub(crate) struct TextInput {
     focus: FocusHandle,
     content: String,
@@ -230,6 +274,9 @@ pub(crate) struct TextInput {
     scroll: ScrollHandle,
     completion_active: bool,
     autoscroll_cursor: bool,
+    undo_stack: Vec<InputSnapshot>,
+    redo_stack: Vec<InputSnapshot>,
+    coalescing_edit: Option<CoalescingEdit>,
 }
 
 impl TextInput {
@@ -252,6 +299,9 @@ impl TextInput {
             scroll: ScrollHandle::new(),
             completion_active: false,
             autoscroll_cursor: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            coalescing_edit: None,
         }
     }
 
@@ -299,8 +349,13 @@ impl TextInput {
         {
             return;
         }
+        let value = self.normalized(value);
+        if self.content[range.clone()] == value {
+            return;
+        }
+        self.begin_atomic_edit();
         self.selection = range;
-        self.replace_selection(value);
+        self.replace_selection(&value);
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
@@ -333,12 +388,19 @@ impl TextInput {
         self.cursor = self.content.len();
         self.collapse_selection(self.cursor);
         self.prune_images();
+        self.reset_history();
         cx.notify();
     }
 
     pub(crate) fn remove_image(&mut self, label: &str, cx: &mut Context<Self>) {
+        let marker = format!("[{label}]");
+        if !self.images.iter().any(|image| image.label == label) && !self.content.contains(&marker)
+        {
+            return;
+        }
+        self.begin_atomic_edit();
         self.images.retain(|image| image.label != label);
-        self.content = self.content.replace(&format!("[{label}]"), "");
+        self.content = self.content.replace(&marker, "");
         self.cursor = self.cursor.min(self.content.len());
         self.collapse_selection(self.cursor);
         cx.emit(InputEvent::Changed);
@@ -346,7 +408,12 @@ impl TextInput {
     }
 
     pub(crate) fn insert_at_cursor(&mut self, value: &str, cx: &mut Context<Self>) {
-        self.replace_selection(value);
+        let value = self.normalized(value);
+        if value.is_empty() && self.selection.is_empty() {
+            return;
+        }
+        self.begin_atomic_edit();
+        self.replace_selection(&value);
         cx.emit(InputEvent::Changed);
         cx.notify();
     }
@@ -356,13 +423,117 @@ impl TextInput {
         self.cursor = self.content.len();
         self.collapse_selection(self.cursor);
         self.prune_images();
+        self.reset_history();
         cx.notify();
     }
 
     pub(crate) fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.break_edit_group();
         self.selection_anchor = 0;
         self.select_to(self.content.len());
         cx.notify();
+    }
+
+    fn snapshot(&self) -> InputSnapshot {
+        InputSnapshot {
+            content: self.content.clone(),
+            cursor: self.cursor,
+            selection: self.selection.clone(),
+            selection_anchor: self.selection_anchor,
+            images: self.images.clone(),
+            next_image_number: self.next_image_number,
+        }
+    }
+
+    fn restore_snapshot(&mut self, snapshot: InputSnapshot) {
+        self.content = snapshot.content;
+        self.cursor = snapshot.cursor;
+        self.selection = snapshot.selection;
+        self.selection_anchor = snapshot.selection_anchor;
+        self.images = snapshot.images;
+        self.next_image_number = snapshot.next_image_number;
+        self.selecting = false;
+        self.preferred_cursor_x = None;
+        self.autoscroll_cursor = true;
+    }
+
+    fn push_snapshot(stack: &mut Vec<InputSnapshot>, snapshot: InputSnapshot) {
+        if stack.len() == UNDO_LIMIT {
+            stack.remove(0);
+        }
+        stack.push(snapshot);
+    }
+
+    fn begin_atomic_edit(&mut self) {
+        self.break_edit_group();
+        let snapshot = self.snapshot();
+        Self::push_snapshot(&mut self.undo_stack, snapshot);
+        self.redo_stack.clear();
+    }
+
+    /// Groups adjacent typing and deletion into word-sized undo transactions.
+    fn begin_coalescing_edit(
+        &mut self,
+        kind: EditKind,
+        affected_text: &str,
+        can_continue_existing: bool,
+    ) {
+        let contains_separator = affected_text.chars().any(char::is_whitespace);
+        let continue_existing = can_coalesce_edit(
+            self.coalescing_edit,
+            kind,
+            self.cursor,
+            affected_text,
+            can_continue_existing,
+        );
+
+        let separator_seen = if continue_existing {
+            self.coalescing_edit.is_some_and(|edit| edit.separator_seen) || contains_separator
+        } else {
+            self.begin_atomic_edit();
+            contains_separator
+        };
+        self.coalescing_edit = Some(CoalescingEdit {
+            kind,
+            separator_seen,
+            cursor_after: self.cursor,
+        });
+    }
+
+    fn update_edit_group_cursor(&mut self) {
+        if let Some(edit) = &mut self.coalescing_edit {
+            edit.cursor_after = self.cursor;
+        }
+    }
+
+    fn break_edit_group(&mut self) {
+        self.coalescing_edit = None;
+    }
+
+    fn reset_history(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.break_edit_group();
+    }
+
+    fn undo(&mut self) {
+        self.break_edit_group();
+        let Some(snapshot) = self.undo_stack.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        Self::push_snapshot(&mut self.redo_stack, current);
+        self.restore_snapshot(snapshot);
+    }
+
+    fn redo(&mut self) {
+        self.break_edit_group();
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return;
+        };
+        let current = self.snapshot();
+        Self::push_snapshot(&mut self.undo_stack, current);
+        self.restore_snapshot(snapshot);
     }
 
     fn collapse_selection(&mut self, offset: usize) {
@@ -510,6 +681,7 @@ impl TextInput {
 
         if clipboard_images.is_empty() && external_paths.is_empty() && !probe_native_paths {
             if !fallback_text.is_empty() {
+                self.begin_atomic_edit();
                 self.replace_selection(&fallback_text);
             }
             return;
@@ -547,6 +719,9 @@ impl TextInput {
             let _ = this.update(cx, |this, cx| {
                 let previous_content = this.content.clone();
                 let attached_images = !images.is_empty();
+                if attached_images || !remaining_paths.is_empty() || !fallback_text.is_empty() {
+                    this.begin_atomic_edit();
+                }
                 for image in images {
                     let label = format!("image-{}", this.next_image_number);
                     this.next_image_number += 1;
@@ -608,6 +783,7 @@ impl TextInput {
     ) {
         window.focus(&self.focus, cx);
         cx.emit(InputEvent::Focused);
+        self.break_edit_group();
         let offset = self.index_for_position(event.position);
         self.preferred_cursor_x = None;
         self.selecting = true;
@@ -643,40 +819,74 @@ impl TextInput {
         let shift = modifiers.shift;
         match key {
             "escape" => {
+                self.break_edit_group();
                 self.completion_active = false;
                 cx.emit(InputEvent::Escape);
             }
             "enter" | "tab" if self.completion_active => {
+                self.break_edit_group();
                 self.completion_active = false;
                 cx.emit(InputEvent::CompletionAccepted);
             }
             "up" if self.completion_active => cx.emit(InputEvent::CompletionPrevious),
             "down" if self.completion_active => cx.emit(InputEvent::CompletionNext),
-            "enter" if self.multiline && !command => self.replace_selection("\n"),
-            "enter" => cx.emit(InputEvent::Submit),
+            "z" if command && shift => self.redo(),
+            "z" if command => self.undo(),
+            "enter" if self.multiline && !command => {
+                let can_continue = self.selection.is_empty();
+                self.begin_coalescing_edit(EditKind::Typing, "\n", can_continue);
+                self.replace_selection("\n");
+                self.update_edit_group_cursor();
+            }
+            "enter" => {
+                self.break_edit_group();
+                cx.emit(InputEvent::Submit);
+            }
             "backspace" => {
-                if self.selection.is_empty() && self.cursor > 0 {
+                let can_continue = self.selection.is_empty();
+                let range = if can_continue && self.cursor > 0 {
                     let previous = if modifiers.control {
                         self.previous_word_boundary(self.cursor)
                     } else {
                         self.previous_boundary(self.cursor)
                     };
-                    self.selection = previous..self.cursor;
-                }
-                if !self.selection.is_empty() {
+                    previous..self.cursor
+                } else {
+                    self.selection.clone()
+                };
+                if !range.is_empty() {
+                    let removed = self.content[range.clone()].to_string();
+                    self.begin_coalescing_edit(EditKind::Backspace, &removed, can_continue);
+                    self.selection = range;
                     self.replace_selection("");
+                    if can_continue {
+                        self.update_edit_group_cursor();
+                    } else {
+                        self.break_edit_group();
+                    }
                 }
             }
             "delete" => {
-                if self.selection.is_empty() && self.cursor < self.content.len() {
-                    let next = self.next_boundary(self.cursor);
-                    self.selection = self.cursor..next;
-                }
-                if !self.selection.is_empty() {
+                let can_continue = self.selection.is_empty();
+                let range = if can_continue && self.cursor < self.content.len() {
+                    self.cursor..self.next_boundary(self.cursor)
+                } else {
+                    self.selection.clone()
+                };
+                if !range.is_empty() {
+                    let removed = self.content[range.clone()].to_string();
+                    self.begin_coalescing_edit(EditKind::Delete, &removed, can_continue);
+                    self.selection = range;
                     self.replace_selection("");
+                    if can_continue {
+                        self.update_edit_group_cursor();
+                    } else {
+                        self.break_edit_group();
+                    }
                 }
             }
             "left" => {
+                self.break_edit_group();
                 let offset = if !shift && !self.selection.is_empty() {
                     self.selection.start
                 } else if modifiers.control {
@@ -691,6 +901,7 @@ impl TextInput {
                 }
             }
             "right" => {
+                self.break_edit_group();
                 let offset = if !shift && !self.selection.is_empty() {
                     self.selection.end
                 } else if modifiers.control {
@@ -704,9 +915,16 @@ impl TextInput {
                     self.collapse_selection(offset);
                 }
             }
-            "up" if self.multiline => self.move_vertically(false, shift),
-            "down" if self.multiline => self.move_vertically(true, shift),
+            "up" if self.multiline => {
+                self.break_edit_group();
+                self.move_vertically(false, shift);
+            }
+            "down" if self.multiline => {
+                self.break_edit_group();
+                self.move_vertically(true, shift);
+            }
             "home" => {
+                self.break_edit_group();
                 if shift {
                     self.select_to(0);
                 } else {
@@ -714,6 +932,7 @@ impl TextInput {
                 }
             }
             "end" => {
+                self.break_edit_group();
                 let end = self.content.len();
                 if shift {
                     self.select_to(end);
@@ -722,6 +941,7 @@ impl TextInput {
                 }
             }
             "a" if command => {
+                self.break_edit_group();
                 self.selection_anchor = 0;
                 self.select_to(self.content.len());
             }
@@ -729,13 +949,22 @@ impl TextInput {
             "x" if command => {
                 self.copy(cx);
                 if !self.selection.is_empty() {
+                    self.begin_atomic_edit();
                     self.replace_selection("");
                 }
             }
             "v" if command => self.paste(cx),
             _ if !command => {
                 if let Some(character) = event.keystroke.key_char.as_deref() {
-                    self.replace_selection(character);
+                    let character = self.normalized(character);
+                    if !character.is_empty() || !self.selection.is_empty() {
+                        let can_continue = self.selection.is_empty();
+                        self.begin_coalescing_edit(EditKind::Typing, &character, can_continue);
+                        self.replace_selection(&character);
+                        self.update_edit_group_cursor();
+                    }
+                } else {
+                    self.break_edit_group();
                 }
             }
             _ => return,
