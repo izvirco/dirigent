@@ -345,6 +345,23 @@ impl Dirigent {
         })
         .detach();
 
+        let (update_event_tx, update_event_rx) = async_channel::unbounded();
+        crate::update::start_checker(update_event_tx.clone());
+        cx.spawn(async move |this, cx| {
+            while let Ok(event) = update_event_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        this.handle_update_event(event, cx);
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let (math_render_task_tx, math_render_task_rx) = async_channel::unbounded();
         let (math_render_result_tx, math_render_result_rx) = async_channel::unbounded();
         std::thread::Builder::new()
@@ -743,6 +760,9 @@ impl Dirigent {
             extension_input,
             pending_dialog: None,
             banner,
+            update_state: crate::update::UpdateState::Checking,
+            update_events: update_event_tx,
+            update_shutdown_lock: None,
             config_error,
             font: appearance.font.into(),
             window_transparent: None,

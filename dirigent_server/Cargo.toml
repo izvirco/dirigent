@@ -3,6 +3,37 @@ name = "dirigent_server"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "dirigent_server"
+path = "src/main.rs"
+required-features = ["service"]
+
 [features]
 default = ["service"]
-service = []
+service = [
+    "dep:aws-config",
+    "dep:aws-sdk-s3",
+    "dep:axum",
+    "dep:chrono",
+    "dep:semver",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:tempfile",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+semver = { version = "1", optional = true }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-s3 = { version = "1", optional = true }
+axum = { version = "0.8", features = ["multipart"], optional = true }
+chrono = { version = "0.4", optional = true }
+sha2 = { version = "0.10", optional = true }
+tempfile = { version = "3", optional = true }
+tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread", "signal"], optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }

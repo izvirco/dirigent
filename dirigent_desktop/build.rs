@@ -19,8 +19,33 @@ const LILEX_FONTS: &[&str] = &[
 
 fn main() {
     embed_commit_id();
+    embed_release_identity();
     embed_windows_icon();
     bundle_lilex();
+}
+
+fn embed_release_identity() {
+    println!("cargo:rerun-if-env-changed=DIRIGENT_RELEASE_VERSION");
+    println!("cargo:rerun-if-env-changed=DIRIGENT_UPDATE_CHANNEL");
+    println!("cargo:rerun-if-env-changed=DIRIGENT_UPDATE_TARGET");
+
+    let version = env::var("DIRIGENT_RELEASE_VERSION").unwrap_or_else(|_| {
+        env::var("CARGO_PKG_VERSION").expect("Cargo must set CARGO_PKG_VERSION")
+    });
+    let channel = env::var("DIRIGENT_UPDATE_CHANNEL").unwrap_or_else(|_| "stable".into());
+    let target = env::var("DIRIGENT_UPDATE_TARGET").unwrap_or_else(|_| {
+        match (
+            env::var("CARGO_CFG_TARGET_ARCH").as_deref(),
+            env::var("CARGO_CFG_TARGET_OS").as_deref(),
+        ) {
+            (Ok("x86_64"), Ok("windows")) => "x86_64-pc-windows-msvc".into(),
+            (Ok("x86_64"), Ok("linux")) => "x86_64-arch-linux".into(),
+            (arch, os) => format!("{}-{}", arch.unwrap_or("unknown"), os.unwrap_or("unknown")),
+        }
+    });
+    println!("cargo:rustc-env=DIRIGENT_RELEASE_VERSION={version}");
+    println!("cargo:rustc-env=DIRIGENT_UPDATE_CHANNEL={channel}");
+    println!("cargo:rustc-env=DIRIGENT_UPDATE_TARGET={target}");
 }
 
 fn git_text(manifest_dir: &Path, args: &[&str]) -> Option<String> {

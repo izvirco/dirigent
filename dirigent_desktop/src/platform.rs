@@ -60,6 +60,10 @@ pub(crate) fn logs_directory() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("logs"))
 }
 
+pub(crate) fn updates_directory() -> Result<PathBuf, String> {
+    Ok(state_directory()?.join("updates"))
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {

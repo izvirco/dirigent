@@ -23,6 +23,7 @@ mod text_input;
 mod theme;
 mod title_generator;
 mod ui;
+mod update;
 mod vcs;
 
 use app::Dirigent;
@@ -54,6 +55,14 @@ fn load_bundled_fonts(cx: &App) {
 }
 
 fn main() {
+    if let Some(result) = update::run_updater_from_args() {
+        if let Err(error) = result {
+            eprintln!("Dirigent update failed: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     let _logging_guard = match logging::initialize() {
         Ok(guard) => Some(guard),
         Err(error) => {
@@ -63,7 +72,9 @@ fn main() {
         }
     };
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = update::current_version(),
+        channel = update::channel(),
+        target = update::update_target(),
         commit = env!("DIRIGENT_COMMIT_ID"),
         "starting Dirigent"
     );

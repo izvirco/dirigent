@@ -4,7 +4,18 @@ on:
   push:
     branches:
       - "**"
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      publish_channel:
+        description: Publish this build
+        type: choice
+        options:
+          - none
+          - nightly
+          - stable
+        default: none
 
 permissions:
   contents: read
@@ -15,30 +26,73 @@ env:
   LILEX_SHA256: "34310edb4ba749f772d42b88e3eec4a6318527e75ceeaa96cfc556ee35366fbc"
 
 jobs:
-  build-windows:
-    name: Build Windows executable
-    runs-on: blacksmith-2vcpu-windows-2025
+  prepare:
+    name: Prepare release identity
+    runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.release.outputs.channel }}
+      version: ${{ steps.release.outputs.version }}
+      publish: ${{ steps.release.outputs.publish }}
+      commit: ${{ steps.release.outputs.commit }}
 
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Create build name
-        shell: pwsh
+      - name: Create release identity
+        id: release
+        shell: bash
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.publish_channel || 'none' }}
         run: |
-          $versionMatch = Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-          if (-not $versionMatch) {
-            throw "Could not read the package version from Cargo.toml"
-          }
+          package_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)"
+          if [[ -z "$package_version" ]]; then
+            echo "Could not read the package version from Cargo.toml" >&2
+            exit 1
+          fi
 
-          $version = $versionMatch.Matches[0].Groups[1].Value
-          $timestamp = [DateTime]::UtcNow.ToString("yyyyMMdd_HHmm", [Globalization.CultureInfo]::InvariantCulture)
-          $buildName = "dirigent_${version}_${timestamp}"
+          channel="stable"
+          version="$package_version"
+          publish=false
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            channel="stable"
+            version="${GITHUB_REF_NAME#v}"
+            publish=true
+            if [[ "$version" != "$package_version" ]]; then
+              echo "Tag version $version does not match Cargo version $package_version" >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_CHANNEL" != "none" ]]; then
+            channel="$REQUESTED_CHANNEL"
+            publish=true
+            if [[ "$channel" == "nightly" ]]; then
+              version="$(date -u +%Y%m%dT%H%M%SZ)"
+            fi
+          elif [[ "$GITHUB_REF" == "refs/heads/unstable" ]]; then
+            channel="nightly"
+            version="$(date -u +%Y%m%dT%H%M%SZ)"
+            publish=true
+          fi
 
-          "DIRIGENT_BUILD_NAME=$buildName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "DIRIGENT_ASSET_NAME=$buildName.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "DIRIGENT_ARTIFACT_NAME=$buildName-windows-x86_64" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Building $buildName (UTC)"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
+          echo "Building $channel $version ($publish)"
+
+  build-windows:
+    name: Build Windows executable
+    needs: prepare
+    runs-on: blacksmith-2vcpu-windows-2025
+    env:
+      DIRIGENT_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      DIRIGENT_UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      DIRIGENT_UPDATE_TARGET: x86_64-pc-windows-msvc
+      DIRIGENT_COMMIT_ID: ${{ needs.prepare.outputs.commit }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -60,33 +114,36 @@ jobs:
           }
 
           Expand-Archive -Path $archive -DestinationPath $destination -Force
-          $fontDirectory = Join-Path $destination "ttf"
-          "LILEX_FONT_DIR=$fontDirectory" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LILEX_FONT_DIR=$(Join-Path $destination 'ttf')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build bundled release executable
         run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex
 
-      - name: Prepare build artifacts
+      - name: Prepare build artifact
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $executable = Join-Path "dist" $env:DIRIGENT_ASSET_NAME
-          Copy-Item target/release/dirigent.exe $executable
-
-          $checksum = (Get-FileHash -Path $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$checksum  $env:DIRIGENT_ASSET_NAME" | Set-Content -Path "$executable.sha256" -Encoding ascii
+          Copy-Item target/release/dirigent.exe dist/dirigent.exe
+          $checksum = (Get-FileHash -Path dist/dirigent.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  dirigent.exe" | Set-Content -Path dist/dirigent.exe.sha256 -Encoding ascii
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DIRIGENT_ARTIFACT_NAME }}
+          name: dirigent-windows-x86_64
           path: dist/*
           if-no-files-found: error
 
   build-arch-linux:
     name: Build Arch Linux executable
+    needs: prepare
     runs-on: blacksmith-2vcpu-ubuntu-2404
     container: archlinux:base-devel
+    env:
+      DIRIGENT_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      DIRIGENT_UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
+      DIRIGENT_UPDATE_TARGET: x86_64-arch-linux
+      DIRIGENT_COMMIT_ID: ${{ needs.prepare.outputs.commit }}
 
     steps:
       - name: Install system dependencies
@@ -105,23 +162,6 @@ jobs:
 
       - name: Check out source
         uses: actions/checkout@v4
-
-      - name: Create build name
-        shell: bash
-        run: |
-          version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' Cargo.toml | head -n 1)"
-          if [[ -z "$version" ]]; then
-            echo "Could not read the package version from Cargo.toml" >&2
-            exit 1
-          fi
-
-          timestamp="$(date -u +%Y%m%d_%H%M)"
-          build_name="dirigent_${version}_${timestamp}"
-
-          echo "DIRIGENT_BUILD_NAME=$build_name" >> "$GITHUB_ENV"
-          echo "DIRIGENT_ASSET_NAME=$build_name" >> "$GITHUB_ENV"
-          echo "DIRIGENT_ARTIFACT_NAME=$build_name-arch-linux-x86_64" >> "$GITHUB_ENV"
-          echo "Building $build_name (UTC)"
 
       - name: Install Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -144,17 +184,66 @@ jobs:
       - name: Build bundled release executable
         run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex
 
-      - name: Prepare build artifacts
+      - name: Prepare build artifact
         shell: bash
         run: |
           mkdir -p dist
-          executable="dist/$DIRIGENT_ASSET_NAME"
-          cp target/release/dirigent "$executable"
-          (cd dist && sha256sum "$DIRIGENT_ASSET_NAME" > "$DIRIGENT_ASSET_NAME.sha256")
+          cp target/release/dirigent dist/dirigent
+          (cd dist && sha256sum dirigent > dirigent.sha256)
 
       - name: Upload Arch Linux artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.DIRIGENT_ARTIFACT_NAME }}
+          name: dirigent-arch-linux-x86_64
           path: dist/*
           if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.prepare.outputs.channel }} ${{ needs.prepare.outputs.version }}
+    if: needs.prepare.outputs.publish == 'true'
+    needs:
+      - prepare
+      - build-windows
+      - build-arch-linux
+    runs-on: ubuntu-24.04
+    env:
+      DIRIGENT_API_URL: ${{ vars.DIRIGENT_API_URL || 'https://dirigent.sebba.dev' }}
+      DIRIGENT_PUBLISH_TOKEN: ${{ secrets.DIRIGENT_PUBLISH_TOKEN }}
+
+    steps:
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dirigent-windows-x86_64
+          path: dist/windows
+
+      - name: Download Arch Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dirigent-arch-linux-x86_64
+          path: dist/arch-linux
+
+      - name: Build publishing manifest
+        shell: bash
+        run: |
+          jq -n \
+            --arg version '${{ needs.prepare.outputs.version }}' \
+            --arg commit '${{ needs.prepare.outputs.commit }}' \
+            '{
+              version: $version,
+              commit: $commit,
+              artifacts: [
+                { target: "x86_64-pc-windows-msvc", file_name: "dirigent.exe" },
+                { target: "x86_64-arch-linux", file_name: "dirigent" }
+              ]
+            }' > manifest.json
+
+      - name: Publish release
+        shell: bash
+        run: |
+          curl --fail-with-body --show-error \
+            -H "Authorization: Bearer $DIRIGENT_PUBLISH_TOKEN" \
+            -F 'manifest=@manifest.json;type=application/json' \
+            -F 'x86_64-pc-windows-msvc=@dist/windows/dirigent.exe;filename=dirigent.exe' \
+            -F 'x86_64-arch-linux=@dist/arch-linux/dirigent;filename=dirigent' \
+            "$DIRIGENT_API_URL/api/v0/version/${{ needs.prepare.outputs.channel }}"

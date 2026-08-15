@@ -258,6 +258,18 @@ impl Dirigent {
             mouse_x: window.mouse_position().x,
         };
         let codex_usage = self.codex_usage.and_then(format_codex_usage);
+        let update_action = match &self.update_state {
+            crate::update::UpdateState::Available(release) => {
+                Some((format!("Update to {}", release.version), true, false))
+            }
+            crate::update::UpdateState::Downloading(release) => {
+                Some((format!("Downloading {}…", release.version), false, false))
+            }
+            crate::update::UpdateState::Failed { .. } => {
+                Some(("Update failed · Retry".into(), true, true))
+            }
+            crate::update::UpdateState::Checking | crate::update::UpdateState::Current => None,
+        };
 
         div()
             .relative()
@@ -309,6 +321,34 @@ impl Dirigent {
                         ),
                     ),
             )
+            .when_some(update_action, |element, (label, clickable, failed)| {
+                element.child(
+                    div()
+                        .id("dirigent-update")
+                        .mx_3()
+                        .mt_2()
+                        .h(px(30.0))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(if failed { red() } else { blue() }))
+                        .text_xs()
+                        .text_color(rgb(if failed { red() } else { blue() }))
+                        .when(clickable, |element| {
+                            element
+                                .cursor(CursorStyle::PointingHand)
+                                .hover(|style| style.bg(rgb(surface_hover())))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.install_available_update(cx);
+                                    cx.stop_propagation();
+                                }))
+                        })
+                        .child(label),
+                )
+            })
             .child(
                 div()
                     .relative()

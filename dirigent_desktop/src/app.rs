@@ -10,6 +10,7 @@ mod path_completion;
 mod render;
 mod runtime;
 mod startup;
+mod update;
 mod workspace;
 
 use std::{
@@ -556,6 +557,9 @@ pub(crate) struct Dirigent {
     pub(crate) extension_input: Entity<TextInput>,
     pub(crate) pending_dialog: Option<PendingDialog>,
     pub(crate) banner: Option<String>,
+    pub(crate) update_state: crate::update::UpdateState,
+    update_events: Sender<crate::update::UpdateEvent>,
+    update_shutdown_lock: Option<std::fs::File>,
     config_error: Option<String>,
     pub(crate) font: SharedString,
     window_transparent: Option<bool>,

@@ -52,6 +52,10 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mathjax-svg-rs = "0.4.0"
+fs2 = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+semver = "1"
+sha2 = "0.10"
 
 [build-dependencies]
 embed-resource = "3"
