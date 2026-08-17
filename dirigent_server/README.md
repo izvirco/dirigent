@@ -1,6 +1,6 @@
 # Dirigent version server
 
-The server stores immutable releases and channel pointers in S3. Artifacts remain private; download URLs redirect to short-lived presigned S3 URLs.
+The server stores immutable releases and channel pointers under `dist/dirigent/` in S3. Artifacts are served directly from the public bucket through `cdn.sebba.dev`.
 
 ## Configuration
 
@@ -9,7 +9,7 @@ Standard AWS credential and region variables are supported, plus:
 ```text
 DIRIGENT_S3_BUCKET             required
 DIRIGENT_PUBLISH_TOKEN         required
-DIRIGENT_PUBLIC_URL            default: https://dirigent.sebba.dev
+DIRIGENT_CDN_URL               default: https://cdn.sebba.dev
 DIRIGENT_BIND                  default: 127.0.0.1:8080
 DIRIGENT_MAX_ARTIFACT_BYTES    default: 1073741824
 ```
@@ -20,7 +20,18 @@ Run it with:
 cargo run -p dirigent_server --release
 ```
 
-`GET /health` is available for deployment health checks. TLS is expected to be terminated by the reverse proxy in front of the service.
+Pushes also publish `linux/amd64` containers to `ghcr.io/izvirco/dirigent-server`. Branch names, tags, and the commit SHA are emitted as image tags; the default branch additionally updates `latest`.
+
+`GET /health` is available for deployment health checks. TLS is expected to be terminated by the reverse proxy in front of the service. The S3 bucket policy must allow public reads of `dist/dirigent/releases/*`; the server's credentials require read and write access.
+
+## Website downloads
+
+`GET /releases/{channel}/latest/{target}` redirects to the latest CDN artifact for that explicit target, so it can be used directly in links:
+
+```html
+<a href="https://dirigent.sebba.dev/releases/stable/latest/x86_64-pc-windows-msvc">Download for Windows</a>
+<a href="https://dirigent.sebba.dev/releases/stable/latest/x86_64-arch-linux">Download for Arch Linux</a>
+```
 
 ## Publishing
 
@@ -44,4 +55,4 @@ curl --fail-with-body \
   https://dirigent.sebba.dev/api/v0/version/stable
 ```
 
-Stable versions are release SemVer values and cannot be republished. Nightly versions use `YYYYMMDDTHHMMSSZ`. A release must be newer than the channel's current release.
+Stable is a virtual channel advanced by SemVer tags, and a tagged version cannot be republished. Other channels use their branch name and `YYYYMMDDTHHMMSSZ` versions. A release must be newer than the channel's current release.

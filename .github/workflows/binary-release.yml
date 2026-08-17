@@ -13,8 +13,7 @@ on:
         type: choice
         options:
           - none
-          - nightly
-          - stable
+          - unstable
         default: none
 
 permissions:
@@ -51,10 +50,11 @@ jobs:
             exit 1
           fi
 
-          channel="stable"
-          version="$package_version"
+          channel="$GITHUB_REF_NAME"
+          version="$(date -u +%Y%m%dT%H%M%SZ)"
           publish=false
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/v* ]]; then
+            # Stable is a virtual channel advanced only by immutable version tags.
             channel="stable"
             version="${GITHUB_REF_NAME#v}"
             publish=true
@@ -65,12 +65,8 @@ jobs:
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_CHANNEL" != "none" ]]; then
             channel="$REQUESTED_CHANNEL"
             publish=true
-            if [[ "$channel" == "nightly" ]]; then
-              version="$(date -u +%Y%m%dT%H%M%SZ)"
-            fi
           elif [[ "$GITHUB_REF" == "refs/heads/unstable" ]]; then
-            channel="nightly"
-            version="$(date -u +%Y%m%dT%H%M%SZ)"
+            channel="unstable"
             publish=true
           fi
 

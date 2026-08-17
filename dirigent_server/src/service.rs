@@ -6,15 +6,14 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
 };
 
-use aws_sdk_s3::{Client as S3Client, presigning::PresigningConfig, primitives::ByteStream};
+use aws_sdk_s3::{Client as S3Client, primitives::ByteStream};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use chrono::{NaiveDateTime, SecondsFormat, Utc};
@@ -26,6 +25,7 @@ use crate::contract::{PublishVersion, VersionArtifact, VersionResponse};
 
 const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 16;
+const S3_PREFIX: &str = "dist/dirigent";
 
 #[derive(Clone)]
 pub struct ServiceState {
@@ -35,7 +35,7 @@ pub struct ServiceState {
 struct ServiceStateInner {
     s3: S3Client,
     bucket: String,
-    public_url: String,
+    cdn_url: String,
     publish_token: String,
     max_artifact_bytes: u64,
 }
@@ -44,7 +44,7 @@ impl ServiceState {
     pub fn new(
         s3: S3Client,
         bucket: String,
-        public_url: String,
+        cdn_url: String,
         publish_token: String,
         max_artifact_bytes: u64,
     ) -> Self {
@@ -52,7 +52,7 @@ impl ServiceState {
             inner: Arc::new(ServiceStateInner {
                 s3,
                 bucket,
-                public_url: public_url.trim_end_matches('/').to_string(),
+                cdn_url: cdn_url.trim_end_matches('/').to_string(),
                 publish_token,
                 max_artifact_bytes,
             }),
@@ -88,12 +88,14 @@ impl ServiceState {
     fn populate_urls(&self, release: &mut VersionResponse) {
         for artifact in &mut release.artifacts {
             artifact.url = format!(
-                "{}/api/v0/artifact/{}/{}/{}/{}",
-                self.inner.public_url,
-                release.channel,
-                release.version,
-                artifact.target,
-                artifact.file_name
+                "{}/{}",
+                self.inner.cdn_url,
+                artifact_key(
+                    &release.channel,
+                    &release.version,
+                    &artifact.target,
+                    &artifact.file_name,
+                )
             );
         }
     }
@@ -155,11 +157,10 @@ fn validate_version(channel: &str, version: &str) -> Result<(), ApiError> {
                 ));
             }
         }
-        "nightly" => {
+        _ => {
             NaiveDateTime::parse_from_str(version, "%Y%m%dT%H%M%SZ")
-                .map_err(|_| bad_request("nightly versions must use YYYYMMDDTHHMMSSZ UTC"))?;
+                .map_err(|_| bad_request("branch versions must use YYYYMMDDTHHMMSSZ UTC"))?;
         }
-        _ => return Err(bad_request("unknown release channel")),
     }
     Ok(())
 }
@@ -169,8 +170,7 @@ fn ensure_newer(channel: &str, next: &str, current: &str) -> Result<(), ApiError
         "stable" => {
             Version::parse(next).map_err(internal)? > Version::parse(current).map_err(internal)?
         }
-        "nightly" => next > current,
-        _ => false,
+        _ => next > current,
     };
     if newer {
         Ok(())
@@ -183,15 +183,15 @@ fn ensure_newer(channel: &str, next: &str, current: &str) -> Result<(), ApiError
 }
 
 fn release_manifest_key(channel: &str, version: &str) -> String {
-    format!("releases/{channel}/{version}/manifest.json")
+    format!("{S3_PREFIX}/releases/{channel}/{version}/manifest.json")
 }
 
 fn latest_key(channel: &str) -> String {
-    format!("channels/{channel}/latest.json")
+    format!("{S3_PREFIX}/channels/{channel}/latest.json")
 }
 
 fn artifact_key(channel: &str, version: &str, target: &str, file_name: &str) -> String {
-    format!("releases/{channel}/{version}/{target}/{file_name}")
+    format!("{S3_PREFIX}/releases/{channel}/{version}/{target}/{file_name}")
 }
 
 pub fn router(state: ServiceState) -> Router {
@@ -208,8 +208,8 @@ pub fn router(state: ServiceState) -> Router {
             get(get_version).post(post_version),
         )
         .route(
-            "/api/v0/artifact/{channel}/{version}/{target}/{file_name}",
-            get(get_artifact),
+            "/releases/{channel}/latest/{target}",
+            get(get_latest_download),
         )
         .layer(DefaultBodyLimit::max(request_limit))
         .with_state(state)
@@ -219,12 +219,10 @@ async fn get_version(
     State(state): State<ServiceState>,
     Path(channel): Path<String>,
 ) -> Result<Json<VersionResponse>, ApiError> {
-    if !matches!(channel.as_str(), "stable" | "nightly") {
-        return Err(ApiError {
-            status: StatusCode::NOT_FOUND,
-            message: "unknown release channel".into(),
-        });
-    }
+    validate_component(&channel, "release channel").map_err(|_| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "unknown release channel".into(),
+    })?;
     let mut release = state
         .read_release(&latest_key(&channel))
         .await?
@@ -234,6 +232,41 @@ async fn get_version(
         })?;
     state.populate_urls(&mut release);
     Ok(Json(release))
+}
+
+async fn get_latest_download(
+    State(state): State<ServiceState>,
+    Path((channel, target)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    validate_component(&channel, "release channel").map_err(|_| ApiError {
+        status: StatusCode::NOT_FOUND,
+        message: "unknown release channel".into(),
+    })?;
+    let mut release = state
+        .read_release(&latest_key(&channel))
+        .await?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: "this channel has no releases".into(),
+        })?;
+    state.populate_urls(&mut release);
+
+    validate_component(&target, "artifact target")?;
+    let artifact = release
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.target == target)
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            message: format!("release has no {target} artifact"),
+        })?;
+
+    let mut response = axum::response::Redirect::temporary(&artifact.url).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 struct UploadedArtifact {
@@ -261,9 +294,7 @@ async fn post_version(
             message: "invalid publishing token".into(),
         });
     }
-    if !matches!(channel.as_str(), "stable" | "nightly") {
-        return Err(bad_request("unknown release channel"));
-    }
+    validate_component(&channel, "release channel")?;
 
     let temporary = tempfile::tempdir().map_err(internal)?;
     let mut manifest = None;
@@ -418,6 +449,8 @@ async fn post_version(
             .key(key)
             .body(body)
             .content_length(upload.size as i64)
+            .content_type("application/octet-stream")
+            .cache_control("public, max-age=31536000, immutable")
             .if_none_match("*")
             .send()
             .await
@@ -468,27 +501,6 @@ async fn post_version(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
-async fn get_artifact(
-    State(state): State<ServiceState>,
-    Path((channel, version, target, file_name)): Path<(String, String, String, String)>,
-) -> Result<Redirect, ApiError> {
-    if !matches!(channel.as_str(), "stable" | "nightly") {
-        return Err(bad_request("unknown release channel"));
-    }
-    validate_version(&channel, &version)?;
-    validate_component(&target, "artifact target")?;
-    validate_component(&file_name, "artifact file name")?;
-    let request = state
-        .inner
-        .s3
-        .get_object()
-        .bucket(&state.inner.bucket)
-        .key(artifact_key(&channel, &version, &target, &file_name));
-    let config = PresigningConfig::expires_in(Duration::from_secs(15 * 60)).map_err(internal)?;
-    let presigned = request.presigned(config).await.map_err(internal)?;
-    Ok(Redirect::temporary(presigned.uri()))
-}
-
 pub async fn run_from_env() -> Result<(), String> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -497,8 +509,7 @@ pub async fn run_from_env() -> Result<(), String> {
         )
         .init();
     let bucket = required_env("DIRIGENT_S3_BUCKET")?;
-    let public_url =
-        env::var("DIRIGENT_PUBLIC_URL").unwrap_or_else(|_| "https://dirigent.sebba.dev".into());
+    let cdn_url = env::var("DIRIGENT_CDN_URL").unwrap_or_else(|_| "https://cdn.sebba.dev".into());
     let publish_token = required_env("DIRIGENT_PUBLISH_TOKEN")?;
     let bind = env::var("DIRIGENT_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
     let address = bind
@@ -514,7 +525,7 @@ pub async fn run_from_env() -> Result<(), String> {
     let state = ServiceState::new(
         S3Client::new(&aws),
         bucket,
-        public_url,
+        cdn_url,
         publish_token,
         max_artifact_bytes,
     );
@@ -552,9 +563,9 @@ mod tests {
     }
 
     #[test]
-    fn nightly_versions_are_sortable_utc_timestamps() {
-        assert!(validate_version("nightly", "20260310T123456Z").is_ok());
-        assert!(validate_version("nightly", "2026-03-10T12:34:56Z").is_err());
-        assert!(ensure_newer("nightly", "20260310T123457Z", "20260310T123456Z").is_ok());
+    fn branch_versions_are_sortable_utc_timestamps() {
+        assert!(validate_version("unstable", "20260310T123456Z").is_ok());
+        assert!(validate_version("unstable", "2026-03-10T12:34:56Z").is_err());
+        assert!(ensure_newer("unstable", "20260310T123457Z", "20260310T123456Z").is_ok());
     }
 }

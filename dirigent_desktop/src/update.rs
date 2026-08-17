@@ -146,16 +146,15 @@ fn is_newer(remote: &str) -> Result<bool, String> {
                 .map_err(|error| format!("this build has invalid SemVer: {error}"))?;
             Ok(remote > current)
         }
-        "nightly" => {
-            validate_nightly(remote)?;
-            validate_nightly(current_version())?;
+        _ => {
+            validate_branch_version(remote)?;
+            validate_branch_version(current_version())?;
             Ok(remote > current_version())
         }
-        channel => Err(format!("unsupported update channel {channel}")),
     }
 }
 
-fn validate_nightly(version: &str) -> Result<(), String> {
+fn validate_branch_version(version: &str) -> Result<(), String> {
     let bytes = version.as_bytes();
     let valid = bytes.len() == 16
         && bytes[8] == b'T'
@@ -164,7 +163,7 @@ fn validate_nightly(version: &str) -> Result<(), String> {
         && bytes[9..15].iter().all(u8::is_ascii_digit);
     valid
         .then_some(())
-        .ok_or_else(|| "nightly versions must use YYYYMMDDTHHMMSSZ UTC".into())
+        .ok_or_else(|| "branch versions must use YYYYMMDDTHHMMSSZ UTC".into())
 }
 
 fn can_replace_current_executable() -> bool {
@@ -416,9 +415,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nightly_versions_sort_by_time() {
-        assert!(validate_nightly("20260310T123456Z").is_ok());
+    fn branch_versions_sort_by_time() {
+        assert!(validate_branch_version("20260310T123456Z").is_ok());
         assert!("20260310T123457Z" > "20260310T123456Z");
-        assert!(validate_nightly("2026-03-10T12:34:56Z").is_err());
+        assert!(validate_branch_version("2026-03-10T12:34:56Z").is_err());
     }
 }
