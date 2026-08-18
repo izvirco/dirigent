@@ -732,6 +732,7 @@ impl Dirigent {
             creating_harness: false,
             project_settings: None,
             workspace_settings_editing: false,
+            about_open: false,
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
             sidebar_layout_persist_task: None,
             diff_sidebar_open,

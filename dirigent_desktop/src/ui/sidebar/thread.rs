@@ -143,7 +143,8 @@ impl Dirigent {
             .unwrap();
         let workspace = self.workspace_for_harness(id);
         let has_workspace = workspace.is_some();
-        let active = self.selected_harness == Some(id)
+        let active = !self.about_open
+            && self.selected_harness == Some(id)
             && !self.adding_project
             && self.project_settings.is_none();
         let title = harness

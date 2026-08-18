@@ -1,5 +1,6 @@
 //! Collects GPUI views and shared UI rendering helpers.
 
+mod about;
 mod composer;
 mod conversation;
 mod diff_sidebar;
@@ -360,17 +361,28 @@ impl Dirigent {
                         ),
                 )
             })
-            .when_some(self.project_settings, |element, project_id| {
-                element.child(self.render_project_settings(project_id, cx))
+            .when(self.about_open, |element| {
+                element.child(self.render_about(cx))
             })
-            .when(self.project_settings.is_none() && self.adding_project, |element| {
-                element.child(self.render_add_project(cx))
-            })
-            .when(self.project_settings.is_none() && !self.adding_project && self.creating_harness, |element| {
-                element.child(self.render_new_harness(window, cx))
+            .when(!self.about_open, |element| {
+                element.when_some(self.project_settings, |element, project_id| {
+                    element.child(self.render_project_settings(project_id, cx))
+                })
             })
             .when(
-                self.project_settings.is_none()
+                !self.about_open && self.project_settings.is_none() && self.adding_project,
+                |element| element.child(self.render_add_project(cx)),
+            )
+            .when(
+                !self.about_open
+                    && self.project_settings.is_none()
+                    && !self.adding_project
+                    && self.creating_harness,
+                |element| element.child(self.render_new_harness(window, cx)),
+            )
+            .when(
+                !self.about_open
+                    && self.project_settings.is_none()
                     && !self.adding_project
                     && !self.creating_harness
                     && self.selected_harness.is_some(),
@@ -382,7 +394,8 @@ impl Dirigent {
                 },
             )
             .when(
-                self.project_settings.is_none()
+                !self.about_open
+                    && self.project_settings.is_none()
                     && !self.adding_project
                     && !self.creating_harness
                     && self.selected_harness.is_none(),

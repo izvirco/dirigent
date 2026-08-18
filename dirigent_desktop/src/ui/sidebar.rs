@@ -202,6 +202,27 @@ impl Dirigent {
                             cx.notify();
                         }))
                         .child("Add project"),
+                )
+                .child(
+                    div()
+                        .id("about-dirigent")
+                        .h(px(26.0))
+                        .px_1()
+                        .flex()
+                        .items_center()
+                        .rounded_md()
+                        .whitespace_nowrap()
+                        .text_xs()
+                        .text_color(rgb(muted()))
+                        .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.about_open = true;
+                            this.sidebar_menu = None;
+                            this.enter_normal_mode();
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .child("About"),
                 ),
         )
         .priority(2)

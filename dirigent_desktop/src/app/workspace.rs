@@ -309,6 +309,7 @@ impl Dirigent {
         self.persist();
     }
     pub(crate) fn begin_adding_project(&mut self) {
+        self.about_open = false;
         self.project_probe.take();
         self.path_completion = None;
         self.adding_project = true;
@@ -566,6 +567,7 @@ impl Dirigent {
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
+        self.about_open = false;
         self.project_probe.take();
         self.harnesses[index].has_unread_completion = false;
         self.selected_project = Some(self.harnesses[index].project_id);
@@ -592,6 +594,7 @@ impl Dirigent {
         self.start_harness(id, None);
     }
     pub(crate) fn start_new_harness(&mut self, project_id: Id) {
+        self.about_open = false;
         // New threads inherit model settings from a visible sibling, avoiding an ephemeral probe
         // when a project Pi process has already resolved its local configuration.
         let source_id = self
