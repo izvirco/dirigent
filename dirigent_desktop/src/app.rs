@@ -531,6 +531,7 @@ pub(crate) struct Dirigent {
     pub(crate) project_settings: Option<Id>,
     pub(crate) workspace_settings_editing: bool,
     pub(crate) about_open: bool,
+    pub(crate) pi_version: String,
     pub(crate) sidebar_width: f32,
     sidebar_layout_persist_task: Option<Task<()>>,
     pub(crate) diff_sidebar_open: bool,

@@ -733,6 +733,7 @@ impl Dirigent {
             project_settings: None,
             workspace_settings_editing: false,
             about_open: false,
+            pi_version: "Checking…".into(),
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
             sidebar_layout_persist_task: None,
             diff_sidebar_open,
@@ -834,6 +835,19 @@ impl Dirigent {
             next_diff_job_id: 1,
             title_processes: HashMap::new(),
         };
+        let pi_version_task = cx.background_spawn(async { platform::pi_version() });
+        cx.spawn(async move |this, cx| {
+            let version = pi_version_task.await;
+            let _ = this.update(cx, |this, cx| {
+                this.pi_version = version.unwrap_or_else(|error| {
+                    tracing::warn!(%error, "could not determine pi version");
+                    "Unavailable".into()
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+
         if let Some(project_id) = selected_project {
             this.refresh_repository(project_id);
         }

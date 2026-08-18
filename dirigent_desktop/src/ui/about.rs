@@ -1,6 +1,6 @@
 //! Renders Dirigent build and release information.
 
-use gpui::{Context, IntoElement, div, prelude::*, px};
+use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 
 use crate::{
     app::Dirigent,
@@ -8,7 +8,7 @@ use crate::{
     update,
 };
 
-fn info_row(label: &'static str, value: &'static str) -> impl IntoElement {
+fn info_row(label: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
     div()
         .h(px(30.0))
         .flex()
@@ -23,7 +23,7 @@ fn info_row(label: &'static str, value: &'static str) -> impl IntoElement {
                 .min_w(px(0.0))
                 .flex_1()
                 .text_color(rgb(theme_text()))
-                .child(value),
+                .child(value.into()),
         )
 }
 
@@ -87,6 +87,7 @@ impl Dirigent {
                                     .child("Build information"),
                             )
                             .child(info_row("Version", update::current_version()))
+                            .child(info_row("Pi version", self.pi_version.clone()))
                             .child(info_row("Commit", env!("DIRIGENT_COMMIT_ID")))
                             .child(info_row("Target", update::update_target()))
                             .child(info_row("Channel", update::channel())),

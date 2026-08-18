@@ -192,6 +192,21 @@ pub(crate) fn pi_command(_nix_enabled: bool) -> Result<Command, String> {
     Ok(command)
 }
 
+pub(crate) fn pi_version() -> Result<String, String> {
+    let output = pi_command(false)?
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("could not read pi version: {error}"))?;
+    if !output.status.success() {
+        return Err(format!("pi --version exited with {}", output.status));
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        return Err("pi --version returned no version".into());
+    }
+    Ok(version)
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn stop_child(child: &mut Child) {
     let _ = child.kill();
