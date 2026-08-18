@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, Context, CursorStyle, DragMoveEvent, IntoElement, Pixels, Point, Transformation,
-    Window, deferred, div, prelude::*, px, radians, svg,
+    Window, deferred, div, prelude::*, px, radians, relative, svg,
 };
 
 use crate::{
@@ -37,6 +37,28 @@ enum ThreadPlacement {
     Inbox,
     Workpool,
     Project,
+}
+
+fn update_status_text(label: String, detail: Option<String>) -> impl IntoElement {
+    div()
+        .relative()
+        .w_full()
+        .h_full()
+        .px_3()
+        .flex()
+        .items_center()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .whitespace_nowrap()
+                .overflow_hidden()
+                .text_ellipsis()
+                .child(label),
+        )
+        .when_some(detail, |element, detail| {
+            element.child(div().ml_2().flex_none().child(detail))
+        })
 }
 
 fn sidebar_icon(path: &'static str, color: u32) -> impl IntoElement {
@@ -280,14 +302,41 @@ impl Dirigent {
         };
         let codex_usage = self.codex_usage.and_then(format_codex_usage);
         let update_action = match &self.update_state {
-            crate::update::UpdateState::Available(release) => {
-                Some((format!("Update to {}", release.version), true, false))
+            crate::update::UpdateState::Available(release) => Some((
+                format!("Update to {}", crate::update::display_version(release)),
+                None,
+                true,
+                None,
+                false,
+            )),
+            crate::update::UpdateState::Downloading {
+                release,
+                downloaded,
+                total,
+            } => {
+                let downloaded_mib = *downloaded as f64 / (1024.0 * 1024.0);
+                let total_mib = *total as f64 / (1024.0 * 1024.0);
+                let progress = (*total > 0).then_some(*downloaded as f32 / *total as f32);
+                Some((
+                    format!("Downloading {}", crate::update::display_version(release)),
+                    Some(format!("{downloaded_mib:.1}/{total_mib:.1} MiB")),
+                    false,
+                    progress,
+                    false,
+                ))
             }
-            crate::update::UpdateState::Downloading(release) => {
-                Some((format!("Downloading {}…", release.version), false, false))
-            }
+            crate::update::UpdateState::Ready { release, .. } => Some((
+                format!(
+                    "Restart to finish update to {}",
+                    crate::update::display_version(release)
+                ),
+                None,
+                true,
+                None,
+                true,
+            )),
             crate::update::UpdateState::Failed { .. } => {
-                Some(("Update failed · Retry".into(), true, true))
+                Some(("Update failed · Retry".into(), None, true, None, false))
             }
             crate::update::UpdateState::Checking | crate::update::UpdateState::Current => None,
         };
@@ -342,34 +391,77 @@ impl Dirigent {
                         ),
                     ),
             )
-            .when_some(update_action, |element, (label, clickable, failed)| {
-                element.child(
-                    div()
-                        .id("dirigent-update")
-                        .mx_3()
-                        .mt_2()
-                        .h(px(30.0))
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(rgb(if failed { red() } else { blue() }))
-                        .text_xs()
-                        .text_color(rgb(if failed { red() } else { blue() }))
-                        .when(clickable, |element| {
-                            element
-                                .cursor(CursorStyle::PointingHand)
-                                .hover(|style| style.bg(rgb(surface_hover())))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.install_available_update(cx);
-                                    cx.stop_propagation();
-                                }))
-                        })
-                        .child(label),
-                )
-            })
+            .when_some(
+                update_action,
+                |element, (label, detail, clickable, progress, ready)| {
+                    let progress_label = label.clone();
+                    let progress_detail = detail.clone();
+                    let downloading = progress.is_some();
+                    element.child(
+                        div()
+                            .id("dirigent-update")
+                            .relative()
+                            .mx_3()
+                            .mt_2()
+                            .h(px(30.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .overflow_hidden()
+                            .rounded_md()
+                            .bg(if ready {
+                                rgb(orange()).opacity(0.20)
+                            } else if downloading {
+                                rgb(blue()).opacity(0.20)
+                            } else {
+                                rgb(blue()).opacity(0.10)
+                            })
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(if ready { orange() } else { blue() }))
+                            .child(update_status_text(label, detail))
+                            .when_some(progress, |element, progress| {
+                                let progress = progress.clamp(0.0, 1.0);
+                                element.child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(relative(progress))
+                                        .overflow_hidden()
+                                        .rounded_md()
+                                        .bg(rgb(orange()).opacity(0.40))
+                                        .text_color(rgb(orange()))
+                                        .child(
+                                            div()
+                                                .w(relative(1.0 / progress.max(0.001)))
+                                                .h_full()
+                                                .child(update_status_text(
+                                                    progress_label,
+                                                    progress_detail,
+                                                )),
+                                        ),
+                                )
+                            })
+                            .when(clickable, |element| {
+                                element
+                                    .cursor(CursorStyle::PointingHand)
+                                    .hover(move |style| {
+                                        style.bg(if ready {
+                                            rgb(orange()).opacity(0.40)
+                                        } else {
+                                            rgb(blue()).opacity(0.20)
+                                        })
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.activate_update(cx);
+                                        cx.stop_propagation();
+                                    }))
+                            }),
+                    )
+                },
+            )
             .child(
                 div()
                     .relative()

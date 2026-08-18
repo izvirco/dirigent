@@ -6,13 +6,14 @@ impl Dirigent {
     pub(super) fn handle_update_event(
         &mut self,
         event: crate::update::UpdateEvent,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) {
         match event {
             crate::update::UpdateEvent::Checked(release) => {
                 if matches!(
                     self.update_state,
-                    crate::update::UpdateState::Downloading(_)
+                    crate::update::UpdateState::Downloading { .. }
+                        | crate::update::UpdateState::Ready { .. }
                 ) {
                     return;
                 }
@@ -27,17 +28,19 @@ impl Dirigent {
                     self.update_state = crate::update::UpdateState::Current;
                 }
             }
-            crate::update::UpdateEvent::Downloaded { release, path } => {
-                match crate::update::launch_updater(&path) {
-                    Ok(lock) => {
-                        self.update_shutdown_lock = Some(lock);
-                        cx.quit();
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "could not start update");
-                        self.update_state = crate::update::UpdateState::Failed { release };
-                    }
+            crate::update::UpdateEvent::DownloadProgress { downloaded, total } => {
+                if let crate::update::UpdateState::Downloading {
+                    downloaded: current,
+                    total: expected,
+                    ..
+                } = &mut self.update_state
+                {
+                    *current = downloaded;
+                    *expected = total;
                 }
+            }
+            crate::update::UpdateEvent::Downloaded { release, path } => {
+                self.update_state = crate::update::UpdateState::Ready { release, path };
             }
             crate::update::UpdateEvent::DownloadFailed { release, error } => {
                 tracing::error!(%error, "update download failed");
@@ -46,13 +49,47 @@ impl Dirigent {
         }
     }
 
-    pub(crate) fn install_available_update(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn activate_update(&mut self, cx: &mut Context<Self>) {
+        if let crate::update::UpdateState::Ready { release, path } = &self.update_state {
+            let release = release.clone();
+            let path = path.clone();
+            if crate::update::dry_run_enabled() {
+                tracing::info!(
+                    version = %release.version,
+                    path = %path.display(),
+                    "update dry run completed; skipping installation and restart"
+                );
+                let _ = std::fs::remove_file(path);
+                self.update_state = crate::update::UpdateState::Available(release);
+                cx.notify();
+                return;
+            }
+            match crate::update::launch_updater(&path) {
+                Ok(lock) => {
+                    self.update_shutdown_lock = Some(lock);
+                    cx.quit();
+                }
+                Err(error) => {
+                    tracing::error!(%error, "could not start update");
+                    let _ = std::fs::remove_file(path);
+                    self.update_state = crate::update::UpdateState::Failed { release };
+                    cx.notify();
+                }
+            }
+            return;
+        }
+
         let release = match &self.update_state {
             crate::update::UpdateState::Available(release)
             | crate::update::UpdateState::Failed { release, .. } => release.clone(),
             _ => return,
         };
-        self.update_state = crate::update::UpdateState::Downloading(release.clone());
+        let total = crate::update::artifact_size(&release);
+        self.update_state = crate::update::UpdateState::Downloading {
+            release: release.clone(),
+            downloaded: 0,
+            total,
+        };
         crate::update::download(release, self.update_events.clone());
         cx.notify();
     }

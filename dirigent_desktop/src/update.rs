@@ -27,13 +27,27 @@ pub(crate) enum UpdateState {
     Checking,
     Current,
     Available(VersionResponse),
-    Downloading(VersionResponse),
-    Failed { release: VersionResponse },
+    Downloading {
+        release: VersionResponse,
+        downloaded: u64,
+        total: u64,
+    },
+    Ready {
+        release: VersionResponse,
+        path: PathBuf,
+    },
+    Failed {
+        release: VersionResponse,
+    },
 }
 
 pub(crate) enum UpdateEvent {
     Checked(Option<VersionResponse>),
     CheckFailed(String),
+    DownloadProgress {
+        downloaded: u64,
+        total: u64,
+    },
     Downloaded {
         release: VersionResponse,
         path: PathBuf,
@@ -56,8 +70,13 @@ pub(crate) fn update_target() -> &'static str {
     env!("DIRIGENT_UPDATE_TARGET")
 }
 
+/// Exercises update checking and downloading without replacing the app.
+pub(crate) fn dry_run_enabled() -> bool {
+    env::var_os("DIRIGENT_UPDATE_DRY_RUN").is_some()
+}
+
 fn updates_enabled() -> bool {
-    !cfg!(debug_assertions) || env::var_os("DIRIGENT_ENABLE_UPDATES").is_some()
+    !cfg!(debug_assertions) || env::var_os("DIRIGENT_ENABLE_UPDATES").is_some() || dry_run_enabled()
 }
 
 pub(crate) fn start_checker(events: Sender<UpdateEvent>) {
@@ -187,7 +206,8 @@ pub(crate) fn download(release: VersionResponse, events: Sender<UpdateEvent>) {
     thread::Builder::new()
         .name("dirigent-update-download".into())
         .spawn(move || {
-            let result = matching_artifact(&release).and_then(download_artifact);
+            let result = matching_artifact(&release)
+                .and_then(|artifact| download_artifact(artifact, &events));
             let event = match result {
                 Ok(path) => UpdateEvent::Downloaded {
                     release: release.clone(),
@@ -211,7 +231,22 @@ fn matching_artifact(release: &VersionResponse) -> Result<&VersionArtifact, Stri
         .ok_or_else(|| format!("release has no {} artifact", update_target()))
 }
 
-fn download_artifact(artifact: &VersionArtifact) -> Result<PathBuf, String> {
+pub(crate) fn artifact_size(release: &VersionResponse) -> u64 {
+    matching_artifact(release).map_or(0, |artifact| artifact.size)
+}
+
+pub(crate) fn display_version(release: &VersionResponse) -> String {
+    if release.channel == "stable" {
+        release.version.clone()
+    } else {
+        format!("{}-{}", release.channel, release.version)
+    }
+}
+
+fn download_artifact(
+    artifact: &VersionArtifact,
+    events: &Sender<UpdateEvent>,
+) -> Result<PathBuf, String> {
     let directory = platform::updates_directory()?;
     fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
@@ -240,6 +275,7 @@ fn download_artifact(artifact: &VersionArtifact) -> Result<PathBuf, String> {
         .map_err(|error| format!("could not create {}: {error}", temporary.display()))?;
     let mut hasher = Sha256::new();
     let mut size = 0_u64;
+    let mut reported_size = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let read = response
@@ -255,6 +291,13 @@ fn download_artifact(artifact: &VersionArtifact) -> Result<PathBuf, String> {
         hasher.update(&buffer[..read]);
         file.write_all(&buffer[..read])
             .map_err(|error| format!("could not write update: {error}"))?;
+        if size == artifact.size || size.saturating_sub(reported_size) >= 256 * 1024 {
+            let _ = events.send_blocking(UpdateEvent::DownloadProgress {
+                downloaded: size,
+                total: artifact.size,
+            });
+            reported_size = size;
+        }
     }
     file.sync_all()
         .map_err(|error| format!("could not flush update: {error}"))?;
@@ -373,31 +416,60 @@ fn apply_update(target: &Path, staged: &Path, lock_path: &Path) -> Result<(), St
     lock.lock_exclusive()
         .map_err(|error| format!("could not wait for Dirigent to exit: {error}"))?;
 
-    let replacement = appended_path(target, ".new");
     let backup = appended_path(target, ".old");
-    let _ = fs::remove_file(&replacement);
     let _ = fs::remove_file(&backup);
-    if let Err(error) = fs::copy(staged, &replacement) {
-        let _ = Command::new(target).spawn();
-        return Err(format!("could not stage replacement: {error}"));
+
+    #[cfg(target_os = "windows")]
+    {
+        // Keep the desktop entry intact: renaming it makes Explorer move the replacement icon.
+        if let Err(error) = fs::copy(target, &backup) {
+            let _ = fs::remove_file(&backup);
+            let _ = Command::new(target).spawn();
+            return Err(format!("could not back up the old executable: {error}"));
+        }
+        if let Err(error) = fs::copy(staged, target) {
+            if fs::copy(&backup, target).is_ok() {
+                let _ = fs::remove_file(&backup);
+            }
+            let _ = Command::new(target).spawn();
+            return Err(format!("could not install the new executable: {error}"));
+        }
     }
-    if let Err(error) = fs::rename(target, &backup) {
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let replacement = appended_path(target, ".new");
         let _ = fs::remove_file(&replacement);
-        let _ = Command::new(target).spawn();
-        return Err(format!("could not move the old executable: {error}"));
-    }
-    if let Err(error) = fs::rename(&replacement, target) {
-        let _ = fs::rename(&backup, target);
-        let _ = Command::new(target).spawn();
-        return Err(format!("could not install the new executable: {error}"));
+        if let Err(error) = fs::copy(staged, &replacement) {
+            let _ = Command::new(target).spawn();
+            return Err(format!("could not stage replacement: {error}"));
+        }
+        if let Err(error) = fs::rename(target, &backup) {
+            let _ = fs::remove_file(&replacement);
+            let _ = Command::new(target).spawn();
+            return Err(format!("could not move the old executable: {error}"));
+        }
+        if let Err(error) = fs::rename(&replacement, target) {
+            let _ = fs::rename(&backup, target);
+            let _ = Command::new(target).spawn();
+            return Err(format!("could not install the new executable: {error}"));
+        }
     }
 
     if let Err(error) = Command::new(target).spawn() {
-        let _ = fs::remove_file(target);
-        let _ = fs::rename(&backup, target);
+        #[cfg(target_os = "windows")]
+        if fs::copy(&backup, target).is_ok() {
+            let _ = fs::remove_file(&backup);
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = fs::remove_file(target);
+            let _ = fs::rename(&backup, target);
+        }
         let _ = Command::new(target).spawn();
         return Err(format!("could not restart updated Dirigent: {error}"));
     }
+    let _ = fs::remove_file(&backup);
     let _ = fs::remove_file(staged);
     let _ = fs2::FileExt::unlock(&lock);
     let _ = fs::remove_file(lock_path);
