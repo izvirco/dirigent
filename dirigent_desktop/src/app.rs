@@ -560,7 +560,6 @@ pub(crate) struct Dirigent {
     pub(crate) banner: Option<String>,
     pub(crate) update_state: crate::update::UpdateState,
     update_events: Sender<crate::update::UpdateEvent>,
-    update_shutdown_lock: Option<std::fs::File>,
     config_error: Option<String>,
     pub(crate) font: SharedString,
     window_transparent: Option<bool>,

@@ -54,15 +54,7 @@ fn load_bundled_fonts(cx: &App) {
         .expect("failed to load bundled Lilex fonts");
 }
 
-fn main() {
-    if let Some(result) = update::run_updater_from_args() {
-        if let Err(error) = result {
-            eprintln!("Dirigent update failed: {error}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
+fn main() -> std::process::ExitCode {
     let _logging_guard = match logging::initialize() {
         Ok(guard) => Some(guard),
         Err(error) => {
@@ -71,6 +63,18 @@ fn main() {
             None
         }
     };
+
+    if let Some(result) = update::run_updater_from_args() {
+        return match result {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!(%error, "Dirigent update failed");
+                eprintln!("Dirigent update failed: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+
     tracing::info!(
         version = update::current_version(),
         channel = update::channel(),
@@ -78,6 +82,7 @@ fn main() {
         commit = env!("DIRIGENT_COMMIT_ID"),
         "starting Dirigent"
     );
+    update::cleanup_updater_helpers();
 
     application().with_assets(Assets).run(|cx: &mut App| {
         cx.set_app_identity("dirigent", "Dirigent");
@@ -104,4 +109,5 @@ fn main() {
 
         cx.activate(true);
     });
+    std::process::ExitCode::SUCCESS
 }

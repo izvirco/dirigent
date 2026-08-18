@@ -69,10 +69,7 @@ impl Dirigent {
                 return;
             }
             match crate::update::launch_updater(&path) {
-                Ok(lock) => {
-                    self.update_shutdown_lock = Some(lock);
-                    cx.quit();
-                }
+                Ok(()) => cx.quit(),
                 Err(error) => {
                     tracing::error!(%error, "could not start update");
                     let _ = std::fs::remove_file(path);

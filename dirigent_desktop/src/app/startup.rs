@@ -763,7 +763,6 @@ impl Dirigent {
             banner,
             update_state: crate::update::UpdateState::Checking,
             update_events: update_event_tx,
-            update_shutdown_lock: None,
             config_error,
             font: appearance.font.into(),
             window_transparent: None,

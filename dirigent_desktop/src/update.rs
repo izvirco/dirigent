@@ -21,6 +21,7 @@ use crate::platform;
 const DEFAULT_API_URL: &str = "https://dirigent.sebba.dev";
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const APPLY_UPDATE_ARGUMENT: &str = "--dirigent-apply-update";
+const UPDATER_HELPER_PREFIX: &str = "dirigent-updater-";
 
 #[derive(Clone)]
 pub(crate) enum UpdateState {
@@ -356,8 +357,8 @@ fn make_executable(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts a copy of the current binary which waits on this returned lock before replacing us.
-pub(crate) fn launch_updater(staged: &Path) -> Result<File, String> {
+/// Starts a copy of the current binary which waits for this process to exit before replacing us.
+pub(crate) fn launch_updater(staged: &Path) -> Result<(), String> {
     let current = env::current_exe()
         .map_err(|error| format!("could not locate the running executable: {error}"))?;
     let directory = platform::updates_directory()?;
@@ -369,7 +370,7 @@ pub(crate) fn launch_updater(staged: &Path) -> Result<File, String> {
         ""
     };
     let helper = directory.join(format!(
-        "dirigent-updater-{}{}",
+        "{UPDATER_HELPER_PREFIX}{}{}",
         std::process::id(),
         extension
     ));
@@ -388,7 +389,7 @@ pub(crate) fn launch_updater(staged: &Path) -> Result<File, String> {
 
     let mut command = Command::new(&helper);
     platform::hide_command_window(&mut command);
-    command
+    let spawn = command
         .arg(APPLY_UPDATE_ARGUMENT)
         .arg(&current)
         .arg(staged)
@@ -396,12 +397,99 @@ pub(crate) fn launch_updater(staged: &Path) -> Result<File, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("could not start update helper: {error}"))?;
-    Ok(lock)
+        .spawn();
+    if let Err(error) = spawn {
+        let _ = fs2::FileExt::unlock(&lock);
+        drop(lock);
+        remove_update_file(&helper, "unused update helper");
+        remove_update_file(&lock_path, "unused update handoff lock");
+        return Err(format!("could not start update helper: {error}"));
+    }
+    tracing::info!(
+        helper = %helper.display(),
+        target = %current.display(),
+        staged = %staged.display(),
+        "started update helper"
+    );
+
+    // The helper must not observe the handoff until the process has actually exited. Keeping
+    // this handle alive in application state is too short-lived: GPUI drops that state while
+    // the Windows executable is still mapped. The OS closes this deliberately leaked handle
+    // at process termination and releases the lock at the correct time.
+    std::mem::forget(lock);
+    Ok(())
 }
 
-/// Handles the private updater invocation before GPUI or logging are initialized.
+/// Removes updater copies left by completed update helper processes.
+pub(crate) fn cleanup_updater_helpers() {
+    let directory = match platform::updates_directory() {
+        Ok(directory) => directory,
+        Err(error) => {
+            tracing::warn!(%error, "could not locate update helpers for cleanup");
+            return;
+        }
+    };
+    if let Err(error) = thread::Builder::new()
+        .name("dirigent-update-cleanup".into())
+        .spawn(move || {
+            const ATTEMPTS: usize = 40;
+            for attempt in 0..ATTEMPTS {
+                match remove_updater_helpers(&directory) {
+                    Ok(failures) if failures.is_empty() => return,
+                    Ok(failures) if attempt + 1 == ATTEMPTS => {
+                        for (path, error) in failures {
+                            tracing::warn!(
+                                path = %path.display(),
+                                %error,
+                                "could not remove completed update helper"
+                            );
+                        }
+                    }
+                    Ok(_) => thread::sleep(Duration::from_millis(250)),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not clean up update helpers");
+                        return;
+                    }
+                }
+            }
+        })
+    {
+        tracing::warn!(%error, "could not start update helper cleanup");
+    }
+}
+
+fn remove_updater_helpers(directory: &Path) -> Result<Vec<(PathBuf, std::io::Error)>, String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(format!(
+                "could not read update directory {}: {error}",
+                directory.display()
+            ));
+        }
+    };
+    let mut failures = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("could not read update entry: {error}"))?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(UPDATER_HELPER_PREFIX)
+        {
+            continue;
+        }
+        let path = entry.path();
+        match fs::remove_file(&path) {
+            Ok(()) => tracing::info!(path = %path.display(), "removed completed update helper"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => failures.push((path, error)),
+        }
+    }
+    Ok(failures)
+}
+
+/// Handles the private updater invocation before GPUI is initialized.
 pub(crate) fn run_updater_from_args() -> Option<Result<(), String>> {
     let mut arguments = env::args_os();
     let _executable = arguments.next()?;
@@ -430,6 +518,12 @@ pub(crate) fn run_updater_from_args() -> Option<Result<(), String>> {
 }
 
 fn apply_update(target: &Path, staged: &Path, lock_path: &Path) -> Result<(), String> {
+    tracing::info!(
+        target = %target.display(),
+        staged = %staged.display(),
+        lock = %lock_path.display(),
+        "update helper waiting for the previous process to exit"
+    );
     let lock = OpenOptions::new()
         .read(true)
         .write(true)
@@ -437,23 +531,27 @@ fn apply_update(target: &Path, staged: &Path, lock_path: &Path) -> Result<(), St
         .map_err(|error| format!("could not open update lock: {error}"))?;
     lock.lock_exclusive()
         .map_err(|error| format!("could not wait for Dirigent to exit: {error}"))?;
+    tracing::info!("previous Dirigent process exited; applying update");
 
     let backup = appended_path(target, ".old");
-    let _ = fs::remove_file(&backup);
+    remove_update_file(&backup, "stale update backup");
 
     #[cfg(target_os = "windows")]
     {
         // Keep the desktop entry intact: renaming it makes Explorer move the replacement icon.
         if let Err(error) = fs::copy(target, &backup) {
-            let _ = fs::remove_file(&backup);
-            let _ = Command::new(target).spawn();
+            remove_update_file(&backup, "incomplete update backup");
+            restart_target(target, "update backup failed");
             return Err(format!("could not back up the old executable: {error}"));
         }
+        tracing::info!(backup = %backup.display(), "backed up current executable");
         if let Err(error) = fs::copy(staged, target) {
-            if fs::copy(&backup, target).is_ok() {
-                let _ = fs::remove_file(&backup);
+            if let Err(restore_error) = fs::copy(&backup, target) {
+                tracing::error!(%restore_error, "could not restore executable after install failure");
+            } else {
+                remove_update_file(&backup, "restored update backup");
             }
-            let _ = Command::new(target).spawn();
+            restart_target(target, "update installation failed");
             return Err(format!("could not install the new executable: {error}"));
         }
     }
@@ -461,41 +559,80 @@ fn apply_update(target: &Path, staged: &Path, lock_path: &Path) -> Result<(), St
     #[cfg(not(target_os = "windows"))]
     {
         let replacement = appended_path(target, ".new");
-        let _ = fs::remove_file(&replacement);
+        remove_update_file(&replacement, "stale update replacement");
         if let Err(error) = fs::copy(staged, &replacement) {
-            let _ = Command::new(target).spawn();
+            restart_target(target, "update staging failed");
             return Err(format!("could not stage replacement: {error}"));
         }
         if let Err(error) = fs::rename(target, &backup) {
-            let _ = fs::remove_file(&replacement);
-            let _ = Command::new(target).spawn();
+            remove_update_file(&replacement, "unused update replacement");
+            restart_target(target, "update backup failed");
             return Err(format!("could not move the old executable: {error}"));
         }
         if let Err(error) = fs::rename(&replacement, target) {
-            let _ = fs::rename(&backup, target);
-            let _ = Command::new(target).spawn();
+            if let Err(restore_error) = fs::rename(&backup, target) {
+                tracing::error!(%restore_error, "could not restore executable after install failure");
+            }
+            restart_target(target, "update installation failed");
             return Err(format!("could not install the new executable: {error}"));
         }
     }
 
-    if let Err(error) = Command::new(target).spawn() {
-        #[cfg(target_os = "windows")]
-        if fs::copy(&backup, target).is_ok() {
-            let _ = fs::remove_file(&backup);
+    tracing::info!(target = %target.display(), "installed updated executable");
+    let child = match Command::new(target).spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            #[cfg(target_os = "windows")]
+            if let Err(restore_error) = fs::copy(&backup, target) {
+                tracing::error!(%restore_error, "could not restore executable after restart failure");
+            } else {
+                remove_update_file(&backup, "restored update backup");
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                remove_update_file(target, "unstartable updated executable");
+                if let Err(restore_error) = fs::rename(&backup, target) {
+                    tracing::error!(%restore_error, "could not restore executable after restart failure");
+                }
+            }
+            restart_target(target, "updated executable failed to start");
+            return Err(format!("could not restart updated Dirigent: {error}"));
         }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = fs::remove_file(target);
-            let _ = fs::rename(&backup, target);
-        }
-        let _ = Command::new(target).spawn();
-        return Err(format!("could not restart updated Dirigent: {error}"));
+    };
+    tracing::info!(pid = child.id(), "started updated Dirigent");
+
+    remove_update_file(&backup, "update backup");
+    remove_update_file(staged, "staged update");
+    if let Err(error) = fs2::FileExt::unlock(&lock) {
+        tracing::warn!(%error, "could not unlock update handoff");
     }
-    let _ = fs::remove_file(&backup);
-    let _ = fs::remove_file(staged);
-    let _ = fs2::FileExt::unlock(&lock);
-    let _ = fs::remove_file(lock_path);
+    drop(lock);
+    remove_update_file(lock_path, "update handoff lock");
+    tracing::info!("update completed successfully");
     Ok(())
+}
+
+fn restart_target(target: &Path, reason: &'static str) {
+    match Command::new(target).spawn() {
+        Ok(child) => tracing::warn!(
+            pid = child.id(),
+            reason,
+            "restarted previous Dirigent executable"
+        ),
+        Err(error) => {
+            tracing::error!(%error, reason, "could not restart previous Dirigent executable")
+        }
+    }
+}
+
+fn remove_update_file(path: &Path, description: &'static str) {
+    match fs::remove_file(path) {
+        Ok(()) => tracing::info!(path = %path.display(), description, "removed update file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, description, "could not remove update file")
+        }
+    }
 }
 
 fn appended_path(path: &Path, suffix: &str) -> PathBuf {
