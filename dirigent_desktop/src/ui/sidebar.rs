@@ -239,6 +239,7 @@ impl Dirigent {
                         .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.about_open = true;
+                            this.check_for_updates();
                             this.sidebar_menu = None;
                             this.enter_normal_mode();
                             cx.stop_propagation();

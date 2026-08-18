@@ -3,6 +3,10 @@
 use super::*;
 
 impl Dirigent {
+    pub(crate) fn check_for_updates(&self) {
+        crate::update::check_now(self.update_events.clone());
+    }
+
     pub(super) fn handle_update_event(
         &mut self,
         event: crate::update::UpdateEvent,

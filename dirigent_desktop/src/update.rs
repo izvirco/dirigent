@@ -87,30 +87,52 @@ pub(crate) fn start_checker(events: Sender<UpdateEvent>) {
     thread::Builder::new()
         .name("dirigent-update-checker".into())
         .spawn(move || {
-            let client = match reqwest::blocking::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(30))
-                .build()
-            {
+            let client = match update_client() {
                 Ok(client) => client,
                 Err(error) => {
-                    let _ = events.send_blocking(UpdateEvent::CheckFailed(error.to_string()));
+                    let _ = events.send_blocking(UpdateEvent::CheckFailed(error));
                     return;
                 }
             };
             loop {
-                let result = check(&client);
-                let event = match result {
-                    Ok(release) => UpdateEvent::Checked(release),
-                    Err(error) => UpdateEvent::CheckFailed(error),
-                };
-                if events.send_blocking(event).is_err() {
+                if events.send_blocking(check_event(&client)).is_err() {
                     break;
                 }
                 thread::sleep(CHECK_INTERVAL);
             }
         })
         .expect("could not start update checker");
+}
+
+pub(crate) fn check_now(events: Sender<UpdateEvent>) {
+    if !updates_enabled() {
+        return;
+    }
+    thread::Builder::new()
+        .name("dirigent-update-check-now".into())
+        .spawn(move || {
+            let event = match update_client() {
+                Ok(client) => check_event(&client),
+                Err(error) => UpdateEvent::CheckFailed(error),
+            };
+            let _ = events.send_blocking(event);
+        })
+        .expect("could not start update check");
+}
+
+fn update_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
+fn check_event(client: &reqwest::blocking::Client) -> UpdateEvent {
+    match check(client) {
+        Ok(release) => UpdateEvent::Checked(release),
+        Err(error) => UpdateEvent::CheckFailed(error),
+    }
 }
 
 fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, String> {
