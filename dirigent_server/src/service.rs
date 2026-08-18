@@ -8,7 +8,11 @@ use std::{
     sync::Arc,
 };
 
-use aws_sdk_s3::{Client as S3Client, primitives::ByteStream};
+use aws_sdk_s3::{
+    Client as S3Client,
+    config::{Credentials, Region},
+    primitives::ByteStream,
+};
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, State},
@@ -508,7 +512,11 @@ pub async fn run_from_env() -> Result<(), String> {
                 .unwrap_or_else(|_| "dirigent_server=info,tower_http=info".into()),
         )
         .init();
+    let s3_url = required_env("DIRIGENT_S3_URL")?;
     let bucket = required_env("DIRIGENT_S3_BUCKET")?;
+    let access_key = required_env("DIRIGENT_S3_ACCESS_KEY")?;
+    let secret_key = required_env("DIRIGENT_S3_SECRET_KEY")?;
+    let region = env::var("DIRIGENT_S3_REGION").unwrap_or_else(|_| "auto".into());
     let cdn_url = env::var("DIRIGENT_CDN_URL").unwrap_or_else(|_| "https://cdn.sebba.dev".into());
     let publish_token = required_env("DIRIGENT_PUBLISH_TOKEN")?;
     let bind = env::var("DIRIGENT_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
@@ -521,9 +529,17 @@ pub async fn run_from_env() -> Result<(), String> {
         .transpose()
         .map_err(|error| format!("invalid DIRIGENT_MAX_ARTIFACT_BYTES: {error}"))?
         .unwrap_or(DEFAULT_MAX_ARTIFACT_BYTES);
-    let aws = aws_config::load_from_env().await;
+    let s3_config = aws_sdk_s3::Config::builder()
+        .behavior_version_latest()
+        .endpoint_url(s3_url)
+        .region(Region::new(region))
+        .credentials_provider(Credentials::new(
+            access_key, secret_key, None, None, "dirigent",
+        ))
+        .force_path_style(true)
+        .build();
     let state = ServiceState::new(
-        S3Client::new(&aws),
+        S3Client::from_conf(s3_config),
         bucket,
         cdn_url,
         publish_token,

@@ -4,10 +4,14 @@ The server stores immutable releases and channel pointers under `dist/dirigent/`
 
 ## Configuration
 
-Standard AWS credential and region variables are supported, plus:
+The writable S3-compatible endpoint and its credentials are configured explicitly:
 
 ```text
+DIRIGENT_S3_URL                required
 DIRIGENT_S3_BUCKET             required
+DIRIGENT_S3_ACCESS_KEY         required
+DIRIGENT_S3_SECRET_KEY         required
+DIRIGENT_S3_REGION             default: auto
 DIRIGENT_PUBLISH_TOKEN         required
 DIRIGENT_CDN_URL               default: https://cdn.sebba.dev
 DIRIGENT_BIND                  default: 127.0.0.1:8080
