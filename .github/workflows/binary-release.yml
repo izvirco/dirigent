@@ -34,6 +34,7 @@ jobs:
       publish: ${{ steps.release.outputs.publish }}
       commit: ${{ steps.release.outputs.commit }}
       windows_file_name: ${{ steps.release.outputs.windows_file_name }}
+      linux_file_name: ${{ steps.release.outputs.linux_file_name }}
 
     steps:
       - name: Check out source
@@ -51,7 +52,7 @@ jobs:
             exit 1
           fi
 
-          # Channels are used in update URLs and Windows file names, so keep them to the
+          # Channels are used in update URLs and binary file names, so keep them to the
           # component characters accepted by the version server.
           channel="$(printf '%s' "$GITHUB_REF_NAME" | LC_ALL=C tr -c 'A-Za-z0-9._+-' '-')"
           version="$(date -u +%Y%m%d-%H%M%S)"
@@ -74,17 +75,20 @@ jobs:
           fi
 
           if [[ "$channel" == "stable" ]]; then
-            windows_file_name="dirigent.exe"
+            binary_name="dirigent"
           else
-            windows_file_name="dirigent-$channel.exe"
+            binary_name="dirigent-$channel"
           fi
+          windows_file_name="$binary_name.exe"
+          linux_file_name="$binary_name"
 
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
           echo "windows_file_name=$windows_file_name" >> "$GITHUB_OUTPUT"
-          echo "Building $channel $version ($publish) as $windows_file_name"
+          echo "linux_file_name=$linux_file_name" >> "$GITHUB_OUTPUT"
+          echo "Building $channel $version ($publish) as $binary_name"
 
   build-windows:
     name: Build Windows executable
@@ -152,6 +156,7 @@ jobs:
       DIRIGENT_UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
       DIRIGENT_UPDATE_TARGET: x86_64-arch-linux
       DIRIGENT_COMMIT_ID: ${{ needs.prepare.outputs.commit }}
+      DIRIGENT_LINUX_FILE_NAME: ${{ needs.prepare.outputs.linux_file_name }}
 
     steps:
       - name: Install system dependencies
@@ -196,8 +201,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/dirigent dist/dirigent
-          (cd dist && sha256sum dirigent > dirigent.sha256)
+          cp target/release/dirigent "dist/$DIRIGENT_LINUX_FILE_NAME"
+          (cd dist && sha256sum "$DIRIGENT_LINUX_FILE_NAME" > "$DIRIGENT_LINUX_FILE_NAME.sha256")
 
       - name: Upload Arch Linux artifact
         uses: actions/upload-artifact@v4
@@ -218,6 +223,7 @@ jobs:
       DIRIGENT_API_URL: ${{ vars.DIRIGENT_API_URL || 'https://dirigent.sebba.dev' }}
       DIRIGENT_PUBLISH_TOKEN: ${{ secrets.DIRIGENT_PUBLISH_TOKEN }}
       DIRIGENT_WINDOWS_FILE_NAME: ${{ needs.prepare.outputs.windows_file_name }}
+      DIRIGENT_LINUX_FILE_NAME: ${{ needs.prepare.outputs.linux_file_name }}
 
     steps:
       - name: Download Windows artifact
@@ -239,12 +245,13 @@ jobs:
             --arg version '${{ needs.prepare.outputs.version }}' \
             --arg commit '${{ needs.prepare.outputs.commit }}' \
             --arg windows_file_name "$DIRIGENT_WINDOWS_FILE_NAME" \
+            --arg linux_file_name "$DIRIGENT_LINUX_FILE_NAME" \
             '{
               version: $version,
               commit: $commit,
               artifacts: [
                 { target: "x86_64-pc-windows-msvc", file_name: $windows_file_name },
-                { target: "x86_64-arch-linux", file_name: "dirigent" }
+                { target: "x86_64-arch-linux", file_name: $linux_file_name }
               ]
             }' > manifest.json
 
@@ -255,5 +262,5 @@ jobs:
             -H "Authorization: Bearer $DIRIGENT_PUBLISH_TOKEN" \
             -F 'manifest=@manifest.json;type=application/json' \
             -F "x86_64-pc-windows-msvc=@dist/windows/$DIRIGENT_WINDOWS_FILE_NAME;filename=$DIRIGENT_WINDOWS_FILE_NAME" \
-            -F 'x86_64-arch-linux=@dist/arch-linux/dirigent;filename=dirigent' \
+            -F "x86_64-arch-linux=@dist/arch-linux/$DIRIGENT_LINUX_FILE_NAME;filename=$DIRIGENT_LINUX_FILE_NAME" \
             "$DIRIGENT_API_URL/api/v0/version/${{ needs.prepare.outputs.channel }}"

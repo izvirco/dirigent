@@ -31,6 +31,7 @@ const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 16;
 const S3_PREFIX: &str = "dist/dirigent";
 const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
+const ARCH_LINUX_TARGET: &str = "x86_64-arch-linux";
 
 #[derive(Clone)]
 pub struct ServiceState {
@@ -156,20 +157,21 @@ fn validate_artifact_file_name(
     file_name: &str,
 ) -> Result<(), ApiError> {
     validate_component(file_name, "artifact file name")?;
-    if target != WINDOWS_TARGET {
-        return Ok(());
-    }
-
-    let expected = if channel == "stable" {
-        "dirigent.exe".to_string()
+    let binary_name = if channel == "stable" {
+        "dirigent".to_string()
     } else {
-        format!("dirigent-{channel}.exe")
+        format!("dirigent-{channel}")
+    };
+    let expected = match target {
+        WINDOWS_TARGET => format!("{binary_name}.exe"),
+        ARCH_LINUX_TARGET => binary_name,
+        _ => return Ok(()),
     };
     if file_name == expected {
         Ok(())
     } else {
         Err(bad_request(format!(
-            "{channel} Windows artifact must be named {expected}"
+            "{channel} {target} artifact must be named {expected}"
         )))
     }
 }
