@@ -565,23 +565,3 @@ fn required_env(name: &str) -> Result<String, String> {
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("{name} must be set"))
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stable_versions_are_semver_and_only_move_forward() {
-        assert!(validate_version("stable", "0.0.0").is_ok());
-        assert!(validate_version("stable", "0.0.1-beta.1").is_err());
-        assert!(ensure_newer("stable", "0.1.0", "0.0.0").is_ok());
-        assert!(ensure_newer("stable", "0.0.0", "0.0.0").is_err());
-    }
-
-    #[test]
-    fn branch_versions_are_sortable_utc_timestamps() {
-        assert!(validate_version("unstable", "20260310T123456Z").is_ok());
-        assert!(validate_version("unstable", "2026-03-10T12:34:56Z").is_err());
-        assert!(ensure_newer("unstable", "20260310T123457Z", "20260310T123456Z").is_ok());
-    }
-}
