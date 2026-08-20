@@ -198,14 +198,13 @@ fn is_newer(remote: &str) -> Result<bool, String> {
 
 fn validate_branch_version(version: &str) -> Result<(), String> {
     let bytes = version.as_bytes();
-    let valid = bytes.len() == 16
-        && bytes[8] == b'T'
-        && bytes[15] == b'Z'
+    let valid = bytes.len() == 15
+        && bytes[8] == b'-'
         && bytes[..8].iter().all(u8::is_ascii_digit)
-        && bytes[9..15].iter().all(u8::is_ascii_digit);
+        && bytes[9..].iter().all(u8::is_ascii_digit);
     valid
         .then_some(())
-        .ok_or_else(|| "branch versions must use YYYYMMDDTHHMMSSZ UTC".into())
+        .ok_or_else(|| "branch versions must use YYYYMMDD-HHMMSS UTC".into())
 }
 
 fn can_replace_current_executable() -> bool {
@@ -647,8 +646,8 @@ mod tests {
 
     #[test]
     fn branch_versions_sort_by_time() {
-        assert!(validate_branch_version("20260310T123456Z").is_ok());
-        assert!("20260310T123457Z" > "20260310T123456Z");
-        assert!(validate_branch_version("2026-03-10T12:34:56Z").is_err());
+        assert!(validate_branch_version("20260310-123456").is_ok());
+        assert!("20260310-123457" > "20260310-123456");
+        assert!(validate_branch_version("20260310T123456Z").is_err());
     }
 }

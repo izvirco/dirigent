@@ -30,6 +30,7 @@ use crate::contract::{PublishVersion, VersionArtifact, VersionResponse};
 const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 16;
 const S3_PREFIX: &str = "dist/dirigent";
+const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
 
 #[derive(Clone)]
 pub struct ServiceState {
@@ -149,6 +150,30 @@ fn validate_component(value: &str, label: &str) -> Result<(), ApiError> {
     }
 }
 
+fn validate_artifact_file_name(
+    channel: &str,
+    target: &str,
+    file_name: &str,
+) -> Result<(), ApiError> {
+    validate_component(file_name, "artifact file name")?;
+    if target != WINDOWS_TARGET {
+        return Ok(());
+    }
+
+    let expected = if channel == "stable" {
+        "dirigent.exe".to_string()
+    } else {
+        format!("dirigent-{channel}.exe")
+    };
+    if file_name == expected {
+        Ok(())
+    } else {
+        Err(bad_request(format!(
+            "{channel} Windows artifact must be named {expected}"
+        )))
+    }
+}
+
 fn validate_version(channel: &str, version: &str) -> Result<(), ApiError> {
     validate_component(version, "version")?;
     match channel {
@@ -162,8 +187,8 @@ fn validate_version(channel: &str, version: &str) -> Result<(), ApiError> {
             }
         }
         _ => {
-            NaiveDateTime::parse_from_str(version, "%Y%m%dT%H%M%SZ")
-                .map_err(|_| bad_request("branch versions must use YYYYMMDDTHHMMSSZ UTC"))?;
+            NaiveDateTime::parse_from_str(version, "%Y%m%d-%H%M%S")
+                .map_err(|_| bad_request("branch versions must use YYYYMMDD-HHMMSS UTC"))?;
         }
     }
     Ok(())
@@ -337,7 +362,7 @@ async fn post_version(
             .file_name()
             .ok_or_else(|| bad_request("artifact has no file name"))?
             .to_string();
-        validate_component(&file_name, "artifact file name")?;
+        validate_artifact_file_name(&channel, &name, &file_name)?;
         if uploads.contains_key(&name) {
             return Err(bad_request(format!("duplicate artifact {name}")));
         }
@@ -383,7 +408,7 @@ async fn post_version(
     let mut declared = HashSet::new();
     for artifact in &manifest.artifacts {
         validate_component(&artifact.target, "artifact target")?;
-        validate_component(&artifact.file_name, "artifact file name")?;
+        validate_artifact_file_name(&channel, &artifact.target, &artifact.file_name)?;
         if !declared.insert(&artifact.target) {
             return Err(bad_request(format!(
                 "duplicate declared artifact {}",

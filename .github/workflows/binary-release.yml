@@ -33,6 +33,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       publish: ${{ steps.release.outputs.publish }}
       commit: ${{ steps.release.outputs.commit }}
+      windows_file_name: ${{ steps.release.outputs.windows_file_name }}
 
     steps:
       - name: Check out source
@@ -50,8 +51,10 @@ jobs:
             exit 1
           fi
 
-          channel="$GITHUB_REF_NAME"
-          version="$(date -u +%Y%m%dT%H%M%SZ)"
+          # Channels are used in update URLs and Windows file names, so keep them to the
+          # component characters accepted by the version server.
+          channel="$(printf '%s' "$GITHUB_REF_NAME" | LC_ALL=C tr -c 'A-Za-z0-9._+-' '-')"
+          version="$(date -u +%Y%m%d-%H%M%S)"
           publish=false
           if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/v* ]]; then
             # Stable is a virtual channel advanced only by immutable version tags.
@@ -70,11 +73,18 @@ jobs:
             publish=true
           fi
 
+          if [[ "$channel" == "stable" ]]; then
+            windows_file_name="dirigent.exe"
+          else
+            windows_file_name="dirigent-$channel.exe"
+          fi
+
           echo "channel=$channel" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "commit=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
-          echo "Building $channel $version ($publish)"
+          echo "windows_file_name=$windows_file_name" >> "$GITHUB_OUTPUT"
+          echo "Building $channel $version ($publish) as $windows_file_name"
 
   build-windows:
     name: Build Windows executable
@@ -85,6 +95,7 @@ jobs:
       DIRIGENT_UPDATE_CHANNEL: ${{ needs.prepare.outputs.channel }}
       DIRIGENT_UPDATE_TARGET: x86_64-pc-windows-msvc
       DIRIGENT_COMMIT_ID: ${{ needs.prepare.outputs.commit }}
+      DIRIGENT_WINDOWS_FILE_NAME: ${{ needs.prepare.outputs.windows_file_name }}
 
     steps:
       - name: Check out source
@@ -119,9 +130,10 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item target/release/dirigent.exe dist/dirigent.exe
-          $checksum = (Get-FileHash -Path dist/dirigent.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$checksum  dirigent.exe" | Set-Content -Path dist/dirigent.exe.sha256 -Encoding ascii
+          $artifact = Join-Path dist $env:DIRIGENT_WINDOWS_FILE_NAME
+          Copy-Item target/release/dirigent.exe $artifact
+          $checksum = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  $env:DIRIGENT_WINDOWS_FILE_NAME" | Set-Content -Path "$artifact.sha256" -Encoding ascii
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -205,6 +217,7 @@ jobs:
     env:
       DIRIGENT_API_URL: ${{ vars.DIRIGENT_API_URL || 'https://dirigent.sebba.dev' }}
       DIRIGENT_PUBLISH_TOKEN: ${{ secrets.DIRIGENT_PUBLISH_TOKEN }}
+      DIRIGENT_WINDOWS_FILE_NAME: ${{ needs.prepare.outputs.windows_file_name }}
 
     steps:
       - name: Download Windows artifact
@@ -225,11 +238,12 @@ jobs:
           jq -n \
             --arg version '${{ needs.prepare.outputs.version }}' \
             --arg commit '${{ needs.prepare.outputs.commit }}' \
+            --arg windows_file_name "$DIRIGENT_WINDOWS_FILE_NAME" \
             '{
               version: $version,
               commit: $commit,
               artifacts: [
-                { target: "x86_64-pc-windows-msvc", file_name: "dirigent.exe" },
+                { target: "x86_64-pc-windows-msvc", file_name: $windows_file_name },
                 { target: "x86_64-arch-linux", file_name: "dirigent" }
               ]
             }' > manifest.json
@@ -240,6 +254,6 @@ jobs:
           curl --fail-with-body --show-error \
             -H "Authorization: Bearer $DIRIGENT_PUBLISH_TOKEN" \
             -F 'manifest=@manifest.json;type=application/json' \
-            -F 'x86_64-pc-windows-msvc=@dist/windows/dirigent.exe;filename=dirigent.exe' \
+            -F "x86_64-pc-windows-msvc=@dist/windows/$DIRIGENT_WINDOWS_FILE_NAME;filename=$DIRIGENT_WINDOWS_FILE_NAME" \
             -F 'x86_64-arch-linux=@dist/arch-linux/dirigent;filename=dirigent' \
             "$DIRIGENT_API_URL/api/v0/version/${{ needs.prepare.outputs.channel }}"
