@@ -1,6 +1,15 @@
 //! Configures rolling diagnostics and panic reporting.
 
-use std::{fs, io, panic};
+use std::{
+    backtrace::Backtrace,
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    panic,
+    path::Path,
+    sync::Mutex,
+    thread,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tracing::{Event, Subscriber, field::Visit};
 use tracing_appender::{
@@ -19,6 +28,7 @@ use crate::platform;
 // cannot act on: optional D-Bus services may be absent, and inotify may report that a
 // deleted child watch was already removed by the kernel.
 const DEFAULT_FILTER: &str = "warn,dirigent=info,zbus::proxy=error,notify::inotify=error";
+const CRASH_LOG_FILE_NAME: &str = "dirigent-crash.log";
 
 #[derive(Clone, Copy)]
 struct ExpectedNoiseFilter;
@@ -84,6 +94,11 @@ pub(crate) fn initialize() -> Result<LoggingGuard, String> {
             )
         })?;
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    let crash_log_path = directory.join(CRASH_LOG_FILE_NAME);
+    let (crash_file, crash_file_error) = match open_crash_file(&directory) {
+        Ok(file) => (Some(file), None),
+        Err(error) => (None, Some(error)),
+    };
 
     tracing_subscriber::registry()
         .with(
@@ -103,14 +118,29 @@ pub(crate) fn initialize() -> Result<LoggingGuard, String> {
         .try_init()
         .map_err(|error| format!("could not install tracing subscriber: {error}"))?;
 
-    install_panic_hook();
-    tracing::info!(log_directory = %directory.display(), "logging initialized");
+    install_panic_hook(crash_file);
+    if let Some(error) = crash_file_error {
+        tracing::warn!(
+            path = %crash_log_path.display(),
+            %error,
+            "synchronous crash logging is unavailable"
+        );
+    }
+    tracing::info!(
+        log_directory = %directory.display(),
+        crash_log = %crash_log_path.display(),
+        "logging initialized"
+    );
     Ok(LoggingGuard {
         _file_guard: file_guard,
     })
 }
 
 pub(crate) fn initialize_console() {
+    let crash_file = platform::logs_directory().ok().and_then(|directory| {
+        fs::create_dir_all(&directory).ok()?;
+        open_crash_file(&directory).ok()
+    });
     let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
@@ -120,17 +150,52 @@ pub(crate) fn initialize_console() {
         )
         .with(env_filter())
         .try_init();
-    install_panic_hook();
+    install_panic_hook(crash_file);
 }
 
 fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER))
 }
 
-fn install_panic_hook() {
+fn open_crash_file(directory: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join(CRASH_LOG_FILE_NAME))
+}
+
+fn install_panic_hook(crash_file: Option<File>) {
+    let crash_file = crash_file.map(Mutex::new);
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
+        if let Some(crash_file) = crash_file.as_ref() {
+            write_panic_report(crash_file, panic_info);
+        }
         tracing::error!(panic = %panic_info, "application panicked");
         previous_hook(panic_info);
     }));
+}
+
+fn write_panic_report(crash_file: &Mutex<File>, panic_info: &panic::PanicHookInfo<'_>) {
+    let timestamp_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    let thread = thread::current();
+    let mut file = match crash_file.lock() {
+        Ok(file) => file,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = writeln!(
+        file,
+        "timestamp_unix_ms={timestamp_unix_ms} thread={:?} thread_id={:?} {panic_info}",
+        thread.name().unwrap_or("<unnamed>"),
+        thread.id(),
+    );
+    let _ = file.flush();
+    let _ = file.sync_data();
+
+    let backtrace = Backtrace::force_capture();
+    let _ = writeln!(file, "backtrace:\n{backtrace}\n");
+    let _ = file.flush();
+    let _ = file.sync_data();
 }

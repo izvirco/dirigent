@@ -109,5 +109,6 @@ fn main() -> std::process::ExitCode {
 
         cx.activate(true);
     });
+    tracing::info!("application exited normally");
     std::process::ExitCode::SUCCESS
 }
