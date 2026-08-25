@@ -49,7 +49,7 @@ use crate::{
     math::{MathRenderKey, MathRenderState, MathRenderTask},
     model::{
         CodexUsage, CodexUsageWindow, ContextUsage, Harness, HarnessStatus, Id, ManagedWorkspace,
-        Message, MessageRole, PiProcessState, Project, RetryStatus, WorkspaceState,
+        Message, MessageRole, PiProcessState, Project, RetryStatus, SessionStats, WorkspaceState,
     },
     platform,
     rpc::{PiProcess, RuntimeEvent, RuntimeEventKind, RuntimeTarget},

@@ -164,7 +164,7 @@ impl Dirigent {
             }
             "agent_settled" => {
                 let changed_message = self.settle_harness(index);
-                self.request_context_usage(index);
+                self.request_session_stats(index);
                 self.request_entries(index);
                 changed_message
             }
@@ -174,12 +174,13 @@ impl Dirigent {
             }
             "compaction_end" => {
                 let changed_message = self.handle_compaction_end(index, &value);
-                self.request_context_usage(index);
+                self.request_session_stats(index);
+                self.request_entries(index);
                 changed_message
             }
             "message_end" => {
                 let changed_message = self.handle_message_end(index, &value);
-                self.request_context_usage(index);
+                self.request_session_stats(index);
                 changed_message
             }
             "message_update" => self.handle_message_update(index, &value),
@@ -849,7 +850,7 @@ impl Dirigent {
                 self.cache_model_thinking_levels(project_id, &model);
             }
             Some("get_session_stats") => {
-                self.harnesses[index].context_usage = parse_context_usage(value);
+                self.harnesses[index].session_stats = parse_session_stats(value);
             }
             Some("set_model") => {
                 let model = value.get("data").unwrap_or(&Value::Null);
@@ -860,7 +861,7 @@ impl Dirigent {
                     self.harnesses[index].model = Some(format!("{provider}/{id}"));
                 }
                 self.cache_harness_state(index);
-                self.request_context_usage(index);
+                self.request_session_stats(index);
                 self.request_thinking_levels(index);
             }
             Some("set_thinking_level") => {

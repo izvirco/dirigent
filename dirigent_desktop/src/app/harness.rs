@@ -614,7 +614,7 @@ impl Dirigent {
     pub(super) fn finish_harness_startup(&mut self, index: usize) {
         self.harnesses[index].startup_settings_pending = false;
         self.send_value(index, json!({"id":"dirigent-state","type":"get_state"}));
-        self.request_context_usage(index);
+        self.request_session_stats(index);
         if !self.harnesses[index].loaded_messages {
             self.request_entries(index);
         }
@@ -635,7 +635,7 @@ impl Dirigent {
             true
         }
     }
-    pub(super) fn request_context_usage(&mut self, index: usize) {
+    pub(super) fn request_session_stats(&mut self, index: usize) {
         self.send_value(index, json!({"type":"get_session_stats"}));
     }
     pub(super) fn request_entries(&mut self, index: usize) {

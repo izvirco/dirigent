@@ -587,6 +587,18 @@ pub(crate) struct ContextUsage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SessionStats {
+    pub(crate) input_tokens: u64,
+    pub(crate) output_tokens: u64,
+    pub(crate) cache_read_tokens: u64,
+    pub(crate) cache_write_tokens: u64,
+    pub(crate) user_messages: u64,
+    pub(crate) assistant_messages: u64,
+    pub(crate) cost: f64,
+    pub(crate) context_usage: Option<ContextUsage>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CodexUsageWindow {
     pub(crate) used_percent: f64,
     pub(crate) resets_at: Option<u64>,
@@ -624,7 +636,7 @@ pub(crate) struct Harness {
     pub(crate) thinking_level: Option<String>,
     pub(crate) composer_draft: String,
     pub(crate) composer_draft_images: Vec<AttachedImage>,
-    pub(crate) context_usage: Option<ContextUsage>,
+    pub(crate) session_stats: Option<SessionStats>,
     pub(crate) queued_messages: Vec<Message>,
     pub(crate) steering_queue: Vec<String>,
     pub(crate) follow_up_queue: Vec<String>,
@@ -670,7 +682,7 @@ impl Harness {
             thinking_level: None,
             composer_draft: String::new(),
             composer_draft_images: Vec::new(),
-            context_usage: None,
+            session_stats: None,
             error: None,
             process: None,
             process_generation: 0,
@@ -759,7 +771,7 @@ impl Harness {
             thinking_level: None,
             composer_draft: String::new(),
             composer_draft_images: Vec::new(),
-            context_usage: None,
+            session_stats: None,
             error: None,
             process: None,
             process_generation: 0,

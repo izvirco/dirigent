@@ -4,21 +4,107 @@ use std::time::Duration;
 
 use gpui::{
     Animation, AnimationExt as _, AnyElement, Context, Entity, Focusable, IntoElement, ObjectFit,
-    StyledImage, Transformation, Window, deferred, div, img, percentage, prelude::*, px, radians,
-    rgba, svg,
+    Render, StyledImage, Transformation, Window, deferred, div, img, percentage, prelude::*, px,
+    radians, rgba, svg,
 };
 
 use crate::{
     app::{ComposerDropdown, Dirigent},
-    model::{ContextUsage, HarnessStatus, PiProcessState, WorkspaceBackend, WorkspaceState},
+    model::{
+        ContextUsage, HarnessStatus, PiProcessState, SessionStats, WorkspaceBackend, WorkspaceState,
+    },
     text_input::TextInput,
-    theme::{bg, blue, border, muted, orange, red, rgb, surface, surface_hover, theme_text},
+    theme::{
+        bg, blue, border, muted, orange, popup_bg, red, rgb, surface, surface_hover, theme_text,
+    },
 };
 
 fn format_context_usage(usage: ContextUsage) -> String {
     let used = usage.used_tokens / 1_000;
     let total = usage.context_window / 1_000;
     format!("{used}k/{total}k")
+}
+
+fn format_scaled_tokens(value: f64, suffix: &str) -> String {
+    let value = format!("{value:.1}");
+    let value = value.strip_suffix(".0").unwrap_or(&value);
+    format!("{value}{suffix}")
+}
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 10_000 {
+        format_scaled_tokens(tokens as f64 / 1_000.0, "k")
+    } else if tokens < 1_000_000 {
+        format!("{:.0}k", tokens as f64 / 1_000.0)
+    } else if tokens < 10_000_000 {
+        format_scaled_tokens(tokens as f64 / 1_000_000.0, "M")
+    } else {
+        format!("{:.0}M", tokens as f64 / 1_000_000.0)
+    }
+}
+
+fn format_message_count(count: u64, role: &str) -> String {
+    let suffix = if count == 1 { "" } else { "s" };
+    format!("{count} {role} message{suffix}")
+}
+
+fn format_session_stats(stats: SessionStats, compaction_count: usize) -> [String; 6] {
+    let input_tokens = stats
+        .input_tokens
+        .saturating_add(stats.cache_read_tokens)
+        .saturating_add(stats.cache_write_tokens);
+    let cache_percent = if input_tokens == 0 {
+        0.0
+    } else {
+        stats.cache_read_tokens as f64 / input_tokens as f64 * 100.0
+    };
+    [
+        format!(
+            "{} in / {} out",
+            format_token_count(input_tokens),
+            format_token_count(stats.output_tokens),
+        ),
+        format!(
+            "{} cached ({cache_percent:.0}%)",
+            format_token_count(stats.cache_read_tokens),
+        ),
+        format_message_count(stats.user_messages, "user"),
+        format_message_count(stats.assistant_messages, "assistant"),
+        format!(
+            "{compaction_count} compaction{}",
+            if compaction_count == 1 { "" } else { "s" }
+        ),
+        format!("${:.2}", stats.cost),
+    ]
+}
+
+struct SessionStatsTooltip {
+    stats: SessionStats,
+    compaction_count: usize,
+}
+
+impl Render for SessionStatsTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(border()))
+            .bg(rgb(popup_bg()))
+            .shadow_lg()
+            .text_xs()
+            .text_color(rgb(theme_text()))
+            .children(
+                format_session_stats(self.stats, self.compaction_count)
+                    .map(|line| div().whitespace_nowrap().child(line)),
+            )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -643,7 +729,8 @@ impl Dirigent {
         input: Entity<TextInput>,
         model: &str,
         thinking: &str,
-        context_usage: Option<ContextUsage>,
+        session_stats: Option<SessionStats>,
+        compaction_count: usize,
         queue_state: Option<String>,
         working: bool,
         creating: bool,
@@ -654,6 +741,11 @@ impl Dirigent {
     ) -> AnyElement {
         let focused = input.focus_handle(cx).is_focused(window);
         let images = input.read(cx).images();
+        let context_stats = session_stats.and_then(|stats| {
+            stats
+                .context_usage
+                .map(|context_usage| (context_usage, stats))
+        });
         div()
             .relative()
             .w_full()
@@ -754,15 +846,23 @@ impl Dirigent {
                     .child(self.render_workspace_picker(cx))
                     .child(self.render_model_picker(model, cx))
                     .child(self.render_reasoning_picker(thinking, cx))
-                    .when_some(context_usage, |element, usage| {
+                    .when_some(context_stats, |element, (usage, stats)| {
                         element.child(
                             div()
+                                .id("context-usage")
                                 .h(px(26.0))
                                 .px_2()
                                 .flex()
                                 .items_center()
                                 .text_xs()
                                 .text_color(rgb(muted()))
+                                .tooltip(move |_, cx| {
+                                    cx.new(|_| SessionStatsTooltip {
+                                        stats,
+                                        compaction_count,
+                                    })
+                                    .into()
+                                })
                                 .child(format_context_usage(usage)),
                         )
                     })
@@ -899,7 +999,18 @@ impl Dirigent {
         let thinking = harness
             .and_then(|harness| harness.thinking_level.clone())
             .unwrap_or_else(|| "loading".into());
-        let context_usage = harness.and_then(|harness| harness.context_usage);
+        let session_stats = harness.and_then(|harness| harness.session_stats);
+        let compaction_count = harness
+            .and_then(|harness| harness.cached_entries.as_deref())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.get("type").and_then(|value| value.as_str()) == Some("compaction")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
         let queue_state = harness.and_then(|harness| {
             format_queue_state(harness.steering_queue.len(), harness.follow_up_queue.len())
         });
@@ -920,7 +1031,8 @@ impl Dirigent {
                 composer_input,
                 &model,
                 &thinking,
-                context_usage,
+                session_stats,
+                compaction_count,
                 queue_state,
                 working,
                 false,
@@ -972,6 +1084,7 @@ impl Dirigent {
                         &model,
                         &thinking,
                         None,
+                        0,
                         None,
                         false,
                         true,
@@ -981,5 +1094,36 @@ impl Dirigent {
                         cx,
                     )),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn formats_session_stats_for_the_composer() {
+        let stats = SessionStats {
+            input_tokens: 130_000,
+            output_tokens: 15_000,
+            cache_read_tokens: 1_770_000,
+            cache_write_tokens: 0,
+            user_messages: 2,
+            assistant_messages: 38,
+            cost: 2.00,
+            context_usage: None,
+        };
+
+        assert_eq!(
+            format_session_stats(stats, 3),
+            [
+                "1.9M in / 15k out",
+                "1.8M cached (93%)",
+                "2 user messages",
+                "38 assistant messages",
+                "3 compactions",
+                "$2.00",
+            ]
+        );
     }
 }

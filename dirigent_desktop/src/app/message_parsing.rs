@@ -47,11 +47,24 @@ pub(super) fn parse_available_model(value: &Value) -> Option<AvailableModel> {
     })
 }
 
-pub(super) fn parse_context_usage(value: &Value) -> Option<ContextUsage> {
-    let context_usage = value.pointer("/data/contextUsage")?;
-    Some(ContextUsage {
-        used_tokens: context_usage.get("tokens")?.as_u64()?,
-        context_window: context_usage.get("contextWindow")?.as_u64()?,
+pub(super) fn parse_session_stats(value: &Value) -> Option<SessionStats> {
+    let data = value.get("data")?;
+    let tokens = data.get("tokens")?;
+    let context_usage = data.get("contextUsage").and_then(|usage| {
+        Some(ContextUsage {
+            used_tokens: usage.get("tokens")?.as_u64()?,
+            context_window: usage.get("contextWindow")?.as_u64()?,
+        })
+    });
+    Some(SessionStats {
+        input_tokens: tokens.get("input")?.as_u64()?,
+        output_tokens: tokens.get("output")?.as_u64()?,
+        cache_read_tokens: tokens.get("cacheRead")?.as_u64()?,
+        cache_write_tokens: tokens.get("cacheWrite")?.as_u64()?,
+        user_messages: data.get("userMessages")?.as_u64()?,
+        assistant_messages: data.get("assistantMessages")?.as_u64()?,
+        cost: data.get("cost")?.as_f64()?,
+        context_usage,
     })
 }
 
@@ -654,5 +667,78 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
             Some(message)
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_session_stats() {
+        let value = json!({
+            "data": {
+                "userMessages": 5,
+                "assistantMessages": 12,
+                "tokens": {
+                    "input": 10_000,
+                    "output": 2_000,
+                    "cacheRead": 30_000,
+                    "cacheWrite": 5_000
+                },
+                "cost": 123.12,
+                "contextUsage": {
+                    "tokens": 39_000,
+                    "contextWindow": 272_000,
+                    "percent": 14.3
+                }
+            }
+        });
+
+        assert_eq!(
+            parse_session_stats(&value),
+            Some(SessionStats {
+                input_tokens: 10_000,
+                output_tokens: 2_000,
+                cache_read_tokens: 30_000,
+                cache_write_tokens: 5_000,
+                user_messages: 5,
+                assistant_messages: 12,
+                cost: 123.12,
+                context_usage: Some(ContextUsage {
+                    used_tokens: 39_000,
+                    context_window: 272_000,
+                }),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_stats_when_context_usage_is_unknown() {
+        let value = json!({
+            "data": {
+                "userMessages": 1,
+                "assistantMessages": 2,
+                "tokens": {
+                    "input": 100,
+                    "output": 20,
+                    "cacheRead": 0,
+                    "cacheWrite": 0
+                },
+                "cost": 0.01,
+                "contextUsage": {
+                    "tokens": null,
+                    "contextWindow": 200_000,
+                    "percent": null
+                }
+            }
+        });
+
+        assert_eq!(
+            parse_session_stats(&value)
+                .expect("stats should parse")
+                .context_usage,
+            None
+        );
     }
 }
