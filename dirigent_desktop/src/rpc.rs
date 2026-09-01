@@ -99,6 +99,9 @@ impl PiProcess {
         events: Sender<RuntimeEvent>,
     ) -> Result<Self, String> {
         let mut command = platform::pi_command(nix_enabled)?;
+        // npm installs Pi as a .cmd shim on Windows, where batch arguments cannot
+        // contain line breaks. Initial titles may come from multiline prompts.
+        let session_name = single_line_session_name(session_name);
         command
             .arg("--mode")
             .arg("rpc")
@@ -232,6 +235,14 @@ fn read_stdout(target: RuntimeTarget, stdout: impl Read, events: Sender<RuntimeE
         }
     }
     let _ = events.send_blocking(RuntimeEvent::new(RuntimeEventKind::Exited { target }));
+}
+
+fn single_line_session_name(name: &str) -> String {
+    name.split(['\r', '\n'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn read_stderr(target: RuntimeTarget, stderr: impl Read, events: Sender<RuntimeEvent>) {
