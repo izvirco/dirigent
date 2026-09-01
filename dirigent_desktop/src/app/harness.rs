@@ -218,12 +218,28 @@ impl Dirigent {
         let harness = &self.harnesses[index];
         let (Some(session_file), Some(entries)) = (
             harness.session_file.as_deref(),
-            harness.cached_entries.as_deref(),
+            harness.cached_entries.as_ref(),
         ) else {
             return;
         };
+        if let Err(error) = cache.save_entries(
+            session_file,
+            Arc::clone(entries),
+            harness.cached_leaf_id.as_deref(),
+        ) {
+            self.report_cache_error(error);
+        }
+    }
+    pub(super) fn cache_harness_entries_incremental(&mut self, index: usize, entries: Vec<Value>) {
+        let Some(cache) = self.session_cache.as_ref() else {
+            return;
+        };
+        let harness = &self.harnesses[index];
+        let Some(session_file) = harness.session_file.as_deref() else {
+            return;
+        };
         if let Err(error) =
-            cache.save_entries(session_file, entries, harness.cached_leaf_id.as_deref())
+            cache.append_entries(session_file, entries, harness.cached_leaf_id.as_deref())
         {
             self.report_cache_error(error);
         }
@@ -425,6 +441,20 @@ impl Dirigent {
         self.conversation_list_message_count = new_message_count;
         self.conversation_list_queued_count = new_queued_count;
         self.conversation_list_working = new_working;
+    }
+    pub(super) fn sync_replaced_conversation_tail(
+        &mut self,
+        harness_index: usize,
+        rebuild_from_message: usize,
+    ) {
+        if self.selected_harness != Some(self.harnesses[harness_index].id) {
+            return;
+        }
+        self.sync_conversation_render_cache(rebuild_from_message);
+        let harness = &self.harnesses[harness_index];
+        self.conversation_list_message_count = harness.messages.len();
+        self.conversation_list_queued_count = harness.queued_messages.len();
+        self.conversation_list_working = harness.status == HarnessStatus::Working;
     }
     pub(crate) fn scroll_conversation_to_fraction(&mut self, fraction: f32) {
         let max_offset = self.conversation_list.max_offset_for_scrollbar().y;

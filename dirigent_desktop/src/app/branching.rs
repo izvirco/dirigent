@@ -100,7 +100,7 @@ impl Dirigent {
             self.harnesses[index]
                 .cached_entries
                 .as_deref()
-                .unwrap_or_default(),
+                .map_or(&[][..], Vec::as_slice),
             &entry_id,
             fallback_model,
             fallback_thinking,
@@ -287,7 +287,7 @@ impl Dirigent {
             && self.harnesses[source_index]
                 .cached_entries
                 .as_deref()
-                .unwrap_or_default()
+                .map_or(&[][..], Vec::as_slice)
                 .iter()
                 .find(|entry| entry.get("id").and_then(Value::as_str) == Some(entry_id.as_str()))
                 .is_some_and(|entry| entry.get("parentId").is_none_or(Value::is_null));
@@ -536,21 +536,30 @@ impl Dirigent {
                 let parent_id = self.harnesses[index]
                     .cached_entries
                     .as_deref()
-                    .unwrap_or_default()
+                    .map_or(&[][..], Vec::as_slice)
                     .iter()
                     .find(|entry| {
                         entry.get("id").and_then(Value::as_str) == Some(pending.entry_id.as_str())
                     })
                     .and_then(|entry| entry.get("parentId").and_then(Value::as_str))
                     .map(str::to_string);
-                self.harnesses[index].cached_leaf_id = parent_id;
-                self.harnesses[index].messages = parse_entries(
-                    self.harnesses[index]
-                        .cached_entries
-                        .as_deref()
-                        .unwrap_or_default(),
-                    self.harnesses[index].cached_leaf_id.as_deref(),
-                );
+                self.harnesses[index].cached_leaf_id = parent_id.clone();
+                if let Some(entries) = self.harnesses[index]
+                    .cached_entries
+                    .as_ref()
+                    .map(Arc::clone)
+                {
+                    self.queue_session_rebuild(
+                        index,
+                        entries,
+                        parent_id,
+                        Some(self.harnesses[index].process_generation),
+                        "branch_navigation",
+                        false,
+                        false,
+                        cx,
+                    );
+                }
                 self.request_entries(index);
                 self.send_pending_edit_model(index);
                 true
@@ -589,7 +598,7 @@ impl Dirigent {
                     self.harnesses[index]
                         .cached_entries
                         .as_deref()
-                        .unwrap_or_default()
+                        .map_or(&[][..], Vec::as_slice)
                         .iter()
                         .find(|entry| {
                             entry.get("id").and_then(Value::as_str)
@@ -598,13 +607,10 @@ impl Dirigent {
                         .and_then(|entry| entry.get("parentId").and_then(Value::as_str))
                         .map(str::to_string)
                 };
-                let entries = entries_through_leaf(
-                    self.harnesses[index]
-                        .cached_entries
-                        .as_deref()
-                        .unwrap_or_default(),
-                    leaf_id.as_deref(),
-                );
+                let source_entries = self.harnesses[index]
+                    .cached_entries
+                    .as_ref()
+                    .map(Arc::clone);
                 // Pi writes the fork while the source process owns the original session. Stop
                 // that process before the target opens the newly reported session file.
                 self.harnesses[index].process.take();
@@ -619,17 +625,8 @@ impl Dirigent {
                     return true;
                 };
                 self.harnesses[target_index].session_file = Some(session_file);
-                self.harnesses[target_index].cached_entries = Some(entries);
-                self.harnesses[target_index].cached_leaf_id = leaf_id;
-                self.prune_turn_diffs_to_active_branch(target_index);
-                self.harnesses[target_index].messages = parse_entries(
-                    self.harnesses[target_index]
-                        .cached_entries
-                        .as_deref()
-                        .unwrap_or_default(),
-                    self.harnesses[target_index].cached_leaf_id.as_deref(),
-                );
-                self.harnesses[target_index].loaded_messages = true;
+                self.harnesses[target_index].cached_leaf_id = leaf_id.clone();
+                self.harnesses[target_index].loaded_messages = source_entries.is_none();
                 self.harnesses[target_index].status = HarnessStatus::Stopped;
                 self.selected_project = Some(self.harnesses[target_index].project_id);
                 self.selected_harness = Some(target_harness_id);
@@ -637,9 +634,20 @@ impl Dirigent {
                 self.focus_input = true;
                 self.keyboard_mode = KeyboardMode::Input;
                 self.persist_composer_draft(target_harness_id, cx);
-                self.cache_harness_entries(target_index);
                 self.reset_conversation_list(target_index);
                 self.persist();
+                if let Some(entries) = source_entries {
+                    self.queue_session_rebuild(
+                        target_index,
+                        entries,
+                        leaf_id,
+                        None,
+                        "fork",
+                        true,
+                        true,
+                        cx,
+                    );
+                }
                 true
             }
             _ => false,

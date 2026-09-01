@@ -2,6 +2,63 @@
 
 use super::*;
 
+struct ResponseTiming {
+    started_at: Instant,
+    harness_id: Id,
+    command: String,
+    request_id: String,
+    outcome: &'static str,
+    entry_extract: Duration,
+    canonical_update: Duration,
+    cache_queue: Duration,
+    conversation_sync: Duration,
+    conversation_synced: bool,
+}
+
+impl ResponseTiming {
+    fn new(harness_id: Id, value: &Value) -> Self {
+        Self {
+            started_at: Instant::now(),
+            harness_id,
+            command: value
+                .get("command")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            request_id: value
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string(),
+            outcome: "handled",
+            entry_extract: Duration::ZERO,
+            canonical_update: Duration::ZERO,
+            cache_queue: Duration::ZERO,
+            conversation_sync: Duration::ZERO,
+            conversation_synced: false,
+        }
+    }
+
+    fn log(self) {
+        let total = self.started_at.elapsed();
+        let measured =
+            self.entry_extract + self.canonical_update + self.cache_queue + self.conversation_sync;
+        tracing::info!(
+            harness_id = self.harness_id,
+            command = self.command,
+            request_id = self.request_id,
+            outcome = self.outcome,
+            total_us = duration_us(total),
+            entry_extract_us = duration_us(self.entry_extract),
+            canonical_update_us = duration_us(self.canonical_update),
+            cache_queue_us = duration_us(self.cache_queue),
+            conversation_sync_us = duration_us(self.conversation_sync),
+            other_us = duration_us(total.saturating_sub(measured)),
+            "assistant response timing"
+        );
+    }
+}
+
 impl Dirigent {
     pub(super) fn fail_harness(&mut self, index: usize, error: String) {
         self.pending_diff_prompts.remove(&self.harnesses[index].id);
@@ -133,20 +190,11 @@ impl Dirigent {
         let event_type = value
             .get("type")
             .and_then(Value::as_str)
-            .unwrap_or_default();
-        // Initial cached messages are replaced by Pi's canonical session tree. Capture the user's
-        // semantic scroll position before that replacement changes render-item identities.
-        let replaces_messages = event_type == "response"
-            && value.get("success").and_then(Value::as_bool) != Some(false)
-            && matches!(
-                value.get("command").and_then(Value::as_str),
-                Some("get_entries" | "get_messages")
-            )
-            && !self.harnesses[index].loaded_messages;
-        let replacement_scroll_anchor = replaces_messages
-            .then(|| self.conversation_scroll_anchor(index))
-            .flatten();
-        let changed_message = match event_type {
+            .unwrap_or_default()
+            .to_string();
+        let mut response_timing =
+            (event_type == "response").then(|| ResponseTiming::new(harness_id, &value));
+        let changed_message = match event_type.as_str() {
             "agent_start" => {
                 self.begin_turn_diff(index, "Agent turn");
                 self.harnesses[index].status = HarnessStatus::Working;
@@ -200,7 +248,14 @@ impl Dirigent {
             }
             "auto_retry_end" => self.handle_auto_retry_end(index, &value),
             "response" => {
-                self.handle_response(index, &value);
+                self.handle_response(
+                    index,
+                    value,
+                    response_timing
+                        .as_mut()
+                        .expect("response timing exists for response events"),
+                    cx,
+                );
                 None
             }
             "extension_error" => {
@@ -218,10 +273,14 @@ impl Dirigent {
             }
             _ => None,
         };
-        if replaces_messages && self.selected_harness == Some(self.harnesses[index].id) {
-            self.reset_conversation_list_preserving_scroll(index, replacement_scroll_anchor);
-        } else {
+        if !response_timing
+            .as_ref()
+            .is_some_and(|timing| timing.conversation_synced)
+        {
             self.sync_conversation_list(index, changed_message);
+        }
+        if let Some(timing) = response_timing {
+            timing.log();
         }
     }
     pub(super) fn handle_compaction_start(&mut self, index: usize, value: &Value) {
@@ -598,9 +657,20 @@ impl Dirigent {
             _ => {}
         }
     }
-    pub(super) fn handle_response(&mut self, index: usize, value: &Value) {
-        let command = value.get("command").and_then(Value::as_str);
-        let request_id = value.get("id").and_then(Value::as_str);
+    fn handle_response(
+        &mut self,
+        index: usize,
+        mut value: Value,
+        timing: &mut ResponseTiming,
+        cx: &mut Context<Self>,
+    ) {
+        let command_owned = value
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let request_id_owned = value.get("id").and_then(Value::as_str).map(str::to_string);
+        let command = command_owned.as_deref();
+        let request_id = request_id_owned.as_deref();
         let startup_request = self.harnesses[index].startup_settings_pending
             && matches!(
                 (request_id, command),
@@ -611,6 +681,7 @@ impl Dirigent {
                     )
             );
         if value.get("success").and_then(Value::as_bool) == Some(false) {
+            timing.outcome = "error";
             if startup_request {
                 self.harnesses[index].process.take();
                 let error = value
@@ -759,62 +830,124 @@ impl Dirigent {
                 self.request_thinking_levels(index);
             }
             Some("get_entries") => {
-                // RPC stream updates optimize responsiveness, but this session-tree response is
-                // canonical and also accounts for navigation, compaction, and external changes.
+                let extract_started = Instant::now();
                 let incoming = value
-                    .pointer("/data/entries")
-                    .and_then(Value::as_array)
-                    .cloned()
+                    .pointer_mut("/data/entries")
+                    .map(Value::take)
+                    .and_then(|entries| match entries {
+                        Value::Array(entries) => Some(entries),
+                        _ => None,
+                    })
                     .unwrap_or_default();
-                let incremental =
-                    value.get("id").and_then(Value::as_str) == Some("dirigent-entries-incremental");
-                if incremental {
-                    let entries = self.harnesses[index]
-                        .cached_entries
-                        .get_or_insert_with(Vec::new);
-                    let mut known_ids = entries
-                        .iter()
-                        .filter_map(|entry| entry.get("id")?.as_str().map(str::to_string))
-                        .collect::<HashSet<_>>();
-                    entries.extend(incoming.into_iter().filter(|entry| {
-                        entry
-                            .get("id")
-                            .and_then(Value::as_str)
-                            .is_none_or(|id| known_ids.insert(id.to_string()))
-                    }));
-                } else {
-                    self.harnesses[index].cached_entries = Some(incoming);
-                }
-                self.harnesses[index].cached_leaf_id = value
+                let leaf_id = value
                     .pointer("/data/leafId")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                self.prune_turn_diffs_to_active_branch(index);
-                let canonical_messages = parse_entries(
-                    self.harnesses[index]
-                        .cached_entries
-                        .as_deref()
-                        .unwrap_or_default(),
-                    self.harnesses[index].cached_leaf_id.as_deref(),
-                );
-                let previous_messages = std::mem::take(&mut self.harnesses[index].messages);
-                let expansion_changed = reconcile_work_group_expansion(
-                    &previous_messages,
-                    &canonical_messages,
-                    &mut self.harnesses[index].work_group_expansion,
-                );
-                self.harnesses[index].messages = canonical_messages;
-                self.harnesses[index].loaded_messages = true;
-                self.cache_harness_entries(index);
-                if expansion_changed {
-                    self.persist();
+                timing.entry_extract = extract_started.elapsed();
+                let incremental = request_id == Some("dirigent-entries-incremental")
+                    && self.harnesses[index].cached_entries.is_some()
+                    && self.harnesses[index].loaded_messages;
+
+                if incremental {
+                    let update_started = Instant::now();
+                    let old_leaf_id = self.harnesses[index].cached_leaf_id.clone();
+                    let parsed = parse_incremental_entries(
+                        &incoming,
+                        old_leaf_id.as_deref(),
+                        leaf_id.as_deref(),
+                        self.harnesses[index].canonical_model.clone(),
+                        self.harnesses[index].canonical_thinking_level.clone(),
+                    );
+                    if let Some(parsed) = parsed {
+                        let harness = &mut self.harnesses[index];
+                        let canonical_count =
+                            harness.canonical_message_count.min(harness.messages.len());
+                        let expansion_changed = reconcile_work_group_expansion_from(
+                            &harness.messages[canonical_count..],
+                            &parsed.messages,
+                            canonical_count,
+                            &mut harness.work_group_expansion,
+                        );
+                        harness.messages.truncate(canonical_count);
+                        harness.messages.extend(parsed.messages);
+                        harness.canonical_message_count = harness.messages.len();
+                        harness.canonical_model = parsed.model;
+                        harness.canonical_thinking_level = parsed.thinking_level;
+                        harness.cached_leaf_id = leaf_id;
+                        let cache_entries = incoming.clone();
+                        Arc::make_mut(
+                            harness
+                                .cached_entries
+                                .as_mut()
+                                .expect("incremental response has cached entries"),
+                        )
+                        .extend(incoming);
+                        harness.loaded_messages = true;
+                        if expansion_changed {
+                            self.persist();
+                        }
+                        timing.canonical_update = update_started.elapsed();
+                        let cache_started = Instant::now();
+                        self.cache_harness_entries_incremental(index, cache_entries);
+                        timing.cache_queue = cache_started.elapsed();
+                        let conversation_started = Instant::now();
+                        self.sync_replaced_conversation_tail(index, canonical_count);
+                        timing.conversation_sync = conversation_started.elapsed();
+                        timing.conversation_synced = true;
+                        timing.outcome = "incremental";
+                    } else {
+                        let mut entries = self.harnesses[index]
+                            .cached_entries
+                            .take()
+                            .map(Arc::unwrap_or_clone)
+                            .unwrap_or_default();
+                        entries.extend(incoming);
+                        let entries = Arc::new(entries);
+                        self.harnesses[index].cached_entries = Some(Arc::clone(&entries));
+                        self.harnesses[index].cached_leaf_id = leaf_id.clone();
+                        timing.canonical_update = update_started.elapsed();
+                        timing.outcome = "queued_recovery_rebuild";
+                        self.queue_session_rebuild(
+                            index,
+                            entries,
+                            leaf_id,
+                            Some(self.harnesses[index].process_generation),
+                            "incremental_recovery",
+                            false,
+                            true,
+                            cx,
+                        );
+                    }
+                } else {
+                    let entries = Arc::new(incoming);
+                    self.harnesses[index].cached_entries = Some(Arc::clone(&entries));
+                    self.harnesses[index].cached_leaf_id = leaf_id.clone();
+                    timing.outcome = "queued_full_rebuild";
+                    self.queue_session_rebuild(
+                        index,
+                        entries,
+                        leaf_id,
+                        Some(self.harnesses[index].process_generation),
+                        "full_response",
+                        false,
+                        true,
+                        cx,
+                    );
                 }
             }
             Some("get_messages") if !self.harnesses[index].loaded_messages => {
-                if let Some(messages) = value.pointer("/data/messages").and_then(Value::as_array) {
-                    self.harnesses[index].messages = parse_messages(messages);
-                }
-                self.harnesses[index].loaded_messages = true;
+                let extract_started = Instant::now();
+                let messages = value
+                    .pointer_mut("/data/messages")
+                    .map(Value::take)
+                    .and_then(|messages| match messages {
+                        Value::Array(messages) => Some(messages),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                timing.entry_extract = extract_started.elapsed();
+                self.queue_legacy_message_rebuild(index, messages, cx);
+                timing.outcome = "queued_legacy_rebuild";
             }
             Some("get_available_models") => {
                 let models = value
@@ -850,7 +983,7 @@ impl Dirigent {
                 self.cache_model_thinking_levels(project_id, &model);
             }
             Some("get_session_stats") => {
-                self.harnesses[index].session_stats = parse_session_stats(value);
+                self.harnesses[index].session_stats = parse_session_stats(&value);
             }
             Some("set_model") => {
                 let model = value.get("data").unwrap_or(&Value::Null);

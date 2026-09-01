@@ -203,6 +203,45 @@ impl Dirigent {
         })
         .detach();
 
+        let (cached_session_rebuild_tx, cached_session_rebuild_rx) =
+            async_channel::unbounded::<CachedSessionRebuildRequest>();
+        cx.spawn(async move |this, cx| {
+            while let Ok(request) = cached_session_rebuild_rx.recv().await {
+                if this
+                    .update(cx, |this, cx| {
+                        let Some(index) = this
+                            .harnesses
+                            .iter()
+                            .position(|harness| harness.id == request.harness_id)
+                        else {
+                            return;
+                        };
+                        let still_current = this.harnesses[index]
+                            .cached_entries
+                            .as_ref()
+                            .is_some_and(|entries| Arc::ptr_eq(entries, &request.entries));
+                        if this.harnesses[index].loaded_messages || !still_current {
+                            return;
+                        }
+                        this.queue_session_rebuild(
+                            index,
+                            request.entries,
+                            request.leaf_id,
+                            None,
+                            "thread_selection_cache",
+                            false,
+                            false,
+                            cx,
+                        );
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+
         let (workspace_event_tx, workspace_event_rx) = async_channel::unbounded();
         cx.spawn(async move |this, cx| {
             while let Ok(event) = workspace_event_rx.recv().await {
@@ -503,9 +542,7 @@ impl Dirigent {
                         }
                         harness.cached_leaf_id = cached.leaf_id;
                         if let Some(entries) = cached.entries {
-                            harness.messages =
-                                parse_entries(&entries, harness.cached_leaf_id.as_deref());
-                            harness.cached_entries = Some(entries);
+                            harness.cached_entries = Some(Arc::new(entries));
                         }
                     }
                     Ok(None) => {}
@@ -798,6 +835,9 @@ impl Dirigent {
             available_thinking_levels,
             state_database,
             session_cache,
+            cached_session_rebuilds: cached_session_rebuild_tx,
+            pending_session_rebuilds: HashMap::new(),
+            next_session_rebuild_job_id: 1,
             draft_model: None,
             draft_thinking_level: None,
             draft_nix_enabled: true,
@@ -848,6 +888,29 @@ impl Dirigent {
         })
         .detach();
 
+        if let Some((index, entries, leaf_id)) = selected_harness.and_then(|selected| {
+            let index = this
+                .harnesses
+                .iter()
+                .position(|harness| harness.id == selected)?;
+            let harness = &this.harnesses[index];
+            Some((
+                index,
+                Arc::clone(harness.cached_entries.as_ref()?),
+                harness.cached_leaf_id.clone(),
+            ))
+        }) {
+            this.queue_session_rebuild(
+                index,
+                entries,
+                leaf_id,
+                None,
+                "startup_cache",
+                false,
+                false,
+                cx,
+            );
+        }
         if let Some(project_id) = selected_project {
             this.refresh_repository(project_id);
         }

@@ -588,6 +588,7 @@ impl Dirigent {
         self.path_completion = None;
         self.draft_model = None;
         self.draft_thinking_level = None;
+        self.request_cached_session_rebuild(index);
         self.reset_conversation_list(index);
         self.persist_last_used_harness();
         self.refresh_repository(self.harnesses[index].project_id);

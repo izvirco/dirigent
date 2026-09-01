@@ -729,7 +729,7 @@ impl Dirigent {
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
             .expect("selected harness must exist");
         let empty = harness.messages.is_empty() && harness.queued_messages.is_empty();
-        let empty_label = if harness.loaded_messages || harness.cached_entries.is_some() {
+        let empty_label = if harness.loaded_messages {
             "This pi session has no messages yet."
         } else {
             "Loading conversation…"

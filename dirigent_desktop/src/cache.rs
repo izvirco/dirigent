@@ -1,9 +1,10 @@
 //! Caches Pi sessions, drafts, models, and reasoning levels in SQLite.
 
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::mpsc,
+    sync::{Arc, mpsc},
     thread,
 };
 
@@ -118,14 +119,28 @@ impl SessionCache {
     pub(crate) fn save_entries(
         &self,
         session_file: &Path,
-        entries: &[Value],
+        entries: Arc<Vec<Value>>,
         leaf_id: Option<&str>,
     ) -> Result<(), String> {
         let session_file = session_file.to_path_buf();
-        let entries = entries.to_vec();
         let leaf_id = leaf_id.map(str::to_string);
         self.execute(move |database| {
             database.save_entries(&session_file, &entries, leaf_id.as_deref())
+        })
+    }
+
+    /// Persists only the newly received entries on the UI thread. The cache worker merges and
+    /// serializes the complete snapshot.
+    pub(crate) fn append_entries(
+        &self,
+        session_file: &Path,
+        entries: Vec<Value>,
+        leaf_id: Option<&str>,
+    ) -> Result<(), String> {
+        let session_file = session_file.to_path_buf();
+        let leaf_id = leaf_id.map(str::to_string);
+        self.execute(move |database| {
+            database.append_entries(&session_file, entries, leaf_id.as_deref())
         })
     }
 
@@ -344,6 +359,42 @@ impl CacheDatabase {
         Ok(())
     }
 
+    fn append_entries(
+        &self,
+        session_file: &Path,
+        incoming: Vec<Value>,
+        leaf_id: Option<&str>,
+    ) -> Result<(), String> {
+        let entries_json = self
+            .connection
+            .query_row(
+                "SELECT entries_json FROM session_cache WHERE session_file = ?1",
+                params![path_key(session_file)],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()
+            .map_err(|error| format!("could not read cached session entries: {error}"))?
+            .flatten();
+        let mut entries = entries_json
+            .map(|bytes| {
+                serde_json::from_slice::<Vec<Value>>(&bytes)
+                    .map_err(|error| format!("could not decode cached session entries: {error}"))
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let mut known_ids = entries
+            .iter()
+            .filter_map(|entry| entry.get("id")?.as_str().map(str::to_string))
+            .collect::<HashSet<_>>();
+        entries.extend(incoming.into_iter().filter(|entry| {
+            entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| known_ids.insert(id.to_string()))
+        }));
+        self.save_entries(session_file, &entries, leaf_id)
+    }
+
     fn save_session_state(
         &self,
         session_file: &Path,
@@ -477,4 +528,38 @@ fn path_key(path: &Path) -> Vec<u8> {
 
 fn cache_path() -> Result<PathBuf, String> {
     platform::cache_path()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn appends_only_new_session_entries() {
+        let database = CacheDatabase::initialize(
+            Connection::open_in_memory().expect("in-memory cache should open"),
+        )
+        .expect("cache should initialize");
+        let session = Path::new("session.jsonl");
+        database
+            .save_entries(session, &[json!({"id": "one"})], Some("one"))
+            .expect("initial entries should save");
+        database
+            .append_entries(
+                session,
+                vec![json!({"id": "one"}), json!({"id": "two"})],
+                Some("two"),
+            )
+            .expect("incremental entries should append");
+
+        let cached = database
+            .load_session(session)
+            .expect("cache should load")
+            .expect("session should exist");
+        let entries = cached.entries.expect("entries should exist");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].get("id").and_then(Value::as_str), Some("two"));
+        assert_eq!(cached.leaf_id.as_deref(), Some("two"));
+    }
 }

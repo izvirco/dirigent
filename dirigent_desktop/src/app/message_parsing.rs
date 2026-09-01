@@ -305,81 +305,58 @@ pub(super) fn push_assistant_block(
     messages.push(Message::new(role, text).with_entry_id(entry_id));
 }
 
-/// Reconstructs the active root-to-leaf path from Pi's flat session-tree entries.
-pub(super) fn entries_through_leaf(values: &[Value], leaf_id: Option<&str>) -> Vec<Value> {
-    let by_id = values
-        .iter()
-        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
-        .collect::<HashMap<_, _>>();
-    let mut entries = Vec::new();
-    let mut current_id = leaf_id;
-    let mut visited = HashSet::new();
-    while let Some(id) = current_id {
-        if !visited.insert(id) {
-            break;
-        }
-        let Some(entry) = by_id.get(id).copied() else {
-            break;
-        };
-        entries.push(entry.clone());
-        current_id = entry.get("parentId").and_then(Value::as_str);
-    }
-    entries.reverse();
-    entries
+pub(super) struct ParsedEntries {
+    pub(super) messages: Vec<Message>,
+    pub(super) model: Option<String>,
+    pub(super) thinking_level: Option<String>,
 }
 
-/// Parses only the active branch and annotates messages with settings effective at each entry.
-pub(super) fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Message> {
-    let entries_by_id = values
-        .iter()
-        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
-        .collect::<HashMap<_, _>>();
-    let mut active_entries = Vec::new();
-    let mut visited = HashSet::new();
-    let mut current_id = leaf_id;
-    while let Some(id) = current_id {
-        if !visited.insert(id) {
-            break;
-        }
-        let Some(entry) = entries_by_id.get(id).copied() else {
-            break;
-        };
-        active_entries.push(entry);
-        current_id = entry.get("parentId").and_then(Value::as_str);
-    }
-    active_entries.reverse();
+pub(super) struct EntryMessageParser {
+    messages: Vec<Message>,
+    current_model: Option<String>,
+    current_thinking_level: Option<String>,
+}
 
-    let mut messages = Vec::new();
-    let mut current_model = None;
-    let mut current_thinking_level = None;
-    for entry in active_entries {
+impl EntryMessageParser {
+    pub(super) fn new(
+        current_model: Option<String>,
+        current_thinking_level: Option<String>,
+    ) -> Self {
+        Self {
+            messages: Vec::new(),
+            current_model,
+            current_thinking_level,
+        }
+    }
+
+    pub(super) fn push(&mut self, entry: &Value) {
         match entry.get("type").and_then(Value::as_str) {
             Some("model_change") => {
-                current_model = entry
+                self.current_model = entry
                     .get("provider")
                     .and_then(Value::as_str)
                     .zip(entry.get("modelId").and_then(Value::as_str))
                     .map(|(provider, model)| format!("{provider}/{model}"));
             }
             Some("thinking_level_change") => {
-                current_thinking_level = entry
+                self.current_thinking_level = entry
                     .get("thinkingLevel")
                     .and_then(Value::as_str)
                     .map(str::to_string);
             }
             Some("message") => {
                 if let Some(message) = entry.get("message") {
-                    let first_new_message = messages.len();
+                    let first_new_message = self.messages.len();
                     push_parsed_message(
-                        &mut messages,
+                        &mut self.messages,
                         message,
                         entry.get("id").and_then(Value::as_str),
                     );
-                    for message in &mut messages[first_new_message..] {
+                    for message in &mut self.messages[first_new_message..] {
                         if message.model.is_none() {
-                            message.model = current_model.clone();
+                            message.model = self.current_model.clone();
                         }
-                        message.thinking_level = current_thinking_level.clone();
+                        message.thinking_level = self.current_thinking_level.clone();
                     }
                 }
             }
@@ -390,21 +367,83 @@ pub(super) fn parse_entries(values: &[Value], leaf_id: Option<&str>) -> Vec<Mess
                     .map(truncate_output);
                 let mut message = Message::compaction(None, summary.as_deref(), false)
                     .with_entry_id(entry.get("id").and_then(Value::as_str));
-                message.set_turn_settings(current_model.clone(), current_thinking_level.clone());
-                messages.push(message);
+                message.set_turn_settings(
+                    self.current_model.clone(),
+                    self.current_thinking_level.clone(),
+                );
+                self.messages.push(message);
             }
             _ => {}
         }
     }
-    messages
+
+    pub(super) fn finish(self) -> ParsedEntries {
+        ParsedEntries {
+            messages: self.messages,
+            model: self.current_model,
+            thinking_level: self.current_thinking_level,
+        }
+    }
 }
 
-pub(super) fn parse_messages(values: &[Value]) -> Vec<Message> {
-    let mut messages = Vec::new();
-    for value in values {
-        push_parsed_message(&mut messages, value, None);
+/// Returns the active root-to-leaf path as indexes so large JSON entries stay shared.
+pub(super) fn active_entry_indices(values: &[Value], leaf_id: Option<&str>) -> Vec<usize> {
+    let entries_by_id = values
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| Some((entry.get("id")?.as_str()?, index)))
+        .collect::<HashMap<_, _>>();
+    let mut active_entries = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_id = leaf_id;
+    while let Some(id) = current_id {
+        if !visited.insert(id) {
+            break;
+        }
+        let Some(index) = entries_by_id.get(id).copied() else {
+            break;
+        };
+        active_entries.push(index);
+        current_id = values[index].get("parentId").and_then(Value::as_str);
     }
-    messages
+    active_entries.reverse();
+    active_entries
+}
+
+/// Parses only entries between a known canonical leaf and its new descendant.
+pub(super) fn parse_incremental_entries(
+    values: &[Value],
+    ancestor_id: Option<&str>,
+    leaf_id: Option<&str>,
+    current_model: Option<String>,
+    current_thinking_level: Option<String>,
+) -> Option<ParsedEntries> {
+    if ancestor_id == leaf_id {
+        return Some(EntryMessageParser::new(current_model, current_thinking_level).finish());
+    }
+    let entries_by_id = values
+        .iter()
+        .filter_map(|entry| Some((entry.get("id")?.as_str()?, entry)))
+        .collect::<HashMap<_, _>>();
+    let mut active_entries = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current_id = leaf_id;
+    while current_id != ancestor_id {
+        let id = current_id?;
+        if !visited.insert(id) {
+            return None;
+        }
+        let entry = entries_by_id.get(id).copied()?;
+        active_entries.push(entry);
+        current_id = entry.get("parentId").and_then(Value::as_str);
+    }
+    active_entries.reverse();
+
+    let mut parser = EntryMessageParser::new(current_model, current_thinking_level);
+    for entry in active_entries {
+        parser.push(entry);
+    }
+    Some(parser.finish())
 }
 
 pub(super) fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
@@ -424,6 +463,15 @@ pub(super) fn reconcile_work_group_expansion(
     canonical: &[Message],
     expansion: &mut HashMap<String, bool>,
 ) -> bool {
+    reconcile_work_group_expansion_from(previous, canonical, 0, expansion)
+}
+
+pub(super) fn reconcile_work_group_expansion_from(
+    previous: &[Message],
+    canonical: &[Message],
+    previous_index_offset: usize,
+    expansion: &mut HashMap<String, bool>,
+) -> bool {
     let previous_users = previous
         .iter()
         .enumerate()
@@ -435,7 +483,7 @@ pub(super) fn reconcile_work_group_expansion(
         .collect::<Vec<_>>();
     let mut changed = false;
     for ((previous_index, previous), canonical) in previous_users.into_iter().zip(canonical_users) {
-        let pending_id = format!("pending:{previous_index}");
+        let pending_id = format!("pending:{}", previous_index_offset + previous_index);
         let Some(expanded) = expansion.remove(&pending_id) else {
             continue;
         };
@@ -739,6 +787,58 @@ mod tests {
                 .expect("stats should parse")
                 .context_usage,
             None
+        );
+    }
+
+    #[test]
+    fn parses_only_entries_after_the_canonical_leaf() {
+        let entries = vec![
+            json!({
+                "id": "model",
+                "parentId": "old-leaf",
+                "type": "model_change",
+                "provider": "anthropic",
+                "modelId": "claude"
+            }),
+            json!({
+                "id": "message",
+                "parentId": "model",
+                "type": "message",
+                "message": {"role": "assistant", "content": "done"}
+            }),
+        ];
+
+        let parsed = parse_incremental_entries(
+            &entries,
+            Some("old-leaf"),
+            Some("message"),
+            Some("openai/old".into()),
+            Some("high".into()),
+        )
+        .expect("new leaf should descend from the canonical leaf");
+
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].text, "done");
+        assert_eq!(
+            parsed.messages[0].model.as_deref(),
+            Some("anthropic/claude")
+        );
+        assert_eq!(parsed.messages[0].thinking_level.as_deref(), Some("high"));
+        assert_eq!(parsed.model.as_deref(), Some("anthropic/claude"));
+    }
+
+    #[test]
+    fn rejects_incremental_entries_from_another_branch() {
+        let entries = vec![json!({
+            "id": "new-leaf",
+            "parentId": "other-branch",
+            "type": "message",
+            "message": {"role": "user", "content": "hello"}
+        })];
+
+        assert!(
+            parse_incremental_entries(&entries, Some("old-leaf"), Some("new-leaf"), None, None,)
+                .is_none()
         );
     }
 }

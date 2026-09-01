@@ -9,6 +9,7 @@ mod message_parsing;
 mod path_completion;
 mod render;
 mod runtime;
+mod session;
 mod startup;
 mod update;
 mod workspace;
@@ -111,6 +112,12 @@ pub(crate) struct PathCompletion {
 enum FuzzyIndexReady {
     Project(Id),
     Workspace(String),
+}
+
+struct CachedSessionRebuildRequest {
+    harness_id: Id,
+    entries: Arc<Vec<Value>>,
+    leaf_id: Option<String>,
 }
 
 pub(crate) enum WorkspaceEvent {
@@ -595,6 +602,9 @@ pub(crate) struct Dirigent {
     available_thinking_levels: HashMap<(Id, String), Vec<String>>,
     state_database: storage::StateDatabase,
     session_cache: Option<SessionCache>,
+    cached_session_rebuilds: Sender<CachedSessionRebuildRequest>,
+    pending_session_rebuilds: HashMap<Id, u64>,
+    next_session_rebuild_job_id: u64,
     pub(crate) draft_model: Option<String>,
     pub(crate) draft_thinking_level: Option<String>,
     pub(crate) draft_nix_enabled: bool,

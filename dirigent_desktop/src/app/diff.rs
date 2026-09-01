@@ -685,27 +685,7 @@ impl Dirigent {
     }
 
     /// Drops persisted turns that no longer correspond to the active Pi session branch.
-    pub(super) fn prune_turn_diffs_to_active_branch(&mut self, index: usize) {
-        let entries = entries_through_leaf(
-            self.harnesses[index]
-                .cached_entries
-                .as_deref()
-                .unwrap_or_default(),
-            self.harnesses[index].cached_leaf_id.as_deref(),
-        );
-        // Turn records predate direct entry linkage, so normalized prompt excerpts are the stable
-        // key available for reconciling them after navigation or a fork.
-        let prompts = entries
-            .iter()
-            .filter_map(|entry| {
-                let message = entry.get("message")?;
-                (message.get("role").and_then(Value::as_str) == Some("user"))
-                    .then(|| message.get("content"))
-                    .flatten()
-                    .map(content_text)
-            })
-            .map(|prompt| diff::prompt_excerpt(&prompt))
-            .collect::<HashSet<_>>();
+    pub(super) fn prune_turn_diffs_to_prompts(&mut self, index: usize, prompts: &HashSet<String>) {
         if prompts.is_empty() {
             return;
         }
