@@ -336,6 +336,16 @@ impl Dirigent {
                 None,
                 true,
             )),
+            crate::update::UpdateState::Installing { release } => Some((
+                format!(
+                    "Installing update to {}",
+                    crate::update::display_version(release)
+                ),
+                None,
+                false,
+                None,
+                true,
+            )),
             crate::update::UpdateState::Failed { .. } => {
                 Some(("Update failed · Retry".into(), None, true, None, false))
             }

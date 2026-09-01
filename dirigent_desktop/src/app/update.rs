@@ -18,6 +18,7 @@ impl Dirigent {
                     self.update_state,
                     crate::update::UpdateState::Downloading { .. }
                         | crate::update::UpdateState::Ready { .. }
+                        | crate::update::UpdateState::Installing { .. }
                 ) {
                     return;
                 }
@@ -68,6 +69,12 @@ impl Dirigent {
                 cx.notify();
                 return;
             }
+            // Change state before launching so queued clicks cannot start a second helper and
+            // delete the staged executable while the first helper is using it.
+            self.update_state = crate::update::UpdateState::Installing {
+                release: release.clone(),
+            };
+            cx.notify();
             match crate::update::launch_updater(&path) {
                 Ok(()) => cx.quit(),
                 Err(error) => {

@@ -37,6 +37,9 @@ pub(crate) enum UpdateState {
         release: VersionResponse,
         path: PathBuf,
     },
+    Installing {
+        release: VersionResponse,
+    },
     Failed {
         release: VersionResponse,
     },
