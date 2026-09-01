@@ -149,8 +149,8 @@ pub(crate) enum KeyboardMode {
 impl KeyboardMode {
     pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Normal => "NORMAL",
-            Self::Input => "INSERT",
+            Self::Normal => "NOR",
+            Self::Input => "INS",
         }
     }
 }

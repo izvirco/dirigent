@@ -156,7 +156,7 @@ fn format_codex_usage(usage: CodexUsage) -> Option<String> {
     let mut windows = Vec::new();
     let mut push_window = |label: &str, window: CodexUsageWindow| {
         let available = (100.0 - window.used_percent).clamp(0.0, 100.0);
-        windows.push(format!("{label} {available:.0}% left"));
+        windows.push(format!("{available:.0}% {label}"));
     };
     if let Some(window) = usage.five_hour {
         push_window("5h", window);

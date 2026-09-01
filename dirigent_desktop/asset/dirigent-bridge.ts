@@ -29,7 +29,7 @@ type CommandContext = BridgeContext & {
 
 type ExtensionApi = {
   on(
-    event: "session_start" | "agent_settled",
+    event: "session_start" | "session_shutdown" | "agent_settled",
     handler: (event: unknown, ctx: BridgeContext) => void | Promise<void>,
   ): void;
   registerCommand(
@@ -49,6 +49,7 @@ type CodexUsageWindow = {
 
 const CODEX_PROVIDER = "openai-codex";
 const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
+const CODEX_USAGE_REFRESH_INTERVAL_MS = 60_000;
 
 function report(ctx: BridgeContext, value: Record<string, unknown>) {
   ctx.ui.setStatus(STATUS_KEY, JSON.stringify(value));
@@ -145,6 +146,7 @@ async function fetchCodexUsage(ctx: BridgeContext): Promise<void> {
 
 export default function (pi: ExtensionApi) {
   let usageRequest: Promise<void> | undefined;
+  let usageRefreshTimer: ReturnType<typeof setInterval> | undefined;
   const refreshUsage = (ctx: BridgeContext): Promise<void> => {
     if (usageRequest) return usageRequest;
     usageRequest = fetchCodexUsage(ctx).finally(() => {
@@ -153,7 +155,16 @@ export default function (pi: ExtensionApi) {
     return usageRequest;
   };
 
-  pi.on("session_start", (_event, ctx) => refreshUsage(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    await refreshUsage(ctx);
+    usageRefreshTimer = setInterval(() => void refreshUsage(ctx), CODEX_USAGE_REFRESH_INTERVAL_MS);
+  });
+  pi.on("session_shutdown", () => {
+    if (usageRefreshTimer) {
+      clearInterval(usageRefreshTimer);
+      usageRefreshTimer = undefined;
+    }
+  });
   pi.on("agent_settled", (_event, ctx) => refreshUsage(ctx));
 
   pi.registerCommand("dirigent-navigate", {
