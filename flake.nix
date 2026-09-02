@@ -20,18 +20,62 @@
         overlays = [ rust.overlays.default ];
       };
       rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+      rustPlatform = pkgs.makeRustPlatform {
+        cargo = rustToolchain;
+        rustc = rustToolchain;
+      };
+      runtimeLibraries = [
+        pkgs.fontconfig
+        pkgs.freetype
+        pkgs.libxkbcommon
+        pkgs.vulkan-loader
+        pkgs.wayland
+      ];
+      dirigent = rustPlatform.buildRustPackage {
+        pname = "dirigent";
+        version = "0.0.0";
+        src = pkgs.lib.cleanSource ./.;
+
+        cargoHash = "sha256-8cT8VspDIhNoqYlflZgzr4OTSNIQh2GBKOQXwz891UM=";
+        cargoBuildFlags = [
+          "--package"
+          "dirigent_desktop"
+          "--features"
+          "bundled-lilex"
+        ];
+
+        nativeBuildInputs = [
+          pkgs.patchelf
+          pkgs.pkg-config
+          pkgs.removeReferencesTo
+        ];
+        buildInputs = runtimeLibraries;
+
+        LILEX_FONT_DIR = "${pkgs.lilex}/share/fonts/truetype";
+
+        postFixup = ''
+          patchelf --add-rpath "${pkgs.lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib" "$out/bin/dirigent"
+          remove-references-to -t ${rustToolchain} "$out/bin/dirigent"
+        '';
+
+        meta = {
+          description = "Native desktop workspace for Pi coding agent sessions";
+          homepage = "https://forge.sebba.dev/izvir/dirigent";
+          mainProgram = "dirigent";
+          platforms = [ "x86_64-linux" ];
+        };
+      };
     in
     {
+      packages.${system} = {
+        default = dirigent;
+        inherit dirigent;
+      };
+
       devShells.${system}.default = pkgs.mkShell {
         nativeBuildInputs = [ pkgs.pkg-config ];
 
-        buildInputs = [
-          pkgs.fontconfig
-          pkgs.freetype
-          pkgs.libxkbcommon
-          pkgs.vulkan-loader
-          pkgs.wayland
-        ];
+        buildInputs = runtimeLibraries;
 
         packages = [
           rustToolchain
