@@ -11,6 +11,7 @@ mod render;
 mod runtime;
 mod session;
 mod startup;
+#[cfg(feature = "self-update")]
 mod update;
 mod workspace;
 
@@ -566,7 +567,9 @@ pub(crate) struct Dirigent {
     pub(crate) extension_input: Entity<TextInput>,
     pub(crate) pending_dialog: Option<PendingDialog>,
     pub(crate) banner: Option<String>,
+    #[cfg(feature = "self-update")]
     pub(crate) update_state: crate::update::UpdateState,
+    #[cfg(feature = "self-update")]
     update_events: Sender<crate::update::UpdateEvent>,
     config_error: Option<String>,
     pub(crate) font: SharedString,

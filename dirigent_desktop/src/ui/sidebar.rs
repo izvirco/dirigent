@@ -239,6 +239,7 @@ impl Dirigent {
                         .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.about_open = true;
+                            #[cfg(feature = "self-update")]
                             this.check_for_updates();
                             this.sidebar_menu = None;
                             this.enter_normal_mode();
@@ -302,6 +303,7 @@ impl Dirigent {
             mouse_x: window.mouse_position().x,
         };
         let codex_usage = self.codex_usage.and_then(format_codex_usage);
+        #[cfg(feature = "self-update")]
         let update_action = match &self.update_state {
             crate::update::UpdateState::Available(release) => Some((
                 format!("Update to {}", crate::update::display_version(release)),
@@ -351,6 +353,8 @@ impl Dirigent {
             }
             crate::update::UpdateState::Checking | crate::update::UpdateState::Current => None,
         };
+        #[cfg(not(feature = "self-update"))]
+        let update_action: Option<(String, Option<String>, bool, Option<f32>, bool)> = None;
 
         div()
             .relative()
@@ -465,8 +469,9 @@ impl Dirigent {
                                             rgb(blue()).opacity(0.20)
                                         })
                                     })
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.activate_update(cx);
+                                    .on_click(cx.listener(|_this, _, _, cx| {
+                                        #[cfg(feature = "self-update")]
+                                        _this.activate_update(cx);
                                         cx.stop_propagation();
                                     }))
                             }),

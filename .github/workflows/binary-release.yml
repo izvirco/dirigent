@@ -128,7 +128,7 @@ jobs:
           "LILEX_FONT_DIR=$(Join-Path $destination 'ttf')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Build bundled release executable
-        run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex
+        run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex,self-update
 
       - name: Prepare build artifact
         shell: pwsh
@@ -195,7 +195,7 @@ jobs:
           echo "LILEX_FONT_DIR=$destination/ttf" >> "$GITHUB_ENV"
 
       - name: Build bundled release executable
-        run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex
+        run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex,self-update
 
       - name: Prepare build artifact
         shell: bash

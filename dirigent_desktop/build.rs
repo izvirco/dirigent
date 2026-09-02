@@ -1,10 +1,6 @@
 //! Packages platform resources and optional bundled font assets.
 
-use std::{
-    env, fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{env, fs, path::PathBuf};
 
 const LILEX_FONTS: &[&str] = &[
     "Lilex-Regular.ttf",
@@ -40,41 +36,9 @@ fn embed_release_identity() {
     println!("cargo:rustc-env=DIRIGENT_UPDATE_TARGET={target}");
 }
 
-fn git_text(manifest_dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(manifest_dir)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|text| !text.is_empty())
-}
-
 fn embed_commit_id() {
     println!("cargo:rerun-if-env-changed=DIRIGENT_COMMIT_ID");
-    let manifest_dir = PathBuf::from(
-        env::var_os("CARGO_MANIFEST_DIR").expect("Cargo must set CARGO_MANIFEST_DIR"),
-    );
-    for git_path in [
-        git_text(&manifest_dir, &["rev-parse", "--git-path", "HEAD"]),
-        git_text(&manifest_dir, &["symbolic-ref", "-q", "HEAD"]).and_then(|reference| {
-            git_text(&manifest_dir, &["rev-parse", "--git-path", &reference])
-        }),
-        git_text(&manifest_dir, &["rev-parse", "--git-path", "packed-refs"]),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        println!("cargo:rerun-if-changed={git_path}");
-    }
-
-    let commit = env::var("DIRIGENT_COMMIT_ID")
-        .ok()
-        .or_else(|| git_text(&manifest_dir, &["rev-parse", "--short=8", "HEAD"]))
-        .unwrap_or_else(|| "unknown".into());
+    let commit = env::var("DIRIGENT_COMMIT_ID").unwrap_or_else(|_| "unknown".into());
     let commit = commit.chars().take(8).collect::<String>();
     println!("cargo:rustc-env=DIRIGENT_COMMIT_ID={commit}");
 }

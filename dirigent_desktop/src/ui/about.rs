@@ -4,8 +4,8 @@ use gpui::{Context, IntoElement, SharedString, div, prelude::*, px};
 
 use crate::{
     app::Dirigent,
+    build_info,
     theme::{border, muted, rgb, surface_hover, theme_text},
-    update,
 };
 
 fn info_row(label: &'static str, value: impl Into<SharedString>) -> impl IntoElement {
@@ -86,11 +86,11 @@ impl Dirigent {
                                     .text_color(rgb(theme_text()))
                                     .child("Build information"),
                             )
-                            .child(info_row("Version", update::current_version()))
+                            .child(info_row("Version", build_info::version()))
                             .child(info_row("Pi version", self.pi_version.clone()))
                             .child(info_row("Commit", env!("DIRIGENT_COMMIT_ID")))
-                            .child(info_row("Target", update::update_target()))
-                            .child(info_row("Channel", update::channel())),
+                            .child(info_row("Target", build_info::target()))
+                            .child(info_row("Channel", build_info::channel())),
                     ),
             )
     }

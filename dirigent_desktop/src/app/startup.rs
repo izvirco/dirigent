@@ -384,22 +384,26 @@ impl Dirigent {
         })
         .detach();
 
-        let (update_event_tx, update_event_rx) = async_channel::unbounded();
-        crate::update::start_checker(update_event_tx.clone());
-        cx.spawn(async move |this, cx| {
-            while let Ok(event) = update_event_rx.recv().await {
-                if this
-                    .update(cx, |this, cx| {
-                        this.handle_update_event(event, cx);
-                        cx.notify();
-                    })
-                    .is_err()
-                {
-                    break;
+        #[cfg(feature = "self-update")]
+        let update_event_tx = {
+            let (update_event_tx, update_event_rx) = async_channel::unbounded();
+            crate::update::start_checker(update_event_tx.clone());
+            cx.spawn(async move |this, cx| {
+                while let Ok(event) = update_event_rx.recv().await {
+                    if this
+                        .update(cx, |this, cx| {
+                            this.handle_update_event(event, cx);
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
-            }
-        })
-        .detach();
+            })
+            .detach();
+            update_event_tx
+        };
 
         let (math_render_task_tx, math_render_task_rx) = async_channel::unbounded();
         let (math_render_result_tx, math_render_result_rx) = async_channel::unbounded();
@@ -799,7 +803,9 @@ impl Dirigent {
             extension_input,
             pending_dialog: None,
             banner,
+            #[cfg(feature = "self-update")]
             update_state: crate::update::UpdateState::Checking,
+            #[cfg(feature = "self-update")]
             update_events: update_event_tx,
             config_error,
             font: appearance.font.into(),

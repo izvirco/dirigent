@@ -8,7 +8,10 @@ name = "dirigent"
 path = "src/main.rs"
 
 [features]
+default = []
 bundled-lilex = []
+self-update = ["dep:fs2", "dep:reqwest", "dep:semver", "dep:sha2"]
+update-dry-run = ["self-update"]
 
 [dependencies]
 dirigent_server = { path = "../dirigent_server", default-features = false }
@@ -52,10 +55,10 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mathjax-svg-rs = "0.4.0"
-fs2 = "0.4"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-semver = "1"
-sha2 = "0.10"
+fs2 = { version = "0.4", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"], optional = true }
+semver = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [build-dependencies]
 embed-resource = "3"

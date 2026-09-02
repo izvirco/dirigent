@@ -60,6 +60,7 @@ pub(crate) fn logs_directory() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("logs"))
 }
 
+#[cfg(feature = "self-update")]
 pub(crate) fn updates_directory() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("updates"))
 }

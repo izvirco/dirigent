@@ -62,32 +62,12 @@ pub(crate) enum UpdateEvent {
     },
 }
 
-pub(crate) fn channel() -> &'static str {
-    env!("DIRIGENT_UPDATE_CHANNEL")
-}
-
-pub(crate) fn current_version() -> &'static str {
-    env!("DIRIGENT_RELEASE_VERSION")
-}
-
-pub(crate) fn update_target() -> &'static str {
-    env!("DIRIGENT_UPDATE_TARGET")
-}
-
 /// Exercises update checking and downloading without replacing the app.
 pub(crate) fn dry_run_enabled() -> bool {
-    env::var_os("DIRIGENT_UPDATE_DRY_RUN").is_some()
-}
-
-fn updates_enabled() -> bool {
-    !cfg!(debug_assertions) || env::var_os("DIRIGENT_ENABLE_UPDATES").is_some() || dry_run_enabled()
+    cfg!(feature = "update-dry-run")
 }
 
 pub(crate) fn start_checker(events: Sender<UpdateEvent>) {
-    if !updates_enabled() {
-        let _ = events.send_blocking(UpdateEvent::Checked(None));
-        return;
-    }
     thread::Builder::new()
         .name("dirigent-update-checker".into())
         .spawn(move || {
@@ -109,9 +89,6 @@ pub(crate) fn start_checker(events: Sender<UpdateEvent>) {
 }
 
 pub(crate) fn check_now(events: Sender<UpdateEvent>) {
-    if !updates_enabled() {
-        return;
-    }
     thread::Builder::new()
         .name("dirigent-update-check-now".into())
         .spawn(move || {
@@ -145,7 +122,7 @@ fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, 
         .get(format!(
             "{}/api/v0/version/{}",
             base.trim_end_matches('/'),
-            channel()
+            crate::build_info::channel()
         ))
         .send()
         .map_err(|error| format!("could not check for updates: {error}"))?;
@@ -158,7 +135,7 @@ fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, 
     let release = response
         .json::<VersionResponse>()
         .map_err(|error| format!("could not decode update response: {error}"))?;
-    if release.channel != channel() {
+    if release.channel != crate::build_info::channel() {
         return Err("update server returned the wrong channel".into());
     }
     if !is_newer(&release.version)? {
@@ -167,10 +144,10 @@ fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, 
     if !release
         .artifacts
         .iter()
-        .any(|artifact| artifact.target == update_target())
+        .any(|artifact| artifact.target == crate::build_info::target())
     {
         tracing::warn!(
-            target = update_target(),
+            target = crate::build_info::target(),
             "release has no artifact for this platform"
         );
         return Ok(None);
@@ -183,18 +160,18 @@ fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, 
 }
 
 fn is_newer(remote: &str) -> Result<bool, String> {
-    match channel() {
+    match crate::build_info::channel() {
         "stable" => {
             let remote = Version::parse(remote)
                 .map_err(|error| format!("server returned invalid SemVer: {error}"))?;
-            let current = Version::parse(current_version())
+            let current = Version::parse(crate::build_info::version())
                 .map_err(|error| format!("this build has invalid SemVer: {error}"))?;
             Ok(remote > current)
         }
         _ => {
             validate_branch_version(remote)?;
-            validate_branch_version(current_version())?;
-            Ok(remote > current_version())
+            validate_branch_version(crate::build_info::version())?;
+            Ok(remote > crate::build_info::version())
         }
     }
 }
@@ -252,8 +229,8 @@ fn matching_artifact(release: &VersionResponse) -> Result<&VersionArtifact, Stri
     release
         .artifacts
         .iter()
-        .find(|artifact| artifact.target == update_target())
-        .ok_or_else(|| format!("release has no {} artifact", update_target()))
+        .find(|artifact| artifact.target == crate::build_info::target())
+        .ok_or_else(|| format!("release has no {} artifact", crate::build_info::target()))
 }
 
 pub(crate) fn artifact_size(release: &VersionResponse) -> u64 {

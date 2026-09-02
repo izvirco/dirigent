@@ -8,6 +8,7 @@
 
 mod app;
 mod assets;
+mod build_info;
 mod cache;
 mod diff;
 mod image_attachment;
@@ -23,6 +24,7 @@ mod text_input;
 mod theme;
 mod title_generator;
 mod ui;
+#[cfg(feature = "self-update")]
 mod update;
 mod vcs;
 
@@ -64,6 +66,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
+    #[cfg(feature = "self-update")]
     if let Some(result) = update::run_updater_from_args() {
         return match result {
             Ok(()) => std::process::ExitCode::SUCCESS,
@@ -76,12 +79,13 @@ fn main() -> std::process::ExitCode {
     }
 
     tracing::info!(
-        version = update::current_version(),
-        channel = update::channel(),
-        target = update::update_target(),
+        version = build_info::version(),
+        channel = build_info::channel(),
+        target = build_info::target(),
         commit = env!("DIRIGENT_COMMIT_ID"),
         "starting Dirigent"
     );
+    #[cfg(feature = "self-update")]
     update::cleanup_updater_helpers();
 
     application().with_assets(Assets).run(|cx: &mut App| {
