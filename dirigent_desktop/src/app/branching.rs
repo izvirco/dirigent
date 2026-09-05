@@ -511,6 +511,10 @@ impl Dirigent {
             )
             .to_string();
         match operation {
+            "agents_request" => {
+                self.handle_delegation_request(index, &result, cx);
+                true
+            }
             "codex_usage" => {
                 if success
                     && let Some(usage) = parse_codex_usage(&result)

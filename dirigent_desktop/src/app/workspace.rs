@@ -192,6 +192,7 @@ impl Dirigent {
         self.harnesses[index].attention_required = false;
         self.harnesses[index].run_started_at = None;
         if archived {
+            self.stop_delegation(id);
             self.harnesses[index].has_unread_completion = false;
             self.harnesses[index].process.take();
             self.harnesses[index].process_state = PiProcessState::Stopped;
@@ -204,11 +205,17 @@ impl Dirigent {
         self.persist();
     }
     pub(crate) fn delete_harness(&mut self, id: Id) {
+        self.stop_delegation(id);
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
         let project_id = self.harnesses[index].project_id;
         self.harnesses.remove(index);
+        for child in &mut self.harnesses {
+            if child.delegation.parent == Some(id) {
+                child.delegation.parent = None;
+            }
+        }
         self.composer_inputs.remove(&id);
         self.title_processes.remove(&id);
         self.pending_workspace_sources.remove(&id);
@@ -589,6 +596,7 @@ impl Dirigent {
         self.draft_model = None;
         self.draft_thinking_level = None;
         self.request_cached_session_rebuild(index);
+        self.request_delegated_session_rebuilds(id);
         self.reset_conversation_list(index);
         self.persist_last_used_harness();
         self.refresh_repository(self.harnesses[index].project_id);

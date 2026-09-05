@@ -582,6 +582,7 @@ impl Dirigent {
         self.harnesses[index].error = None;
         self.harnesses[index].process_generation += 1;
         self.harnesses[index].process_state = PiProcessState::Initializing;
+        self.harnesses[index].cancellation_pending = false;
         let process_generation = self.harnesses[index].process_generation;
         self.sync_conversation_list(index, None);
         match PiProcess::spawn(
@@ -642,6 +643,18 @@ impl Dirigent {
         }
     }
     pub(super) fn finish_harness_startup(&mut self, index: usize) {
+        if self.harnesses[index].startup_settings_pending
+            && self.harnesses[index].delegation.active_run_mut().is_some()
+        {
+            self.send_value(
+                index,
+                json!({"id": "dirigent-agent-verify", "type": "get_state"}),
+            );
+            return;
+        }
+        self.complete_harness_startup(index);
+    }
+    pub(super) fn complete_harness_startup(&mut self, index: usize) {
         self.harnesses[index].startup_settings_pending = false;
         self.send_value(index, json!({"id":"dirigent-state","type":"get_state"}));
         self.request_session_stats(index);
@@ -869,6 +882,17 @@ impl Dirigent {
         let Some(input) = self.composer_inputs.get(&id).cloned() else {
             return;
         };
+        if self
+            .harnesses
+            .iter()
+            .any(|h| h.id == id && h.cancellation_pending)
+        {
+            self.banner = Some(
+                "Wait for the current cancellation to finish before sending another prompt.".into(),
+            );
+            cx.notify();
+            return;
+        }
         if let Some(workspace) = self.selected_managed_workspace()
             && workspace.state != WorkspaceState::Ready
         {
@@ -1061,31 +1085,44 @@ impl Dirigent {
         );
     }
     pub(crate) fn abort_selected(&mut self) {
-        if let Some(index) = self
-            .selected_harness
-            .and_then(|id| self.harnesses.iter().position(|harness| harness.id == id))
-            && self.send_value(index, json!({"type":"abort"}))
-        {
-            self.mark_turn_diff_status(index, TurnDiffStatus::Aborted);
-            self.pending_diff_prompts.remove(&self.harnesses[index].id);
-            self.harnesses[index].startup_settings_pending = false;
-            self.harnesses[index].pending_initial_prompt = None;
-            self.harnesses[index].status = HarnessStatus::Idle;
-            self.harnesses[index].run_started_at = None;
-            self.harnesses[index].attention_required = false;
-            self.refresh_harness_order(index);
-            let mut changed_message = None;
-            for (message_index, message) in self.harnesses[index].messages.iter_mut().enumerate() {
-                if message.running {
-                    if message.role == MessageRole::Assistant {
-                        changed_message = Some(message_index);
-                    }
-                    message.set_running(false);
-                }
-            }
-            self.persist();
-            self.sync_conversation_list(index, changed_message);
+        if let Some(id) = self.selected_harness {
+            self.abort_harness(id);
         }
+    }
+    pub(crate) fn abort_harness(&mut self, id: Id) {
+        self.stop_delegation(id);
+        let Some(index) = self.harnesses.iter().position(|h| h.id == id) else {
+            return;
+        };
+        self.finish_delegated_run(index, crate::delegation::WorkStatus::Cancelled);
+        self.harnesses[index].pending_initial_prompt = None;
+        self.pending_diff_prompts.remove(&id);
+        self.harnesses[index].cancellation_pending = self.harnesses[index].process.is_some();
+        if let Some(process) = self.harnesses[index].process.as_ref() {
+            // Chain abort from the clear acknowledgement: RPC dispatches commands concurrently.
+            let _ = process.send(json!({"id": "dirigent-cancel-clear", "type":"clear_queue"}));
+        }
+        self.mark_turn_diff_status(index, TurnDiffStatus::Aborted);
+        // A cancelled child's startup may still finish configuring its explicitly selected model.
+        // Removing the pending prompt is sufficient to prevent it from executing the assignment.
+        if self.harnesses[index].delegation.parent.is_none() {
+            self.harnesses[index].startup_settings_pending = false;
+        }
+        self.harnesses[index].status = HarnessStatus::Idle;
+        self.harnesses[index].run_started_at = None;
+        self.harnesses[index].attention_required = false;
+        self.refresh_harness_order(index);
+        let mut changed_message = None;
+        for (message_index, message) in self.harnesses[index].messages.iter_mut().enumerate() {
+            if message.running {
+                if message.role == MessageRole::Assistant {
+                    changed_message = Some(message_index);
+                }
+                message.set_running(false);
+            }
+        }
+        self.persist();
+        self.sync_conversation_list(index, changed_message);
     }
     pub(super) fn restart_selected(&mut self) {
         if let Some(id) = self.selected_harness {
@@ -1272,6 +1309,8 @@ impl Dirigent {
         if let Some(process) = self.harnesses[index].process.take() {
             process.stop();
         }
+        self.stop_delegation(id);
+        self.finish_delegated_run(index, crate::delegation::WorkStatus::Interrupted);
         self.harnesses[index].process_state = PiProcessState::Stopped;
         if self.harnesses[index].run_started_at.take().is_some() {
             self.harnesses[index].attention_required = false;

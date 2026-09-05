@@ -110,23 +110,42 @@ pub(crate) fn cache_path() -> Result<PathBuf, String> {
     Ok(cache_home.join("dirigent/v0/cache.sqlite3"))
 }
 
-/// Atomically updates the private bridge extension bundled with this Dirigent build.
+/// Materializes a versioned private bundle so a running Pi never loads half an update.
 pub(crate) fn materialize_pi_bridge() -> Result<PathBuf, String> {
+    let files = [
+        ("pi-bridge.ts", PI_BRIDGE_EXTENSION),
+        (
+            "dirigent-agents.ts",
+            include_str!("../asset/dirigent-agents.ts"),
+        ),
+        (
+            "dirigent-agent-worker.mjs",
+            include_str!("../asset/dirigent-agent-worker.mjs"),
+        ),
+    ];
+    let mut hash = blake3::Hasher::new();
+    for (_, content) in &files {
+        hash.update(content.as_bytes());
+    }
     let database = state_database_path()?;
     let directory = database
         .parent()
-        .ok_or_else(|| "Dirigent state database path has no parent directory".to_string())?;
-    fs::create_dir_all(directory)
+        .ok_or_else(|| "Dirigent state database path has no parent directory".to_string())?
+        .join("bridges")
+        .join(hash.finalize().to_hex().as_str());
+    fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-    let path = directory.join("pi-bridge.ts");
-    if fs::read_to_string(&path).ok().as_deref() != Some(PI_BRIDGE_EXTENSION) {
-        let temporary = directory.join("pi-bridge.ts.tmp");
-        fs::write(&temporary, PI_BRIDGE_EXTENSION)
-            .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
-        fs::rename(&temporary, &path)
-            .map_err(|error| format!("could not replace {}: {error}", path.display()))?;
+    for (name, content) in files {
+        let path = directory.join(name);
+        if fs::read_to_string(&path).ok().as_deref() != Some(content) {
+            let temporary = path.with_extension("tmp");
+            fs::write(&temporary, content)
+                .map_err(|error| format!("could not write {}: {error}", temporary.display()))?;
+            fs::rename(&temporary, &path)
+                .map_err(|error| format!("could not replace {}: {error}", path.display()))?;
+        }
     }
-    Ok(path)
+    Ok(directory.join("pi-bridge.ts"))
 }
 
 #[cfg(not(target_os = "windows"))]

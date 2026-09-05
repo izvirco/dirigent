@@ -1,6 +1,9 @@
 // Loaded explicitly by Dirigent. It exposes session operations that Pi's RPC
-// protocol does not yet expose directly. It is not installed into the user's
-// Pi configuration and does not register any LLM tools.
+// protocol does not yet expose directly, plus the bundled delegation tool.
+// It is not installed into the user's Pi configuration.
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import registerAgents from "./dirigent-agents.ts";
+
 const STATUS_KEY = "__dirigent_bridge__";
 
 type BridgeContext = {
@@ -144,7 +147,8 @@ async function fetchCodexUsage(ctx: BridgeContext): Promise<void> {
   }
 }
 
-export default function (pi: ExtensionApi) {
+export default function (pi: ExtensionApi & ExtensionAPI) {
+  registerAgents(pi);
   let usageRequest: Promise<void> | undefined;
   let usageRefreshTimer: ReturnType<typeof setInterval> | undefined;
   const refreshUsage = (ctx: BridgeContext): Promise<void> => {

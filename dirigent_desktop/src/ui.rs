@@ -3,6 +3,7 @@
 mod about;
 mod composer;
 mod conversation;
+mod delegation;
 mod diff_sidebar;
 
 pub(crate) use conversation::{ConversationRenderCache, ConversationScrollAnchor};
@@ -388,6 +389,7 @@ impl Dirigent {
                     && self.selected_harness.is_some(),
                 |element| {
                     element
+                        .child(self.render_delegation(cx))
                         .child(self.render_conversation(cx))
                         .child(self.render_composer(window, cx))
                         .child(self.render_changes_toggle(cx))

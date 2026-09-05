@@ -619,6 +619,8 @@ pub(crate) enum HarnessTitleState {
 }
 
 pub(crate) struct Harness {
+    pub(crate) delegation: crate::delegation::Delegation,
+    pub(crate) cancellation_pending: bool,
     pub(crate) id: Id,
     pub(crate) project_id: Id,
     pub(crate) title: String,
@@ -672,6 +674,8 @@ impl Harness {
             project_id,
             title,
             title_state: HarnessTitleState::Initial,
+            delegation: Default::default(),
+            cancellation_pending: false,
             session_file: None,
             status: HarnessStatus::Starting,
             has_unread_completion: false,
@@ -734,14 +738,20 @@ impl Harness {
     }
 
     pub(crate) fn is_in_workpool(&self) -> bool {
-        !self.archived
+        self.delegation.parent.is_none()
+            && !self.archived
             && !self.attention_required
             && !self.has_unread_completion
-            && self.run_started_at.is_some()
+            && (self.run_started_at.is_some()
+                || self
+                    .delegation
+                    .jobs
+                    .iter()
+                    .any(|job| job.status == crate::delegation::WorkStatus::Running))
     }
 
     pub(crate) fn is_in_inbox(&self) -> bool {
-        !self.archived && !self.is_in_workpool()
+        self.delegation.parent.is_none() && !self.archived && !self.is_in_workpool()
     }
 
     /// Restores metadata eagerly while leaving session messages for the cache or Pi to load.
@@ -764,6 +774,8 @@ impl Harness {
             project_id,
             title,
             title_state: HarnessTitleState::Manual,
+            delegation: Default::default(),
+            cancellation_pending: false,
             session_file,
             status: HarnessStatus::Idle,
             has_unread_completion: false,

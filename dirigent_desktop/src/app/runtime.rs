@@ -75,6 +75,10 @@ impl Dirigent {
         self.harnesses[index].run_started_at = None;
         self.harnesses[index].attention_required = false;
         self.harnesses[index].error = Some(error.clone());
+        self.finish_delegated_run(index, crate::delegation::WorkStatus::Failed);
+        if self.harnesses[index].delegation.parent.is_some() {
+            self.harnesses[index].pending_initial_prompt = None;
+        }
         self.harnesses[index].messages.push(Message::error(error));
         self.refresh_harness_order(index);
         self.persist();
@@ -126,9 +130,12 @@ impl Dirigent {
         {
             self.pending_dialog = None;
         }
+        self.stop_delegation(harness_id);
+        self.finish_delegated_run(index, crate::delegation::WorkStatus::Interrupted);
         self.pending_diff_prompts.remove(&harness_id);
         self.finish_turn_diff(index, TurnDiffStatus::Interrupted);
         self.harnesses[index].process.take();
+        self.harnesses[index].cancellation_pending = false;
         self.harnesses[index].process_state = PiProcessState::Errored;
         self.harnesses[index].retry_status = None;
         self.harnesses[index].steering_queue.clear();
@@ -192,6 +199,9 @@ impl Dirigent {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        if event_type == "response" && value["id"].as_str() == Some("dirigent-agent-response") {
+            return;
+        }
         let mut response_timing =
             (event_type == "response").then(|| ResponseTiming::new(harness_id, &value));
         let changed_message = match event_type.as_str() {
@@ -227,6 +237,7 @@ impl Dirigent {
                 changed_message
             }
             "message_end" => {
+                self.record_delegated_message(index, &value);
                 let changed_message = self.handle_message_end(index, &value);
                 self.request_session_stats(index);
                 changed_message
@@ -385,6 +396,11 @@ impl Dirigent {
     }
     pub(super) fn handle_message_end(&mut self, index: usize, value: &Value) -> Option<usize> {
         let message = value.get("message").unwrap_or(&Value::Null);
+        if message.get("role").and_then(Value::as_str) == Some("custom") {
+            let message = parse_message(message)?;
+            self.harnesses[index].messages.push(message);
+            return self.harnesses[index].messages.len().checked_sub(1);
+        }
         let error = assistant_failure(message)?;
         if self.harnesses[index]
             .messages
@@ -462,6 +478,14 @@ impl Dirigent {
     }
     /// Finalizes a run, promotes queued messages, and marks background completions unread.
     pub(super) fn settle_harness(&mut self, index: usize) -> Option<usize> {
+        self.finish_delegated_run(
+            index,
+            if self.harnesses[index].status == HarnessStatus::Failed {
+                crate::delegation::WorkStatus::Failed
+            } else {
+                crate::delegation::WorkStatus::Completed
+            },
+        );
         self.finish_turn_diff(index, TurnDiffStatus::Completed);
         if self.harnesses[index].status != HarnessStatus::Failed {
             self.harnesses[index].status = HarnessStatus::Idle;
@@ -479,7 +503,14 @@ impl Dirigent {
             .map(|started_at| started_at.elapsed());
         self.harnesses[index].last_run_duration = run_duration;
         self.harnesses[index].attention_required = false;
-        if self.selected_harness != Some(self.harnesses[index].id) {
+        if self.selected_harness != Some(self.harnesses[index].id)
+            && self.harnesses[index].delegation.parent.is_none()
+            && !self.harnesses[index]
+                .delegation
+                .jobs
+                .iter()
+                .any(|job| job.status == crate::delegation::WorkStatus::Running)
+        {
             self.harnesses[index].has_unread_completion = true;
         }
         self.refresh_harness_order(index);
@@ -671,10 +702,30 @@ impl Dirigent {
         let request_id_owned = value.get("id").and_then(Value::as_str).map(str::to_string);
         let command = command_owned.as_deref();
         let request_id = request_id_owned.as_deref();
+        if request_id == Some("dirigent-cancel-clear") {
+            if value["success"].as_bool() == Some(true) {
+                self.send_value(
+                    index,
+                    json!({"id": "dirigent-cancel-abort", "type": "abort"}),
+                );
+            } else {
+                self.harnesses[index].process.take();
+                self.harnesses[index].cancellation_pending = false;
+            }
+            return;
+        }
+        if request_id == Some("dirigent-cancel-abort") {
+            self.harnesses[index].cancellation_pending = false;
+            if value["success"].as_bool() != Some(true) {
+                self.harnesses[index].process.take();
+            }
+            return;
+        }
         let startup_request = self.harnesses[index].startup_settings_pending
             && matches!(
                 (request_id, command),
                 (Some(STARTUP_MODEL_REQUEST_ID), Some("set_model"))
+                    | (Some("dirigent-agent-verify"), Some("get_state"))
                     | (
                         Some(STARTUP_THINKING_REQUEST_ID),
                         Some("set_thinking_level")
@@ -722,6 +773,16 @@ impl Dirigent {
             }
             if command == Some("prompt") {
                 self.harnesses[index].queued_messages.pop();
+                if self.harnesses[index].delegation.active_run_mut().is_some() {
+                    self.fail_harness(
+                        index,
+                        value["error"]
+                            .as_str()
+                            .unwrap_or("Pi rejected the assignment.")
+                            .to_string(),
+                    );
+                    return;
+                }
             }
             if command == Some("get_entries")
                 && value.get("id").and_then(Value::as_str) == Some("dirigent-entries-incremental")
@@ -759,6 +820,24 @@ impl Dirigent {
             match command {
                 Some("set_model") => self.send_startup_thinking_level(index),
                 Some("set_thinking_level") => self.finish_harness_startup(index),
+                Some("get_state") => {
+                    let data = &value["data"];
+                    let model = format!(
+                        "{}/{}",
+                        data["model"]["provider"].as_str().unwrap_or_default(),
+                        data["model"]["id"].as_str().unwrap_or_default()
+                    );
+                    if self.harnesses[index].model.as_deref() != Some(model.as_str())
+                        || self.harnesses[index].thinking_level.as_deref()
+                            != data["thinkingLevel"].as_str()
+                    {
+                        self.harnesses[index].pending_initial_prompt = None;
+                        self.harnesses[index].process.take();
+                        self.fail_harness(index, "Pi did not honor the requested model/thinking level. No assignment was sent; choose supported settings explicitly.".into());
+                    } else {
+                        self.complete_harness_startup(index);
+                    }
+                }
                 _ => {}
             }
             return;

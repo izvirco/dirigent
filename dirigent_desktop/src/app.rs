@@ -1,6 +1,7 @@
 //! Defines the central application state and shared application-level helpers.
 
 mod branching;
+mod delegation;
 mod diff;
 mod harness;
 mod keyboard;
@@ -607,6 +608,7 @@ pub(crate) struct Dirigent {
     session_cache: Option<SessionCache>,
     cached_session_rebuilds: Sender<CachedSessionRebuildRequest>,
     pending_session_rebuilds: HashMap<Id, u64>,
+    requested_session_rebuilds: HashSet<Id>,
     next_session_rebuild_job_id: u64,
     pub(crate) draft_model: Option<String>,
     pub(crate) draft_thinking_level: Option<String>,

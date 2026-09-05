@@ -214,8 +214,10 @@ impl Dirigent {
                             .iter()
                             .position(|harness| harness.id == request.harness_id)
                         else {
+                            this.requested_session_rebuilds.remove(&request.harness_id);
                             return;
                         };
+                        this.requested_session_rebuilds.remove(&request.harness_id);
                         let still_current = this.harnesses[index]
                             .cached_entries
                             .as_ref()
@@ -843,6 +845,7 @@ impl Dirigent {
             session_cache,
             cached_session_rebuilds: cached_session_rebuild_tx,
             pending_session_rebuilds: HashMap::new(),
+            requested_session_rebuilds: HashSet::new(),
             next_session_rebuild_job_id: 1,
             draft_model: None,
             draft_thinking_level: None,
@@ -921,6 +924,7 @@ impl Dirigent {
             this.refresh_repository(project_id);
         }
         if let Some(harness_id) = selected_harness {
+            this.request_delegated_session_rebuilds(harness_id);
             this.start_harness(harness_id, None);
         }
         this

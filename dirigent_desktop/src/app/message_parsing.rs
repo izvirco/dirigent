@@ -360,6 +360,12 @@ impl EntryMessageParser {
                     }
                 }
             }
+            Some("custom_message") => {
+                if let Some(message) = parse_custom_message(entry) {
+                    self.messages
+                        .push(message.with_entry_id(entry.get("id").and_then(Value::as_str)));
+                }
+            }
             Some("compaction") => {
                 let summary = entry
                     .get("summary")
@@ -651,6 +657,11 @@ pub(super) fn push_parsed_message(
     }
 }
 
+fn parse_custom_message(value: &Value) -> Option<Message> {
+    (value.get("display").and_then(Value::as_bool) == Some(true)).then_some(())?;
+    Some(Message::notice(content_text(value.get("content")?)))
+}
+
 pub(super) fn parse_message(value: &Value) -> Option<Message> {
     match value.get("role")?.as_str()? {
         "user" => {
@@ -695,6 +706,7 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
             message.finish_tool(is_error, message_timestamp_ms(value));
             Some(message)
         }
+        "custom" => parse_custom_message(value),
         "bashExecution" => {
             let mut message = Message::tool(
                 value
@@ -721,6 +733,56 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_displayed_live_custom_messages_as_notices() {
+        let message = parse_message(&json!({
+            "role": "custom",
+            "customType": "dirigent-workflow",
+            "content": [{"type": "text", "text": "Workflow complete"}],
+            "display": true
+        }))
+        .expect("displayed custom message should parse");
+
+        assert_eq!(message.role, MessageRole::Notice);
+        assert_eq!(message.text, "Workflow complete");
+        assert!(
+            parse_message(&json!({
+                "role": "custom",
+                "customType": "dirigent-workflow",
+                "content": "hidden",
+                "display": false
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn parses_only_displayed_persisted_custom_messages_and_preserves_ids() {
+        let mut parser = EntryMessageParser::new(None, None);
+        parser.push(&json!({
+            "type": "custom_message",
+            "id": "visible-id",
+            "parentId": null,
+            "customType": "dirigent-workflow",
+            "content": "Workflow complete",
+            "display": true
+        }));
+        parser.push(&json!({
+            "type": "custom_message",
+            "id": "hidden-id",
+            "parentId": "visible-id",
+            "customType": "internal-context",
+            "content": "hidden",
+            "display": false
+        }));
+
+        let parsed = parser.finish();
+        assert_eq!(parsed.messages.len(), 1);
+        assert_eq!(parsed.messages[0].role, MessageRole::Notice);
+        assert_eq!(parsed.messages[0].text, "Workflow complete");
+        assert_eq!(parsed.messages[0].entry_id.as_deref(), Some("visible-id"));
+    }
 
     #[test]
     fn parses_session_stats() {

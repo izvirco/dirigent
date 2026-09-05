@@ -5,7 +5,7 @@ mod cache;
 mod message;
 
 pub(crate) use cache::{ConversationRenderCache, ConversationScrollAnchor};
-use cache::{ConversationRenderItem, WorkGroupSummary};
+use cache::{ConversationRenderItem, WorkGroupDiffStats, WorkGroupSummary, work_group_for_run};
 
 use std::{
     ops::Range,
@@ -210,6 +210,32 @@ impl Dirigent {
                 "slow conversation render cache synchronization"
             );
         }
+    }
+
+    pub(crate) fn remeasure_work_group_for_tool_call(&mut self, tool_call_id: &str) {
+        let Some(harness) = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+        else {
+            return;
+        };
+        let Some(render_index) = self
+            .conversation_render_cache
+            .items
+            .iter()
+            .position(|item| match item {
+                ConversationRenderItem::WorkGroup(group) => harness.messages
+                    [group.first_message_index..=group.last_message_index]
+                    .iter()
+                    .any(|message| message.tool_call_id.as_deref() == Some(tool_call_id)),
+                _ => false,
+            })
+        else {
+            return;
+        };
+        self.conversation_list
+            .remeasure_items(render_index..render_index + 1);
+        self.conversation_render_cache.invalidate_ruler_layout();
     }
 
     pub(crate) fn toggle_work_group(&mut self, id: String, expanded: bool) {

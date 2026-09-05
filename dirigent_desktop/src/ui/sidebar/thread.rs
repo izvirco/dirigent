@@ -1,6 +1,26 @@
 //! Renders thread entries, status, and contextual menus.
 
 use super::*;
+use crate::model::Harness;
+
+fn child_visible_in_sidebar(harness: &Harness) -> bool {
+    matches!(
+        harness.status,
+        HarnessStatus::Starting | HarnessStatus::Working
+    ) || harness.attention_required
+        || harness.cancellation_pending
+        || (harness.startup_settings_pending && harness.process.is_some())
+        || harness
+            .delegation
+            .runs
+            .last()
+            .is_some_and(|run| run.status == crate::delegation::WorkStatus::Running)
+        || harness
+            .delegation
+            .jobs
+            .iter()
+            .any(|job| job.status == crate::delegation::WorkStatus::Running)
+}
 
 impl Dirigent {
     pub(super) fn render_thread_dropdown(
@@ -15,6 +35,26 @@ impl Dirigent {
         let has_workspace = self.workspace_for_harness(id).is_some();
         let can_delete_workspace = self.can_delete_workspace_for_harness(id);
         let deleting_workspace = self.workspace_deletion_pending(id);
+        let delegated_work_active =
+            self.harnesses
+                .iter()
+                .find(|harness| harness.id == id)
+                .is_some_and(|harness| {
+                    harness
+                        .delegation
+                        .jobs
+                        .iter()
+                        .any(|job| job.status == crate::delegation::WorkStatus::Running)
+                })
+                || self.harnesses.iter().any(|child| {
+                    child.delegation.parent == Some(id)
+                        && (matches!(
+                            child.status,
+                            HarnessStatus::Starting | HarnessStatus::Working
+                        ) || child.delegation.runs.last().is_some_and(|run| {
+                            run.status == crate::delegation::WorkStatus::Running
+                        }))
+                });
         let archive_item = div()
             .id(("archive-thread", id as usize))
             .h(px(26.0))
@@ -57,6 +97,28 @@ impl Dirigent {
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
                 )
                 .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .when(delegated_work_active, |menu| {
+                    menu.child(
+                        div()
+                            .id(("stop-delegated-work", id as usize))
+                            .h(px(26.0))
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .rounded_md()
+                            .whitespace_nowrap()
+                            .text_xs()
+                            .text_color(rgb(red()))
+                            .hover(|style| style.bg(rgb(surface_hover())))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.stop_delegation(id);
+                                this.sidebar_menu = None;
+                                cx.stop_propagation();
+                                cx.notify();
+                            }))
+                            .child("Stop delegated work"),
+                    )
+                })
                 .child(
                     div()
                         .id(("rename-thread", id as usize))
@@ -136,6 +198,31 @@ impl Dirigent {
         placement: ThreadPlacement,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let archived = self
+            .harnesses
+            .iter()
+            .find(|h| h.id == id)
+            .is_some_and(|h| h.archived);
+        div()
+            .child(self.render_sidebar_harness_row(id, placement, cx))
+            .children(
+                self.harnesses
+                    .iter()
+                    .filter(|h| {
+                        h.delegation.parent == Some(id)
+                            && child_visible_in_sidebar(h)
+                            && (!h.archived || archived)
+                    })
+                    .map(|h| self.render_sidebar_harness(h.id, ThreadPlacement::Project, cx)),
+            )
+            .into_any_element()
+    }
+    fn render_sidebar_harness_row(
+        &self,
+        id: Id,
+        placement: ThreadPlacement,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let harness = self
             .harnesses
             .iter()
@@ -152,6 +239,7 @@ impl Dirigent {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
+        let is_child = harness.delegation.parent.is_some();
         let status = harness.status;
         let has_unread = harness.has_unread_completion;
         let attention_required = harness.attention_required;
@@ -169,7 +257,13 @@ impl Dirigent {
             .map(|project| project.name.as_str())
             .unwrap_or("Unknown project");
         let detailed = placement != ThreadPlacement::Project;
-        let height = if detailed { 62.0 } else { 34.0 };
+        let height = if detailed {
+            62.0
+        } else if is_child {
+            30.0
+        } else {
+            34.0
+        };
         let title_color = if archived {
             muted()
         } else if has_unread {
@@ -181,7 +275,14 @@ impl Dirigent {
             .map(|workspace| workspace.id.clone())
             .or_else(|| harness.last_vcs_label.clone());
         let hover_controls_width = if quick_archive { 48.0 } else { 22.0 };
-        let (state_label, state_color) = if placement == ThreadPlacement::Workpool {
+        let delegating = harness
+            .delegation
+            .jobs
+            .iter()
+            .any(|job| job.status == crate::delegation::WorkStatus::Running);
+        let (state_label, state_color) = if delegating && status == HarnessStatus::Idle {
+            ("Delegating".to_string(), blue())
+        } else if placement == ThreadPlacement::Workpool {
             (format_elapsed(harness.run_started_at), muted())
         } else if attention_required {
             ("Needs input".to_string(), orange())
@@ -206,6 +307,7 @@ impl Dirigent {
             .group(group.clone())
             .relative()
             .h(px(height))
+            .when(is_child, |style| style.my(px(1.0)))
             .px_2()
             .flex()
             .items_center()
@@ -322,11 +424,20 @@ impl Dirigent {
                     .when(!detailed, |content| {
                         content.child(
                             div()
-                                .h(px(34.0))
+                                .h(px(height))
                                 .flex()
                                 .items_center()
                                 .gap_1()
-                                .line_height(px(34.0))
+                                .line_height(px(height))
+                                .when(is_child, |element| {
+                                    element.child(
+                                        svg()
+                                            .path("icon/corner-down-right.svg")
+                                            .size(px(12.0))
+                                            .text_color(rgb(faint()))
+                                            .flex_none(),
+                                    )
+                                })
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_sm()

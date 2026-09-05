@@ -282,6 +282,58 @@ fn work_group_id(user: &Message, user_index: usize) -> String {
     )
 }
 
+fn assignment_run_id(text: &str) -> Option<&str> {
+    let header = text.lines().next()?.strip_prefix('[')?.strip_suffix(']')?;
+    let metadata = header.strip_prefix("Dirigent assignment; manager #")?;
+    let (manager, run) = metadata.split_once("; run ")?;
+    (!manager.is_empty()
+        && manager.bytes().all(|byte| byte.is_ascii_digit())
+        && !run.is_empty()
+        && !run.bytes().any(|byte| byte.is_ascii_whitespace()))
+    .then_some(run)
+}
+
+pub(crate) fn work_group_for_run(harness: &Harness, run_id: &str) -> Option<WorkGroupSummary> {
+    let (user_index, user) = harness.messages.iter().enumerate().find(|(_, message)| {
+        message.role == MessageRole::User && assignment_run_id(&message.text) == Some(run_id)
+    })?;
+    // An assignment can finish with only an assistant reply (no thinking or tools).
+    // Summarize the entire assignment, including its final reply's model metadata,
+    // instead of requiring a collapsible activity group.
+    let end = harness.messages[user_index + 1..]
+        .iter()
+        .position(|message| message.role == MessageRole::User)
+        .map_or(harness.messages.len(), |offset| user_index + 1 + offset);
+    let latest = end == harness.messages.len();
+    let running = latest && harness.status == HarnessStatus::Working;
+    let prompt = diff::prompt_excerpt(&user.text);
+    let completed_turn = harness.turn_diffs.iter().find(|turn| turn.prompt == prompt);
+    let turn = harness
+        .active_turn_preview
+        .as_ref()
+        .filter(|turn| running && turn.prompt == prompt)
+        .or(completed_turn.map(Arc::as_ref));
+    let mut summary = WorkGroupSummary::from_range(
+        harness,
+        work_group_id(user, user_index),
+        user_index..end,
+        running,
+        turn,
+        completed_turn.map(Arc::as_ref),
+        latest,
+    );
+    if !latest {
+        // A later assignment may use a different model. Only the latest assignment
+        // can fall back to the harness settings while canonical messages load.
+        let messages = &harness.messages[user_index..end];
+        summary.model = messages.iter().find_map(|message| message.model.clone());
+        summary.thinking_level = messages
+            .iter()
+            .find_map(|message| message.thinking_level.clone());
+    }
+    Some(summary)
+}
+
 fn matching_turn<'a>(
     harness: &'a Harness,
     user: &Message,
@@ -660,5 +712,54 @@ impl ConversationRenderCache {
         } else {
             (self.estimated_height / self.items.len() as f32).clamp(32.0, 320.0)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn associates_each_delegated_run_with_its_own_work_group_stats() {
+        let mut harness = Harness::new(2, 1, "child".into(), 1);
+        harness.messages.push(Message::new(
+            MessageRole::User,
+            "[Dirigent assignment; manager #1; run initial]\n\nFirst",
+        ));
+        let mut write = Message::tool("write", Some("write-1".into()), false, false);
+        write.tool_name = Some("write".into());
+        write.tool_change_stats = Some((7, 0));
+        harness.messages.push(write);
+        harness.messages.push(Message::new(
+            MessageRole::User,
+            "[Dirigent assignment; manager #1; run feedback]\n\nRevise",
+        ));
+        let mut edit = Message::tool("edit", Some("edit-1".into()), false, false);
+        edit.tool_name = Some("edit".into());
+        edit.tool_change_stats = Some((2, 3));
+        harness.messages.push(edit);
+
+        let initial = work_group_for_run(&harness, "initial").expect("initial work group");
+        let feedback = work_group_for_run(&harness, "feedback").expect("feedback work group");
+        assert_eq!(initial.diff_stats.counts(), (7, 0));
+        assert_eq!(initial.write_count, 1);
+        assert_eq!(initial.edit_count, 0);
+        assert_eq!(feedback.diff_stats.counts(), (2, 3));
+        assert_eq!(feedback.write_count, 0);
+        assert_eq!(feedback.edit_count, 1);
+    }
+
+    #[test]
+    fn extracts_only_current_delegated_assignment_run_ids() {
+        assert_eq!(
+            assignment_run_id("[Dirigent assignment; manager #281; run run-new]\n\nDo work"),
+            Some("run-new")
+        );
+        assert_eq!(assignment_run_id("ordinary user message"), None);
+        assert_eq!(
+            assignment_run_id("[Dirigent assignment; manager #281; run ]"),
+            None
+        );
+        assert_eq!(assignment_run_id("[Other metadata; run unrelated]"), None);
     }
 }

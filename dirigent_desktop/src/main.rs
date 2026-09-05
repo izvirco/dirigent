@@ -10,6 +10,7 @@ mod app;
 mod assets;
 mod build_info;
 mod cache;
+mod delegation;
 mod diff;
 mod image_attachment;
 mod logging;

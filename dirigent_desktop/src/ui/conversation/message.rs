@@ -88,13 +88,12 @@ impl Dirigent {
             .child(self.render_thin_scrollbar(scrollbar_id, scroll, cx))
             .into_any_element()
     }
-    pub(super) fn render_work_group(
+    fn render_work_summary_stats(
         &self,
         group: &WorkGroupSummary,
-        cx: &mut Context<Self>,
+        leading: AnyElement,
+        animation_id: String,
     ) -> AnyElement {
-        let group_id = group.id.clone();
-        let expanded = group.expanded;
         let model = group
             .model
             .as_deref()
@@ -108,7 +107,7 @@ impl Dirigent {
                     .flex_none()
                     .text_color(rgb(blue()))
                     .with_animation(
-                        format!("work-group-timer-{}", group.id),
+                        animation_id,
                         Animation::new(Duration::from_secs(1)).repeat(),
                         move |timer, _| timer.child(format_working_duration(started_at.elapsed())),
                     )
@@ -138,38 +137,19 @@ impl Dirigent {
         let tool_stats = (!categories.is_empty()).then(|| categories.join(" · "));
         let (additions, deletions) = group.diff_stats.counts();
         let approximate = group.diff_stats.is_optimistic();
-        let chevron = svg()
-            .path("icon/chevron-down.svg")
-            .size(px(12.0))
-            .text_color(rgb(faint()))
-            .flex_none();
-        let chevron = if expanded {
-            chevron
-        } else {
-            chevron.with_transformation(Transformation::rotate(radians(
-                -std::f32::consts::FRAC_PI_2,
-            )))
-        };
 
         div()
-            .id(format!("work-group-{}", group.id))
-            .w_full()
+            .min_w(px(0.0))
+            .flex_1()
             .min_h(px(22.0))
             .flex()
             .items_center()
             .gap_1()
             .overflow_hidden()
             .whitespace_nowrap()
-            .cursor_pointer()
             .text_xs()
             .text_color(rgb(muted()))
-            .hover(|style| style.text_color(rgb(theme_text())).bg(rgb(surface_hover())))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_work_group(group_id.clone(), !expanded);
-                cx.stop_propagation();
-                cx.notify();
-            }))
-            .child(chevron)
+            .child(leading)
             .child(div().flex_none().text_color(rgb(blue())).child(model))
             .when_some(reasoning, |element, reasoning| {
                 element.child(div().flex_none().text_color(rgb(purple())).child(reasoning))
@@ -203,6 +183,191 @@ impl Dirigent {
                         .child(tool_stats),
                 )
             })
+            .into_any_element()
+    }
+
+    fn delegated_work_rows(
+        &self,
+        group: &WorkGroupSummary,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(parent) = self
+            .selected_harness
+            .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
+        else {
+            return Vec::new();
+        };
+        let tool_call_ids = parent.messages[group.first_message_index..=group.last_message_index]
+            .iter()
+            .filter_map(|message| message.tool_call_id.as_deref())
+            .collect::<Vec<_>>();
+        let job_ids = parent
+            .delegation
+            .jobs
+            .iter()
+            .filter(|job| tool_call_ids.contains(&job.tool_call_id.as_str()))
+            .map(|job| job.id.as_str())
+            .collect::<Vec<_>>();
+        if job_ids.is_empty() {
+            return Vec::new();
+        }
+
+        self.harnesses
+            .iter()
+            .filter(|child| child.delegation.parent == Some(parent.id))
+            .filter_map(|child| {
+                let run = child
+                    .delegation
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| job_ids.contains(&run.job_id.as_str()))?;
+                let running = run.status == crate::delegation::WorkStatus::Running
+                    && child
+                        .delegation
+                        .runs
+                        .last()
+                        .is_some_and(|latest| latest.id == run.id)
+                    && matches!(
+                        child.status,
+                        HarnessStatus::Starting | HarnessStatus::Working
+                    );
+                let mut summary = if let Some(summary) = work_group_for_run(child, &run.id) {
+                    summary
+                } else {
+                    WorkGroupSummary {
+                        id: format!("delegated:{}:{}", child.id, run.id),
+                        first_message_index: 0,
+                        last_message_index: 0,
+                        expanded: false,
+                        running,
+                        model: None,
+                        thinking_level: None,
+                        started_at: None,
+                        duration: None,
+                        diff_stats: WorkGroupDiffStats::Optimistic {
+                            additions: 0,
+                            deletions: 0,
+                        },
+                        tool_count: 0,
+                        write_count: 0,
+                        edit_count: 0,
+                        compaction_count: 0,
+                        misc_count: 0,
+                    }
+                };
+                summary.running = running;
+                if running {
+                    // Live stream fragments lack canonical turn metadata; the active latest run
+                    // can safely use the child's current settings and timer until rebuild catches up.
+                    summary.model = summary.model.or_else(|| child.model.clone());
+                    summary.thinking_level = summary
+                        .thinking_level
+                        .or_else(|| child.thinking_level.clone());
+                    summary.started_at = summary.started_at.or(child.run_started_at);
+                } else {
+                    summary.started_at = None;
+                }
+                // A shared checkout's net diff cannot be attributed to one child reliably.
+                if child.workspace_id == parent.workspace_id {
+                    summary.diff_stats = WorkGroupDiffStats::Optimistic {
+                        additions: 0,
+                        deletions: 0,
+                    };
+                }
+                let child_id = child.id;
+                let leading = svg()
+                    .path("icon/corner-down-right.svg")
+                    .size(px(12.0))
+                    .text_color(rgb(faint()))
+                    .flex_none()
+                    .into_any_element();
+                Some(
+                    div()
+                        .id(format!("delegated-work-row-{}-{}", group.id, child_id))
+                        .w_full()
+                        .min_h(px(22.0))
+                        .pl_4()
+                        .flex()
+                        .items_center()
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(rgb(theme_text())).bg(rgb(surface_hover())))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.select_harness(child_id);
+                            cx.stop_propagation();
+                            cx.notify();
+                        }))
+                        .child(self.render_work_summary_stats(
+                            &summary,
+                            leading,
+                            format!("delegated-work-timer-{child_id}"),
+                        ))
+                        .when(running, |row| {
+                            row.child(
+                                div()
+                                    .id(("stop-delegated-agent", child_id as usize))
+                                    .px_1()
+                                    .text_xs()
+                                    .text_color(rgb(red()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.abort_harness(child_id);
+                                        cx.stop_propagation();
+                                        cx.notify();
+                                    }))
+                                    .child("Stop"),
+                            )
+                        })
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    pub(super) fn render_work_group(
+        &self,
+        group: &WorkGroupSummary,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let group_id = group.id.clone();
+        let expanded = group.expanded;
+        let chevron = svg()
+            .path("icon/chevron-down.svg")
+            .size(px(12.0))
+            .text_color(rgb(faint()))
+            .flex_none();
+        let chevron = if expanded {
+            chevron
+        } else {
+            chevron.with_transformation(Transformation::rotate(radians(
+                -std::f32::consts::FRAC_PI_2,
+            )))
+        };
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id(format!("work-group-{}", group.id))
+                    .w_full()
+                    .min_h(px(22.0))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|style| style.text_color(rgb(theme_text())).bg(rgb(surface_hover())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.toggle_work_group(group_id.clone(), !expanded);
+                        cx.stop_propagation();
+                        cx.notify();
+                    }))
+                    .child(self.render_work_summary_stats(
+                        group,
+                        chevron.into_any_element(),
+                        format!("work-group-timer-{}", group.id),
+                    )),
+            )
+            .children(self.delegated_work_rows(group, cx))
             .into_any_element()
     }
 

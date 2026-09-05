@@ -6,21 +6,40 @@ const SESSION_MATERIALIZE_CHUNK_SIZE: usize = 128;
 const SESSION_MATERIALIZE_YIELD: Duration = Duration::from_millis(1);
 
 impl Dirigent {
-    pub(super) fn request_cached_session_rebuild(&self, harness_index: usize) {
+    pub(super) fn request_cached_session_rebuild(&mut self, harness_index: usize) {
         let harness = &self.harnesses[harness_index];
-        if harness.loaded_messages || !harness.messages.is_empty() {
+        if harness.loaded_messages
+            || !harness.messages.is_empty()
+            || self.pending_session_rebuilds.contains_key(&harness.id)
+            || self.requested_session_rebuilds.contains(&harness.id)
+        {
             return;
         }
         let Some(entries) = harness.cached_entries.as_ref() else {
             return;
         };
-        let _ = self
-            .cached_session_rebuilds
-            .try_send(CachedSessionRebuildRequest {
-                harness_id: harness.id,
-                entries: Arc::clone(entries),
-                leaf_id: harness.cached_leaf_id.clone(),
-            });
+        let request = CachedSessionRebuildRequest {
+            harness_id: harness.id,
+            entries: Arc::clone(entries),
+            leaf_id: harness.cached_leaf_id.clone(),
+        };
+        if self.cached_session_rebuilds.try_send(request).is_ok() {
+            self.requested_session_rebuilds.insert(harness.id);
+        }
+    }
+
+    pub(super) fn request_delegated_session_rebuilds(&mut self, parent: Id) {
+        let child_indices = self
+            .harnesses
+            .iter()
+            .enumerate()
+            .filter_map(|(index, harness)| {
+                (harness.delegation.parent == Some(parent)).then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in child_indices {
+            self.request_cached_session_rebuild(index);
+        }
     }
 
     pub(super) fn queue_legacy_message_rebuild(

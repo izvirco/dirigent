@@ -36,7 +36,7 @@
         version = "0.0.0";
         src = pkgs.lib.cleanSource ./.;
 
-        cargoHash = "sha256-8cT8VspDIhNoqYlflZgzr4OTSNIQh2GBKOQXwz891UM=";
+        cargoHash = "sha256-SWRJcQIvJHTiuCLdHHOFd91KzdNUbNJy+pq6W4l9iQg=";
         cargoBuildFlags = [
           "--package"
           "dirigent_desktop"

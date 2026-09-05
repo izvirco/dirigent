@@ -124,7 +124,9 @@ impl Dirigent {
         let mut archived_ids = self
             .harnesses
             .iter()
-            .filter(|harness| harness.project_id == id && harness.archived)
+            .filter(|harness| {
+                harness.project_id == id && harness.archived && harness.delegation.parent.is_none()
+            })
             .map(|harness| harness.id)
             .collect::<Vec<_>>();
         let order = |harness_id: &Id| {

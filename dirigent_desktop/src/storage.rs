@@ -23,7 +23,7 @@ use crate::{
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
 pub(crate) const DEFAULT_DIFF_SIDEBAR_WIDTH: f32 = 560.0;
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS app_state (
@@ -56,7 +56,8 @@ const SCHEMA: &str = "
         archived INTEGER NOT NULL,
         sidebar_order TEXT NOT NULL,
         turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D',
-        work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D'
+        work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D',
+        delegation_json BLOB NOT NULL DEFAULT X'7B7D'
     );
     CREATE TABLE IF NOT EXISTS turn_diffs (
         harness_id TEXT NOT NULL,
@@ -139,6 +140,7 @@ struct StoredProject {
 }
 
 struct StoredHarness {
+    delegation: crate::delegation::Delegation,
     id: Id,
     project_id: Id,
     title: String,
@@ -153,6 +155,7 @@ struct StoredHarness {
 }
 
 struct StoredHarnessMetadata {
+    delegation: crate::delegation::Delegation,
     id: Id,
     project_id: Id,
     title: String,
@@ -360,6 +363,7 @@ impl StateDatabase {
             harnesses: harnesses
                 .iter()
                 .map(|harness| StoredHarnessMetadata {
+                    delegation: harness.delegation.clone(),
                     id: harness.id,
                     project_id: harness.project_id,
                     title: harness.title.clone(),
@@ -578,6 +582,11 @@ fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<()
         .map_err(|error| format!("could not initialize {}: {error}", database_path.display()))?;
     let migrations = [
         (
+            "harnesses",
+            "delegation_json",
+            "ALTER TABLE harnesses ADD COLUMN delegation_json BLOB NOT NULL DEFAULT X'7B7D';",
+        ),
+        (
             "app_state",
             "diff_sidebar_open",
             "ALTER TABLE app_state ADD COLUMN diff_sidebar_open INTEGER NOT NULL DEFAULT 0;",
@@ -791,8 +800,8 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
                 "INSERT INTO harnesses (
                     id, order_index, project_id, title, session_file_json, nix_enabled,
                     workspace_id, last_vcs_label, archived, sidebar_order,
-                    work_group_expansion_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    work_group_expansion_json, delegation_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     harness.id.to_string(),
                     order_index(index)?,
@@ -805,6 +814,7 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
                     harness.archived,
                     harness.sidebar_order.to_string(),
                     encode_json(&harness.work_group_expansion, "work group expansion")?,
+                    encode_json(&harness.delegation, "delegation")?,
                 ],
             )
             .map_err(|error| format!("could not store harness {}: {error}", harness.id))?;
@@ -965,8 +975,8 @@ fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> 
                 "INSERT INTO harnesses (
                      id, order_index, project_id, title, session_file_json, nix_enabled,
                      workspace_id, last_vcs_label, archived, sidebar_order,
-                     work_group_expansion_json
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                     work_group_expansion_json, delegation_json
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                  ON CONFLICT(id) DO UPDATE SET
                      order_index = excluded.order_index,
                      project_id = excluded.project_id,
@@ -977,7 +987,8 @@ fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> 
                      last_vcs_label = excluded.last_vcs_label,
                      archived = excluded.archived,
                      sidebar_order = excluded.sidebar_order,
-                     work_group_expansion_json = excluded.work_group_expansion_json
+                     work_group_expansion_json = excluded.work_group_expansion_json,
+                     delegation_json = excluded.delegation_json
                  WHERE harnesses.order_index IS NOT excluded.order_index
                     OR harnesses.project_id IS NOT excluded.project_id
                     OR harnesses.title IS NOT excluded.title
@@ -987,7 +998,8 @@ fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> 
                     OR harnesses.last_vcs_label IS NOT excluded.last_vcs_label
                     OR harnesses.archived IS NOT excluded.archived
                     OR harnesses.sidebar_order IS NOT excluded.sidebar_order
-                    OR harnesses.work_group_expansion_json IS NOT excluded.work_group_expansion_json",
+                    OR harnesses.work_group_expansion_json IS NOT excluded.work_group_expansion_json
+                    OR harnesses.delegation_json IS NOT excluded.delegation_json",
                 params![
                     harness.id.to_string(),
                     order_index(index)?,
@@ -1000,6 +1012,7 @@ fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> 
                     harness.archived,
                     harness.sidebar_order.to_string(),
                     work_group_expansion_json,
+                    encode_json(&harness.delegation, "delegation")?,
                 ],
             )
             .map_err(|error| format!("could not update thread {}: {error}", harness.id))?;
@@ -1318,7 +1331,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, project_id, title, session_file_json, nix_enabled, workspace_id,
-                    last_vcs_label, archived, sidebar_order, work_group_expansion_json
+                    last_vcs_label, archived, sidebar_order, work_group_expansion_json, delegation_json
              FROM harnesses ORDER BY order_index",
         )
         .map_err(|error| format!("could not prepare harness state: {error}"))?;
@@ -1335,6 +1348,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                 row.get::<_, bool>(7)?,
                 row.get::<_, String>(8)?,
                 row.get::<_, Vec<u8>>(9)?,
+                row.get::<_, Vec<u8>>(10)?,
             ))
         })
         .map_err(|error| format!("could not read harnesses: {error}"))?;
@@ -1350,8 +1364,10 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
             archived,
             sidebar_order,
             work_group_expansion_json,
+            delegation_json,
         ) = row.map_err(|error| format!("could not read harness: {error}"))?;
         harnesses.push(StoredHarness {
+            delegation: decode_json(&delegation_json, "delegation")?,
             id: decode_id(&id, "harness id")?,
             project_id: decode_id(&project_id, "harness project id")?,
             title,
@@ -1503,7 +1519,7 @@ impl StoredState {
             .harnesses
             .into_iter()
             .map(|harness| {
-                Harness::restored(
+                let mut restored = Harness::restored(
                     harness.id,
                     harness.project_id,
                     harness.title,
@@ -1515,7 +1531,10 @@ impl StoredState {
                     harness.sidebar_order,
                     harness.turn_diffs.into_iter().map(Arc::new).collect(),
                     harness.work_group_expansion,
-                )
+                );
+                restored.delegation = harness.delegation;
+                restored.delegation.interrupt();
+                restored
             })
             .collect();
         let workspaces = self
@@ -1599,4 +1618,82 @@ fn decode_id(value: &str, description: &str) -> Result<u64, String> {
 
 fn order_index(index: usize) -> Result<i64, String> {
     i64::try_from(index).map_err(|_| "too many state records to store".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delegation::{AgentJob, AgentRun, WorkStatus};
+
+    #[test]
+    fn delegation_survives_database_restart_without_replaying_work() {
+        let directory =
+            std::env::temp_dir().join(format!("dirigent-delegation-{}", fastrand::u64(..)));
+        let path = directory.join("state.sqlite3");
+        let (db, _) = StateDatabase::open_at(&path).unwrap();
+        let mut parent = Harness::new(1, 10, "Manager".into(), 1);
+        parent.delegation.jobs.push(AgentJob {
+            id: "job".into(),
+            tool_call_id: "tool-call".into(),
+            title: "Implement".into(),
+            status: WorkStatus::Running,
+            result: String::new(),
+        });
+        let mut child = Harness::new(2, 10, "Child".into(), 2);
+        child.delegation.parent = Some(1);
+        for (id, status) in [
+            ("finished", WorkStatus::Completed),
+            ("active", WorkStatus::Running),
+        ] {
+            child.delegation.runs.push(AgentRun {
+                id: id.into(),
+                job_id: "job".into(),
+                status,
+                result: "saved output".into(),
+                error: None,
+                stop_reason: Some("stop".into()),
+            });
+        }
+        db.save(
+            &[],
+            &[parent, child],
+            &[],
+            11,
+            3,
+            Some(1),
+            &HashSet::new(),
+            DEFAULT_SIDEBAR_WIDTH,
+            false,
+            DEFAULT_DIFF_SIDEBAR_WIDTH,
+            DiffViewMode::Unified,
+        )
+        .unwrap();
+        drop(db); // flush the ordered storage worker
+        let (db, loaded) = StateDatabase::open_at(&path).unwrap();
+        assert_eq!(
+            loaded.harnesses[0].delegation.jobs[0].status,
+            WorkStatus::Interrupted
+        );
+        let child = &loaded.harnesses[1];
+        assert_eq!(child.delegation.parent, Some(1));
+        assert_eq!(child.delegation.runs[0].status, WorkStatus::Completed);
+        assert_eq!(child.delegation.runs[0].result, "saved output");
+        assert_eq!(child.delegation.runs[1].status, WorkStatus::Interrupted);
+        assert!(child.pending_initial_prompt.is_none());
+        drop(db);
+
+        // Existing schema-6 databases acquire empty metadata without losing their threads.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE harnesses DROP COLUMN delegation_json; PRAGMA user_version = 6;",
+            )
+            .unwrap();
+        drop(connection);
+        let (db, loaded) = StateDatabase::open_at(&path).unwrap();
+        assert_eq!(loaded.harnesses.len(), 2);
+        assert!(loaded.harnesses[1].delegation.parent.is_none());
+        drop(db);
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
