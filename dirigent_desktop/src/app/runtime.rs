@@ -305,7 +305,7 @@ impl Dirigent {
         let summary = value
             .pointer("/result/summary")
             .and_then(Value::as_str)
-            .map(truncate_output);
+            .map(str::to_string);
         let message_index = self.harnesses[index]
             .messages
             .iter()
@@ -325,7 +325,7 @@ impl Dirigent {
         } else {
             message.append_text(" · failed");
             if let Some(error) = value.get("errorMessage").and_then(Value::as_str) {
-                message.set_detail(Some(truncate_output(error)));
+                message.set_detail(Some(error.to_string()));
             }
         }
         Some(message_index)
@@ -553,7 +553,7 @@ impl Dirigent {
         let detail = value
             .pointer("/partialResult/content/0/text")
             .and_then(Value::as_str)
-            .map(truncate_output)?;
+            .map(str::to_string)?;
         let message_index = self.harnesses[index]
             .messages
             .iter()

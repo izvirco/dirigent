@@ -100,7 +100,7 @@ pub(super) fn parse_codex_usage(value: &Value) -> Option<CodexUsage> {
 }
 
 pub(super) fn compact_json(value: &Value) -> String {
-    truncate_output(&serde_json::to_string(value).unwrap_or_else(|_| "{}".into()))
+    serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
 }
 
 pub(super) fn one_line(value: &str) -> String {
@@ -173,7 +173,7 @@ pub(super) fn write_detail(args: &Value) -> Option<String> {
         detail.push_str("+ ");
         detail.push_str(line);
     }
-    Some(truncate_output(&detail))
+    Some(detail)
 }
 
 pub(super) fn normalize_diff_spacing(diff: &str) -> String {
@@ -214,33 +214,19 @@ pub(super) fn tool_message(
     message
 }
 
-pub(super) fn truncate_output(value: &str) -> String {
-    const LIMIT: usize = 4_000;
-    if value.len() <= LIMIT {
-        value.to_string()
-    } else {
-        let mut end = LIMIT;
-        while !value.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}\n… output truncated by Dirigent", &value[..end])
-    }
-}
-
-/// Extracts concise display output, preferring edit diffs over generic result text.
+/// Extracts display output, preferring edit diffs over generic result text.
 pub(super) fn tool_result_detail(name: &str, result: &Value, is_error: bool) -> Option<String> {
     if name == "edit"
         && !is_error
         && let Some(diff) = result.pointer("/details/diff").and_then(Value::as_str)
     {
-        return Some(truncate_output(&normalize_diff_spacing(diff)));
+        return Some(normalize_diff_spacing(diff));
     }
 
     result
         .get("content")
         .map(content_text)
         .filter(|text| !text.is_empty())
-        .map(|text| truncate_output(&text))
 }
 
 pub(super) fn content_text(value: &Value) -> String {
@@ -370,7 +356,7 @@ impl EntryMessageParser {
                 let summary = entry
                     .get("summary")
                     .and_then(Value::as_str)
-                    .map(truncate_output);
+                    .map(str::to_string);
                 let mut message = Message::compaction(None, summary.as_deref(), false)
                     .with_entry_id(entry.get("id").and_then(Value::as_str));
                 message.set_turn_settings(
@@ -722,7 +708,7 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
                 value
                     .get("output")
                     .and_then(Value::as_str)
-                    .map(truncate_output),
+                    .map(str::to_string),
             );
             Some(message)
         }
