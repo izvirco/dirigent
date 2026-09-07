@@ -205,29 +205,63 @@ impl Dirigent {
         self.persist();
     }
     pub(crate) fn delete_harness(&mut self, id: Id) {
-        self.stop_delegation(id);
         let Some(index) = self.harnesses.iter().position(|harness| harness.id == id) else {
             return;
         };
         let project_id = self.harnesses[index].project_id;
-        self.harnesses.remove(index);
-        for child in &mut self.harnesses {
-            if child.delegation.parent == Some(id) {
-                child.delegation.parent = None;
+        // Include the entire delegation tree, not just direct children.
+        let mut removed = HashSet::new();
+        let mut pending = vec![id];
+        while let Some(id) = pending.pop() {
+            if !removed.insert(id) {
+                continue;
             }
+            pending.extend(
+                self.harnesses
+                    .iter()
+                    .filter(|harness| harness.delegation.parent == Some(id))
+                    .map(|harness| harness.id),
+            );
+            self.stop_delegation(id);
         }
-        self.composer_inputs.remove(&id);
-        self.title_processes.remove(&id);
-        self.pending_workspace_sources.remove(&id);
-        self.deleting_workspace_harnesses.remove(&id);
-        if self.pending_workspace_deletion == Some(id) {
+        self.harnesses
+            .retain(|harness| !removed.contains(&harness.id));
+        self.composer_inputs.retain(|id, _| !removed.contains(id));
+        self.title_processes.retain(|id, _| !removed.contains(id));
+        self.pending_workspace_sources
+            .retain(|id, _| !removed.contains(id));
+        self.deleting_workspace_harnesses
+            .retain(|id| !removed.contains(id));
+        if self
+            .pending_workspace_deletion
+            .is_some_and(|id| removed.contains(&id))
+        {
             self.pending_workspace_deletion = None;
         }
         self.sidebar_menu = None;
-        if self.renaming_harness == Some(id) {
+        if self
+            .renaming_harness
+            .is_some_and(|id| removed.contains(&id))
+        {
             self.renaming_harness = None;
         }
-        if self.selected_harness == Some(id) {
+        if self
+            .pending_dialog
+            .as_ref()
+            .is_some_and(|dialog| removed.contains(&dialog.harness_id))
+        {
+            self.pending_dialog = None;
+        }
+        if self
+            .last_used_harness
+            .is_some_and(|id| removed.contains(&id))
+        {
+            self.last_used_harness = None;
+        }
+        if self
+            .selected_harness
+            .is_some_and(|id| removed.contains(&id))
+        {
             self.select_after_harness_hidden(project_id);
         }
         self.persist();
