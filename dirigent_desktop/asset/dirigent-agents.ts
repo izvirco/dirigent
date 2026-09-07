@@ -22,6 +22,8 @@ API (all methods async):
   agents.jobs(): saved workflow statuses/results, including interrupted workflows after restart.
   agents.stop(agentId): cancel work, retain session/files.
 
+The spawn name becomes the child's visible title. Use a concise, human-readable task description: "Add titles to sub-agent rows", not "Sub-agent work entry title".
+
 spawn returns after scheduling, not after completion. Consecutive spawns run concurrently. Use await wait([first.runId]) before spawning a dependent task; use wait(all) or wait(any) for barriers. IDs remain usable in later scripts. send preserves the child's context. Children start with a fresh context and normal project/global Pi instructions, tools, extensions and skills; give each a self-contained brief with the agreed plan, relevant context, boundaries and acceptance criteria. Parent conversation is NOT automatically copied. Children should not delegate further unless their assignment explicitly permits nested delegation. Model/thinking must be explicit; first use models() to resolve shorthand to exact IDs; never silently substitute.
 
 current means the manager's actual checkout, including its worktree. new provisions an isolated Git worktree or JJ workspace at its recorded revision. Dirty Git checkouts reject new unless allowDirtyBase:true explicitly acknowledges exclusion of uncommitted changes. Shared checkouts have no write isolation; avoid overlapping writers, including the manager. Git/JJ integration is NOT automatic: inspect actual diffs, run tests, provide feedback via send, then integrate with ordinary tools only when authorized. A completed run is not approval or proof of correctness. Never discard unrelated changes.

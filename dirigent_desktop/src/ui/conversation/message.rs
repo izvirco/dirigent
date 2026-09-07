@@ -93,6 +93,7 @@ impl Dirigent {
         group: &WorkGroupSummary,
         leading: AnyElement,
         animation_id: String,
+        thread_title: Option<String>,
     ) -> AnyElement {
         let model = group
             .model
@@ -156,6 +157,15 @@ impl Dirigent {
             })
             .when_some(duration, |element, duration| {
                 element.child("·").child(duration)
+            })
+            .when_some(thread_title, |element, title| {
+                element.child("·").child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(title),
+                )
             })
             .when(additions > 0 || deletions > 0, |element| {
                 let approximation = if approximate { "~" } else { "" };
@@ -301,6 +311,7 @@ impl Dirigent {
                             &summary,
                             leading,
                             format!("delegated-work-timer-{child_id}"),
+                            Some(child.title.clone()),
                         ))
                         .when(running, |row| {
                             row.child(
@@ -365,6 +376,7 @@ impl Dirigent {
                         group,
                         chevron.into_any_element(),
                         format!("work-group-timer-{}", group.id),
+                        None,
                     )),
             )
             .children(self.delegated_work_rows(group, cx))
