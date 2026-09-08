@@ -23,7 +23,6 @@ use crate::{
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 288.0;
 pub(crate) const DEFAULT_DIFF_SIDEBAR_WIDTH: f32 = 560.0;
-const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
     CREATE TABLE IF NOT EXISTS app_state (
@@ -55,7 +54,6 @@ const SCHEMA: &str = "
         last_vcs_label TEXT,
         archived INTEGER NOT NULL,
         sidebar_order TEXT NOT NULL,
-        turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D',
         work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D',
         delegation_json BLOB NOT NULL DEFAULT X'7B7D'
     );
@@ -564,164 +562,13 @@ fn open_database(database_path: &Path) -> Result<Connection, String> {
 }
 
 fn initialize_schema(connection: &Connection, database_path: &Path) -> Result<(), String> {
-    let version = connection
-        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
-        .map_err(|error| format!("could not inspect {}: {error}", database_path.display()))?;
-    if version > SCHEMA_VERSION {
-        return Err(format!(
-            "{} uses state schema version {version}, but this version of Dirigent supports up to {SCHEMA_VERSION}",
-            database_path.display()
-        ));
-    }
     connection
         .execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              {SCHEMA}"
         ))
-        .map_err(|error| format!("could not initialize {}: {error}", database_path.display()))?;
-    let migrations = [
-        (
-            "harnesses",
-            "delegation_json",
-            "ALTER TABLE harnesses ADD COLUMN delegation_json BLOB NOT NULL DEFAULT X'7B7D';",
-        ),
-        (
-            "app_state",
-            "diff_sidebar_open",
-            "ALTER TABLE app_state ADD COLUMN diff_sidebar_open INTEGER NOT NULL DEFAULT 0;",
-        ),
-        (
-            "app_state",
-            "diff_sidebar_width",
-            "ALTER TABLE app_state ADD COLUMN diff_sidebar_width REAL NOT NULL DEFAULT 560;",
-        ),
-        (
-            "app_state",
-            "diff_view_mode_json",
-            "ALTER TABLE app_state ADD COLUMN diff_view_mode_json BLOB NOT NULL DEFAULT X'22556E696669656422';",
-        ),
-        (
-            "harnesses",
-            "turn_diffs_json",
-            "ALTER TABLE harnesses ADD COLUMN turn_diffs_json BLOB NOT NULL DEFAULT X'5B5D';",
-        ),
-        (
-            "harnesses",
-            "last_vcs_label",
-            "ALTER TABLE harnesses ADD COLUMN last_vcs_label TEXT;",
-        ),
-        (
-            "harnesses",
-            "work_group_expansion_json",
-            "ALTER TABLE harnesses ADD COLUMN work_group_expansion_json BLOB NOT NULL DEFAULT X'7B7D';",
-        ),
-        (
-            "projects",
-            "keep_active_threads_in_project",
-            "ALTER TABLE projects ADD COLUMN keep_active_threads_in_project INTEGER NOT NULL DEFAULT 0;",
-        ),
-    ];
-    for (table, column, migration) in migrations {
-        if !table_has_column(connection, table, column).map_err(|error| {
-            format!(
-                "could not inspect {} for migration: {error}",
-                database_path.display()
-            )
-        })? {
-            connection.execute_batch(migration).map_err(|error| {
-                format!("could not migrate {}: {error}", database_path.display())
-            })?;
-        }
-    }
-    if version < 6 {
-        migrate_normalized_turn_diffs(connection, database_path)?;
-    }
-    connection
-        .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
-        .map_err(|error| format!("could not update {}: {error}", database_path.display()))
-}
-
-fn migrate_normalized_turn_diffs(
-    connection: &Connection,
-    database_path: &Path,
-) -> Result<(), String> {
-    let mut statement = connection
-        .prepare("SELECT id, turn_diffs_json FROM harnesses")
-        .map_err(|error| {
-            format!(
-                "could not prepare {} turn diff migration: {error}",
-                database_path.display()
-            )
-        })?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-        })
-        .map_err(|error| {
-            format!(
-                "could not read {} turn diffs for migration: {error}",
-                database_path.display()
-            )
-        })?;
-    let mut migrated = Vec::new();
-    for row in rows {
-        let (harness_id, bytes) = row.map_err(|error| {
-            format!(
-                "could not read {} turn diff migration row: {error}",
-                database_path.display()
-            )
-        })?;
-        migrated.push((harness_id, decode_turn_diffs(&bytes)?));
-    }
-    drop(statement);
-    let transaction = connection.unchecked_transaction().map_err(|error| {
-        format!(
-            "could not begin {} turn diff migration: {error}",
-            database_path.display()
-        )
-    })?;
-    for (harness_id, turns) in migrated {
-        for turn in turns {
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO turn_diffs (harness_id, turn_id, diff_json)
-                     VALUES (?1, ?2, ?3)",
-                    params![harness_id, turn.id.to_string(), encode_turn_diff(&turn)?],
-                )
-                .map_err(|error| {
-                    format!(
-                        "could not migrate {} turn diff: {error}",
-                        database_path.display()
-                    )
-                })?;
-        }
-    }
-    transaction
-        .execute("UPDATE harnesses SET turn_diffs_json = X'5B5D'", [])
-        .map_err(|error| {
-            format!(
-                "could not clear {} legacy turn diffs after migration: {error}",
-                database_path.display()
-            )
-        })?;
-    transaction.commit().map_err(|error| {
-        format!(
-            "could not commit {} turn diff migration: {error}",
-            database_path.display()
-        )
-    })
-}
-
-fn table_has_column(connection: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
-    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
-    let mut rows = statement.query([])?;
-    while let Some(row) = rows.next()? {
-        if row.get::<_, String>(1)? == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+        .map_err(|error| format!("could not initialize {}: {error}", database_path.display()))
 }
 
 fn write_stored_state(connection: &mut Connection, state: &StoredState) -> Result<(), String> {
@@ -1580,25 +1427,9 @@ fn encode_turn_diff(turn: &TurnDiff) -> Result<Vec<u8>, String> {
 }
 
 fn decode_turn_diff(bytes: &[u8]) -> Result<TurnDiff, String> {
-    // Uncompressed JSON remains readable for databases created before diff compression.
-    let json = if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        zstd::stream::decode_all(bytes)
-            .map_err(|error| format!("could not decompress turn diff: {error}"))?
-    } else {
-        bytes.to_vec()
-    };
+    let json = zstd::stream::decode_all(bytes)
+        .map_err(|error| format!("could not decompress turn diff: {error}"))?;
     serde_json::from_slice(&json).map_err(|error| format!("could not decode turn diff: {error}"))
-}
-
-// Legacy schema decoder used only while migrating the old per-harness blob.
-fn decode_turn_diffs(bytes: &[u8]) -> Result<Vec<TurnDiff>, String> {
-    let json = if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-        zstd::stream::decode_all(bytes)
-            .map_err(|error| format!("could not decompress turn diffs: {error}"))?
-    } else {
-        bytes.to_vec()
-    };
-    serde_json::from_slice(&json).map_err(|error| format!("could not decode turn diffs: {error}"))
 }
 
 fn encode_json<T: Serialize + ?Sized>(value: &T, description: &str) -> Result<Vec<u8>, String> {
@@ -1626,7 +1457,7 @@ mod tests {
     use crate::delegation::{AgentJob, AgentRun, WorkStatus};
 
     #[test]
-    fn delegation_survives_database_restart_without_replaying_work() {
+    fn state_survives_database_restart_without_replaying_work() {
         let directory =
             std::env::temp_dir().join(format!("dirigent-delegation-{}", fastrand::u64(..)));
         let path = directory.join("state.sqlite3");
@@ -1655,7 +1486,13 @@ mod tests {
             });
         }
         db.save(
-            &[],
+            &[Project {
+                id: 10,
+                name: "Project".into(),
+                path: directory.clone(),
+                workspace_root: None,
+                keep_active_threads_in_project: false,
+            }],
             &[parent, child],
             &[],
             11,
@@ -1668,8 +1505,26 @@ mod tests {
             DiffViewMode::Unified,
         )
         .unwrap();
+        let turn = Arc::new(TurnDiff {
+            id: 1,
+            prompt: "Change a file".into(),
+            started_at: 1,
+            finished_at: 2,
+            status: crate::diff::TurnDiffStatus::Completed,
+            files: Vec::new(),
+            additions: 0,
+            deletions: 0,
+            error: None,
+        });
+        db.save_turn_diff(1, turn.clone()).unwrap();
         drop(db); // flush the ordered storage worker
         let (db, loaded) = StateDatabase::open_at(&path).unwrap();
+        assert_eq!(loaded.projects[0].path, directory);
+        assert_eq!(loaded.last_used_harness, Some(1));
+        assert_eq!(
+            serde_json::to_value(loaded.harnesses[0].turn_diffs[0].as_ref()).unwrap(),
+            serde_json::to_value(turn.as_ref()).unwrap()
+        );
         assert_eq!(
             loaded.harnesses[0].delegation.jobs[0].status,
             WorkStatus::Interrupted
@@ -1682,18 +1537,6 @@ mod tests {
         assert!(child.pending_initial_prompt.is_none());
         drop(db);
 
-        // Existing schema-6 databases acquire empty metadata without losing their threads.
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "ALTER TABLE harnesses DROP COLUMN delegation_json; PRAGMA user_version = 6;",
-            )
-            .unwrap();
-        drop(connection);
-        let (db, loaded) = StateDatabase::open_at(&path).unwrap();
-        assert_eq!(loaded.harnesses.len(), 2);
-        assert!(loaded.harnesses[1].delegation.parent.is_none());
-        drop(db);
         fs::remove_dir_all(directory).unwrap();
     }
 }

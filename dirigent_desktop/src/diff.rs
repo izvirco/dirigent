@@ -116,10 +116,8 @@ pub(crate) struct FileDiff {
     pub(crate) new_text: Option<String>,
     pub(crate) old_mode: u32,
     pub(crate) new_mode: u32,
-    #[serde(default)]
-    pub(crate) old_exists: Option<bool>,
-    #[serde(default)]
-    pub(crate) new_exists: Option<bool>,
+    pub(crate) old_exists: bool,
+    pub(crate) new_exists: bool,
     pub(crate) hunks: Vec<DiffHunk>,
     pub(crate) additions: usize,
     pub(crate) deletions: usize,
@@ -186,10 +184,9 @@ struct CombinedFile {
 
 fn combined_version(file: &FileDiff, old: bool) -> CombinedFileVersion {
     let exists = if old {
-        file.old_exists.unwrap_or(file.kind != FileDiffKind::Added)
+        file.old_exists
     } else {
         file.new_exists
-            .unwrap_or(file.kind != FileDiffKind::Deleted)
     };
     CombinedFileVersion {
         exists,
@@ -271,8 +268,8 @@ fn finish_combined_file(file: CombinedFile) -> Option<FileDiff> {
         new_text: file.new.exists.then_some(file.new.text).flatten(),
         old_mode: file.old.mode,
         new_mode: file.new.mode,
-        old_exists: Some(file.old.exists),
-        new_exists: Some(file.new.exists),
+        old_exists: file.old.exists,
+        new_exists: file.new.exists,
         hunks,
         additions,
         deletions,

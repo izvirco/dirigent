@@ -185,9 +185,21 @@ jobs:
               -not (Test-Path (Join-Path $install "versions/$($selected.channel)-$($selected.version)/dirigent_desktop.exe"))) {
             throw 'Installer did not create the expected layout'
           }
+          $verbs = @{
+            "HKCU:\Software\Classes\Directory\shell\Dirigent-$env:DIRIGENT_UPDATE_CHANNEL" = '%1'
+            "HKCU:\Software\Classes\Directory\Background\shell\Dirigent-$env:DIRIGENT_UPDATE_CHANNEL" = '%V'
+          }
+          foreach ($key in $verbs.Keys) {
+            $command = (Get-Item "$key\command").GetValue('')
+            $expected = '"{0}\dirigent.exe" --open-project "{1}\."' -f $install, $verbs[$key]
+            if ($command -ne $expected) { throw "Incorrect Explorer command: $command" }
+          }
           $process = Start-Process (Join-Path $install 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Uninstaller exited with $($process.ExitCode)" }
           if (Test-Path (Join-Path $install 'current.json')) { throw 'Uninstaller left the installation selection behind' }
+          foreach ($key in $verbs.Keys) {
+            if (Test-Path $key) { throw "Uninstaller left the Explorer entry behind: $key" }
+          }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4

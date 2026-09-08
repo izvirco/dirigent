@@ -475,20 +475,49 @@ impl Dirigent {
             cx.notify();
             return;
         }
-        let path = match fs::canonicalize(&path) {
-            Ok(path) if path.is_dir() => path,
-            Ok(_) => {
-                self.banner = Some(format!("{} is not a directory.", path.display()));
-                cx.notify();
-                return;
+        if let Err(error) = self.open_project_directory(path, cx) {
+            self.banner = Some(error);
+        }
+        cx.notify();
+    }
+
+    /// A directory launch selects its composer; a plain relaunch only activates the window.
+    /// Returns whether startup should skip restoring the previously selected thread.
+    pub(crate) fn handle_launch(
+        &mut self,
+        project_directory: Result<Option<PathBuf>, String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let result = match project_directory {
+            Ok(Some(path)) => self.open_project_directory(path, cx),
+            Ok(None) => return false,
+            Err(error) => Err(error),
+        };
+        let opened = match result {
+            Ok(()) => {
+                self.enter_input_mode(true);
+                true
             }
             Err(error) => {
-                tracing::error!(error = %error, path = %path.display(), "could not open project directory");
-                self.banner = Some(format!("Cannot open {}: {error}", path.display()));
-                cx.notify();
-                return;
+                self.banner = Some(error);
+                false
             }
         };
+        cx.notify();
+        opened
+    }
+
+    /// Shared by the project input and Explorer launches; canonical paths prevent duplicates.
+    pub(super) fn open_project_directory(
+        &mut self,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let path = fs::canonicalize(&path)
+            .map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
+        if !path.is_dir() {
+            return Err(format!("{} is not a directory.", path.display()));
+        }
         if let Some(project_id) = self
             .projects
             .iter()
@@ -496,9 +525,7 @@ impl Dirigent {
             .map(|project| project.id)
         {
             self.start_new_harness(project_id);
-            self.banner = Some("That project is already connected.".into());
-            cx.notify();
-            return;
+            return Ok(());
         }
 
         let name = path
@@ -530,21 +557,10 @@ impl Dirigent {
             }
         }
         self.collapsed_projects.insert(id);
-        self.selected_project = Some(id);
-        self.show_cached_models(id);
-        self.selected_harness = None;
-        self.adding_project = false;
-        self.creating_harness = true;
-        self.project_settings = None;
-        self.draft_model = None;
-        self.draft_thinking_level = None;
-        self.draft_nix_enabled = true;
-        self.banner = None;
         self.project_input.update(cx, |input, cx| input.clear(cx));
         self.persist();
-        self.refresh_repository(id);
-        self.start_project_probe(id);
-        cx.notify();
+        self.start_new_harness(id);
+        Ok(())
     }
     /// Creates the local thread immediately, then starts Pi or provisions its chosen workspace.
     pub(crate) fn create_harness(&mut self, cx: &mut Context<Self>) {

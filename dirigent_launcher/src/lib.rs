@@ -7,6 +7,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+// Windows uses named pipes; unit tests exercise the same handoff over Unix local sockets.
+#[cfg(any(windows, test))]
+pub mod instance;
+
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
@@ -217,6 +221,28 @@ pub fn cleanup(root: &Path, running_version: &str) -> Result<(), String> {
         let _ = fs::remove_dir_all(entry.path());
     }
     Ok(())
+}
+
+/// Reports launch failures even for Windows GUI-subsystem executables without a console.
+#[cfg(not(windows))]
+pub fn show_error(message: &str) {
+    eprintln!("{message}");
+}
+
+#[cfg(windows)]
+pub fn show_error(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = "Dirigent".encode_utf16().chain(Some(0)).collect();
+    // Both strings are NUL-terminated and remain alive for this synchronous call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }
 
 /// Inno Setup uses this channel-scoped marker to require desktop processes to exit

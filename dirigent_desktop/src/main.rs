@@ -13,6 +13,7 @@ mod cache;
 mod delegation;
 mod diff;
 mod image_attachment;
+mod launch;
 mod logging;
 mod markdown;
 mod math;
@@ -70,6 +71,20 @@ fn main() -> std::process::ExitCode {
         }
     };
 
+    let project_directory = launch::project_directory(std::env::args_os().skip(1));
+    #[cfg(windows)]
+    let instance = match launch::single_instance(&project_directory) {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            tracing::error!(%error);
+            dirigent_launcher::show_error(&error);
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    #[cfg(windows)]
+    let requests = instance.requests.clone();
+
     tracing::info!(
         version = build_info::version(),
         channel = build_info::channel(),
@@ -80,7 +95,7 @@ fn main() -> std::process::ExitCode {
     #[cfg(feature = "self-update")]
     update::cleanup_old_versions();
 
-    application().with_assets(Assets).run(|cx: &mut App| {
+    application().with_assets(Assets).run(move |cx: &mut App| {
         let app_id = format!("dirigent-{}", build_info::channel());
         let app_name = if build_info::channel() == "stable" {
             "Dirigent".to_string()
@@ -95,22 +110,48 @@ fn main() -> std::process::ExitCode {
 
         let bounds = Bounds::centered(None, size(px(1280.0), px(800.0)), cx);
 
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from(app_name)),
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(SharedString::from(app_name)),
+                        ..Default::default()
+                    }),
+                    app_id: Some(app_id.into()),
                     ..Default::default()
-                }),
-                app_id: Some(app_id.into()),
-                ..Default::default()
-            },
-            |_, cx| cx.new(Dirigent::new),
-        )
-        .expect("failed to open window");
+                },
+                |_, cx| cx.new(|cx| Dirigent::new(project_directory, cx)),
+            )
+            .expect("failed to open window");
 
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("failed to activate window");
         cx.activate(true);
+
+        #[cfg(windows)]
+        cx.spawn(async move |cx| {
+            while let Ok(request) = requests.recv().await {
+                if window
+                    .update(cx, |this, window, cx| {
+                        this.handle_launch(request.project_directory.clone(), cx);
+                        window.activate_window();
+                        cx.activate(true);
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                request.handled();
+            }
+        })
+        .detach();
     });
+    // Release the endpoint only after the UI and database workers have shut down, but before
+    // spawning an update restart; otherwise the new build would hand off to this dying process.
+    #[cfg(windows)]
+    drop(instance);
     tracing::info!("application exited normally");
     #[cfg(feature = "self-update")]
     if let Err(error) = update::restart_after_shutdown() {

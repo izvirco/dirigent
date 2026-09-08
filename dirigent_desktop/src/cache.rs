@@ -257,35 +257,6 @@ impl CacheDatabase {
                  PRIMARY KEY (project_path, model)
              );",
         )?;
-        let has_composer_draft = connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('session_cache') WHERE name = 'composer_draft'
-             )",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !has_composer_draft {
-            connection.execute(
-                "ALTER TABLE session_cache
-                 ADD COLUMN composer_draft TEXT NOT NULL DEFAULT ''",
-                [],
-            )?;
-        }
-        let has_composer_images = connection.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('session_cache')
-                WHERE name = 'composer_images_json'
-             )",
-            [],
-            |row| row.get::<_, bool>(0),
-        )?;
-        if !has_composer_images {
-            connection.execute(
-                "ALTER TABLE session_cache
-                 ADD COLUMN composer_images_json BLOB NOT NULL DEFAULT X'5B5D'",
-                [],
-            )?;
-        }
         Ok(Self { connection })
     }
 
@@ -534,6 +505,36 @@ fn cache_path() -> Result<PathBuf, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn cached_state_survives_reinitialization() {
+        let database = CacheDatabase::initialize(Connection::open_in_memory().unwrap()).unwrap();
+        let session = Path::new("session.jsonl");
+        let project = Path::new("project");
+        let images = br#"[{"path":"image.png"}]"#;
+        database
+            .save_session_state(session, Some("model"), Some("high"))
+            .unwrap();
+        database
+            .save_composer_draft(session, "draft", images)
+            .unwrap();
+        database.save_models(project, b"[]").unwrap();
+        database
+            .save_thinking_levels(project, "model", &["high".into()])
+            .unwrap();
+
+        let database = CacheDatabase::initialize(database.connection).unwrap();
+        let cached = database.load_session(session).unwrap().unwrap();
+        assert_eq!(cached.model.as_deref(), Some("model"));
+        assert_eq!(cached.thinking_level.as_deref(), Some("high"));
+        assert_eq!(cached.composer_draft, "draft");
+        assert_eq!(cached.composer_images_json, images);
+        assert_eq!(database.load_models(project).unwrap(), Some(b"[]".to_vec()));
+        assert_eq!(
+            database.load_thinking_levels(project).unwrap(),
+            vec![("model".into(), vec!["high".into()])]
+        );
+    }
 
     #[test]
     fn appends_only_new_session_entries() {

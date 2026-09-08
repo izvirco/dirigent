@@ -2,8 +2,10 @@
 ; StageDir contains dirigent.exe, current.json, and versions/<channel>-<version>/dirigent_desktop.exe.
 #if Channel == "stable"
   #define AppName "Dirigent"
+  #define OpenHereLabel "Open dirigent here"
 #else
   #define AppName "Dirigent (" + Channel + ")"
+  #define OpenHereLabel "Open dirigent here (" + Channel + ")"
 #endif
 
 [Setup]
@@ -12,7 +14,7 @@ AppName={#AppName}
 AppVersion={#ReleaseVersion}
 AppPublisher=Seb
 AppPublisherURL=https://dirigent.sebba.dev
-DefaultDirName={localappdata}\Programs\Dirigent\channels\{#Channel}
+DefaultDirName={localappdata}\Programs\Dirigent\{#Channel}
 DefaultGroupName={#AppName}
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -42,6 +44,16 @@ Source: "{#StageDir}\current.json"; DestDir: "{app}"; DestName: "current.next.js
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\dirigent.exe"; AppUserModelID: "dirigent-{#Channel}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\dirigent.exe"; Tasks: desktopicon; AppUserModelID: "dirigent-{#Channel}"
+
+[Registry]
+; Per-user, channel-owned verbs: uninstalling one channel leaves the others alone.
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Dirigent-{#Channel}"; ValueType: string; ValueName: ""; ValueData: "{#OpenHereLabel}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Dirigent-{#Channel}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent.exe"""
+; The trailing \. keeps drive roots/trailing backslashes from escaping the closing quote.
+Root: HKCU; Subkey: "Software\Classes\Directory\shell\Dirigent-{#Channel}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent.exe"" --open-project ""%1\."""
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\Dirigent-{#Channel}"; ValueType: string; ValueName: ""; ValueData: "{#OpenHereLabel}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\Dirigent-{#Channel}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent.exe"""
+Root: HKCU; Subkey: "Software\Classes\Directory\Background\shell\Dirigent-{#Channel}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent.exe"" --open-project ""%V\."""
 
 [Run]
 Filename: "{app}\dirigent.exe"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

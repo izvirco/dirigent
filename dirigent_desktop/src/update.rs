@@ -326,8 +326,8 @@ pub(crate) fn restart_after_shutdown() -> Result<(), String> {
     let Some(root) = RESTART_ROOT.get() else {
         return Ok(());
     };
+    // Directory launch requests are one-shot; restore the current state after updating.
     Command::new(root.join(LAUNCHER_EXE))
-        .args(env::args_os().skip(1))
         .spawn()
         .map_err(|e| format!("could not restart Dirigent through its launcher: {e}"))?;
     Ok(())

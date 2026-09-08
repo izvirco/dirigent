@@ -1,7 +1,7 @@
 //! A stable entry point: resolve the selection, spawn the desktop, and exit.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use dirigent_launcher::{Selection, lock};
+use dirigent_launcher::{Selection, lock, show_error};
 use std::{
     env,
     process::{Command, ExitCode},
@@ -15,7 +15,7 @@ fn launch() -> Result<(), String> {
     // Keep cleanup/publication out until Windows has opened the selected executable.
     let _lock = lock(root, false)?;
     let selected = Selection::read(root)?;
-    Command::new(selected.executable(root))
+    let child = Command::new(selected.executable(root))
         .args(env::args_os().skip(1))
         .spawn()
         .map_err(|e| {
@@ -24,6 +24,14 @@ fn launch() -> Result<(), String> {
                 selected.channel, selected.version
             )
         })?;
+    // Pass Explorer's foreground permission through to the desktop, which may hand it on
+    // to the existing window owner instead of creating a window of its own.
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(child.id());
+    }
+    #[cfg(not(windows))]
+    let _ = child;
     Ok(())
 }
 
@@ -36,26 +44,5 @@ fn main() -> ExitCode {
             ));
             ExitCode::FAILURE
         }
-    }
-}
-
-#[cfg(not(windows))]
-fn show_error(message: &str) {
-    eprintln!("{message}");
-}
-
-#[cfg(windows)]
-fn show_error(message: &str) {
-    use windows_sys::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
-    let text: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
-    let title: Vec<u16> = "Dirigent".encode_utf16().chain(Some(0)).collect();
-    // Both strings are NUL-terminated and remain alive for this synchronous call.
-    unsafe {
-        MessageBoxW(
-            std::ptr::null_mut(),
-            text.as_ptr(),
-            title.as_ptr(),
-            MB_OK | MB_ICONERROR,
-        );
     }
 }

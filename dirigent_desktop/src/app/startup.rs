@@ -3,7 +3,10 @@
 use super::*;
 
 impl Dirigent {
-    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+    pub(crate) fn new(
+        project_directory: Result<Option<PathBuf>, String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // Initialize persistent state before the rest of app startup reads from disk.
         let (state_database, loaded) = storage::StateDatabase::open()
             .unwrap_or_else(|error| panic!("could not initialize persistent state: {error}"));
@@ -896,6 +899,10 @@ impl Dirigent {
             });
         })
         .detach();
+
+        if this.handle_launch(project_directory, cx) {
+            return this;
+        }
 
         if let Some((index, entries, leaf_id)) = selected_harness.and_then(|selected| {
             let index = this

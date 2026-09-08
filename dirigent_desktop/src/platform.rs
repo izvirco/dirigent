@@ -12,7 +12,7 @@ const PI_BRIDGE_EXTENSION: &str = include_str!("../asset/dirigent-bridge.ts");
 fn channel_directory(base: PathBuf) -> Result<PathBuf, String> {
     let channel = crate::build_info::channel();
     dirigent_launcher::validate_channel(channel)?;
-    Ok(base.join("dirigent/channels").join(channel))
+    Ok(base.join("dirigent").join(channel))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -130,8 +130,8 @@ mod tests {
             let components: Vec<_> = path.iter().map(|part| part.to_string_lossy()).collect();
             assert!(
                 components
-                    .windows(3)
-                    .any(|parts| parts == ["dirigent", "channels", channel]),
+                    .windows(2)
+                    .any(|parts| parts == ["dirigent", channel]),
                 "unscoped path: {}",
                 path.display()
             );
