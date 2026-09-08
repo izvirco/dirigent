@@ -25,7 +25,7 @@ use semver::Version;
 use sha2::{Digest, Sha256};
 use tokio::{fs::File, io::AsyncWriteExt, net::TcpListener};
 
-use crate::contract::{PublishVersion, VersionArtifact, VersionResponse};
+use crate::contract::{ArtifactKind, PublishVersion, VersionArtifact, VersionResponse};
 
 const DEFAULT_MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_ARTIFACTS: usize = 16;
@@ -65,7 +65,10 @@ impl ServiceState {
         }
     }
 
-    async fn read_release(&self, key: &str) -> Result<Option<VersionResponse>, ApiError> {
+    async fn read_release<T: serde::de::DeserializeOwned>(
+        &self,
+        key: &str,
+    ) -> Result<Option<T>, ApiError> {
         let output = match self
             .inner
             .s3
@@ -154,6 +157,7 @@ fn validate_component(value: &str, label: &str) -> Result<(), ApiError> {
 fn validate_artifact_file_name(
     channel: &str,
     target: &str,
+    kind: ArtifactKind,
     file_name: &str,
 ) -> Result<(), ApiError> {
     validate_component(file_name, "artifact file name")?;
@@ -162,9 +166,11 @@ fn validate_artifact_file_name(
     } else {
         format!("dirigent-{channel}")
     };
-    let expected = match target {
-        WINDOWS_TARGET => format!("{binary_name}.exe"),
-        ARCH_LINUX_TARGET => binary_name,
+    let expected = match (target, kind) {
+        (WINDOWS_TARGET, ArtifactKind::Application) => "dirigent_desktop.exe".into(),
+        (ARCH_LINUX_TARGET, ArtifactKind::Application) => "dirigent_desktop".into(),
+        (WINDOWS_TARGET, ArtifactKind::Installer) => format!("{binary_name}-setup.exe"),
+        (ARCH_LINUX_TARGET, ArtifactKind::Installer) => format!("{binary_name}.tar.gz"),
         _ => return Ok(()),
     };
     if file_name == expected {
@@ -286,7 +292,7 @@ async fn get_latest_download(
     let artifact = release
         .artifacts
         .iter()
-        .find(|artifact| artifact.target == target)
+        .find(|artifact| artifact.target == target && artifact.kind == ArtifactKind::Installer)
         .ok_or_else(|| ApiError {
             status: StatusCode::NOT_FOUND,
             message: format!("release has no {target} artifact"),
@@ -300,8 +306,12 @@ async fn get_latest_download(
     Ok(response)
 }
 
+#[derive(serde::Deserialize)]
+struct ReleaseIdentity {
+    version: String,
+}
+
 struct UploadedArtifact {
-    target: String,
     file_name: String,
     path: PathBuf,
     size: u64,
@@ -364,7 +374,7 @@ async fn post_version(
             .file_name()
             .ok_or_else(|| bad_request("artifact has no file name"))?
             .to_string();
-        validate_artifact_file_name(&channel, &name, &file_name)?;
+        validate_component(&file_name, "artifact file name")?;
         if uploads.contains_key(&name) {
             return Err(bad_request(format!("duplicate artifact {name}")));
         }
@@ -390,9 +400,8 @@ async fn post_version(
         }
         file.flush().await.map_err(internal)?;
         uploads.insert(
-            name.clone(),
+            name,
             UploadedArtifact {
-                target: name,
                 file_name,
                 path,
                 size,
@@ -410,15 +419,21 @@ async fn post_version(
     let mut declared = HashSet::new();
     for artifact in &manifest.artifacts {
         validate_component(&artifact.target, "artifact target")?;
-        validate_artifact_file_name(&channel, &artifact.target, &artifact.file_name)?;
-        if !declared.insert(&artifact.target) {
+        validate_artifact_file_name(
+            &channel,
+            &artifact.target,
+            artifact.kind,
+            &artifact.file_name,
+        )?;
+        let field = artifact.multipart_field();
+        if !declared.insert(field.clone()) {
             return Err(bad_request(format!(
                 "duplicate declared artifact {}",
                 artifact.target
             )));
         }
         let upload = uploads
-            .get(&artifact.target)
+            .get(&field)
             .ok_or_else(|| bad_request(format!("missing artifact {}", artifact.target)))?;
         if upload.file_name != artifact.file_name {
             return Err(bad_request(format!(
@@ -457,16 +472,20 @@ async fn post_version(
         Err(error) => return Err(internal(error)),
     }
     if let Some(latest) = state.read_release(&latest_key(&channel)).await? {
+        // Publication only needs the previous version, not its artifact schema.
+        let latest: ReleaseIdentity = latest;
         ensure_newer(&channel, &manifest.version, &latest.version)?;
     }
 
     let mut artifacts = Vec::with_capacity(manifest.artifacts.len());
     for declared in &manifest.artifacts {
-        let upload = uploads.remove(&declared.target).expect("validated above");
+        let upload = uploads
+            .remove(&declared.multipart_field())
+            .expect("validated above");
         let key = artifact_key(
             &channel,
             &manifest.version,
-            &upload.target,
+            &declared.target,
             &upload.file_name,
         );
         let body = ByteStream::from_path(&upload.path)
@@ -487,7 +506,8 @@ async fn post_version(
             .await
             .map_err(internal)?;
         artifacts.push(VersionArtifact {
-            target: upload.target,
+            target: declared.target.clone(),
+            kind: declared.kind,
             file_name: upload.file_name,
             url: String::new(),
             size: upload.size,
@@ -584,6 +604,66 @@ pub async fn run_from_env() -> Result<(), String> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::contract::PublishArtifact;
+
+    #[test]
+    fn installation_downloads_and_updater_payloads_are_distinct() {
+        for (target, kind, name) in [
+            (
+                WINDOWS_TARGET,
+                ArtifactKind::Installer,
+                "dirigent-unstable-setup.exe",
+            ),
+            (
+                WINDOWS_TARGET,
+                ArtifactKind::Application,
+                "dirigent_desktop.exe",
+            ),
+            (
+                ARCH_LINUX_TARGET,
+                ArtifactKind::Installer,
+                "dirigent-unstable.tar.gz",
+            ),
+            (
+                ARCH_LINUX_TARGET,
+                ArtifactKind::Application,
+                "dirigent_desktop",
+            ),
+        ] {
+            assert!(validate_artifact_file_name("unstable", target, kind, name).is_ok());
+        }
+        assert!(
+            validate_artifact_file_name(
+                "stable",
+                WINDOWS_TARGET,
+                ArtifactKind::Installer,
+                "dirigent-setup.exe"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_artifact_file_name(
+                "unstable",
+                WINDOWS_TARGET,
+                ArtifactKind::Application,
+                "dirigent-unstable-setup.exe"
+            )
+            .is_err()
+        );
+        let mut artifact = PublishArtifact {
+            target: WINDOWS_TARGET.into(),
+            kind: ArtifactKind::Application,
+            file_name: "dirigent_desktop.exe".into(),
+        };
+        let application_field = artifact.multipart_field();
+        artifact.kind = ArtifactKind::Installer;
+        assert_ne!(application_field, artifact.multipart_field());
+    }
 }
 
 fn required_env(name: &str) -> Result<String, String> {

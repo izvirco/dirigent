@@ -1,5 +1,5 @@
 [workspace]
-members = ["dirigent_desktop", "dirigent_server"]
+members = ["dirigent_desktop", "dirigent_launcher", "dirigent_server"]
 default-members = ["dirigent_desktop"]
 resolver = "3"
 

@@ -11,9 +11,28 @@ pub struct VersionResponse {
     pub artifacts: Vec<VersionArtifact>,
 }
 
+/// Application binaries are updater payloads; installers are user-facing downloads
+/// (a setup executable on Windows, an installation archive on Linux).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactKind {
+    Application,
+    Installer,
+}
+
+impl ArtifactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Application => "application",
+            Self::Installer => "installer",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VersionArtifact {
     pub target: String,
+    pub kind: ArtifactKind,
     pub file_name: String,
     pub url: String,
     pub size: u64,
@@ -30,7 +49,14 @@ pub struct PublishVersion {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct PublishArtifact {
-    /// Also used as the multipart field name for this artifact.
     pub target: String,
+    pub kind: ArtifactKind,
     pub file_name: String,
+}
+
+impl PublishArtifact {
+    /// Distinguishes installation downloads from updater payloads for the same target.
+    pub fn multipart_field(&self) -> String {
+        format!("{}-{}", self.target, self.kind.as_str())
+    }
 }

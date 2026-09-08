@@ -58,6 +58,9 @@ fn load_bundled_fonts(cx: &App) {
 }
 
 fn main() -> std::process::ExitCode {
+    #[cfg(windows)]
+    let _installer_marker = dirigent_launcher::installer_marker(build_info::channel())
+        .expect("could not register running Dirigent with the installer");
     let _logging_guard = match logging::initialize() {
         Ok(guard) => Some(guard),
         Err(error) => {
@@ -67,18 +70,6 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    #[cfg(feature = "self-update")]
-    if let Some(result) = update::run_updater_from_args() {
-        return match result {
-            Ok(()) => std::process::ExitCode::SUCCESS,
-            Err(error) => {
-                tracing::error!(%error, "Dirigent update failed");
-                eprintln!("Dirigent update failed: {error}");
-                std::process::ExitCode::FAILURE
-            }
-        };
-    }
-
     tracing::info!(
         version = build_info::version(),
         channel = build_info::channel(),
@@ -87,10 +78,16 @@ fn main() -> std::process::ExitCode {
         "starting Dirigent"
     );
     #[cfg(feature = "self-update")]
-    update::cleanup_updater_helpers();
+    update::cleanup_old_versions();
 
     application().with_assets(Assets).run(|cx: &mut App| {
-        cx.set_app_identity("dirigent", "Dirigent");
+        let app_id = format!("dirigent-{}", build_info::channel());
+        let app_name = if build_info::channel() == "stable" {
+            "Dirigent".to_string()
+        } else {
+            format!("Dirigent ({})", build_info::channel())
+        };
+        cx.set_app_identity(&app_id, &app_name);
         cx.set_cursor_hide_mode(CursorHideMode::Never);
 
         #[cfg(feature = "bundled-lilex")]
@@ -102,10 +99,10 @@ fn main() -> std::process::ExitCode {
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("Dirigent")),
+                    title: Some(SharedString::from(app_name)),
                     ..Default::default()
                 }),
-                app_id: Some("dirigent".into()),
+                app_id: Some(app_id.into()),
                 ..Default::default()
             },
             |_, cx| cx.new(Dirigent::new),
@@ -115,5 +112,10 @@ fn main() -> std::process::ExitCode {
         cx.activate(true);
     });
     tracing::info!("application exited normally");
+    #[cfg(feature = "self-update")]
+    if let Err(error) = update::restart_after_shutdown() {
+        tracing::error!(%error);
+        return std::process::ExitCode::FAILURE;
+    }
     std::process::ExitCode::SUCCESS
 }

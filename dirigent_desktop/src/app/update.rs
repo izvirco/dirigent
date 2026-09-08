@@ -61,25 +61,22 @@ impl Dirigent {
             if crate::update::dry_run_enabled() {
                 tracing::info!(
                     version = %release.version,
-                    path = %path.display(),
+                    path = %path.path().display(),
                     "update dry run completed; skipping installation and restart"
                 );
-                let _ = std::fs::remove_file(path);
                 self.update_state = crate::update::UpdateState::Available(release);
                 cx.notify();
                 return;
             }
-            // Change state before launching so queued clicks cannot start a second helper and
-            // delete the staged executable while the first helper is using it.
+            // Change state before publication so queued clicks cannot select the same update twice.
             self.update_state = crate::update::UpdateState::Installing {
                 release: release.clone(),
             };
             cx.notify();
-            match crate::update::launch_updater(&path) {
+            match crate::update::install_update(&release, path.path()) {
                 Ok(()) => cx.quit(),
                 Err(error) => {
                     tracing::error!(%error, "could not start update");
-                    let _ = std::fs::remove_file(path);
                     self.update_state = crate::update::UpdateState::Failed { release };
                     cx.notify();
                 }

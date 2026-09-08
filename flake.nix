@@ -52,10 +52,15 @@
         buildInputs = runtimeLibraries;
 
         LILEX_FONT_DIR = "${pkgs.lilex}/share/fonts/truetype";
+        DIRIGENT_UPDATE_CHANNEL = "nix";
+
+        postInstall = ''
+          ln -s dirigent_desktop "$out/bin/dirigent"
+        '';
 
         postFixup = ''
-          patchelf --add-rpath "${pkgs.lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib" "$out/bin/dirigent"
-          remove-references-to -t ${rustToolchain} "$out/bin/dirigent"
+          patchelf --add-rpath "${pkgs.lib.makeLibraryPath runtimeLibraries}:/run/opengl-driver/lib" "$out/bin/dirigent_desktop"
+          remove-references-to -t ${rustToolchain} "$out/bin/dirigent_desktop"
         '';
 
         meta = {

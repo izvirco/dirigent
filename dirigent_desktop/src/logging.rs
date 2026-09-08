@@ -27,7 +27,7 @@ use crate::platform;
 // These dependency warnings describe expected desktop/filesystem races that Dirigent
 // cannot act on: optional D-Bus services may be absent, and inotify may report that a
 // deleted child watch was already removed by the kernel.
-const DEFAULT_FILTER: &str = "warn,dirigent=info,zbus::proxy=error,notify::inotify=error";
+const DEFAULT_FILTER: &str = "warn,dirigent_desktop=info,zbus::proxy=error,notify::inotify=error";
 const CRASH_LOG_FILE_NAME: &str = "dirigent-crash.log";
 
 #[derive(Clone, Copy)]

@@ -1,27 +1,25 @@
-//! Checks for releases and replaces the portable Dirigent executable.
+//! Checks releases and installs immutable, side-by-side desktop versions.
 
 use std::{
     env, fs,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
+    sync::{Arc, OnceLock},
     thread,
     time::Duration,
 };
 
 use async_channel::Sender;
-use dirigent_server::contract::{VersionArtifact, VersionResponse};
-use fs2::FileExt as _;
-use semver::Version;
+use dirigent_launcher::{self as installation, DESKTOP_EXE, LAUNCHER_EXE, Selection};
+use dirigent_server::contract::{ArtifactKind, VersionArtifact, VersionResponse};
 use sha2::{Digest, Sha256};
-
-use crate::platform;
+use tempfile::TempDir;
 
 const DEFAULT_API_URL: &str = "https://dirigent.sebba.dev";
 const CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
-const APPLY_UPDATE_ARGUMENT: &str = "--dirigent-apply-update";
-const UPDATER_HELPER_PREFIX: &str = "dirigent-updater-";
+static RESTART_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone)]
 pub(crate) enum UpdateState {
@@ -35,7 +33,7 @@ pub(crate) enum UpdateState {
     },
     Ready {
         release: VersionResponse,
-        path: PathBuf,
+        path: Arc<TempDir>,
     },
     Installing {
         release: VersionResponse,
@@ -54,7 +52,7 @@ pub(crate) enum UpdateEvent {
     },
     Downloaded {
         release: VersionResponse,
-        path: PathBuf,
+        path: Arc<TempDir>,
     },
     DownloadFailed {
         release: VersionResponse,
@@ -62,9 +60,18 @@ pub(crate) enum UpdateEvent {
     },
 }
 
-/// Exercises update checking and downloading without replacing the app.
+/// Exercises update checking and downloading without selecting or restarting a build.
 pub(crate) fn dry_run_enabled() -> bool {
     cfg!(feature = "update-dry-run")
+}
+
+fn installation_root() -> Result<PathBuf, String> {
+    let executable = env::current_exe().map_err(|e| e.to_string())?;
+    installation::installation_root(
+        &executable,
+        crate::build_info::channel(),
+        crate::build_info::version(),
+    )
 }
 
 pub(crate) fn start_checker(events: Sender<UpdateEvent>) {
@@ -117,6 +124,9 @@ fn check_event(client: &reqwest::blocking::Client) -> UpdateEvent {
 }
 
 fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, String> {
+    if !dry_run_enabled() && installation_root().is_err() {
+        return Ok(None);
+    }
     let base = env::var("DIRIGENT_UPDATE_API").unwrap_or_else(|_| DEFAULT_API_URL.into());
     let response = client
         .get(format!(
@@ -129,79 +139,36 @@ fn check(client: &reqwest::blocking::Client) -> Result<Option<VersionResponse>, 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }
-    let response = response
-        .error_for_status()
-        .map_err(|error| format!("update server returned an error: {error}"))?;
     let release = response
+        .error_for_status()
+        .map_err(|error| format!("update server returned an error: {error}"))?
         .json::<VersionResponse>()
         .map_err(|error| format!("could not decode update response: {error}"))?;
     if release.channel != crate::build_info::channel() {
         return Err("update server returned the wrong channel".into());
     }
-    if !is_newer(&release.version)? {
+    if !installation::is_newer(
+        &release.channel,
+        &release.version,
+        crate::build_info::version(),
+    )? {
         return Ok(None);
     }
-    if !release
-        .artifacts
-        .iter()
-        .any(|artifact| artifact.target == crate::build_info::target())
-    {
+    // Another open instance may already have updated this installation.
+    if !dry_run_enabled() {
+        let selected = Selection::read(&installation_root()?)?;
+        if !installation::is_newer(&release.channel, &release.version, &selected.version)? {
+            return Ok(None);
+        }
+    }
+    if matching_artifact(&release).is_err() {
         tracing::warn!(
             target = crate::build_info::target(),
-            "release has no artifact for this platform"
+            "release has no application artifact for this platform"
         );
         return Ok(None);
     }
-    if !can_replace_current_executable() {
-        tracing::warn!("Dirigent is installed in a directory that cannot be updated in place");
-        return Ok(None);
-    }
     Ok(Some(release))
-}
-
-fn is_newer(remote: &str) -> Result<bool, String> {
-    match crate::build_info::channel() {
-        "stable" => {
-            let remote = Version::parse(remote)
-                .map_err(|error| format!("server returned invalid SemVer: {error}"))?;
-            let current = Version::parse(crate::build_info::version())
-                .map_err(|error| format!("this build has invalid SemVer: {error}"))?;
-            Ok(remote > current)
-        }
-        _ => {
-            validate_branch_version(remote)?;
-            validate_branch_version(crate::build_info::version())?;
-            Ok(remote > crate::build_info::version())
-        }
-    }
-}
-
-fn validate_branch_version(version: &str) -> Result<(), String> {
-    let bytes = version.as_bytes();
-    let valid = bytes.len() == 15
-        && bytes[8] == b'-'
-        && bytes[..8].iter().all(u8::is_ascii_digit)
-        && bytes[9..].iter().all(u8::is_ascii_digit);
-    valid
-        .then_some(())
-        .ok_or_else(|| "branch versions must use YYYYMMDD-HHMMSS UTC".into())
-}
-
-fn can_replace_current_executable() -> bool {
-    let Ok(executable) = env::current_exe() else {
-        return false;
-    };
-    let Some(parent) = executable.parent() else {
-        return false;
-    };
-    let probe = parent.join(format!(".dirigent-update-probe-{}", std::process::id()));
-    match OpenOptions::new().write(true).create_new(true).open(&probe) {
-        Ok(_) => {
-            let _ = fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
 }
 
 pub(crate) fn download(release: VersionResponse, events: Sender<UpdateEvent>) {
@@ -212,13 +179,10 @@ pub(crate) fn download(release: VersionResponse, events: Sender<UpdateEvent>) {
                 .and_then(|artifact| download_artifact(artifact, &events));
             let event = match result {
                 Ok(path) => UpdateEvent::Downloaded {
-                    release: release.clone(),
-                    path,
+                    release,
+                    path: Arc::new(path),
                 },
-                Err(error) => UpdateEvent::DownloadFailed {
-                    release: release.clone(),
-                    error,
-                },
+                Err(error) => UpdateEvent::DownloadFailed { release, error },
             };
             let _ = events.send_blocking(event);
         })
@@ -229,8 +193,16 @@ fn matching_artifact(release: &VersionResponse) -> Result<&VersionArtifact, Stri
     release
         .artifacts
         .iter()
-        .find(|artifact| artifact.target == crate::build_info::target())
-        .ok_or_else(|| format!("release has no {} artifact", crate::build_info::target()))
+        .find(|artifact| {
+            artifact.target == crate::build_info::target()
+                && artifact.kind == ArtifactKind::Application
+        })
+        .ok_or_else(|| {
+            format!(
+                "release has no {} application artifact",
+                crate::build_info::target()
+            )
+        })
 }
 
 pub(crate) fn artifact_size(release: &VersionResponse) -> u64 {
@@ -248,21 +220,24 @@ pub(crate) fn display_version(release: &VersionResponse) -> String {
 fn download_artifact(
     artifact: &VersionArtifact,
     events: &Sender<UpdateEvent>,
-) -> Result<PathBuf, String> {
-    let directory = platform::updates_directory()?;
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-    let extension = if cfg!(target_os = "windows") {
-        ".exe"
+) -> Result<TempDir, String> {
+    let directory = if dry_run_enabled() {
+        crate::platform::cache_path()?
+            .parent()
+            .ok_or("cache has no parent")?
+            .join("updates")
     } else {
-        ""
+        installation_root()?.join("versions")
     };
-    let path = directory.join(format!(
-        "dirigent-download-{}{}",
-        std::process::id(),
-        extension
-    ));
-    let temporary = path.with_extension("partial");
+    fs::create_dir_all(&directory)
+        .map_err(|e| format!("could not create {}: {e}", directory.display()))?;
+    // Staging on the install filesystem makes publication a directory rename, not an EXE copy.
+    // TempDir ownership follows the UI state and removes cancelled/failed downloads.
+    let staged = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(&directory)
+        .map_err(|e| format!("could not stage update: {e}"))?;
+    let path = staged.path().join(DESKTOP_EXE);
     let client = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30 * 60))
@@ -273,8 +248,8 @@ fn download_artifact(
         .send()
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| format!("could not download update: {error}"))?;
-    let mut file = File::create(&temporary)
-        .map_err(|error| format!("could not create {}: {error}", temporary.display()))?;
+    let mut file = File::create(&path)
+        .map_err(|error| format!("could not create {}: {error}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut size = 0_u64;
     let mut reported_size = 0_u64;
@@ -303,31 +278,24 @@ fn download_artifact(
     }
     file.sync_all()
         .map_err(|error| format!("could not flush update: {error}"))?;
+    drop(file);
     if size != artifact.size {
         return Err(format!(
             "downloaded artifact has size {size}, expected {}",
             artifact.size
         ));
     }
-    let actual = format!("{:x}", hasher.finalize());
-    if actual != artifact.sha256 {
+    if format!("{:x}", hasher.finalize()) != artifact.sha256 {
         return Err("downloaded artifact checksum does not match".into());
     }
-    fs::rename(&temporary, &path)
-        .map_err(|error| format!("could not finish update download: {error}"))?;
     make_executable(&path)?;
-    Ok(path)
+    Ok(staged)
 }
 
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt as _;
-
-    let mut permissions = fs::metadata(path)
-        .map_err(|error| format!("could not read update permissions: {error}"))?
-        .permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(path, permissions)
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))
         .map_err(|error| format!("could not make update executable: {error}"))
 }
 
@@ -336,298 +304,51 @@ fn make_executable(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Starts a copy of the current binary which waits for this process to exit before replacing us.
-pub(crate) fn launch_updater(staged: &Path) -> Result<(), String> {
-    let current = env::current_exe()
-        .map_err(|error| format!("could not locate the running executable: {error}"))?;
-    let directory = platform::updates_directory()?;
-    fs::create_dir_all(&directory)
-        .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
-    let extension = if cfg!(target_os = "windows") {
-        ".exe"
-    } else {
-        ""
-    };
-    let helper = directory.join(format!(
-        "{UPDATER_HELPER_PREFIX}{}{}",
-        std::process::id(),
-        extension
-    ));
-    fs::copy(&current, &helper)
-        .map_err(|error| format!("could not prepare update helper: {error}"))?;
-    let lock_path = directory.join(format!("dirigent-update-{}.lock", std::process::id()));
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|error| format!("could not create update lock: {error}"))?;
-    lock.lock_exclusive()
-        .map_err(|error| format!("could not lock update handoff: {error}"))?;
-
-    let mut command = Command::new(&helper);
-    platform::hide_command_window(&mut command);
-    let spawn = command
-        .arg(APPLY_UPDATE_ARGUMENT)
-        .arg(&current)
-        .arg(staged)
-        .arg(&lock_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if let Err(error) = spawn {
-        let _ = fs2::FileExt::unlock(&lock);
-        drop(lock);
-        remove_update_file(&helper, "unused update helper");
-        remove_update_file(&lock_path, "unused update handoff lock");
-        return Err(format!("could not start update helper: {error}"));
+/// Only publication and the tiny selection write happen on the UI thread.
+/// Restart is deferred until GPUI and the old application state have shut down.
+pub(crate) fn install_update(release: &VersionResponse, staged: &Path) -> Result<(), String> {
+    if release.channel != crate::build_info::channel() {
+        return Err("update belongs to a different channel".into());
     }
-    tracing::info!(
-        helper = %helper.display(),
-        target = %current.display(),
-        staged = %staged.display(),
-        "started update helper"
-    );
-
-    // The helper must not observe the handoff until the process has actually exited. Keeping
-    // this handle alive in application state is too short-lived: GPUI drops that state while
-    // the Windows executable is still mapped. The OS closes this deliberately leaked handle
-    // at process termination and releases the lock at the correct time.
-    std::mem::forget(lock);
+    let root = installation_root()?;
+    let _lock = installation::lock(&root, true)?;
+    installation::publish(
+        &root,
+        staged,
+        Selection::new(&release.channel, &release.version)?,
+    )?;
+    let _ = RESTART_ROOT.set(root);
+    tracing::info!(version = %release.version, "selected updated Dirigent; restarting after shutdown");
     Ok(())
 }
 
-/// Removes updater copies left by completed update helper processes.
-pub(crate) fn cleanup_updater_helpers() {
-    let directory = match platform::updates_directory() {
-        Ok(directory) => directory,
-        Err(error) => {
-            tracing::warn!(%error, "could not locate update helpers for cleanup");
-            return;
-        }
+pub(crate) fn restart_after_shutdown() -> Result<(), String> {
+    let Some(root) = RESTART_ROOT.get() else {
+        return Ok(());
+    };
+    Command::new(root.join(LAUNCHER_EXE))
+        .args(env::args_os().skip(1))
+        .spawn()
+        .map_err(|e| format!("could not restart Dirigent through its launcher: {e}"))?;
+    Ok(())
+}
+
+pub(crate) fn cleanup_old_versions() {
+    let Ok(root) = installation_root() else {
+        return;
     };
     if let Err(error) = thread::Builder::new()
         .name("dirigent-update-cleanup".into())
         .spawn(move || {
-            const ATTEMPTS: usize = 40;
-            for attempt in 0..ATTEMPTS {
-                match remove_updater_helpers(&directory) {
-                    Ok(failures) if failures.is_empty() => return,
-                    Ok(failures) if attempt + 1 == ATTEMPTS => {
-                        for (path, error) in failures {
-                            tracing::warn!(
-                                path = %path.display(),
-                                %error,
-                                "could not remove completed update helper"
-                            );
-                        }
-                    }
-                    Ok(_) => thread::sleep(Duration::from_millis(250)),
-                    Err(error) => {
-                        tracing::warn!(%error, "could not clean up update helpers");
-                        return;
-                    }
-                }
+            let result = (|| {
+                let _lock = installation::lock(&root, true)?;
+                installation::cleanup(&root, crate::build_info::version())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(%error, "could not clean up old versions");
             }
         })
     {
-        tracing::warn!(%error, "could not start update helper cleanup");
-    }
-}
-
-fn remove_updater_helpers(directory: &Path) -> Result<Vec<(PathBuf, std::io::Error)>, String> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => {
-            return Err(format!(
-                "could not read update directory {}: {error}",
-                directory.display()
-            ));
-        }
-    };
-    let mut failures = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("could not read update entry: {error}"))?;
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(UPDATER_HELPER_PREFIX)
-        {
-            continue;
-        }
-        let path = entry.path();
-        match fs::remove_file(&path) {
-            Ok(()) => tracing::info!(path = %path.display(), "removed completed update helper"),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => failures.push((path, error)),
-        }
-    }
-    Ok(failures)
-}
-
-/// Handles the private updater invocation before GPUI is initialized.
-pub(crate) fn run_updater_from_args() -> Option<Result<(), String>> {
-    let mut arguments = env::args_os();
-    let _executable = arguments.next()?;
-    if arguments.next()?.to_str() != Some(APPLY_UPDATE_ARGUMENT) {
-        return None;
-    }
-    let result = (|| {
-        let target = arguments
-            .next()
-            .map(PathBuf::from)
-            .ok_or_else(|| "update target is missing".to_string())?;
-        let staged = arguments
-            .next()
-            .map(PathBuf::from)
-            .ok_or_else(|| "staged update is missing".to_string())?;
-        let lock_path = arguments
-            .next()
-            .map(PathBuf::from)
-            .ok_or_else(|| "update lock is missing".to_string())?;
-        if arguments.next().is_some() {
-            return Err("unexpected updater argument".into());
-        }
-        apply_update(&target, &staged, &lock_path)
-    })();
-    Some(result)
-}
-
-fn apply_update(target: &Path, staged: &Path, lock_path: &Path) -> Result<(), String> {
-    tracing::info!(
-        target = %target.display(),
-        staged = %staged.display(),
-        lock = %lock_path.display(),
-        "update helper waiting for the previous process to exit"
-    );
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(lock_path)
-        .map_err(|error| format!("could not open update lock: {error}"))?;
-    lock.lock_exclusive()
-        .map_err(|error| format!("could not wait for Dirigent to exit: {error}"))?;
-    tracing::info!("previous Dirigent process exited; applying update");
-
-    let backup = appended_path(target, ".old");
-    remove_update_file(&backup, "stale update backup");
-
-    #[cfg(target_os = "windows")]
-    {
-        // Keep the desktop entry intact: renaming it makes Explorer move the replacement icon.
-        if let Err(error) = fs::copy(target, &backup) {
-            remove_update_file(&backup, "incomplete update backup");
-            restart_target(target, "update backup failed");
-            return Err(format!("could not back up the old executable: {error}"));
-        }
-        tracing::info!(backup = %backup.display(), "backed up current executable");
-        if let Err(error) = fs::copy(staged, target) {
-            if let Err(restore_error) = fs::copy(&backup, target) {
-                tracing::error!(%restore_error, "could not restore executable after install failure");
-            } else {
-                remove_update_file(&backup, "restored update backup");
-            }
-            restart_target(target, "update installation failed");
-            return Err(format!("could not install the new executable: {error}"));
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let replacement = appended_path(target, ".new");
-        remove_update_file(&replacement, "stale update replacement");
-        if let Err(error) = fs::copy(staged, &replacement) {
-            restart_target(target, "update staging failed");
-            return Err(format!("could not stage replacement: {error}"));
-        }
-        if let Err(error) = fs::rename(target, &backup) {
-            remove_update_file(&replacement, "unused update replacement");
-            restart_target(target, "update backup failed");
-            return Err(format!("could not move the old executable: {error}"));
-        }
-        if let Err(error) = fs::rename(&replacement, target) {
-            if let Err(restore_error) = fs::rename(&backup, target) {
-                tracing::error!(%restore_error, "could not restore executable after install failure");
-            }
-            restart_target(target, "update installation failed");
-            return Err(format!("could not install the new executable: {error}"));
-        }
-    }
-
-    tracing::info!(target = %target.display(), "installed updated executable");
-    let child = match Command::new(target).spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            #[cfg(target_os = "windows")]
-            if let Err(restore_error) = fs::copy(&backup, target) {
-                tracing::error!(%restore_error, "could not restore executable after restart failure");
-            } else {
-                remove_update_file(&backup, "restored update backup");
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                remove_update_file(target, "unstartable updated executable");
-                if let Err(restore_error) = fs::rename(&backup, target) {
-                    tracing::error!(%restore_error, "could not restore executable after restart failure");
-                }
-            }
-            restart_target(target, "updated executable failed to start");
-            return Err(format!("could not restart updated Dirigent: {error}"));
-        }
-    };
-    tracing::info!(pid = child.id(), "started updated Dirigent");
-
-    remove_update_file(&backup, "update backup");
-    remove_update_file(staged, "staged update");
-    if let Err(error) = fs2::FileExt::unlock(&lock) {
-        tracing::warn!(%error, "could not unlock update handoff");
-    }
-    drop(lock);
-    remove_update_file(lock_path, "update handoff lock");
-    tracing::info!("update completed successfully");
-    Ok(())
-}
-
-fn restart_target(target: &Path, reason: &'static str) {
-    match Command::new(target).spawn() {
-        Ok(child) => tracing::warn!(
-            pid = child.id(),
-            reason,
-            "restarted previous Dirigent executable"
-        ),
-        Err(error) => {
-            tracing::error!(%error, reason, "could not restart previous Dirigent executable")
-        }
-    }
-}
-
-fn remove_update_file(path: &Path, description: &'static str) {
-    match fs::remove_file(path) {
-        Ok(()) => tracing::info!(path = %path.display(), description, "removed update file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            tracing::warn!(path = %path.display(), %error, description, "could not remove update file")
-        }
-    }
-}
-
-fn appended_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut value = path.as_os_str().to_os_string();
-    value.push(suffix);
-    PathBuf::from(value)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn branch_versions_sort_by_time() {
-        assert!(validate_branch_version("20260310-123456").is_ok());
-        assert!("20260310-123457" > "20260310-123456");
-        assert!(validate_branch_version("20260310T123456Z").is_err());
+        tracing::warn!(%error, "could not start version cleanup");
     }
 }

@@ -52,9 +52,8 @@ jobs:
             exit 1
           fi
 
-          # Channels are used in update URLs and binary file names, so keep them to the
-          # component characters accepted by the version server.
-          channel="$(printf '%s' "$GITHUB_REF_NAME" | LC_ALL=C tr -c 'A-Za-z0-9._+-' '-')"
+          # Windows paths are case-insensitive. Canonicalize channel names for every platform.
+          channel="$(printf '%s' "$GITHUB_REF_NAME" | LC_ALL=C tr '[:upper:]' '[:lower:]' | LC_ALL=C tr -c 'a-z0-9._+-' '-')"
           version="$(date -u +%Y%m%d-%H%M%S)"
           publish=false
           if [[ "$GITHUB_EVENT_NAME" == "push" && "$GITHUB_REF" == refs/tags/v* ]]; then
@@ -69,9 +68,20 @@ jobs:
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_CHANNEL" != "none" ]]; then
             channel="$REQUESTED_CHANNEL"
             publish=true
-          elif [[ "$GITHUB_REF" == "refs/heads/unstable" ]]; then
-            channel="unstable"
+          elif [[ "$GITHUB_REF" == "refs/heads/unstable" || "$GITHUB_REF" == "refs/heads/unstable-next" ]]; then
             publish=true
+          fi
+
+          if [[ ! "$channel" =~ ^[a-z0-9][a-z0-9._+-]*$ || ${#channel} -gt 128 || "$channel" == *. ]]; then
+            echo "Invalid channel name for an installation directory: $channel" >&2
+            exit 1
+          fi
+          case "${channel%%.*}" in
+            con|prn|aux|nul|com[1-9]|lpt[1-9]) echo "Reserved Windows channel name: $channel" >&2; exit 1 ;;
+          esac
+          if [[ "$channel" == "stable" && "$GITHUB_REF" != refs/tags/v* ]]; then
+            echo "The stable channel is reserved for version tags" >&2
+            exit 1
           fi
 
           if [[ "$channel" == "stable" ]]; then
@@ -79,19 +89,21 @@ jobs:
           else
             binary_name="dirigent-$channel"
           fi
-          windows_file_name="$binary_name.exe"
-          linux_file_name="$binary_name"
+          windows_file_name="$binary_name-setup.exe"
+          linux_file_name="$binary_name.tar.gz"
 
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "publish=$publish" >> "$GITHUB_OUTPUT"
-          echo "commit=${GITHUB_SHA:0:8}" >> "$GITHUB_OUTPUT"
-          echo "windows_file_name=$windows_file_name" >> "$GITHUB_OUTPUT"
-          echo "linux_file_name=$linux_file_name" >> "$GITHUB_OUTPUT"
+          {
+            echo "channel=$channel"
+            echo "version=$version"
+            echo "publish=$publish"
+            echo "commit=${GITHUB_SHA:0:8}"
+            echo "windows_file_name=$windows_file_name"
+            echo "linux_file_name=$linux_file_name"
+          } >> "$GITHUB_OUTPUT"
           echo "Building $channel $version ($publish) as $binary_name"
 
   build-windows:
-    name: Build Windows executable
+    name: Build Windows installer
     needs: prepare
     runs-on: blacksmith-2vcpu-windows-2025
     env:
@@ -127,17 +139,55 @@ jobs:
           Expand-Archive -Path $archive -DestinationPath $destination -Force
           "LILEX_FONT_DIR=$(Join-Path $destination 'ttf')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build bundled release executable
-        run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex,self-update
+      - name: Test installation and launcher
+        run: cargo test -p dirigent_launcher --locked
 
-      - name: Prepare build artifact
+      - name: Build bundled desktop and launcher
+        run: cargo build -p dirigent_desktop -p dirigent_launcher --locked --release --features bundled-lilex,self-update
+
+      - name: Build per-user installer and updater payload
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          $artifact = Join-Path dist $env:DIRIGENT_WINDOWS_FILE_NAME
-          Copy-Item target/release/dirigent.exe $artifact
-          $checksum = (Get-FileHash -Path $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$checksum  $env:DIRIGENT_WINDOWS_FILE_NAME" | Set-Content -Path "$artifact.sha256" -Encoding ascii
+          $stage = Join-Path $PWD "stage"
+          $dist = Join-Path $PWD "dist"
+          $versionDir = Join-Path $stage "versions/$env:DIRIGENT_UPDATE_CHANNEL-$env:DIRIGENT_RELEASE_VERSION"
+          New-Item -ItemType Directory -Path $versionDir, $dist -Force | Out-Null
+          Copy-Item target/release/dirigent.exe $stage
+          Copy-Item target/release/dirigent_desktop.exe $versionDir
+          Copy-Item target/release/dirigent_desktop.exe $dist
+          @{ channel = $env:DIRIGENT_UPDATE_CHANNEL; version = $env:DIRIGENT_RELEASE_VERSION } |
+            ConvertTo-Json | Set-Content (Join-Path $stage "current.json") -Encoding utf8NoBOM
+          $iscc = "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          $binaryName = $env:DIRIGENT_WINDOWS_FILE_NAME -replace '-setup.exe$', ''
+          & $iscc "/DChannel=$env:DIRIGENT_UPDATE_CHANNEL" "/DReleaseVersion=$env:DIRIGENT_RELEASE_VERSION" "/DBinaryName=$binaryName" "/DStageDir=$stage" "/DOutputDir=$dist" packaging/windows/dirigent.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem $dist -Filter *.exe | ForEach-Object {
+            $checksum = (Get-FileHash -Path $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$checksum  $($_.Name)" | Set-Content -Path "$($_.FullName).sha256" -Encoding ascii
+          }
+
+      - name: Test silent installation and uninstallation
+        shell: pwsh
+        run: |
+          $install = Join-Path $env:RUNNER_TEMP "Dirigent installer test"
+          $setup = Join-Path $PWD "dist/$env:DIRIGENT_WINDOWS_FILE_NAME"
+          $process = Start-Process $setup -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$install`"") -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Installer exited with $($process.ExitCode)" }
+          $selected = Get-Content (Join-Path $install 'current.json') -Raw | ConvertFrom-Json
+          if ($selected.channel -ne $env:DIRIGENT_UPDATE_CHANNEL -or $selected.version -ne $env:DIRIGENT_RELEASE_VERSION) {
+            throw 'Installer selected the wrong release'
+          }
+          if (-not (Test-Path (Join-Path $install 'dirigent.exe')) -or
+              -not (Test-Path (Join-Path $install "versions/$($selected.channel)-$($selected.version)/dirigent_desktop.exe"))) {
+            throw 'Installer did not create the expected layout'
+          }
+          $process = Start-Process (Join-Path $install 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Uninstaller exited with $($process.ExitCode)" }
+          if (Test-Path (Join-Path $install 'current.json')) { throw 'Uninstaller left the installation selection behind' }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -147,7 +197,7 @@ jobs:
           if-no-files-found: error
 
   build-arch-linux:
-    name: Build Arch Linux executable
+    name: Build Arch Linux installation archive
     needs: prepare
     runs-on: blacksmith-2vcpu-ubuntu-2404
     container: archlinux:base-devel
@@ -194,15 +244,25 @@ jobs:
           unzip -q "$archive" -d "$destination"
           echo "LILEX_FONT_DIR=$destination/ttf" >> "$GITHUB_ENV"
 
-      - name: Build bundled release executable
-        run: cargo build -p dirigent_desktop --locked --release --features bundled-lilex,self-update
+      - name: Test installation and launcher
+        run: cargo test -p dirigent_launcher --locked
 
-      - name: Prepare build artifact
+      - name: Build bundled desktop and launcher
+        run: cargo build -p dirigent_desktop -p dirigent_launcher --locked --release --features bundled-lilex,self-update
+
+      - name: Prepare installation archive and updater payload
         shell: bash
         run: |
-          mkdir -p dist
-          cp target/release/dirigent "dist/$DIRIGENT_LINUX_FILE_NAME"
-          (cd dist && sha256sum "$DIRIGENT_LINUX_FILE_NAME" > "$DIRIGENT_LINUX_FILE_NAME.sha256")
+          binary_name="${DIRIGENT_LINUX_FILE_NAME%.tar.gz}"
+          root="stage/$binary_name"
+          version_dir="$root/versions/$DIRIGENT_UPDATE_CHANNEL-$DIRIGENT_RELEASE_VERSION"
+          mkdir -p dist "$version_dir"
+          cp target/release/dirigent "$root/dirigent"
+          cp target/release/dirigent_desktop "$version_dir/"
+          cp target/release/dirigent_desktop dist/
+          printf '{"channel":"%s","version":"%s"}\n' "$DIRIGENT_UPDATE_CHANNEL" "$DIRIGENT_RELEASE_VERSION" > "$root/current.json"
+          tar -czf "dist/$DIRIGENT_LINUX_FILE_NAME" -C stage "$binary_name"
+          (cd dist && sha256sum "$DIRIGENT_LINUX_FILE_NAME" dirigent_desktop > checksums.sha256)
 
       - name: Upload Arch Linux artifact
         uses: actions/upload-artifact@v4
@@ -250,8 +310,10 @@ jobs:
               version: $version,
               commit: $commit,
               artifacts: [
-                { target: "x86_64-pc-windows-msvc", file_name: $windows_file_name },
-                { target: "x86_64-arch-linux", file_name: $linux_file_name }
+                { target: "x86_64-pc-windows-msvc", kind: "installer", file_name: $windows_file_name },
+                { target: "x86_64-pc-windows-msvc", kind: "application", file_name: "dirigent_desktop.exe" },
+                { target: "x86_64-arch-linux", kind: "installer", file_name: $linux_file_name },
+                { target: "x86_64-arch-linux", kind: "application", file_name: "dirigent_desktop" }
               ]
             }' > manifest.json
 
@@ -261,6 +323,8 @@ jobs:
           curl --fail-with-body --show-error \
             -H "Authorization: Bearer $DIRIGENT_PUBLISH_TOKEN" \
             -F 'manifest=@manifest.json;type=application/json' \
-            -F "x86_64-pc-windows-msvc=@dist/windows/$DIRIGENT_WINDOWS_FILE_NAME;filename=$DIRIGENT_WINDOWS_FILE_NAME" \
-            -F "x86_64-arch-linux=@dist/arch-linux/$DIRIGENT_LINUX_FILE_NAME;filename=$DIRIGENT_LINUX_FILE_NAME" \
+            -F "x86_64-pc-windows-msvc-installer=@dist/windows/$DIRIGENT_WINDOWS_FILE_NAME;filename=$DIRIGENT_WINDOWS_FILE_NAME" \
+            -F 'x86_64-pc-windows-msvc-application=@dist/windows/dirigent_desktop.exe;filename=dirigent_desktop.exe' \
+            -F "x86_64-arch-linux-installer=@dist/arch-linux/$DIRIGENT_LINUX_FILE_NAME;filename=$DIRIGENT_LINUX_FILE_NAME" \
+            -F 'x86_64-arch-linux-application=@dist/arch-linux/dirigent_desktop;filename=dirigent_desktop' \
             "$DIRIGENT_API_URL/api/v0/version/${{ needs.prepare.outputs.channel }}"

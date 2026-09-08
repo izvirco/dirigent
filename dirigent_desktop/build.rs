@@ -25,10 +25,15 @@ fn embed_release_identity() {
     println!("cargo:rerun-if-env-changed=DIRIGENT_UPDATE_CHANNEL");
     println!("cargo:rerun-if-env-changed=DIRIGENT_UPDATE_TARGET");
 
+    // Local builds must not open stable/unstable data by accident.
+    let channel = env::var("DIRIGENT_UPDATE_CHANNEL").unwrap_or_else(|_| "dev".into());
     let version = env::var("DIRIGENT_RELEASE_VERSION").unwrap_or_else(|_| {
-        env::var("CARGO_PKG_VERSION").expect("Cargo must set CARGO_PKG_VERSION")
+        if channel == "stable" {
+            env::var("CARGO_PKG_VERSION").expect("Cargo must set CARGO_PKG_VERSION")
+        } else {
+            "19700101-000000".into()
+        }
     });
-    let channel = env::var("DIRIGENT_UPDATE_CHANNEL").unwrap_or_else(|_| "stable".into());
     let target = env::var("DIRIGENT_UPDATE_TARGET")
         .unwrap_or_else(|_| env::var("TARGET").expect("Cargo must set TARGET"));
     println!("cargo:rustc-env=DIRIGENT_RELEASE_VERSION={version}");

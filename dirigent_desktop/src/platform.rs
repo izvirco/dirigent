@@ -8,15 +8,22 @@ use std::{
 
 const PI_BRIDGE_EXTENSION: &str = include_str!("../asset/dirigent-bridge.ts");
 
+// Always use the running build's channel, never the launcher's mutable selection.
+fn channel_directory(base: PathBuf) -> Result<PathBuf, String> {
+    let channel = crate::build_info::channel();
+    dirigent_launcher::validate_channel(channel)?;
+    Ok(base.join("dirigent/channels").join(channel))
+}
+
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn config_dir() -> Result<PathBuf, String> {
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
-        return Ok(PathBuf::from(config_home).join("dirigent"));
+        return channel_directory(PathBuf::from(config_home));
     }
     let home = home_dir().ok_or_else(|| {
         "HOME and XDG_CONFIG_HOME are unset; cannot load Dirigent configuration".to_string()
     })?;
-    Ok(home.join(".config/dirigent"))
+    channel_directory(home.join(".config"))
 }
 
 #[cfg(target_os = "windows")]
@@ -27,18 +34,18 @@ pub(crate) fn config_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| {
             "APPDATA and USERPROFILE are unset; cannot load Dirigent configuration".to_string()
         })?;
-    Ok(config_home.join("dirigent"))
+    channel_directory(config_home)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn state_directory() -> Result<PathBuf, String> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(data_home).join("dirigent/v0"));
+        return Ok(channel_directory(PathBuf::from(data_home))?.join("v0"));
     }
     let home = home_dir().ok_or_else(|| {
         "HOME and XDG_DATA_HOME are unset; cannot persist Dirigent state".to_string()
     })?;
-    Ok(home.join(".local/share/dirigent/v0"))
+    Ok(channel_directory(home.join(".local/share"))?.join("v0"))
 }
 
 #[cfg(target_os = "windows")]
@@ -49,7 +56,7 @@ fn state_directory() -> Result<PathBuf, String> {
         .ok_or_else(|| {
             "APPDATA and USERPROFILE are unset; cannot persist Dirigent state".to_string()
         })?;
-    Ok(data_home.join("dirigent/v0"))
+    Ok(channel_directory(data_home)?.join("v0"))
 }
 
 pub(crate) fn state_database_path() -> Result<PathBuf, String> {
@@ -60,20 +67,15 @@ pub(crate) fn logs_directory() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("logs"))
 }
 
-#[cfg(feature = "self-update")]
-pub(crate) fn updates_directory() -> Result<PathBuf, String> {
-    Ok(state_directory()?.join("updates"))
-}
-
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
     if let Some(data_home) = env::var_os("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(data_home).join("dirigent/workspace"));
+        return Ok(channel_directory(PathBuf::from(data_home))?.join("workspace"));
     }
     let home = home_dir().ok_or_else(|| {
         "HOME and XDG_DATA_HOME are unset; cannot create managed workspaces".to_string()
     })?;
-    Ok(home.join(".local/share/dirigent/workspace"))
+    Ok(channel_directory(home.join(".local/share"))?.join("workspace"))
 }
 
 #[cfg(target_os = "windows")]
@@ -84,18 +86,18 @@ pub(crate) fn workspace_root() -> Result<PathBuf, String> {
         .ok_or_else(|| {
             "LOCALAPPDATA and USERPROFILE are unset; cannot create managed workspaces".to_string()
         })?;
-    Ok(data_home.join("dirigent/workspace"))
+    Ok(channel_directory(data_home)?.join("workspace"))
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) fn cache_path() -> Result<PathBuf, String> {
     if let Some(cache_home) = env::var_os("XDG_CACHE_HOME") {
-        return Ok(PathBuf::from(cache_home).join("dirigent/v0/cache.sqlite3"));
+        return Ok(channel_directory(PathBuf::from(cache_home))?.join("v0/cache.sqlite3"));
     }
     let home = home_dir().ok_or_else(|| {
         "HOME and XDG_CACHE_HOME are unset; cannot initialize the session cache".to_string()
     })?;
-    Ok(home.join(".cache/dirigent/v0/cache.sqlite3"))
+    Ok(channel_directory(home.join(".cache"))?.join("v0/cache.sqlite3"))
 }
 
 #[cfg(target_os = "windows")]
@@ -107,7 +109,38 @@ pub(crate) fn cache_path() -> Result<PathBuf, String> {
             "LOCALAPPDATA and USERPROFILE are unset; cannot initialize the session cache"
                 .to_string()
         })?;
-    Ok(cache_home.join("dirigent/v0/cache.sqlite3"))
+    Ok(channel_directory(cache_home)?.join("v0/cache.sqlite3"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_paths_use_the_build_channel() {
+        let channel = crate::build_info::channel();
+        for path in [
+            config_dir(),
+            state_database_path(),
+            cache_path(),
+            logs_directory(),
+            workspace_root(),
+        ] {
+            let path = path.unwrap();
+            let components: Vec<_> = path.iter().map(|part| part.to_string_lossy()).collect();
+            assert!(
+                components
+                    .windows(3)
+                    .any(|parts| parts == ["dirigent", "channels", channel]),
+                "unscoped path: {}",
+                path.display()
+            );
+        }
+        assert_eq!(
+            state_database_path().unwrap().parent(),
+            logs_directory().unwrap().parent()
+        );
+    }
 }
 
 /// Materializes a versioned private bundle so a running Pi never loads half an update.
