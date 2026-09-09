@@ -1,6 +1,8 @@
 //! Collects GPUI views and shared UI rendering helpers.
 
 mod about;
+pub(crate) mod settings;
+pub(crate) mod onboarding;
 mod composer;
 mod conversation;
 mod delegation;
@@ -328,6 +330,9 @@ impl Dirigent {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.settings.is_some() {
+            return self.render_settings(cx);
+        }
         div()
             .relative()
             .min_w(px(420.0))

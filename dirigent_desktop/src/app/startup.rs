@@ -10,6 +10,9 @@ impl Dirigent {
         // Initialize persistent state before the rest of app startup reads from disk.
         let (state_database, loaded) = storage::StateDatabase::open()
             .unwrap_or_else(|error| panic!("could not initialize persistent state: {error}"));
+        // Check before theme initialization creates config.toml.
+        let first_startup = platform::config_dir()
+            .is_ok_and(|dir| matches!(dir.join("config.toml").try_exists(), Ok(false)));
         let (config_dir, appearance, mut config_error) = match theme::initialize() {
             Ok((config_dir, appearance)) => (Some(config_dir), appearance, None),
             Err(error) => {
@@ -779,6 +782,7 @@ impl Dirigent {
             project_settings: None,
             workspace_settings_editing: false,
             about_open: false,
+            settings: None,
             pi_version: "Checking…".into(),
             sidebar_width: sidebar_width.clamp(200.0, 520.0),
             sidebar_layout_persist_task: None,
@@ -814,6 +818,7 @@ impl Dirigent {
             update_events: update_event_tx,
             config_error,
             font: appearance.font.into(),
+            onboarding: first_startup.then(crate::ui::onboarding::Onboarding::new),
             window_transparent: None,
             conversation_list,
             conversation_render_cache,

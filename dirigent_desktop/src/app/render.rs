@@ -14,6 +14,11 @@ impl Render for Dirigent {
             self.window_transparent = Some(window_transparent);
         }
 
+        self.finish_onboarding_fade();
+        if self.onboarding.is_some() {
+            return self.render_onboarding(window, cx);
+        }
+
         self.frame_timing.collect_frames(Instant::now());
         let frame_timing_labels = self.frame_timing.labels();
         self.sync_path_completion_input(cx);
@@ -23,7 +28,7 @@ impl Render for Dirigent {
                 .read(cx)
                 .position_for_offset(at)
         });
-        let diff_replaces_thread = self.diff_sidebar_replaces_thread(window);
+        let diff_replaces_thread = self.settings.is_none() && self.diff_sidebar_replaces_thread(window);
 
         if self.focus_normal_mode {
             self.focus_normal_mode = false;
@@ -123,7 +128,7 @@ impl Render for Dirigent {
             .when(!diff_replaces_thread, |element| {
                 element.child(self.render_center(window, cx))
             })
-            .child(self.render_diff_sidebar(window, cx))
+            .when(self.settings.is_none(), |element| element.child(self.render_diff_sidebar(window, cx)))
             .when_some(self.keyboard_menu, |element, menu| {
                 element.child(self.render_keyboard_menu(menu, cx))
             })
@@ -208,5 +213,6 @@ impl Render for Dirigent {
                     )
                 },
             )
+            .into_any_element()
     }
 }

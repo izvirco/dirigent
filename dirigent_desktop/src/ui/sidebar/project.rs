@@ -144,7 +144,7 @@ impl Dirigent {
         const ARCHIVED_THREAD_LIMIT: usize = 8;
         let hidden_thread_count = archived_ids.len().saturating_sub(ARCHIVED_THREAD_LIMIT);
         let archived_threads_expanded = self.expanded_archived_projects.contains(&id);
-        let selected = !self.about_open
+        let selected = self.settings.is_none() && !self.about_open
             && self.selected_project == Some(id)
             && (!self.adding_project || self.project_settings == Some(id));
         let menu_open = self.sidebar_menu == Some(SidebarMenu::Project(id));

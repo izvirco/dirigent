@@ -173,11 +173,16 @@ impl Dirigent {
         let command = modifiers.control || modifiers.platform;
 
         if key == "escape" {
+            self.settings = None;
             self.preview_image = None;
             self.pending_workspace_deletion = None;
             self.enter_normal_mode();
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+
+        if self.settings.is_some() {
             return;
         }
 

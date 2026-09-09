@@ -4,7 +4,7 @@ use std::{
     fs::{self, OpenOptions},
     io::Write as _,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::Duration,
 };
 
@@ -16,6 +16,17 @@ use crate::platform;
 
 const DEFAULT_FONT: &str = "Lilex";
 const CONFIG_FILE: &str = "config.toml";
+static TELEMETRY: AtomicBool = AtomicBool::new(true);
+
+pub(crate) fn telemetry_enabled() -> bool {
+    TELEMETRY.load(Ordering::Relaxed)
+}
+
+pub(crate) fn set_telemetry(enabled: bool) -> Result<(), String> {
+    update_config("telemetry", toml::Value::Boolean(enabled))?;
+    TELEMETRY.store(enabled, Ordering::Relaxed);
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Appearance {
@@ -28,6 +39,7 @@ struct ConfigFile {
     config_version: u32,
     font: String,
     theme: String,
+    telemetry: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -381,42 +393,11 @@ variable = "#E3D7BB"
 "variable.parameter" = "#83A598"
 "##;
 
-const NORD_THEME_FILE: &str = r##"# Nord-inspired sample theme.
-background = "#2e3440"
-sidebar_background = "#272c36"
-surface = "#3b4252"
-surface_hover = "#434c5e"
-menu_background = "#353b49"
-popup_background = "#3b4252"
-selection = "#4c566a"
-text_selection = "#5e81ac"
-border = "#4c566a"
-border_emphasized = "#616e88"
-text = "#eceff4"
-code_text = "#e5e9f0"
-detail_text = "#d8dee9"
-secondary_text = "#d8dee9"
-muted = "#a7adba"
-thinking_text = "#c0c8d8"
-faint = "#737d91"
-accent = "#88c0d0"
-accent_hover = "#8fbcbb"
-accent_surface = "#394b59"
-blue = "#81a1c1"
-orange = "#d08770"
-green = "#a3be8c"
-red = "#bf616a"
-error_text = "#e88b92"
-error_background = "#4a3038"
-warning_border = "#d08770"
-warning_background = "#493e39"
-warning_text = "#ebcb8b"
-yellow = "#ebcb8b"
-purple = "#b48ead"
-"##;
+const GRUVBOX_LIGHT_SOFT_THEME_FILE: &str = include_str!("../asset/themes/gruvbox-light-soft.toml");
+const EXPERIMENTAL_THEME_FILE: &str = include_str!("../asset/themes/experimental.toml");
 
-const GRUVBOX_THEME_FILE: &str = r##"# Gruvbox-inspired sample theme.
-background = "#282828"
+const GRUVBOX_DARK_HARD_THEME_FILE: &str = r##"# Gruvbox Dark Hard.
+background = "#1d2021"
 sidebar_background = "#1d2021"
 surface = "#3c3836"
 surface_hover = "#504945"
@@ -449,6 +430,72 @@ yellow = "#fabd2f"
 purple = "#d3869b"
 "##;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supplied_palettes_parse() {
+        for source in [DEFAULT_THEME_FILE, GRUVBOX_DARK_HARD_THEME_FILE, GRUVBOX_LIGHT_SOFT_THEME_FILE, EXPERIMENTAL_THEME_FILE] {
+            toml::from_str::<ThemeFile>(source).expect("valid supplied palette");
+        }
+        let experimental: ThemeFile = toml::from_str(EXPERIMENTAL_THEME_FILE).unwrap();
+        assert_eq!(experimental.background.0, 0x000000aa);
+    }
+}
+
+pub(crate) struct ThemePreview {
+    pub(crate) name: String,
+    pub(crate) colors: [u32; 3],
+    palette: ThemeFile,
+}
+
+pub(crate) fn theme_previews() -> Vec<ThemePreview> {
+    let Ok(dir) = platform::config_dir() else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(dir.join("theme")) else { return Vec::new() };
+    let mut previews: Vec<_> = entries.flatten().filter_map(|entry| {
+        let path = entry.path();
+        if path.extension()?.to_str()? != "toml" { return None; }
+        let name = path.file_stem()?.to_str()?.to_string();
+        let palette: ThemeFile = toml::from_str(&fs::read_to_string(&path).ok()?).ok()?;
+        Some(ThemePreview {
+            name,
+            colors: [palette.background.0, palette.surface.0, palette.accent.0],
+            palette,
+        })
+    }).collect();
+    previews.sort_by(|a, b| {
+        (a.name == "experimental")
+            .cmp(&(b.name == "experimental"))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    previews
+}
+
+pub(crate) fn set_font(font: &str) -> Result<(), String> {
+    let font = font.trim();
+    if font.is_empty() || font.contains(['\n', '\r']) {
+        return Err("Enter a font family name.".into());
+    }
+    update_config("font", toml::Value::String(font.to_string()))
+}
+
+fn update_config(key: &str, value: toml::Value) -> Result<(), String> {
+    let path = platform::config_dir()?.join(CONFIG_FILE);
+    let source = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut config: toml::Value = toml::from_str(&source).map_err(|e| e.to_string())?;
+    config[key] = value;
+    fs::write(path, toml::to_string_pretty(&config).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn select_preview(preview: &ThemePreview) -> Result<(), String> {
+    update_config("theme", toml::Value::String(preview.name.clone()))?;
+    apply(&preview.palette);
+    Ok(())
+}
+
 pub(crate) fn default_appearance() -> Appearance {
     Appearance {
         font: DEFAULT_FONT.to_string(),
@@ -457,10 +504,7 @@ pub(crate) fn default_appearance() -> Appearance {
 
 pub(crate) fn initialize() -> Result<(PathBuf, Appearance), String> {
     let config_dir = platform::config_dir()?;
-    let config_path = config_dir.join(CONFIG_FILE);
-    if !config_path.exists() {
-        generate_config(&config_dir)?;
-    }
+    generate_config(&config_dir)?;
     let appearance = reload(&config_dir)?;
     Ok((config_dir, appearance))
 }
@@ -476,15 +520,16 @@ fn generate_config(config_dir: &Path) -> Result<(), String> {
 
     for (name, contents) in [
         ("default.toml", DEFAULT_THEME_FILE),
-        ("nord.toml", NORD_THEME_FILE),
-        ("gruvbox.toml", GRUVBOX_THEME_FILE),
+        ("gruvbox-dark-hard.toml", GRUVBOX_DARK_HARD_THEME_FILE),
+        ("gruvbox-light-soft.toml", GRUVBOX_LIGHT_SOFT_THEME_FILE),
+        ("experimental.toml", EXPERIMENTAL_THEME_FILE),
     ] {
         write_new_file(&theme_dir.join(name), contents)?;
     }
 
     write_new_file(
         &config_dir.join(CONFIG_FILE),
-        "config_version = 0\nfont = \"Lilex\"\ntheme = \"default\"\n",
+        "config_version = 0\nfont = \"Lilex\"\ntheme = \"default\"\ntelemetry = true\n",
     )
 }
 
@@ -533,6 +578,7 @@ pub(crate) fn reload(config_dir: &Path) -> Result<Appearance, String> {
 
     // Do not alter the active palette unless both files were read and validated successfully.
     apply(&theme);
+    TELEMETRY.store(config.telemetry, Ordering::Relaxed);
     Ok(Appearance { font: config.font })
 }
 
