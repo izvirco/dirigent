@@ -224,16 +224,44 @@ fn retry<T>(
 impl Read for BoundedStream<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         retry(self.stop, self.deadline, || {
-            let result = self.stream.read(buffer);
-            // Empty nonblocking pipes return raw ERROR_NO_DATA, not Rust's WouldBlock.
             #[cfg(windows)]
-            if result.as_ref().is_err_and(|error| {
-                error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_NO_DATA as i32)
-            }) {
-                return Err(io::ErrorKind::WouldBlock.into());
+            {
+                read_pipe(&self.stream, buffer)
             }
-            result
+            #[cfg(not(windows))]
+            self.stream.read(buffer)
         })
+    }
+}
+
+// interprocess turns BrokenPipe into EOF, but Rust also classifies ERROR_NO_DATA
+// (an empty PIPE_NOWAIT pipe) as BrokenPipe. Read directly to retain that distinction.
+#[cfg(windows)]
+fn read_pipe(stream: &Stream, buffer: &mut [u8]) -> io::Result<usize> {
+    use std::os::windows::io::{AsHandle, AsRawHandle};
+    use windows_sys::Win32::{Foundation::ERROR_NO_DATA, Storage::FileSystem::ReadFile};
+
+    let Stream::NamedPipe(pipe) = stream;
+    let mut read = 0;
+    // SAFETY: the handle and buffer remain valid during this synchronous read; these
+    // streams are not overlapped, so no OVERLAPPED structure is needed.
+    let success = unsafe {
+        ReadFile(
+            pipe.as_handle().as_raw_handle(),
+            buffer.as_mut_ptr(),
+            buffer.len().min(u32::MAX as usize) as u32,
+            &mut read,
+            std::ptr::null_mut(),
+        )
+    };
+    if success != 0 {
+        return Ok(read as usize);
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(ERROR_NO_DATA as i32) {
+        Err(io::ErrorKind::WouldBlock.into())
+    } else {
+        Err(error)
     }
 }
 
