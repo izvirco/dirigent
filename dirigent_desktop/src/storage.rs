@@ -1465,6 +1465,7 @@ mod tests {
         let mut parent = Harness::new(1, 10, "Manager".into(), 1);
         parent.delegation.jobs.push(AgentJob {
             id: "job".into(),
+            handoff: true,
             tool_call_id: "tool-call".into(),
             title: "Implement".into(),
             status: WorkStatus::Running,
@@ -1483,6 +1484,8 @@ mod tests {
                 result: "saved output".into(),
                 error: None,
                 stop_reason: Some("stop".into()),
+                handed_off: false,
+                parent_message: Some("Ready for review".into()),
             });
         }
         db.save(
@@ -1533,6 +1536,11 @@ mod tests {
         assert_eq!(child.delegation.parent, Some(1));
         assert_eq!(child.delegation.runs[0].status, WorkStatus::Completed);
         assert_eq!(child.delegation.runs[0].result, "saved output");
+        assert!(loaded.harnesses[0].delegation.jobs[0].handoff);
+        assert_eq!(
+            child.delegation.runs[0].parent_message.as_deref(),
+            Some("Ready for review")
+        );
         assert_eq!(child.delegation.runs[1].status, WorkStatus::Interrupted);
         assert!(child.pending_initial_prompt.is_none());
         drop(db);

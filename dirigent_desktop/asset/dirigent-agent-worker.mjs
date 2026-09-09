@@ -20,6 +20,12 @@ export function createAgents(call, sleep = ms => new Promise(resolve => setTimeo
     inspect: (agentId, options = {}) => call("inspect", { agentId, ...options }),
     list: () => call("list"),
     jobs: () => call("jobs"),
+    async pingParent(message) {
+      if (typeof message !== "string" || !message.trim() || Buffer.byteLength(message, "utf8") > 8000) {
+        throw new Error("pingParent expects a nonempty message up to 8000 bytes.");
+      }
+      return await call("ping_parent", { message });
+    },
     async stop(agentId) {
       await call("stop", { agentId });
       for (let attempt = 0; attempt < 60; attempt++) {

@@ -25,12 +25,47 @@ pub(crate) struct AgentRun {
     pub(crate) error: Option<String>,
     #[serde(default)]
     pub(crate) stop_reason: Option<String>,
+    /// A successful handoff tool result in the latest assistant turn permits a toolUse ending.
+    #[serde(default)]
+    pub(crate) handed_off: bool,
+    #[serde(default)]
+    pub(crate) parent_message: Option<String>,
+}
+
+impl AgentRun {
+    /// Finalize once. Explicit cancellation/interruption wins over the last model response.
+    pub(crate) fn finish(&mut self, status: WorkStatus, error: Option<String>) -> bool {
+        if self.status != WorkStatus::Running {
+            return false;
+        }
+        self.status = if status == WorkStatus::Completed {
+            match self.stop_reason.as_deref() {
+                Some("stop") => WorkStatus::Completed,
+                Some("toolUse") if self.handed_off => WorkStatus::Completed,
+                Some("aborted") => WorkStatus::Cancelled,
+                _ => WorkStatus::Failed,
+            }
+        } else {
+            status
+        };
+        if self.status == WorkStatus::Failed && self.error.is_none() {
+            self.error = Some(error.unwrap_or_else(|| {
+                format!(
+                    "Assignment did not finish normally ({:?}).",
+                    self.stop_reason
+                )
+            }));
+        }
+        true
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentJob {
     pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) handoff: bool,
     pub(crate) tool_call_id: String,
     pub(crate) title: String,
     pub(crate) status: WorkStatus,
@@ -96,6 +131,8 @@ mod tests {
                 result: "saved result".into(),
                 error: None,
                 stop_reason: None,
+                handed_off: false,
+                parent_message: None,
             });
         }
         let mut restored: Delegation =
@@ -105,6 +142,33 @@ mod tests {
         assert_eq!(restored.runs[1].status, WorkStatus::Interrupted);
         assert_eq!(restored.runs[0].result, "saved result");
         assert!(restored.active_run_mut().is_none());
+    }
+
+    #[test]
+    fn handoff_settles_once_without_a_final_assistant_message() {
+        for (handed_off, requested, expected) in [
+            (true, WorkStatus::Completed, WorkStatus::Completed),
+            (false, WorkStatus::Completed, WorkStatus::Failed),
+            (true, WorkStatus::Cancelled, WorkStatus::Cancelled),
+            (true, WorkStatus::Failed, WorkStatus::Failed),
+            (true, WorkStatus::Interrupted, WorkStatus::Interrupted),
+        ] {
+            let mut run = AgentRun {
+                id: "run".into(),
+                job_id: "job".into(),
+                status: WorkStatus::Running,
+                result: String::new(),
+                error: None,
+                stop_reason: Some("toolUse".into()),
+                handed_off,
+                parent_message: Some("Please review the changes".into()),
+            };
+            assert!(run.finish(requested, None));
+            assert_eq!(run.status, expected);
+            assert_eq!(run.error.is_some(), expected == WorkStatus::Failed);
+            assert!(!run.finish(WorkStatus::Completed, None));
+            assert_eq!(run.status, expected);
+        }
     }
 
     #[test]

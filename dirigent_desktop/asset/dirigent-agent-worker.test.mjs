@@ -64,6 +64,17 @@ test("invalid waits reject before issuing requests; stop waits for cancellation 
   assert.equal(called, 3);
 });
 
+test("parent pings validate bounded UTF-8 messages before contacting the host", async () => {
+  const calls = [];
+  const api = createAgents(async (method, args) => { calls.push([method, args]); return { queued: true }; });
+  for (const invalid of [null, "", "  ", "🦀".repeat(2001)]) {
+    await assert.rejects(api.pingParent(invalid), /nonempty message up to 8000 bytes/);
+  }
+  assert.deepEqual(calls, []);
+  assert.deepEqual(await api.pingParent("Please review"), { queued: true });
+  assert.deepEqual(calls, [["ping_parent", { message: "Please review" }]]);
+});
+
 test("real worker executes TypeScript over IPC and exits when its host disconnects", async () => {
   const child = spawn(process.execPath, [fileURLToPath(new URL("./dirigent-agent-worker.mjs", import.meta.url))], {
     stdio: ["ignore", "ignore", "ignore", "ipc"],

@@ -169,6 +169,7 @@ impl Dirigent {
                 }
                 self.harnesses[parent_index].delegation.jobs.push(AgentJob {
                     id: job.into(),
+                    handoff: args["handoff"].as_bool().unwrap_or(false),
                     tool_call_id: string_arg(&args, "toolCallId")?,
                     title: bounded_text(&string_arg(&args, "title")?, 160),
                     status: WorkStatus::Running,
@@ -213,6 +214,33 @@ impl Dirigent {
             return Err("Workflow is cancelled or no longer running.".into());
         }
         match method {
+            "ping_parent" => {
+                let message = string_arg(&args, "message")?;
+                if message.len() > 8000 {
+                    return Err("Parent messages must be at most 8000 bytes.".into());
+                }
+                let manager = self.harnesses[parent_index]
+                    .delegation
+                    .parent
+                    .ok_or("Only child agents can ping a parent.")?;
+                let run = self.harnesses[parent_index]
+                    .delegation
+                    .runs
+                    .last()
+                    .filter(|run| run.status == WorkStatus::Running)
+                    .ok_or("No active assignment to report on.")?;
+                if !self.handoff_job(manager, &run.job_id) {
+                    return Err("This assignment was not launched with mode: handoff.".into());
+                }
+                let run = self.harnesses[parent_index]
+                    .delegation
+                    .active_run_mut()
+                    .unwrap();
+                // Delivery waits for settlement so the manager can immediately send feedback.
+                run.parent_message = Some(message);
+                self.persist();
+                Ok(json!({"queued": true, "delivery": "when this assignment settles"}))
+            }
             "list" => Ok(Value::Array(
                 self.harnesses
                     .iter()
@@ -266,7 +294,12 @@ impl Dirigent {
                     );
                 }
                 self.working_directory_for_harness(id)?;
-                let prompt = assignment_prompt(parent, request, &string_arg(&args, "prompt")?);
+                let prompt = assignment_prompt(
+                    parent,
+                    request,
+                    &string_arg(&args, "prompt")?,
+                    self.handoff_job(parent, job),
+                );
                 self.harnesses[index].archived = false;
                 self.harnesses[index]
                     .delegation
@@ -348,7 +381,8 @@ impl Dirigent {
                 .and_then(|h| h.delegation.parent);
         }
         let id = self.allocate_id();
-        let prompt = assignment_prompt(parent, request, &args.prompt);
+        let prompt =
+            assignment_prompt(parent, request, &args.prompt, self.handoff_job(parent, job));
         let mut harness = Harness::new(
             id,
             self.harnesses[parent_index].project_id,
@@ -422,40 +456,76 @@ impl Dirigent {
 
     pub(super) fn record_delegated_message(&mut self, index: usize, value: &Value) {
         let message = &value["message"];
-        if message["role"].as_str() != Some("assistant") {
-            return;
-        }
         if let Some(run) = self.harnesses[index].delegation.active_run_mut() {
-            run.stop_reason = message["stopReason"].as_str().map(str::to_string);
-            run.result = bounded_text(&content_text(&message["content"]), 12_000);
-            run.error = message["errorMessage"]
-                .as_str()
-                .map(|s| bounded_text(s, 2_000));
+            if message["role"].as_str() == Some("assistant") {
+                run.handed_off = false;
+                run.stop_reason = message["stopReason"].as_str().map(str::to_string);
+                run.result = bounded_text(&content_text(&message["content"]), 12_000);
+                run.error = message["errorMessage"]
+                    .as_str()
+                    .map(|s| bounded_text(s, 2_000));
+            } else if message["role"].as_str() == Some("toolResult")
+                && message["toolName"].as_str() == Some("dirigent_agents")
+                && message["isError"].as_bool() == Some(false)
+                && message["details"]["handoff"].as_bool() == Some(true)
+            {
+                run.handed_off = true;
+                run.result = bounded_text(&content_text(&message["content"]), 12_000);
+            }
         }
     }
 
     pub(super) fn finish_delegated_run(&mut self, index: usize, status: WorkStatus) {
         let error = self.harnesses[index].error.clone();
-        if let Some(run) = self.harnesses[index].delegation.active_run_mut() {
-            run.status = if status == WorkStatus::Completed {
-                match run.stop_reason.as_deref() {
-                    Some("stop") => WorkStatus::Completed,
-                    Some("aborted") => WorkStatus::Cancelled,
-                    _ => WorkStatus::Failed,
-                }
-            } else {
-                status
-            };
-            if run.status == WorkStatus::Failed && run.error.is_none() {
-                run.error = Some(error.unwrap_or_else(|| {
-                    format!(
-                        "Assignment did not finish normally ({:?}).",
-                        run.stop_reason
-                    )
-                }));
-            }
-            self.persist();
+        let Some(run) = self.harnesses[index].delegation.active_run_mut() else {
+            return;
+        };
+        run.finish(status, error);
+        let run = run.clone();
+        self.persist();
+        // Explicit stop must not immediately wake the manager back up.
+        if run.status == WorkStatus::Cancelled {
+            return;
         }
+        let child = &self.harnesses[index];
+        let Some(parent_index) = child
+            .delegation
+            .parent
+            .and_then(|parent| self.harnesses.iter().position(|h| h.id == parent))
+        else {
+            return;
+        };
+        let parent = &self.harnesses[parent_index];
+        if !self.handoff_job(parent.id, &run.job_id)
+            || parent.process.is_none()
+            || parent.cancellation_pending
+        {
+            return;
+        }
+        let notice = json!({
+            "jobId": run.job_id, "agentId": child.id.to_string(), "name": child.title, "run": run,
+        });
+        // The receiving extension checks the launch branch and queues behind any human turn.
+        self.send_value(
+            parent_index,
+            json!({
+                "id": "dirigent-agent-response", "type": "prompt",
+                "message": format!("/dirigent-agents-notify {notice}"),
+            }),
+        );
+    }
+
+    fn handoff_job(&self, parent: Id, job: &str) -> bool {
+        self.harnesses
+            .iter()
+            .find(|h| h.id == parent)
+            .is_some_and(|h| {
+                h.delegation.jobs.iter().any(|j| {
+                    j.id == job
+                        && j.handoff
+                        && matches!(j.status, WorkStatus::Running | WorkStatus::Completed)
+                })
+            })
     }
 
     fn cancel_delegation_job(&mut self, parent: Id, job: &str, status: WorkStatus) {
@@ -524,8 +594,21 @@ impl Dirigent {
     }
 }
 
-fn assignment_prompt(parent: Id, run: &str, prompt: &str) -> String {
-    format!("[Dirigent assignment; manager #{parent}; run {run}]\n\n{prompt}")
+fn assignment_prompt(parent: Id, run: &str, prompt: &str, handoff: bool) -> String {
+    let instructions = if handoff {
+        "\n\nYour parent has handed off this assignment and may be idle or chatting with the human. \
+         When blocked, needing a decision, or ready for review, use dirigent_agents with \
+         title: \"Report to parent\", mode: \"handoff\", and code: \
+         `return await agents.pingParent(\"Your concise question or review summary\");`. \
+         Make that your only tool call in the batch; it ends your turn without waiting. \
+         The message is delivered once you settle, and the parent can continue this same session \
+         with feedback. Read the API with {} first. Pinging is authorized communication, not \
+         permission to delegate further. Include changed files, checks, and remaining concerns \
+         when reporting results. Normal completion or failure also notifies the parent automatically."
+    } else {
+        ""
+    };
+    format!("[Dirigent assignment; manager #{parent}; run {run}]{instructions}\n\n{prompt}")
 }
 
 fn new_run(id: &str, job: &str) -> AgentRun {
@@ -536,6 +619,8 @@ fn new_run(id: &str, job: &str) -> AgentRun {
         result: String::new(),
         error: None,
         stop_reason: None,
+        handed_off: false,
+        parent_message: None,
     }
 }
 
