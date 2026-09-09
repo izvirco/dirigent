@@ -49,9 +49,15 @@ fn embed_commit_id() {
 }
 
 fn embed_windows_icon() {
-    const ICON_PATH: &str = "asset/icon.ico";
-
-    println!("cargo:rerun-if-changed={ICON_PATH}");
+    let channel = env::var("DIRIGENT_UPDATE_CHANNEL").unwrap_or_default();
+    let icon = match channel.as_str() {
+        "stable" => "stable",
+        "nightly" => "nightly",
+        channel if channel.starts_with("unstable") => "unstable",
+        _ => "dev",
+    };
+    let icon_path = format!("asset/{icon}.ico");
+    println!("cargo:rerun-if-changed={icon_path}");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
@@ -60,7 +66,7 @@ fn embed_windows_icon() {
         env::var_os("CARGO_MANIFEST_DIR").expect("Cargo must set CARGO_MANIFEST_DIR"),
     );
     let icon_path = manifest_dir
-        .join(ICON_PATH)
+        .join(icon_path)
         .to_string_lossy()
         .replace('\\', "\\\\");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo must set OUT_DIR"));

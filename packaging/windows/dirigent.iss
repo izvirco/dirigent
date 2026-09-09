@@ -8,6 +8,17 @@
   #define OpenHereLabel "Open dirigent here (" + Channel + ")"
 #endif
 
+; Keep icon families aligned with both executable build scripts.
+#if Channel == "stable"
+  #define IconChannel "stable"
+#elif Channel == "nightly"
+  #define IconChannel "nightly"
+#elif Pos("unstable", Channel) == 1
+  #define IconChannel "unstable"
+#else
+  #define IconChannel "dev"
+#endif
+
 [Setup]
 AppId=Dirigent-{#Channel}
 AppName={#AppName}
@@ -23,7 +34,7 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 OutputDir={#OutputDir}
 OutputBaseFilename={#BinaryName}-setup
-SetupIconFile=..\..\dirigent_desktop\asset\icon.ico
+SetupIconFile=..\..\dirigent_desktop\asset\{#IconChannel}.ico
 UninstallDisplayIcon={app}\dirigent.exe
 Compression=lzma2
 SolidCompression=yes
