@@ -294,12 +294,7 @@ impl Dirigent {
                     );
                 }
                 self.working_directory_for_harness(id)?;
-                let prompt = assignment_prompt(
-                    parent,
-                    request,
-                    &string_arg(&args, "prompt")?,
-                    self.handoff_job(parent, job),
-                );
+                let prompt = assignment_prompt(parent, request, &string_arg(&args, "prompt")?);
                 self.harnesses[index].archived = false;
                 self.harnesses[index]
                     .delegation
@@ -381,8 +376,7 @@ impl Dirigent {
                 .and_then(|h| h.delegation.parent);
         }
         let id = self.allocate_id();
-        let prompt =
-            assignment_prompt(parent, request, &args.prompt, self.handoff_job(parent, job));
+        let prompt = assignment_prompt(parent, request, &args.prompt);
         let mut harness = Harness::new(
             id,
             self.harnesses[parent_index].project_id,
@@ -457,7 +451,18 @@ impl Dirigent {
     pub(super) fn record_delegated_message(&mut self, index: usize, value: &Value) {
         let message = &value["message"];
         if let Some(run) = self.harnesses[index].delegation.active_run_mut() {
-            if message["role"].as_str() == Some("assistant") {
+            if message["role"].as_str() == Some("user") && run.prompt_timestamp_ms.is_none() {
+                run.prompt_timestamp_ms = message["timestamp"].as_u64();
+                let timestamp = run.prompt_timestamp_ms;
+                let text = content_text(&message["content"]);
+                // Associate the locally echoed prompt before canonical session entries arrive.
+                if let Some(prompt) = self.harnesses[index].messages.iter_mut().rev().find(|m| {
+                    m.role == MessageRole::User && m.timestamp_ms.is_none() && m.text == text
+                }) {
+                    prompt.timestamp_ms = timestamp;
+                }
+                self.persist();
+            } else if message["role"].as_str() == Some("assistant") {
                 run.handed_off = false;
                 run.stop_reason = message["stopReason"].as_str().map(str::to_string);
                 run.result = bounded_text(&content_text(&message["content"]), 12_000);
@@ -594,21 +599,8 @@ impl Dirigent {
     }
 }
 
-fn assignment_prompt(parent: Id, run: &str, prompt: &str, handoff: bool) -> String {
-    let instructions = if handoff {
-        "\n\nYour parent has handed off this assignment and may be idle or chatting with the human. \
-         When blocked, needing a decision, or ready for review, use dirigent_agents with \
-         title: \"Report to parent\", mode: \"handoff\", and code: \
-         `return await agents.pingParent(\"Your concise question or review summary\");`. \
-         Make that your only tool call in the batch; it ends your turn without waiting. \
-         The message is delivered once you settle, and the parent can continue this same session \
-         with feedback. Read the API with {} first. Pinging is authorized communication, not \
-         permission to delegate further. Include changed files, checks, and remaining concerns \
-         when reporting results. Normal completion or failure also notifies the parent automatically."
-    } else {
-        ""
-    };
-    format!("[Dirigent assignment; manager #{parent}; run {run}]{instructions}\n\n{prompt}")
+fn assignment_prompt(parent: Id, run: &str, prompt: &str) -> String {
+    format!("[Dirigent assignment; manager #{parent}; run {run}]\n\n{prompt}")
 }
 
 fn new_run(id: &str, job: &str) -> AgentRun {
@@ -621,6 +613,7 @@ fn new_run(id: &str, job: &str) -> AgentRun {
         stop_reason: None,
         handed_off: false,
         parent_message: None,
+        prompt_timestamp_ms: None,
     }
 }
 

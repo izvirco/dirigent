@@ -1486,6 +1486,7 @@ mod tests {
                 stop_reason: Some("stop".into()),
                 handed_off: false,
                 parent_message: Some("Ready for review".into()),
+                prompt_timestamp_ms: Some(1000),
             });
         }
         db.save(
@@ -1536,6 +1537,7 @@ mod tests {
         assert_eq!(child.delegation.parent, Some(1));
         assert_eq!(child.delegation.runs[0].status, WorkStatus::Completed);
         assert_eq!(child.delegation.runs[0].result, "saved output");
+        assert_eq!(child.delegation.runs[0].prompt_timestamp_ms, Some(1000));
         assert!(loaded.harnesses[0].delegation.jobs[0].handoff);
         assert_eq!(
             child.delegation.runs[0].parent_message.as_deref(),

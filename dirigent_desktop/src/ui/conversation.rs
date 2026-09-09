@@ -476,6 +476,7 @@ impl Dirigent {
                                 let (left, color) = match marker.role {
                                     MessageRole::Assistant => (4.0, assistant_color),
                                     MessageRole::User => (11.0, user_color),
+                                    MessageRole::Agent => (11.0, rgb(purple())),
                                     _ => continue,
                                 };
                                 let line_left = window.pixel_snap(track_bounds.left() + px(left));

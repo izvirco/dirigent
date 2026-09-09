@@ -401,10 +401,15 @@ impl Dirigent {
             || self.hovered_action_message == hover_key
             || self.hovered_tool_detail_message == hover_key;
         match message.role {
-            MessageRole::User => {
+            MessageRole::User | MessageRole::Agent => {
                 let images = message.images.clone();
+                let accent = if message.role == MessageRole::Agent {
+                    purple()
+                } else {
+                    blue()
+                };
                 div()
-                    .id(("user-message", index))
+                    .id(("incoming-message", index))
                     .relative()
                     .w_full()
                     .px_1()
@@ -430,7 +435,7 @@ impl Dirigent {
                             .left(px(-8.0))
                             .right(px(-8.0))
                             .rounded_xl()
-                            .bg(rgb(blue()).opacity(0.10)),
+                            .bg(rgb(accent).opacity(0.10)),
                     )
                     .child(
                         div()
@@ -439,6 +444,9 @@ impl Dirigent {
                             .flex()
                             .flex_col()
                             .gap_1()
+                            .when_some(message.sender.clone(), |element, sender| {
+                                element.child(div().text_xs().text_color(rgb(accent)).child(sender))
+                            })
                             .child(if let Some(markdown) = message.markdown.as_ref() {
                                 self.render_markdown(markdown, index, cx)
                             } else {

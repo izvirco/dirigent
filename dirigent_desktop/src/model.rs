@@ -79,6 +79,7 @@ pub(crate) enum PiProcessState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MessageRole {
     User,
+    Agent,
     Assistant,
     Thinking,
     Tool,
@@ -89,6 +90,8 @@ pub(crate) enum MessageRole {
 pub(crate) struct Message {
     pub(crate) role: MessageRole,
     pub(crate) entry_id: Option<String>,
+    pub(crate) timestamp_ms: Option<u64>,
+    pub(crate) sender: Option<String>,
     pub(crate) text: String,
     pub(crate) queued: bool,
     pub(crate) display_text: SharedString,
@@ -118,6 +121,8 @@ impl Message {
         let mut message = Self {
             role,
             entry_id: None,
+            timestamp_ms: None,
+            sender: None,
             text,
             queued: false,
             display_text: SharedString::default(),
@@ -281,7 +286,10 @@ impl Message {
     }
 
     fn refresh_markdown_cache(&mut self) {
-        if matches!(self.role, MessageRole::User | MessageRole::Assistant) {
+        if matches!(
+            self.role,
+            MessageRole::User | MessageRole::Agent | MessageRole::Assistant
+        ) {
             let mut markdown = parse_markdown(&self.text);
             if let Some(previous) = &self.markdown {
                 markdown.reuse_table_scrolls(previous);

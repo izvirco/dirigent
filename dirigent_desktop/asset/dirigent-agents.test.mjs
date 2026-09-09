@@ -75,7 +75,7 @@ test("handoff ends after scheduling, then reports behind human chat and supports
   await h.notify(result.details.jobId);
   assert.equal(h.messages.length, 1);
   assert.deepEqual(h.messages[0].options, { triggerTurn: true, deliverAs: "followUp" });
-  assert.match(h.messages[0].message.content, /Ready for review/);
+  assert.equal(h.messages[0].message.content, "Child Implement X (2), run initial: completed.\nReady for review");
   assert.equal(h.messages[0].message.details.agentId, "2");
 
   const feedback = await h.execute({ title: "Fix X", mode: "handoff", code: 'return await agents.send("2", "Fix the edge case");' });

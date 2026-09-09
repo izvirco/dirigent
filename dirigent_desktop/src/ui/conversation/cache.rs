@@ -61,15 +61,17 @@ fn build_ruler_markers(
         .enumerate()
         .filter_map(|(message_index, message)| {
             let is_compaction = message.role == MessageRole::Tool && message.is_compaction();
-            let render_item_index =
-                if matches!(message.role, MessageRole::User | MessageRole::Assistant) {
-                    // Hidden assistant fragments do not have a location in a collapsed thread.
-                    direct_render_items[message_index]
-                } else if is_compaction {
-                    direct_render_items[message_index].or(grouped_render_items[message_index])
-                } else {
-                    None
-                }?;
+            let render_item_index = if matches!(
+                message.role,
+                MessageRole::User | MessageRole::Agent | MessageRole::Assistant
+            ) {
+                // Hidden assistant fragments do not have a location in a collapsed thread.
+                direct_render_items[message_index]
+            } else if is_compaction {
+                direct_render_items[message_index].or(grouped_render_items[message_index])
+            } else {
+                None
+            }?;
             Some(ConversationRulerMarker {
                 render_item_index,
                 role: message.role,
@@ -282,6 +284,7 @@ fn work_group_id(user: &Message, user_index: usize) -> String {
     )
 }
 
+// The assignment header identifies runs even before Pi timestamps arrive.
 fn assignment_run_id(text: &str) -> Option<&str> {
     let header = text.lines().next()?.strip_prefix('[')?.strip_suffix(']')?;
     let metadata = header.strip_prefix("Dirigent assignment; manager #")?;
@@ -294,8 +297,18 @@ fn assignment_run_id(text: &str) -> Option<&str> {
 }
 
 pub(crate) fn work_group_for_run(harness: &Harness, run_id: &str) -> Option<WorkGroupSummary> {
+    let timestamp = harness
+        .delegation
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .and_then(|run| run.prompt_timestamp_ms);
     let (user_index, user) = harness.messages.iter().enumerate().find(|(_, message)| {
-        message.role == MessageRole::User && assignment_run_id(&message.text) == Some(run_id)
+        message.role == MessageRole::User
+            && match timestamp {
+                Some(timestamp) => message.timestamp_ms == Some(timestamp),
+                None => assignment_run_id(&message.text) == Some(run_id),
+            }
     })?;
     // An assignment can finish with only an assistant reply (no thinking or tools).
     // Summarize the entire assignment, including its final reply's model metadata,
@@ -307,19 +320,25 @@ pub(crate) fn work_group_for_run(harness: &Harness, run_id: &str) -> Option<Work
     let latest = end == harness.messages.len();
     let running = latest && harness.status == HarnessStatus::Working;
     let prompt = diff::prompt_excerpt(&user.text);
-    let completed_turn = harness.turn_diffs.iter().find(|turn| turn.prompt == prompt);
+    let mut turn_cursor = 0;
+    let completed_turn = harness.messages[..=user_index]
+        .iter()
+        .filter(|message| matches!(message.role, MessageRole::User | MessageRole::Agent))
+        .map(|user| matching_turn(harness, user, &mut turn_cursor))
+        .last()
+        .flatten();
     let turn = harness
         .active_turn_preview
         .as_ref()
         .filter(|turn| running && turn.prompt == prompt)
-        .or(completed_turn.map(Arc::as_ref));
+        .or(completed_turn);
     let mut summary = WorkGroupSummary::from_range(
         harness,
         work_group_id(user, user_index),
         user_index..end,
         running,
         turn,
-        completed_turn.map(Arc::as_ref),
+        completed_turn,
         latest,
     );
     if !latest {
@@ -355,7 +374,9 @@ fn build_work_groups(harness: &Harness) -> Vec<WorkGroupSummary> {
         .messages
         .iter()
         .enumerate()
-        .filter_map(|(index, message)| (message.role == MessageRole::User).then_some(index))
+        .filter_map(|(index, message)| {
+            matches!(message.role, MessageRole::User | MessageRole::Agent).then_some(index)
+        })
         .collect::<Vec<_>>();
     for (user_ordinal, user_index) in user_indices.iter().copied().enumerate() {
         let segment_end = user_indices
@@ -722,22 +743,47 @@ mod tests {
     #[test]
     fn associates_each_delegated_run_with_its_own_work_group_stats() {
         let mut harness = Harness::new(2, 1, "child".into(), 1);
-        harness.messages.push(Message::new(
-            MessageRole::User,
-            "[Dirigent assignment; manager #1; run initial]\n\nFirst",
-        ));
+        for (id, timestamp) in [("initial", 1000), ("feedback", 2000)] {
+            harness.delegation.runs.push(crate::delegation::AgentRun {
+                id: id.into(),
+                job_id: "job".into(),
+                status: crate::delegation::WorkStatus::Completed,
+                result: String::new(),
+                error: None,
+                stop_reason: Some("stop".into()),
+                handed_off: false,
+                parent_message: None,
+                prompt_timestamp_ms: Some(timestamp),
+            });
+        }
+        // Repeated prompts must still map to distinct assignments.
+        let mut initial_prompt = Message::new(MessageRole::User, "Continue");
+        initial_prompt.timestamp_ms = Some(1000);
+        harness.messages.push(initial_prompt);
         let mut write = Message::tool("write", Some("write-1".into()), false, false);
         write.tool_name = Some("write".into());
         write.tool_change_stats = Some((7, 0));
         harness.messages.push(write);
-        harness.messages.push(Message::new(
-            MessageRole::User,
-            "[Dirigent assignment; manager #1; run feedback]\n\nRevise",
-        ));
+        let mut feedback_prompt = Message::new(MessageRole::User, "Continue");
+        feedback_prompt.timestamp_ms = Some(2000);
+        harness.messages.push(feedback_prompt);
         let mut edit = Message::tool("edit", Some("edit-1".into()), false, false);
         edit.tool_name = Some("edit".into());
         edit.tool_change_stats = Some((2, 3));
         harness.messages.push(edit);
+        for (id, additions, deletions) in [(1, 7, 0), (2, 2, 3)] {
+            harness.turn_diffs.push(Arc::new(TurnDiff {
+                id,
+                prompt: "Continue".into(),
+                started_at: id,
+                finished_at: id + 1,
+                status: diff::TurnDiffStatus::Completed,
+                files: Vec::new(),
+                additions,
+                deletions,
+                error: None,
+            }));
+        }
 
         let initial = work_group_for_run(&harness, "initial").expect("initial work group");
         let feedback = work_group_for_run(&harness, "feedback").expect("feedback work group");
@@ -750,7 +796,44 @@ mod tests {
     }
 
     #[test]
-    fn extracts_only_current_delegated_assignment_run_ids() {
+    fn child_pings_start_work_groups_and_stay_visible_when_activity_is_collapsed() {
+        let mut harness = Harness::new(1, 1, "parent".into(), 1);
+        harness.status = HarnessStatus::Idle;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "Delegate the API change"),
+            Message::tool("dirigent_agents", None, false, false),
+            Message::new(MessageRole::Assistant, "The child is working"),
+            Message::new(MessageRole::Agent, "Please review the API"),
+            Message::tool("read", None, false, false),
+            Message::new(MessageRole::Assistant, "The API looks good"),
+        ];
+        let groups = build_work_groups(&harness);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            (groups[0].first_message_index, groups[0].last_message_index),
+            (1, 1)
+        );
+        assert_eq!(
+            (groups[1].first_message_index, groups[1].last_message_index),
+            (4, 4)
+        );
+        let cache = ConversationRenderCache::build(&harness);
+        for index in [2, 3, 5] {
+            assert!(cache.items.iter().any(|item| matches!(
+                item,
+                ConversationRenderItem::Message { message_index, queued: false } if *message_index == index
+            )));
+        }
+        assert!(
+            cache
+                .ruler_markers
+                .iter()
+                .any(|marker| marker.role == MessageRole::Agent)
+        );
+    }
+
+    #[test]
+    fn extracts_assignment_run_ids() {
         assert_eq!(
             assignment_run_id("[Dirigent assignment; manager #281; run run-new]\n\nDo work"),
             Some("run-new")

@@ -73,6 +73,7 @@ impl Dirigent {
             MessageRole::User if stable && idle => &["Copy", "Edit", "Fork"],
             MessageRole::Assistant if stable && idle => &["Copy", "Fork"],
             MessageRole::User
+            | MessageRole::Agent
             | MessageRole::Assistant
             | MessageRole::Thinking
             | MessageRole::Tool

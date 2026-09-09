@@ -449,7 +449,7 @@ pub(super) fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-/// Re-keys expansion state once an optimistic user message receives its persisted entry ID.
+/// Re-keys expansion state once an incoming message receives its persisted entry ID.
 pub(super) fn reconcile_work_group_expansion(
     previous: &[Message],
     canonical: &[Message],
@@ -467,11 +467,11 @@ pub(super) fn reconcile_work_group_expansion_from(
     let previous_users = previous
         .iter()
         .enumerate()
-        .filter(|(_, message)| message.role == MessageRole::User)
+        .filter(|(_, message)| matches!(message.role, MessageRole::User | MessageRole::Agent))
         .collect::<Vec<_>>();
     let canonical_users = canonical
         .iter()
-        .filter(|message| message.role == MessageRole::User)
+        .filter(|message| matches!(message.role, MessageRole::User | MessageRole::Agent))
         .collect::<Vec<_>>();
     let mut changed = false;
     for ((previous_index, previous), canonical) in previous_users.into_iter().zip(canonical_users) {
@@ -645,17 +645,48 @@ pub(super) fn push_parsed_message(
 
 fn parse_custom_message(value: &Value) -> Option<Message> {
     (value.get("display").and_then(Value::as_bool) == Some(true)).then_some(())?;
-    Some(Message::notice(content_text(value.get("content")?)))
+    let content = content_text(value.get("content")?);
+    if value["customType"].as_str() != Some("dirigent-agent") {
+        return Some(Message::notice(content));
+    }
+
+    let details = &value["details"];
+    let run = &details["run"];
+    // Render the actual report, with transport attribution separate from the Markdown body.
+    let text = run["parentMessage"]
+        .as_str()
+        .or_else(|| run["result"].as_str())
+        .map(|body| {
+            let mut text = body.to_string();
+            if let Some(error) = run["error"].as_str().filter(|error| !error.is_empty()) {
+                text.push_str(&format!("\n\nError: {error}"));
+            }
+            text
+        })
+        .unwrap_or(content);
+    let mut message = Message::new(MessageRole::Agent, text);
+    let mut sender = details["name"]
+        .as_str()
+        .unwrap_or("Child agent")
+        .to_string();
+    if let Some(id) = details["agentId"].as_str() {
+        sender.push_str(&format!(" · agent #{id}"));
+    }
+    if let Some(status) = run["status"].as_str() {
+        sender.push_str(&format!(" · {status}"));
+    }
+    message.sender = Some(sender);
+    Some(message)
 }
 
 pub(super) fn parse_message(value: &Value) -> Option<Message> {
     match value.get("role")?.as_str()? {
         "user" => {
             let content = value.get("content")?;
-            Some(Message::user_with_images(
-                content_text(content),
-                content_images(content),
-            ))
+            let mut message =
+                Message::user_with_images(content_text(content), content_images(content));
+            message.timestamp_ms = message_timestamp_ms(value);
+            Some(message)
         }
         "assistant" => {
             let text = content_text(value.get("content")?);
@@ -768,6 +799,68 @@ mod tests {
         assert_eq!(parsed.messages[0].role, MessageRole::Notice);
         assert_eq!(parsed.messages[0].text, "Workflow complete");
         assert_eq!(parsed.messages[0].entry_id.as_deref(), Some("visible-id"));
+    }
+
+    #[test]
+    fn parses_child_reports_as_attributed_chat_messages_live_and_after_reload() {
+        for (ping, result, error, expected) in [
+            (
+                Some("Please review **the API**."),
+                "Done",
+                None,
+                "Please review **the API**.",
+            ),
+            (
+                None,
+                "Implemented **the API**.",
+                None,
+                "Implemented **the API**.",
+            ),
+            (
+                None,
+                "",
+                Some("Provider unavailable"),
+                "\n\nError: Provider unavailable",
+            ),
+        ] {
+            let status = if error.is_some() {
+                "failed"
+            } else {
+                "completed"
+            };
+            let mut value = json!({
+                "role": "custom",
+                "customType": "dirigent-agent",
+                "display": true,
+                "content": "Transport attribution and report",
+                "details": {
+                    "agentId": "2", "name": "Implement API", "jobId": "job",
+                    "run": { "id": "run", "status": status, "parentMessage": ping, "result": result, "error": error }
+                }
+            });
+            let live = parse_message(&value).expect("live child report");
+            assert_eq!(live.role, MessageRole::Agent);
+            assert_eq!(live.text, expected);
+            assert_eq!(live.copy_text.as_ref(), expected);
+            assert!(live.markdown.is_some());
+            assert_eq!(
+                live.sender.as_deref(),
+                Some(format!("Implement API · agent #2 · {status}").as_str())
+            );
+
+            value.as_object_mut().unwrap().remove("role");
+            value["type"] = json!("custom_message");
+            value["id"] = json!("ping-entry");
+            let mut parser = EntryMessageParser::new(None, None);
+            parser.push(&value);
+            let parsed = parser.finish();
+            let restored = &parsed.messages[0];
+            assert_eq!(restored.role, live.role);
+            assert_eq!(restored.text, live.text);
+            assert_eq!(restored.sender, live.sender);
+            assert!(restored.markdown.is_some());
+            assert_eq!(restored.entry_id.as_deref(), Some("ping-entry"));
+        }
     }
 
     #[test]

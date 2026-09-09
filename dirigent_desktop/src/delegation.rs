@@ -30,6 +30,9 @@ pub(crate) struct AgentRun {
     pub(crate) handed_off: bool,
     #[serde(default)]
     pub(crate) parent_message: Option<String>,
+    /// Links run statistics to the Pi user message without adding metadata to its text.
+    #[serde(default)]
+    pub(crate) prompt_timestamp_ms: Option<u64>,
 }
 
 impl AgentRun {
@@ -133,6 +136,7 @@ mod tests {
                 stop_reason: None,
                 handed_off: false,
                 parent_message: None,
+                prompt_timestamp_ms: None,
             });
         }
         let mut restored: Delegation =
@@ -162,6 +166,7 @@ mod tests {
                 stop_reason: Some("toolUse".into()),
                 handed_off,
                 parent_message: Some("Please review the changes".into()),
+                prompt_timestamp_ms: None,
             };
             assert!(run.finish(requested, None));
             assert_eq!(run.status, expected);
