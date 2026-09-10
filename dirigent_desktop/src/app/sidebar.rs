@@ -10,6 +10,15 @@ pub(crate) enum SidebarState {
 }
 
 impl SidebarState {
+    pub(super) fn from_open(open: bool) -> Self {
+        if open { Self::Open } else { Self::Hidden }
+    }
+
+    // Hover reveals do not change the saved open/hidden preference.
+    pub(super) fn is_open(self) -> bool {
+        self == Self::Open
+    }
+
     fn toggled(self) -> Self {
         match self {
             Self::Open => Self::Hidden,
@@ -26,7 +35,7 @@ impl SidebarState {
     }
 
     fn layout_width(self, width: f32) -> f32 {
-        if self == Self::Open { width } else { 0.0 }
+        if self.is_open() { width } else { 0.0 }
     }
 }
 
@@ -34,6 +43,7 @@ impl Dirigent {
     pub(crate) fn toggle_sidebar(&mut self) {
         self.sidebar_state = self.sidebar_state.toggled();
         self.sidebar_menu = None;
+        self.persist_sidebar_layout();
     }
 
     pub(crate) fn sidebar_layout_width(&self) -> f32 {
@@ -57,7 +67,14 @@ impl Dirigent {
 
 #[cfg(test)]
 mod tests {
-    use super::SidebarState::*;
+    use super::SidebarState::{self, *};
+
+    #[test]
+    fn restoring_the_saved_preference_does_not_restore_hover_reveals() {
+        assert_eq!(SidebarState::from_open(Open.is_open()), Open);
+        assert_eq!(SidebarState::from_open(Hidden.is_open()), Hidden);
+        assert_eq!(SidebarState::from_open(Peeking.is_open()), Hidden);
+    }
 
     #[test]
     fn toggle_hides_the_docked_sidebar_and_pins_either_hidden_state() {

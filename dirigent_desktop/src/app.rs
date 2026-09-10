@@ -814,13 +814,16 @@ impl Dirigent {
 
     fn persist_sidebar_layout(&mut self) {
         let started = Instant::now();
-        let result = self
-            .state_database
-            .save_sidebar_layout(self.sidebar_width, self.diff_sidebar_width);
+        let result = self.state_database.save_sidebar_layout(
+            self.sidebar_state.is_open(),
+            self.sidebar_width,
+            self.diff_sidebar_width,
+        );
         let elapsed = started.elapsed();
         if elapsed >= Duration::from_millis(16) {
             tracing::warn!(
                 elapsed_ms = duration_ms(elapsed),
+                sidebar_open = self.sidebar_state.is_open(),
                 sidebar_width = self.sidebar_width,
                 diff_sidebar_width = self.diff_sidebar_width,
                 "slow sidebar layout persistence"
@@ -881,6 +884,7 @@ impl Dirigent {
             self.next_sidebar_order,
             self.last_used_harness,
             &self.collapsed_projects,
+            self.sidebar_state.is_open(),
             self.sidebar_width,
             self.diff_sidebar_open,
             self.diff_sidebar_width,

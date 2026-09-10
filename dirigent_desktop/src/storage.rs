@@ -30,6 +30,7 @@ const SCHEMA: &str = "
         next_id TEXT NOT NULL,
         next_sidebar_order TEXT NOT NULL,
         last_used_harness TEXT,
+        sidebar_open INTEGER NOT NULL DEFAULT 1,
         sidebar_width REAL NOT NULL,
         diff_sidebar_open INTEGER NOT NULL DEFAULT 0,
         diff_sidebar_width REAL NOT NULL DEFAULT 560,
@@ -91,6 +92,7 @@ struct StoredState {
     workspaces: Vec<StoredWorkspace>,
     last_used_harness: Option<Id>,
     collapsed_projects: Vec<Id>,
+    sidebar_open: bool,
     sidebar_width: f32,
     diff_sidebar_open: bool,
     diff_sidebar_width: f32,
@@ -105,6 +107,7 @@ struct StoredMetadata {
     workspaces: Vec<StoredWorkspace>,
     last_used_harness: Option<Id>,
     collapsed_projects: Vec<Id>,
+    sidebar_open: bool,
     sidebar_width: f32,
     diff_sidebar_open: bool,
     diff_sidebar_width: f32,
@@ -121,6 +124,7 @@ impl StoredState {
             workspaces: Vec::new(),
             last_used_harness: None,
             collapsed_projects: Vec::new(),
+            sidebar_open: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             diff_sidebar_open: false,
             diff_sidebar_width: DEFAULT_DIFF_SIDEBAR_WIDTH,
@@ -189,6 +193,7 @@ pub(crate) struct LoadedState {
     pub(crate) next_sidebar_order: u64,
     pub(crate) last_used_harness: Option<Id>,
     pub(crate) collapsed_projects: HashSet<Id>,
+    pub(crate) sidebar_open: bool,
     pub(crate) sidebar_width: f32,
     pub(crate) diff_sidebar_open: bool,
     pub(crate) diff_sidebar_width: f32,
@@ -203,6 +208,7 @@ enum StorageCommand {
         view_mode: DiffViewMode,
     },
     SaveSidebarLayout {
+        sidebar_open: bool,
         sidebar_width: f32,
         diff_sidebar_width: f32,
     },
@@ -277,10 +283,12 @@ impl StateDatabase {
 
     pub(crate) fn save_sidebar_layout(
         &self,
+        sidebar_open: bool,
         sidebar_width: f32,
         diff_sidebar_width: f32,
     ) -> Result<(), String> {
         self.send(StorageCommand::SaveSidebarLayout {
+            sidebar_open,
             sidebar_width,
             diff_sidebar_width,
         })
@@ -338,6 +346,7 @@ impl StateDatabase {
         next_sidebar_order: u64,
         last_used_harness: Option<Id>,
         collapsed_projects: &HashSet<Id>,
+        sidebar_open: bool,
         sidebar_width: f32,
         diff_sidebar_open: bool,
         diff_sidebar_width: f32,
@@ -393,6 +402,7 @@ impl StateDatabase {
                 .collect(),
             last_used_harness,
             collapsed_projects,
+            sidebar_open,
             sidebar_width,
             diff_sidebar_open,
             diff_sidebar_width,
@@ -471,14 +481,16 @@ fn execute_storage_command(
             Ok(())
         }
         StorageCommand::SaveSidebarLayout {
+            sidebar_open,
             sidebar_width,
             diff_sidebar_width,
         } => {
             connection
                 .execute(
-                    "UPDATE app_state SET sidebar_width = ?1, diff_sidebar_width = ?2
+                    "UPDATE app_state SET
+                         sidebar_open = ?1, sidebar_width = ?2, diff_sidebar_width = ?3
                      WHERE singleton = 1",
-                    params![sidebar_width, diff_sidebar_width],
+                    params![sidebar_open, sidebar_width, diff_sidebar_width],
                 )
                 .map_err(|error| format!("could not store sidebar layout: {error}"))?;
             Ok(())
@@ -596,13 +608,15 @@ fn replace_state(transaction: &Transaction<'_>, state: &StoredState) -> Result<(
     transaction
         .execute(
             "INSERT INTO app_state (
-                singleton, next_id, next_sidebar_order, last_used_harness, sidebar_width,
-                diff_sidebar_open, diff_sidebar_width, diff_view_mode_json
-             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                singleton, next_id, next_sidebar_order, last_used_harness,
+                sidebar_open, sidebar_width, diff_sidebar_open, diff_sidebar_width,
+                diff_view_mode_json
+             ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 state.next_id.to_string(),
                 state.next_sidebar_order.to_string(),
                 state.last_used_harness.map(|id| id.to_string()),
+                state.sidebar_open,
                 state.sidebar_width,
                 state.diff_sidebar_open,
                 state.diff_sidebar_width,
@@ -732,13 +746,14 @@ fn sync_stored_metadata(connection: &mut Connection, state: &StoredMetadata) -> 
         .execute(
             "UPDATE app_state SET
                  next_id = ?1, next_sidebar_order = ?2, last_used_harness = ?3,
-                 sidebar_width = ?4, diff_sidebar_open = ?5, diff_sidebar_width = ?6,
-                 diff_view_mode_json = ?7
+                 sidebar_open = ?4, sidebar_width = ?5, diff_sidebar_open = ?6,
+                 diff_sidebar_width = ?7, diff_view_mode_json = ?8
              WHERE singleton = 1",
             params![
                 state.next_id.to_string(),
                 state.next_sidebar_order.to_string(),
                 state.last_used_harness.map(|id| id.to_string()),
+                state.sidebar_open,
                 state.sidebar_width,
                 state.diff_sidebar_open,
                 state.diff_sidebar_width,
@@ -1107,14 +1122,16 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
         next_id,
         next_sidebar_order,
         last_used_harness,
+        sidebar_open,
         sidebar_width,
         diff_sidebar_open,
         diff_sidebar_width,
         diff_view_mode_json,
     ) = connection
         .query_row(
-            "SELECT next_id, next_sidebar_order, last_used_harness, sidebar_width,
-                    diff_sidebar_open, diff_sidebar_width, diff_view_mode_json
+            "SELECT next_id, next_sidebar_order, last_used_harness,
+                    sidebar_open, sidebar_width, diff_sidebar_open, diff_sidebar_width,
+                    diff_view_mode_json
              FROM app_state WHERE singleton = 1",
             [],
             |row| {
@@ -1122,10 +1139,11 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, f32>(3)?,
-                    row.get::<_, bool>(4)?,
-                    row.get::<_, f32>(5)?,
-                    row.get::<_, Vec<u8>>(6)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, f32>(4)?,
+                    row.get::<_, bool>(5)?,
+                    row.get::<_, f32>(6)?,
+                    row.get::<_, Vec<u8>>(7)?,
                 ))
             },
         )
@@ -1342,6 +1360,7 @@ fn read_stored_state(connection: &Connection) -> Result<StoredState, String> {
         workspaces,
         last_used_harness,
         collapsed_projects,
+        sidebar_open,
         sidebar_width,
         diff_sidebar_open,
         diff_sidebar_width,
@@ -1410,6 +1429,7 @@ impl StoredState {
             next_sidebar_order: self.next_sidebar_order.max(1),
             last_used_harness: self.last_used_harness,
             collapsed_projects: self.collapsed_projects.into_iter().collect(),
+            sidebar_open: self.sidebar_open,
             sidebar_width: self.sidebar_width,
             diff_sidebar_open: self.diff_sidebar_open,
             diff_sidebar_width: self.diff_sidebar_width,
@@ -1455,6 +1475,26 @@ fn order_index(index: usize) -> Result<i64, String> {
 mod tests {
     use super::*;
     use crate::delegation::{AgentJob, AgentRun, WorkStatus};
+
+    #[test]
+    fn sidebar_toggle_survives_database_restart() {
+        let directory =
+            std::env::temp_dir().join(format!("dirigent-sidebar-{}", fastrand::u64(..)));
+        let path = directory.join("state.sqlite3");
+        let (mut db, mut loaded) = StateDatabase::open_at(&path).unwrap();
+        assert!(loaded.sidebar_open);
+
+        for open in [false, true] {
+            db.save_sidebar_layout(open, 320.0, 640.0).unwrap();
+            drop(db); // flush the ordered storage worker
+            (db, loaded) = StateDatabase::open_at(&path).unwrap();
+            assert_eq!(loaded.sidebar_open, open);
+            assert_eq!(loaded.sidebar_width, 320.0);
+            assert_eq!(loaded.diff_sidebar_width, 640.0);
+        }
+        drop(db);
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn state_survives_database_restart_without_replaying_work() {
@@ -1503,6 +1543,7 @@ mod tests {
             3,
             Some(1),
             &HashSet::new(),
+            false,
             DEFAULT_SIDEBAR_WIDTH,
             false,
             DEFAULT_DIFF_SIDEBAR_WIDTH,
@@ -1525,6 +1566,7 @@ mod tests {
         let (db, loaded) = StateDatabase::open_at(&path).unwrap();
         assert_eq!(loaded.projects[0].path, directory);
         assert_eq!(loaded.last_used_harness, Some(1));
+        assert!(!loaded.sidebar_open);
         assert_eq!(
             serde_json::to_value(loaded.harnesses[0].turn_diffs[0].as_ref()).unwrap(),
             serde_json::to_value(turn.as_ref()).unwrap()
