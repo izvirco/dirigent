@@ -48,6 +48,9 @@ impl Dirigent {
                 .bg(rgb(crate::theme::menu_bg()))
                 .shadow_lg()
                 .occlude()
+                .when(self.sidebar_state == SidebarState::Peeking, |element| {
+                    element.on_mouse_move(|_, _, cx| cx.stop_propagation())
+                })
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),

@@ -869,7 +869,7 @@ impl Dirigent {
             && self.selected_harness.is_some()
             && diff_sidebar_replaces_thread(
                 window.viewport_size().width.as_f32(),
-                self.sidebar_width,
+                self.sidebar_layout_width(),
                 self.diff_sidebar_width,
             )
     }
@@ -921,7 +921,7 @@ impl Dirigent {
         };
         let viewport_width = window.viewport_size().width.as_f32();
         let rendered_width = if replaces_thread {
-            (viewport_width - self.sidebar_width).max(0.0)
+            (viewport_width - self.sidebar_layout_width()).max(0.0)
         } else {
             self.diff_sidebar_width
         };

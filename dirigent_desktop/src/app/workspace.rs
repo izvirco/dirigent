@@ -74,6 +74,7 @@ impl Dirigent {
         });
         self.renaming_harness = Some(harness_id);
         self.sidebar_menu = None;
+        self.set_sidebar_hovered(true, cx);
         self.enter_input_mode(true);
     }
     pub(super) fn finish_renaming_harness(&mut self, cx: &mut Context<Self>) {

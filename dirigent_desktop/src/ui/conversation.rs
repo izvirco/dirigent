@@ -413,7 +413,7 @@ impl Dirigent {
                 canvas(
                     {
                         let entity = entity.clone();
-                        move |_, _, cx| {
+                        move |bounds, window, cx| {
                             let viewport_width = entity
                                 .read(cx)
                                 .conversation_list
@@ -431,9 +431,10 @@ impl Dirigent {
                                     });
                                 });
                             }
+                            window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
                         }
                     },
-                    move |track_bounds, _, window, _| {
+                    move |track_bounds, hitbox, window, _| {
                         window.paint_layer(track_bounds, |window| {
                             let orange_color = rgb(orange());
                             let user_color = rgb(blue()).opacity(0.68);
@@ -526,8 +527,9 @@ impl Dirigent {
 
                         window.on_mouse_event({
                             let entity = entity.clone();
-                            move |event: &MouseDownEvent, _, _, cx| {
+                            move |event: &MouseDownEvent, _, window, cx| {
                                 if event.button != MouseButton::Left
+                                    || !hitbox.is_hovered(window)
                                     || !track_bounds.contains(&event.position)
                                 {
                                     return;

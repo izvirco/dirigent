@@ -2,6 +2,48 @@
 
 use super::*;
 
+impl Dirigent {
+    // Shared with the floating sidebar, whose hitbox blocks events from reaching app-root.
+    pub(crate) fn on_workspace_mouse_down(
+        &mut self,
+        _: &gpui::MouseDownEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+        if self.keyboard_mode == KeyboardMode::Input {
+            self.enter_normal_mode();
+            changed = true;
+        }
+        if self.keyboard_menu.is_some() {
+            self.close_keyboard_menu();
+            changed = true;
+        }
+        if self.sidebar_menu.take().is_some() {
+            changed = true;
+        }
+        if self.path_completion.take().is_some() {
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_workspace_click(
+        &mut self,
+        _: &gpui::ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.composer_dropdown.take().is_some()
+            | std::mem::take(&mut self.diff_turn_dropdown_open);
+        if changed {
+            cx.notify();
+        }
+    }
+}
+
 impl Render for Dirigent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let window_transparent = bg() & 0xff != 0xff;
@@ -70,34 +112,9 @@ impl Render for Dirigent {
             .on_key_up(cx.listener(Self::on_root_key_up))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    let mut changed = false;
-                    if this.keyboard_mode == KeyboardMode::Input {
-                        this.enter_normal_mode();
-                        changed = true;
-                    }
-                    if this.keyboard_menu.is_some() {
-                        this.close_keyboard_menu();
-                        changed = true;
-                    }
-                    if this.sidebar_menu.take().is_some() {
-                        changed = true;
-                    }
-                    if this.path_completion.take().is_some() {
-                        changed = true;
-                    }
-                    if changed {
-                        cx.notify();
-                    }
-                }),
+                cx.listener(Self::on_workspace_mouse_down),
             )
-            .on_click(cx.listener(|this, _, _, cx| {
-                let changed = this.composer_dropdown.take().is_some()
-                    | std::mem::take(&mut this.diff_turn_dropdown_open);
-                if changed {
-                    cx.notify();
-                }
-            }))
+            .on_click(cx.listener(Self::on_workspace_click))
             .when(
                 self.composer_dropdown.is_some()
                     || self.sidebar_menu.is_some()
@@ -124,11 +141,16 @@ impl Render for Dirigent {
                     )
                 },
             )
-            .child(self.render_sidebar(window, cx))
+            .when(self.sidebar_state == SidebarState::Open, |element| {
+                element.child(self.render_sidebar(window, cx))
+            })
             .when(!diff_replaces_thread, |element| {
                 element.child(self.render_center(window, cx))
             })
             .when(self.settings.is_none(), |element| element.child(self.render_diff_sidebar(window, cx)))
+            .when(self.sidebar_state != SidebarState::Open, |element| {
+                element.child(self.render_sidebar_overlay(window, cx))
+            })
             .when_some(self.keyboard_menu, |element, menu| {
                 element.child(self.render_keyboard_menu(menu, cx))
             })

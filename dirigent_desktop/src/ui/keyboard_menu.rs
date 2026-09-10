@@ -23,6 +23,7 @@ const SPACE_ITEMS: &[(&str, &str)] = &[
     ("o", "expand all work groups"),
     ("O", "collapse all work groups"),
     ("b", "dismiss banner"),
+    ("s", "toggle sidebar"),
     ("d", "toggle changes sidebar"),
     ("D", "toggle debug panels"),
 ];

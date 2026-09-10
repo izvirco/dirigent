@@ -11,6 +11,7 @@ mod path_completion;
 mod render;
 mod runtime;
 mod session;
+mod sidebar;
 mod startup;
 #[cfg(feature = "self-update")]
 mod update;
@@ -43,6 +44,7 @@ use gpui::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub(crate) use self::sidebar::SidebarState;
 use self::{harness::*, message_parsing::*, path_completion::*};
 
 use crate::{
@@ -542,7 +544,9 @@ pub(crate) struct Dirigent {
     pub(crate) about_open: bool,
     pub(crate) settings: Option<crate::ui::settings::Settings>,
     pub(crate) pi_version: String,
+    pub(crate) sidebar_state: SidebarState,
     pub(crate) sidebar_width: f32,
+    pub(crate) sidebar_scroll: ScrollHandle,
     sidebar_layout_persist_task: Option<Task<()>>,
     pub(crate) diff_sidebar_open: bool,
     pub(crate) diff_sidebar_width: f32,

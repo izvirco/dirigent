@@ -6,17 +6,20 @@ mod thread;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, Context, CursorStyle, DragMoveEvent, IntoElement, Pixels, Point, Transformation,
-    Window, deferred, div, prelude::*, px, radians, relative, svg,
+    AnyElement, Context, CursorStyle, DispatchPhase, DragMoveEvent, IntoElement, MouseExitEvent,
+    MouseMoveEvent, MouseUpEvent, Pixels, Point, Transformation, Window, canvas, deferred, div,
+    prelude::*, px, radians, relative, svg,
 };
 
 use crate::{
-    app::{Dirigent, KeyboardMode, SidebarMenu},
+    app::{Dirigent, KeyboardMode, SidebarMenu, SidebarState},
     model::{CodexUsage, CodexUsageWindow, HarnessStatus, Id},
     theme::{
         blue, border, faint, muted, orange, red, rgb, surface, surface_hover, theme_text, yellow,
     },
 };
+
+const FLOATING_SIDEBAR_PADDING: f32 = 8.0;
 
 #[derive(Clone, Copy)]
 struct SidebarResizeDrag {
@@ -200,6 +203,9 @@ impl Dirigent {
                 .bg(rgb(crate::theme::menu_bg()))
                 .shadow_lg()
                 .occlude()
+                .when(self.sidebar_state == SidebarState::Peeking, |element| {
+                    element.on_mouse_move(|_, _, cx| cx.stop_propagation())
+                })
                 .on_mouse_down(
                     gpui::MouseButton::Left,
                     cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -264,6 +270,85 @@ impl Dirigent {
         )
         .priority(2)
         .into_any_element()
+    }
+
+    pub(crate) fn render_sidebar_overlay(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let peeking = self.sidebar_state == SidebarState::Peeking;
+        let entity = cx.entity();
+        div()
+            .id("sidebar-hover-region")
+            .absolute()
+            .left_0()
+            .top_0()
+            .bottom_0()
+            .w(px(if peeking {
+                self.sidebar_width + FLOATING_SIDEBAR_PADDING * 2.0
+            } else {
+                FLOATING_SIDEBAR_PADDING
+            }))
+            .occlude()
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(Self::on_workspace_mouse_down),
+            )
+            .on_click(cx.listener(Self::on_workspace_click))
+            .on_mouse_move(cx.listener(|this, _, _, cx| {
+                this.set_sidebar_hovered(true, cx);
+            }))
+            .when(peeking, |element| {
+                element
+                    .p(px(FLOATING_SIDEBAR_PADDING))
+                    .child(self.render_sidebar(window, cx))
+                    .child(
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
+                                // Include the padding so the pointer can cross from the edge to
+                                // the panel. Dropdowns stop mouse moves, keeping their overhangs
+                                // interactive without treating their occlusion as a hover exit.
+                                window.on_mouse_event({
+                                    let entity = entity.clone();
+                                    move |event: &MouseMoveEvent, phase, _, cx| {
+                                        if phase == DispatchPhase::Bubble && !event.dragging() {
+                                            entity.update(cx, |this, cx| {
+                                                this.set_sidebar_hovered(
+                                                    bounds.contains(&event.position),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }
+                                });
+                                window.on_mouse_event({
+                                    let entity = entity.clone();
+                                    move |event: &MouseUpEvent, phase, _, cx| {
+                                        if phase == DispatchPhase::Bubble {
+                                            entity.update(cx, |this, cx| {
+                                                this.set_sidebar_hovered(
+                                                    bounds.contains(&event.position),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    }
+                                });
+                                window.on_mouse_event(move |_: &MouseExitEvent, phase, _, cx| {
+                                    if phase == DispatchPhase::Bubble {
+                                        entity.update(cx, |this, cx| {
+                                            this.set_sidebar_hovered(false, cx);
+                                        });
+                                    }
+                                });
+                            },
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
+            })
     }
 
     pub(crate) fn render_sidebar(
@@ -377,6 +462,9 @@ impl Dirigent {
             .flex()
             .flex_col()
             .border_r_1()
+            .when(self.sidebar_state == SidebarState::Peeking, |element| {
+                element.border_1().rounded_lg()
+            })
             .border_color(rgb(border()))
             .bg(rgb(crate::theme::sidebar_bg()))
             .child(
@@ -384,6 +472,7 @@ impl Dirigent {
                     .id("project-scroll")
                     .flex_1()
                     .overflow_y_scroll()
+                    .track_scroll(&self.sidebar_scroll)
                     .px_3()
                     .pt_3()
                     .when(!inbox_ids.is_empty(), |element| {
