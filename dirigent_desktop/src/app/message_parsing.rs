@@ -268,13 +268,22 @@ pub(super) fn content_images(value: &Value) -> Vec<Arc<Image>> {
         .collect()
 }
 
-/// Coalesces adjacent blocks of the same role and entry into one rendered message.
+/// Keeps each visible thinking line as its own work-log entry, regardless of provider
+/// block/chunk boundaries. Adjacent assistant text blocks still share one Markdown message.
 pub(super) fn push_assistant_block(
     messages: &mut Vec<Message>,
     role: MessageRole,
     text: &str,
     entry_id: Option<&str>,
 ) {
+    if role == MessageRole::Thinking {
+        messages.extend(
+            text.lines()
+                .map(|line| Message::new(role, line).with_entry_id(entry_id))
+                .filter(|message| !message.display_text.trim().is_empty()),
+        );
+        return;
+    }
     if text.is_empty() {
         return;
     }
@@ -773,6 +782,81 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multiline_thinking_uses_one_preview_slot_per_visible_snippet_live_and_after_reload() {
+        let headings = [
+            "Designing storage restart tests",
+            "Refining sidebar storage tests",
+            "Considering open-state helpers",
+            "Planning sidebar persistence tests",
+            "Matching stored fields",
+            "Preparing state-field replacements",
+            "Applying state field edits",
+        ];
+        let thinking = headings
+            .map(|heading| format!("**{heading}**"))
+            .join("\n\n");
+        let mut content = (0..5)
+            .map(|index| {
+                json!({
+                    "type": "toolCall", "id": format!("read-{index}"), "name": "read",
+                    "arguments": {"path": format!("file-{index}.rs")}
+                })
+            })
+            .collect::<Vec<_>>();
+        content.push(json!({"type": "thinking", "thinking": thinking}));
+
+        let mut harness = Harness::new(1, 1, "agent".into(), 1);
+        harness.status = HarnessStatus::Working;
+        harness
+            .messages
+            .push(Message::new(MessageRole::User, "Add storage tests"));
+        push_parsed_message(
+            &mut harness.messages,
+            &json!({"role": "assistant", "content": content}),
+            Some("response-entry"),
+        );
+
+        // Live line flushes and one large persisted thinking block must produce the same entries.
+        let mut live = Vec::new();
+        for chunk in thinking.split_inclusive('\n') {
+            push_assistant_block(&mut live, MessageRole::Thinking, chunk, None);
+        }
+        assert_eq!(live.len(), headings.len());
+        for ((live, canonical), heading) in live.iter().zip(&harness.messages[6..]).zip(headings) {
+            assert_eq!(live.display_text.as_ref(), heading);
+            assert_eq!(live.text, canonical.text);
+            assert_eq!(canonical.entry_id.as_deref(), Some("response-entry"));
+        }
+
+        let cache = ConversationRenderCache::build(&harness);
+        let visible = harness
+            .messages
+            .iter()
+            .enumerate()
+            .filter_map(|(index, message)| {
+                (index > 0 && cache.message_render_item_index(index).is_some()).then_some(message)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(visible.len(), 8);
+        // This reproduces the screenshot: five tools + seven headings must show ONE tool + seven headings.
+        assert_eq!(visible[0].tool_call_id.as_deref(), Some("read-4"));
+        assert_eq!(
+            visible
+                .iter()
+                .map(|message| message.display_text.lines().count())
+                .sum::<usize>(),
+            8
+        );
+        assert_eq!(
+            visible[1..]
+                .iter()
+                .map(|message| message.display_text.as_ref())
+                .collect::<Vec<_>>(),
+            headings
+        );
+    }
 
     #[test]
     fn canonical_replies_keep_recent_stream_timestamps_only() {

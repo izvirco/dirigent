@@ -438,12 +438,28 @@ impl Dirigent {
     pub(super) fn handle_message_update(&mut self, index: usize, value: &Value) -> Option<usize> {
         let update = value.get("assistantMessageEvent").unwrap_or(&Value::Null);
         match update.get("type").and_then(Value::as_str) {
-            Some("text_delta") | Some("thinking_delta") => {
-                let role = if update.get("type").and_then(Value::as_str) == Some("thinking_delta") {
-                    MessageRole::Thinking
-                } else {
-                    MessageRole::Assistant
-                };
+            Some("thinking_delta") => {
+                // The reader has already flushed complete lines (or the final remainder).
+                // Do not join them back into one message: each visible snippet uses a preview slot.
+                let messages = &mut self.harnesses[index].messages;
+                let first_new_message = messages.len();
+                push_assistant_block(
+                    messages,
+                    MessageRole::Thinking,
+                    update
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                    None,
+                );
+                let now = Instant::now();
+                for message in &mut messages[first_new_message..] {
+                    message.streamed_at = Some(now);
+                }
+                return (messages.len() > first_new_message).then_some(first_new_message);
+            }
+            Some("text_delta") => {
+                let role = MessageRole::Assistant;
                 let delta = update
                     .get("delta")
                     .and_then(Value::as_str)
