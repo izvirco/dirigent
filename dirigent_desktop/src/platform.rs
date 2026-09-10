@@ -63,6 +63,10 @@ pub(crate) fn state_database_path() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("state.sqlite3"))
 }
 
+pub(crate) fn bridges_directory() -> Result<PathBuf, String> {
+    Ok(state_directory()?.join("bridges"))
+}
+
 pub(crate) fn logs_directory() -> Result<PathBuf, String> {
     Ok(state_directory()?.join("logs"))
 }
@@ -124,6 +128,7 @@ mod tests {
             state_database_path(),
             cache_path(),
             logs_directory(),
+            bridges_directory(),
             workspace_root(),
         ] {
             let path = path.unwrap();
@@ -160,12 +165,7 @@ pub(crate) fn materialize_pi_bridge() -> Result<PathBuf, String> {
     for (_, content) in &files {
         hash.update(content.as_bytes());
     }
-    let database = state_database_path()?;
-    let directory = database
-        .parent()
-        .ok_or_else(|| "Dirigent state database path has no parent directory".to_string())?
-        .join("bridges")
-        .join(hash.finalize().to_hex().as_str());
+    let directory = bridges_directory()?.join(hash.finalize().to_hex().as_str());
     fs::create_dir_all(&directory)
         .map_err(|error| format!("could not create {}: {error}", directory.display()))?;
     for (name, content) in files {
