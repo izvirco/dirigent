@@ -31,48 +31,40 @@ fn info_row(label: &'static str, value: impl Into<SharedString>) -> impl IntoEle
 
 struct StorageLocation {
     label: String,
-    description: &'static str,
     path: Result<PathBuf, String>,
 }
 
 impl Dirigent {
     fn storage_locations(&self) -> Vec<StorageLocation> {
         let mut locations = Vec::new();
-        let mut add = |label: String, description, path| {
+        let mut add = |label: String, path| {
             locations.push(StorageLocation {
                 label,
-                description,
                 path,
             })
         };
         add(
             "Configuration".into(),
-            "config.toml (font, theme, telemetry) and theme/*.toml palettes.",
             platform::config_dir(),
         );
         add(
             "Application state".into(),
-            "Projects, threads, drafts, workspace and delegation metadata. SQLite may also create -wal and -shm files alongside this database.",
             platform::state_database_path(),
         );
         add(
             "Conversation cache".into(),
-            "Disposable cached conversations, images and model metadata; includes SQLite sidecar files. Update dry runs stage downloads in the adjacent updates directory.",
             platform::cache_path(),
         );
         add(
             "Logs".into(),
-            "Application diagnostics, performance logs and crash reports.",
             platform::logs_directory(),
         );
         add(
             "Pi bridge bundles".into(),
-            "Versioned private TypeScript/JavaScript extensions used by Pi and delegated agents.",
             platform::bridges_directory(),
         );
         add(
             "Default workspaces".into(),
-            "Managed Git worktrees and JJ workspaces. Projects can override this location in their settings.",
             platform::workspace_root(),
         );
         let executable = std::env::current_exe().map_err(|e| e.to_string());
@@ -81,13 +73,11 @@ impl Dirigent {
         }) {
             add(
                 "Installation".into(),
-                "Launcher, current.json, install.lock and versions/ containing application releases and temporary .staging-* update downloads.",
                 Ok(root),
             );
         } else {
             add(
                 "Application executable".into(),
-                "This build is not running from a managed launcher installation.",
                 executable,
             );
         }
@@ -115,7 +105,6 @@ impl Dirigent {
             });
         add(
             "Pi user data (shared with Pi)".into(),
-            "Pi manages settings, credentials, extensions and sessions here by default. PI_CODING_AGENT_DIR overrides this path; project dev shells may use different Pi settings.",
             agent_dir,
         );
         locations
@@ -123,8 +112,6 @@ impl Dirigent {
 
     fn render_storage_locations(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div().flex().flex_col().gap_4()
-            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Files on your system"))
-            .child(div().text_xs().text_color(rgb(muted())).child("Resolved locations for this platform and build channel, including environment overrides. Some locations are created only when used. External tools and agents can store additional files outside these locations."))
             .children(self.storage_locations().into_iter().enumerate().map(|(index, location)| {
                 let path = location.path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|error| format!("Unavailable: {error}"));
                 let copy = path.clone();
@@ -136,7 +123,6 @@ impl Dirigent {
                             .on_click(cx.listener(move |this, _, _, cx| this.copy_text(copy.clone(), cx)))
                             .child("Copy"))))
                     .child(div().id(("storage-path", index)).w_full().overflow_x_scroll().text_xs().child(div().whitespace_nowrap().child(path)))
-                    .child(div().text_xs().text_color(rgb(muted())).child(location.description))
             }))
     }
 
