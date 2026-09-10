@@ -449,6 +449,29 @@ pub(super) fn rpc_string_array(value: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+/// Canonical replies can arrive before the first animation frame. Keep live timestamps
+/// when replacing stream fragments, without animating newly loaded historical messages.
+pub(super) fn preserve_streamed_at(previous: &[Message], canonical: &mut [Message]) {
+    let mut end = canonical.len();
+    for previous in previous.iter().rev().filter(|message| {
+        message
+            .streamed_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(1))
+    }) {
+        if let Some(index) = canonical[..end].iter().rposition(|message| {
+            message.role == previous.role
+                && if let Some(id) = previous.tool_call_id.as_deref() {
+                    message.tool_call_id.as_deref() == Some(id)
+                } else {
+                    message.text == previous.text
+                }
+        }) {
+            canonical[index].streamed_at = previous.streamed_at;
+            end = index;
+        }
+    }
+}
+
 /// Re-keys expansion state once an incoming message receives its persisted entry ID.
 pub(super) fn reconcile_work_group_expansion(
     previous: &[Message],
@@ -750,6 +773,24 @@ pub(super) fn parse_message(value: &Value) -> Option<Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_replies_keep_recent_stream_timestamps_only() {
+        let now = Instant::now();
+        let mut old = Message::new(MessageRole::Assistant, "Older reply");
+        old.streamed_at = Some(now - Duration::from_secs(2));
+        let mut live = Message::new(MessageRole::Assistant, "New reply");
+        live.streamed_at = Some(now);
+        let mut canonical = vec![
+            Message::new(MessageRole::Assistant, "Older reply"),
+            Message::new(MessageRole::Notice, "Canonical metadata"),
+            Message::new(MessageRole::Assistant, "New reply"),
+        ];
+        preserve_streamed_at(&[old, live], &mut canonical);
+        assert!(canonical[0].streamed_at.is_none());
+        assert!(canonical[1].streamed_at.is_none());
+        assert_eq!(canonical[2].streamed_at, Some(now));
+    }
 
     #[test]
     fn parses_displayed_live_custom_messages_as_notices() {

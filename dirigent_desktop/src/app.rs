@@ -472,7 +472,10 @@ fn try_coalesce_runtime_delta(previous: &mut RuntimeEvent, next: &RuntimeEvent) 
     let next_kind = next_value
         .pointer("/assistantMessageEvent/type")
         .and_then(Value::as_str);
-    if !matches!(previous_kind, Some("text_delta" | "thinking_delta")) || previous_kind != next_kind
+    if !matches!(previous_kind, Some("text_delta" | "thinking_delta"))
+        || previous_kind != next_kind
+        || previous_value.pointer("/assistantMessageEvent/contentIndex")
+            != next_value.pointer("/assistantMessageEvent/contentIndex")
     {
         return false;
     }

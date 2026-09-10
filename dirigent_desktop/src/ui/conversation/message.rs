@@ -377,7 +377,17 @@ impl Dirigent {
                         chevron.into_any_element(),
                         format!("work-group-timer-{}", group.id),
                         None,
-                    )),
+                    ))
+                    .when(group.has_rolling_preview(), |row| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .ml_2()
+                                .text_xs()
+                                .text_color(rgb(faint()))
+                                .child("latest 8"),
+                        )
+                    }),
             )
             .children(self.delegated_work_rows(group, cx))
             .into_any_element()

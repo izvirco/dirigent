@@ -11,6 +11,8 @@ use crate::{
     model::{Harness, HarnessStatus, Message, MessageRole},
 };
 
+const LIVE_WORK_PREVIEW_COUNT: usize = 8;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ConversationRulerMarker {
     pub(super) render_item_index: usize,
@@ -148,6 +150,12 @@ pub(crate) struct WorkGroupSummary {
 }
 
 impl WorkGroupSummary {
+    pub(super) fn has_rolling_preview(&self) -> bool {
+        self.running
+            && !self.expanded
+            && self.last_message_index - self.first_message_index + 1 > LIVE_WORK_PREVIEW_COUNT
+    }
+
     fn from_range(
         harness: &Harness,
         id: String,
@@ -206,7 +214,7 @@ impl WorkGroupSummary {
             .work_group_expansion
             .get(&id)
             .copied()
-            .unwrap_or(running);
+            .unwrap_or(false);
         Self {
             id,
             first_message_index: range.start,
@@ -509,14 +517,24 @@ impl ConversationRenderCache {
                 && group.first_message_index == message_index
             {
                 items.push(ConversationRenderItem::WorkGroup(group.clone()));
-                if group.expanded {
-                    items.extend((group.first_message_index..=group.last_message_index).map(
-                        |message_index| ConversationRenderItem::Message {
+                let visible_start = if group.expanded {
+                    group.first_message_index
+                } else if group.running {
+                    // Tools, thinking snippets, and commentary share the same eight-entry budget.
+                    (group.last_message_index + 1)
+                        .saturating_sub(LIVE_WORK_PREVIEW_COUNT)
+                        .max(group.first_message_index)
+                } else {
+                    group.last_message_index + 1
+                };
+                items.extend(
+                    (visible_start..=group.last_message_index).map(|message_index| {
+                        ConversationRenderItem::Message {
                             message_index,
                             queued: false,
-                        },
-                    ));
-                }
+                        }
+                    }),
+                );
                 message_index = group.last_message_index + 1;
                 group_index += 1;
             } else {
@@ -739,6 +757,109 @@ impl ConversationRenderCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn visible_tools(harness: &Harness) -> Vec<usize> {
+        ConversationRenderCache::build(harness)
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                ConversationRenderItem::Message {
+                    message_index,
+                    queued: false,
+                } if harness.messages[*message_index].role == MessageRole::Tool => {
+                    Some(*message_index)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn collapsed_live_groups_preview_eight_work_entries_and_respect_explicit_expansion() {
+        let mut harness = Harness::new(1, 1, "agent".into(), 1);
+        harness.status = HarnessStatus::Working;
+        harness
+            .messages
+            .push(Message::new(MessageRole::User, "Do work"));
+        for _ in 0..4 {
+            harness
+                .messages
+                .push(Message::new(MessageRole::Assistant, "An update"));
+            harness.messages.push(Message::new(
+                MessageRole::Thinking,
+                "Considering the next step",
+            ));
+            harness
+                .messages
+                .push(Message::tool("read", None, false, false));
+        }
+        let group = build_work_groups(&harness).remove(0);
+        assert!(!group.expanded);
+        assert!(group.has_rolling_preview());
+        assert_eq!(visible_tools(&harness), vec![6, 9, 12]);
+        let cache = ConversationRenderCache::build(&harness);
+        for index in 1..=12 {
+            assert_eq!(cache.message_render_item_index(index).is_some(), index >= 5);
+        }
+
+        harness.work_group_expansion.insert(group.id.clone(), true);
+        assert!(!build_work_groups(&harness)[0].has_rolling_preview());
+        for status in [HarnessStatus::Working, HarnessStatus::Idle] {
+            harness.status = status;
+            let cache = ConversationRenderCache::build(&harness);
+            for index in 1..=12 {
+                assert!(cache.message_render_item_index(index).is_some());
+            }
+        }
+        harness.status = HarnessStatus::Working;
+        harness.work_group_expansion.insert(group.id, false);
+        assert_eq!(visible_tools(&harness), vec![6, 9, 12]);
+        harness.status = HarnessStatus::Idle;
+        let cache = ConversationRenderCache::build(&harness);
+        for index in 1..=12 {
+            assert!(cache.message_render_item_index(index).is_none());
+        }
+    }
+
+    #[test]
+    fn live_preview_rolls_forward_and_only_applies_to_the_running_group() {
+        let mut harness = Harness::new(1, 1, "agent".into(), 1);
+        harness.status = HarnessStatus::Working;
+        harness.messages = vec![
+            Message::new(MessageRole::User, "Previous turn"),
+            Message::tool("read", None, false, false),
+            Message::new(MessageRole::Assistant, "Done"),
+            Message::new(MessageRole::User, "Next turn"),
+        ];
+        for _ in 0..8 {
+            harness
+                .messages
+                .push(Message::tool("read", None, false, false));
+        }
+        assert_eq!(visible_tools(&harness), (4..12).collect::<Vec<_>>());
+        let old = ConversationRenderCache::build(&harness);
+        harness
+            .messages
+            .push(Message::new(MessageRole::Thinking, "Reviewing the results"));
+        let (new, removed, inserted, _) = ConversationRenderCache::update(&harness, old, 12);
+        assert_eq!(visible_tools(&harness), (5..12).collect::<Vec<_>>());
+        assert_eq!(removed.len(), inserted);
+        assert!(new.message_render_item_index(4).is_none());
+        assert!(new.message_render_item_index(12).is_some());
+        for status in [
+            HarnessStatus::Idle,
+            HarnessStatus::Failed,
+            HarnessStatus::Stopped,
+        ] {
+            harness.status = status;
+            assert!(visible_tools(&harness).is_empty());
+            assert!(
+                ConversationRenderCache::build(&harness)
+                    .message_render_item_index(12)
+                    .is_none()
+            );
+        }
+    }
 
     #[test]
     fn associates_each_delegated_run_with_its_own_work_group_stats() {

@@ -154,6 +154,12 @@ impl Dirigent {
         }
         self.harnesses[index].run_started_at = None;
         self.harnesses[index].attention_required = false;
+        // The reader flushes its last partial line before Exited, even on cancellation.
+        for message in &mut self.harnesses[index].messages {
+            if message.running {
+                message.set_running(false);
+            }
+        }
         if transitioned {
             self.refresh_harness_order(index);
             self.persist();
@@ -401,7 +407,21 @@ impl Dirigent {
             self.harnesses[index].messages.push(message);
             return self.harnesses[index].messages.len().checked_sub(1);
         }
-        let error = assistant_failure(message)?;
+        let mut changed_message = None;
+        if message.get("role").and_then(Value::as_str) == Some("assistant") {
+            // message_end is authoritative even if a provider omitted text_end/done.
+            for (message_index, message) in self.harnesses[index].messages.iter_mut().enumerate() {
+                if matches!(message.role, MessageRole::Assistant | MessageRole::Thinking)
+                    && message.running
+                {
+                    message.set_running(false);
+                    changed_message.get_or_insert(message_index);
+                }
+            }
+        }
+        let Some(error) = assistant_failure(message) else {
+            return changed_message;
+        };
         if self.harnesses[index]
             .messages
             .last()
@@ -434,8 +454,10 @@ impl Dirigent {
                     .filter(|message| message.role == role && message.running)
                 {
                     message.append_text(delta);
+                    message.streamed_at = Some(Instant::now());
                 } else {
                     let mut message = Message::new(role, delta);
+                    message.streamed_at = Some(Instant::now());
                     message.set_running(true);
                     self.harnesses[index].messages.push(message);
                 }
@@ -937,7 +959,7 @@ impl Dirigent {
                         self.harnesses[index].canonical_model.clone(),
                         self.harnesses[index].canonical_thinking_level.clone(),
                     );
-                    if let Some(parsed) = parsed {
+                    if let Some(mut parsed) = parsed {
                         let harness = &mut self.harnesses[index];
                         let canonical_count =
                             harness.canonical_message_count.min(harness.messages.len());
@@ -946,6 +968,10 @@ impl Dirigent {
                             &parsed.messages,
                             canonical_count,
                             &mut harness.work_group_expansion,
+                        );
+                        preserve_streamed_at(
+                            &harness.messages[canonical_count..],
+                            &mut parsed.messages,
                         );
                         harness.messages.truncate(canonical_count);
                         harness.messages.extend(parsed.messages);

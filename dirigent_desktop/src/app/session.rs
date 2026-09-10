@@ -174,7 +174,7 @@ impl Dirigent {
                     .timer(SESSION_MATERIALIZE_YIELD)
                     .await;
             }
-            let parsed = parser.finish();
+            let mut parsed = parser.finish();
             let materialize_elapsed = materialize_started.elapsed();
 
             let _ = this.update(cx, |this, cx| {
@@ -196,6 +196,7 @@ impl Dirigent {
                     &parsed.messages,
                     &mut this.harnesses[index].work_group_expansion,
                 );
+                preserve_streamed_at(&previous_messages, &mut parsed.messages);
                 this.harnesses[index].messages = parsed.messages;
                 this.harnesses[index].canonical_message_count =
                     this.harnesses[index].messages.len();

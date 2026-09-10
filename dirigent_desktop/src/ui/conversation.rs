@@ -3,12 +3,15 @@
 mod actions;
 mod cache;
 mod message;
+mod reveal;
 
 pub(crate) use cache::{ConversationRenderCache, ConversationScrollAnchor};
 use cache::{ConversationRenderItem, WorkGroupDiffStats, WorkGroupSummary, work_group_for_run};
 
 use std::{
+    cell::Cell,
     ops::Range,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -600,6 +603,8 @@ impl Dirigent {
     fn render_conversation_item(
         &mut self,
         index: usize,
+        follow_tail: bool,
+        width: gpui::Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -632,7 +637,7 @@ impl Dirigent {
                             harness.messages[*message_index - 1].role,
                             MessageRole::Thinking | MessageRole::Tool
                         ));
-                div()
+                let row = div()
                     .w_full()
                     .child(
                         div()
@@ -645,7 +650,32 @@ impl Dirigent {
                             })
                             .child(self.render_message(message, *message_index, window, cx)),
                     )
+                    .into_any_element();
+                if matches!(
+                    message.role,
+                    MessageRole::Assistant | MessageRole::Thinking | MessageRole::Tool
+                ) {
+                    let rolling_preview = self.conversation_render_cache.items.iter().any(|item| {
+                            matches!(item, ConversationRenderItem::WorkGroup(group)
+                                if group.has_rolling_preview()
+                                    && (group.first_message_index..=group.last_message_index).contains(message_index))
+                        });
+                    reveal::MessageReveal {
+                        child: Some(row),
+                        width,
+                        harness_id: harness.id,
+                        message_index: *message_index,
+                        updated_at: message.streamed_at,
+                        follow_tail,
+                        // Once the preview is full, new activity replaces an earlier entry.
+                        // Keep its full height from the outset so the preview doesn't dip.
+                        grow: !rolling_preview,
+                        entity: cx.entity().downgrade(),
+                    }
                     .into_any_element()
+                } else {
+                    row
+                }
             }
             ConversationRenderItem::WorkGroup(group) => div()
                 .w_full()
@@ -753,6 +783,9 @@ impl Dirigent {
 
     pub(super) fn render_conversation(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_conversation_ruler_layout();
+        // Capture before list layout borrows ListState to render its rows.
+        let follow_tail = self.conversation_list.is_following_tail();
+        let row_width = Rc::new(Cell::new(px(0.0)));
         let harness = self
             .selected_harness
             .and_then(|id| self.harnesses.iter().find(|harness| harness.id == id))
@@ -771,11 +804,33 @@ impl Dirigent {
             .child(
                 div()
                     .id("conversation-scroll")
+                    .relative()
                     .size_full()
+                    // Prepaint this before the list: reveal rows measure their natural height
+                    // at the actual viewport width, including the first frame and resizes.
+                    .child(
+                        canvas(
+                            {
+                                let row_width = row_width.clone();
+                                move |bounds, _, _| row_width.set(bounds.size.width)
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0(),
+                    )
                     .child(
                         list(
                             self.conversation_list.clone(),
-                            cx.processor(Self::render_conversation_item),
+                            cx.processor(move |this, index, window, cx| {
+                                this.render_conversation_item(
+                                    index,
+                                    follow_tail,
+                                    row_width.get(),
+                                    window,
+                                    cx,
+                                )
+                            }),
                         )
                         .size_full()
                         .py_7(),

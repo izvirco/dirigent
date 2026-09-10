@@ -105,6 +105,8 @@ pub(crate) struct Message {
     pub(crate) model: Option<String>,
     pub(crate) thinking_level: Option<String>,
     pub(crate) running: bool,
+    /// Only live content updates animate; loaded history and tool-result changes do not.
+    pub(crate) streamed_at: Option<Instant>,
     pub(crate) tool_started_at: Option<Instant>,
     pub(crate) tool_duration: Option<Duration>,
     pub(crate) tool_failed: bool,
@@ -136,6 +138,7 @@ impl Message {
             model: None,
             thinking_level: None,
             running: false,
+            streamed_at: None,
             tool_started_at: None,
             tool_duration: None,
             tool_failed: false,
@@ -158,7 +161,8 @@ impl Message {
         let mut message = Self::new(MessageRole::Tool, text);
         message.tool_call_id = tool_call_id;
         message.running = running;
-        message.tool_started_at = running.then(Instant::now);
+        message.streamed_at = running.then(Instant::now);
+        message.tool_started_at = message.streamed_at;
         message.expanded = expanded;
         message
     }
