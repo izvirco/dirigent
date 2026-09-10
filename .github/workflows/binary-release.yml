@@ -68,7 +68,7 @@ jobs:
           elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$REQUESTED_CHANNEL" != "none" ]]; then
             channel="$REQUESTED_CHANNEL"
             publish=true
-          elif [[ "$GITHUB_REF" == "refs/heads/unstable" || "$GITHUB_REF" == "refs/heads/unstable-next" ]]; then
+          elif [[ "$GITHUB_REF" == "refs/heads/unstable" || "$GITHUB_REF" == "refs/heads/unstable-next" || "$GITHUB_REF" == "refs/heads/nightly" ]]; then
             publish=true
           fi
 
