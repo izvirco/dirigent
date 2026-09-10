@@ -1,4 +1,4 @@
-# Gruvbox Light Soft.
+# Helix Gruvbox Light Soft palette (gruvbox → gruvbox_light → gruvbox_light_soft).
 background = "#f2e5bc"
 sidebar_background = "#ebdbb2"
 surface = "#d5c4a1"
@@ -9,8 +9,8 @@ selection = "#d5c4a1"
 text_selection = "#bdae93"
 border = "#bdae93"
 border_emphasized = "#a89984"
-text = "#3c3836"
-code_text = "#504945"
+text = "#282828"
+code_text = "#282828"
 detail_text = "#665c54"
 secondary_text = "#504945"
 muted = "#7c6f64"
