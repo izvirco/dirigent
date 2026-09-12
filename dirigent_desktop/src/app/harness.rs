@@ -678,6 +678,21 @@ impl Dirigent {
             true
         }
     }
+    /// One bridge request is enough: subscription limits are shared across threads.
+    pub(crate) fn refresh_subscription_usage(&mut self) {
+        if self.pi_bridge_extension.is_none() {
+            return;
+        }
+        let index = self.harnesses.iter().enumerate()
+            .filter(|(_, h)| h.process.is_some() && !h.startup_settings_pending)
+            .min_by_key(|(_, h)| Some(h.id) != self.selected_harness)
+            .map(|(index, _)| index);
+        let request = json!({"id":"dirigent-usage-refresh", "type":"prompt", "message":"/dirigent-usage"});
+        if let Some(index) = index {
+            self.send_value(index, request);
+        }
+    }
+
     pub(super) fn request_session_stats(&mut self, index: usize) {
         self.send_value(index, json!({"type":"get_session_stats"}));
     }

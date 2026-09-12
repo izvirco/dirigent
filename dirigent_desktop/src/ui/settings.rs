@@ -68,6 +68,7 @@ pub(super) const TELEMETRY_LABEL: &str =
 
 impl Dirigent {
     pub(crate) fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.usage = None;
         let font = cx.new(|cx| {
             let mut input = TextInput::new("Font family", cx).compact().borderless();
             input.set_text(self.font.to_string(), cx);

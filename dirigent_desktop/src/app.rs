@@ -567,6 +567,7 @@ pub(crate) struct Dirigent {
     pub(crate) expanded_archived_projects: HashSet<Id>,
     pub(crate) sidebar_menu: Option<SidebarMenu>,
     pub(crate) codex_usage: Option<CodexUsage>,
+    pub(crate) usage: Option<crate::ui::usage::UsagePage>,
     pub(crate) renaming_harness: Option<Id>,
     pub(crate) project_input: Entity<TextInput>,
     pub(crate) harness_input: Entity<TextInput>,

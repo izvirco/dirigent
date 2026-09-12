@@ -70,7 +70,7 @@ impl Render for Dirigent {
                 .read(cx)
                 .position_for_offset(at)
         });
-        let diff_replaces_thread = self.settings.is_none() && self.diff_sidebar_replaces_thread(window);
+        let diff_replaces_thread = self.settings.is_none() && self.usage.is_none() && self.diff_sidebar_replaces_thread(window);
 
         if self.focus_normal_mode {
             self.focus_normal_mode = false;
@@ -147,7 +147,7 @@ impl Render for Dirigent {
             .when(!diff_replaces_thread, |element| {
                 element.child(self.render_center(window, cx))
             })
-            .when(self.settings.is_none(), |element| element.child(self.render_diff_sidebar(window, cx)))
+            .when(self.settings.is_none() && self.usage.is_none(), |element| element.child(self.render_diff_sidebar(window, cx)))
             .when(self.sidebar_state != SidebarState::Open, |element| {
                 element.child(self.render_sidebar_overlay(window, cx))
             })

@@ -85,6 +85,7 @@ impl Dirigent {
                 if this.path_completion.is_some() {
                     this.path_completion = None;
                 } else {
+                    this.adding_project = false;
                     this.enter_normal_mode();
                 }
                 cx.notify();
@@ -106,6 +107,7 @@ impl Dirigent {
                 if this.path_completion.is_some() {
                     this.path_completion = None;
                 } else {
+                    this.creating_harness = false;
                     this.enter_normal_mode();
                 }
                 cx.notify();
@@ -143,6 +145,7 @@ impl Dirigent {
                 }
                 InputEvent::Escape => {
                     this.cancel_workspace_root_edit(cx);
+                    this.enter_normal_mode();
                     cx.notify();
                 }
                 InputEvent::Changed => {}
@@ -806,6 +809,7 @@ impl Dirigent {
             expanded_archived_projects: HashSet::new(),
             sidebar_menu: None,
             codex_usage: None,
+            usage: None,
             renaming_harness: None,
             project_input,
             harness_input,

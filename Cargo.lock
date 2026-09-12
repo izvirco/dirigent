@@ -2033,6 +2033,7 @@ dependencies = [
  "async-channel",
  "base64",
  "blake3",
+ "chrono",
  "clipboard-rs",
  "dirigent_launcher",
  "dirigent_server",

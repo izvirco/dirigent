@@ -80,6 +80,7 @@ impl Dirigent {
             (KeyboardMenu::Space, "c") => self.start_new_selected_project(),
             (KeyboardMenu::Space, "i") => self.enter_input_mode(true),
             (KeyboardMenu::Space, "a") => self.begin_adding_project(),
+            (KeyboardMenu::Space, "u") => self.open_usage(cx),
             (KeyboardMenu::Space, "t") => self.keyboard_menu = Some(KeyboardMenu::Threads),
             (KeyboardMenu::Space, "p") => self.keyboard_menu = Some(KeyboardMenu::Projects),
             (KeyboardMenu::Space, "x") => self.abort_selected(),
@@ -175,6 +176,13 @@ impl Dirigent {
 
         if key == "escape" {
             self.settings = None;
+            self.usage = None;
+            self.about_open = false;
+            if self.project_settings.is_some() {
+                self.close_project_settings();
+            }
+            self.adding_project = false;
+            self.creating_harness = false;
             self.preview_image = None;
             self.pending_workspace_deletion = None;
             self.enter_normal_mode();
@@ -183,7 +191,7 @@ impl Dirigent {
             return;
         }
 
-        if self.settings.is_some() {
+        if self.settings.is_some() || self.usage.is_some() {
             return;
         }
 

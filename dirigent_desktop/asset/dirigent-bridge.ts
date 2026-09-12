@@ -171,6 +171,11 @@ export default function (pi: ExtensionApi & ExtensionAPI) {
   });
   pi.on("agent_settled", (_event, ctx) => refreshUsage(ctx));
 
+  pi.registerCommand("dirigent-usage", {
+    description: "Internal Dirigent subscription usage refresh",
+    handler: async (_args, ctx) => refreshUsage(ctx),
+  });
+
   pi.registerCommand("dirigent-navigate", {
     description: "Internal Dirigent session navigation bridge",
     handler: async (args, ctx) => {

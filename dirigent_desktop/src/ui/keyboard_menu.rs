@@ -11,6 +11,7 @@ const SPACE_ITEMS: &[(&str, &str)] = &[
     ("c", "new thread"),
     ("i", "focus composer"),
     ("a", "add project"),
+    ("u", "usage"),
     ("t", "thread commands…"),
     ("p", "project commands…"),
     ("x", "stop agent"),

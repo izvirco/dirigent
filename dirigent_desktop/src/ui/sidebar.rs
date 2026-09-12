@@ -13,7 +13,7 @@ use gpui::{
 
 use crate::{
     app::{Dirigent, KeyboardMode, SidebarMenu, SidebarState},
-    model::{CodexUsage, CodexUsageWindow, HarnessStatus, Id},
+    model::{HarnessStatus, Id},
     theme::{
         blue, border, faint, muted, orange, red, rgb, surface, surface_hover, theme_text, yellow,
     },
@@ -155,21 +155,6 @@ fn format_elapsed(started_at: Option<Instant>) -> String {
     )
 }
 
-fn format_codex_usage(usage: CodexUsage) -> Option<String> {
-    let mut windows = Vec::new();
-    let mut push_window = |label: &str, window: CodexUsageWindow| {
-        let available = (100.0 - window.used_percent).clamp(0.0, 100.0);
-        windows.push(format!("{available:.0}% {label}"));
-    };
-    if let Some(window) = usage.five_hour {
-        push_window("5h", window);
-    }
-    if let Some(window) = usage.weekly {
-        push_window("week", window);
-    }
-    (!windows.is_empty()).then(|| windows.join(" · "))
-}
-
 impl Dirigent {
     fn render_section_header(&self, title: &'static str, count: usize, color: u32) -> AnyElement {
         div()
@@ -245,6 +230,18 @@ impl Dirigent {
                 )
                 .child(
                     div()
+                        .id("usage-dirigent")
+                        .h(px(26.0)).px_1().flex().items_center().rounded_md()
+                        .text_xs().text_color(rgb(muted()))
+                        .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.open_usage(cx);
+                            cx.stop_propagation();
+                        }))
+                        .child("Usage"),
+                )
+                .child(
+                    div()
                         .id("about-dirigent")
                         .h(px(26.0))
                         .px_1()
@@ -257,6 +254,7 @@ impl Dirigent {
                         .hover(|style| style.bg(rgb(surface_hover())).text_color(rgb(theme_text())))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.settings = None;
+                            this.usage = None;
                             this.about_open = true;
                             #[cfg(feature = "self-update")]
                             this.check_for_updates();
@@ -400,7 +398,6 @@ impl Dirigent {
             width: self.sidebar_width,
             mouse_x: window.mouse_position().x,
         };
-        let codex_usage = self.codex_usage.and_then(format_codex_usage);
         #[cfg(feature = "self-update")]
         let update_action = match &self.update_state {
             crate::update::UpdateState::Available(release) => Some((
@@ -617,8 +614,7 @@ impl Dirigent {
                             .overflow_hidden()
                             .text_ellipsis()
                             .text_xs()
-                            .text_color(rgb(muted()))
-                            .when_some(codex_usage, |element, usage| element.child(usage)),
+                            .text_color(rgb(muted())),
                     )
                     .child(
                         div()

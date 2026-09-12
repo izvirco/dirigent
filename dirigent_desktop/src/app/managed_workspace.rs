@@ -597,6 +597,7 @@ impl Dirigent {
     }
 
     pub(crate) fn open_project_settings(&mut self, project_id: Id, cx: &mut Context<Self>) {
+        self.usage = None;
         self.settings = None;
         self.about_open = false;
         self.refresh_repository(project_id);
