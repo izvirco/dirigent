@@ -53,7 +53,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (host, id) = (t.host.clone(), t.id.clone());
     let summary = this.summary(&host, &id).cloned();
     let title = summary.as_ref().and_then(|s| s.name.clone()).unwrap_or_else(|| "Untitled".into());
-    let status = summary.as_ref().map(Status::of).unwrap_or(Status::Done);
+    let status = summary.as_ref().map(|s| this.status(&host, s)).unwrap_or(Status::Done);
     let archived = summary.as_ref().is_some_and(|s| s.archived);
     let project = summary.as_ref().and_then(|s| {
         let pid = s.project_id.as_deref()?;
@@ -61,6 +61,10 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     });
 
     let (h1, i1) = (host.clone(), id.clone());
+    let (h3, i3) = (host.clone(), id.clone());
+    let (h4, i4) = (host.clone(), id.clone());
+    let snoozed = status == Status::Snoozed;
+    let pinned = this.pinned(&host, &id);
     let confirm_open = this.menu == Some(Menu::ConfirmDelete);
     let confirm = confirm_open.then(|| {
         let (h, i) = (host.clone(), id.clone());
@@ -91,6 +95,21 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(status.glyph())
                 .child(status.label()),
         )
+        .when(matches!(status, Status::Done | Status::Snoozed), |d| {
+            // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
+            d.child(theme::tinted_icon_button(
+                "hdr-snooze",
+                "moon",
+                if snoozed { theme::WARN } else { theme::FG_1 },
+                cx,
+                move |this, cx| this.set_snoozed(&h3, &i3, !snoozed, cx),
+            ))
+        })
+        // Pin: on top of its list (an amber pin before the title shows it); amber while
+        // pinned, click again unpins.
+        .child(theme::tinted_icon_button("hdr-pin", "pin", if pinned { theme::WARN } else { theme::FG_1 }, cx, move |this, cx| {
+            this.set_pinned(&h4, &i4, !pinned, cx)
+        }))
         .child(theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
             this.set_archived(&h1, &i1, !archived, cx)
         }))
@@ -119,7 +138,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(ruler::render(this, cx)),
         )
         .child(div().w_full().flex().flex_col().items_center().px_6().pb_5().pt_2().child(composer(this, cx)));
-    pane.child(header(breadcrumb(project, title, cx), Some(actions)))
+    pane.child(header(breadcrumb(project, title, pinned, cx), Some(actions)))
         .child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
 }
 

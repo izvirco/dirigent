@@ -8,7 +8,7 @@
 use crate::app::Dirigent;
 use crate::icons::icon;
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, Svg, div, prelude::*, px, rgb};
 
 // Surfaces, darkest to lightest.
 pub const CANVAS: u32 = 0x0a0b0d;
@@ -53,14 +53,18 @@ pub struct Fonts {
     pub mono: SharedString,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Variant order is list order: the Inbox and project pages sort rows by it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status {
     Working,
     Done,
+    /// Done, but snoozed out of the inbox (desktop-side, see `Dirigent::status`).
+    Snoozed,
     Archived,
 }
 
 impl Status {
+    /// Status from the host's view of the thread; never `Snoozed`, that's desktop state.
     pub fn of(t: &ThreadSummary) -> Self {
         if t.running() {
             Status::Working
@@ -75,18 +79,27 @@ impl Status {
         match self {
             Status::Working => "Working",
             Status::Done => "Done",
+            Status::Snoozed => "Snoozed",
             Status::Archived => "Archived",
         }
     }
 
-    /// The status glyph: a still accent dot while working (no spinners), a check when done.
+    /// The status glyph: a still accent dot while working (no spinners), a check when
+    /// done, an amber moon while snoozed, an archive box when archived.
     pub fn glyph(self) -> AnyElement {
         match self {
             Status::Working => div().size(px(16.)).flex().items_center().justify_center().child(dot(WORKING)).into_any_element(),
             Status::Done => icon("circle-check", DONE).into_any_element(),
+            Status::Snoozed => icon("moon", WARN).into_any_element(),
             Status::Archived => icon("archive", FG_2).into_any_element(),
         }
     }
+}
+
+/// The small amber pin shown before a pinned thread's name (sidebar cards, list rows,
+/// thread header).
+pub fn pin_mark() -> Svg {
+    icon("pin", WARN).size(px(12.))
 }
 
 /// A 7px status dot.

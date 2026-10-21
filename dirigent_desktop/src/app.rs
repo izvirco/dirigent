@@ -187,6 +187,11 @@ pub struct Dirigent {
     /// Per thread, its `updated_at` when the user last looked at it; a finished thread
     /// updated since (or never looked at) is unread.
     seen: HashMap<(String, String), i64>,
+    /// Per snoozed thread, its `updated_at` when the user snoozed it: hidden from the
+    /// inbox until its next run bumps `updated_at` past that.
+    snoozed: HashMap<(String, String), i64>,
+    /// Threads kept on top of their status group in the inbox / project lists.
+    pinned: HashSet<(String, String)>,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     resizing: Option<Resize>,
@@ -246,6 +251,8 @@ impl Dirigent {
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let seen = cache.seen().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
+        let snoozed = cache.snoozed().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
+        let pinned = cache.pinned().unwrap_or_default().into_iter().collect();
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
         let presets = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -293,6 +300,8 @@ impl Dirigent {
             sidebar_peek: false,
             collapsed: HashSet::new(),
             seen,
+            snoozed,
+            pinned,
             log_width,
             resizing: None,
             composer,
@@ -364,14 +373,61 @@ impl Dirigent {
         Status::of(t) == Status::Done && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
     }
 
-    /// What the sidebar lists under Inbox: unread threads, plus the open one while it's
-    /// finished (so the thread being read stays in view) unless archived.
+    /// Snoozed and not run since: hidden from the inbox.
+    pub fn snoozed(&self, host: &str, t: &ThreadSummary) -> bool {
+        self.snoozed.get(&(host.to_owned(), t.id.clone())).is_some_and(|&u| t.updated_at <= u)
+    }
+
+    /// `Status::of`, with a snoozed finished thread reported as `Snoozed`.
+    pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
+        match Status::of(t) {
+            Status::Done if self.snoozed(host, t) => Status::Snoozed,
+            s => s,
+        }
+    }
+
+    pub fn pinned(&self, host: &str, thread_id: &str) -> bool {
+        self.pinned.contains(&(host.to_owned(), thread_id.to_owned()))
+    }
+
+    /// Pin keeps a thread on top of its status group (pinned done threads above the other
+    /// done ones, pinned snoozed above the snoozed pile).
+    pub fn set_pinned(&mut self, host: &str, thread_id: &str, pinned: bool, cx: &mut Context<Self>) {
+        let key = (host.to_owned(), thread_id.to_owned());
+        if pinned {
+            self.pinned.insert(key);
+        } else {
+            self.pinned.remove(&key);
+        }
+        let _ = self.cache.lock().unwrap().set_pinned(host, thread_id, pinned);
+        cx.notify();
+    }
+
+    /// Group rows by status (working, done, snoozed, archived) with the pinned ones first
+    /// in each group, keeping their order otherwise. Applied by `threads_with` and the project page.
+    pub fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
+        rows.sort_by_key(|(h, t)| (self.status(h, t), !self.pinned(h, &t.id)));
+    }
+
+    /// Snooze hides a finished thread from the sidebar's inbox without archiving it; it
+    /// comes back by itself once it runs again, or when the user wakes it.
+    pub fn set_snoozed(&mut self, host: &str, thread_id: &str, snoozed: bool, cx: &mut Context<Self>) {
+        let key = (host.to_owned(), thread_id.to_owned());
+        let updated_at = snoozed.then(|| self.summary(host, thread_id).map(|t| t.updated_at)).flatten();
+        match updated_at {
+            Some(u) => self.snoozed.insert(key, u),
+            None => self.snoozed.remove(&key),
+        };
+        let _ = self.cache.lock().unwrap().set_snoozed(host, thread_id, updated_at);
+        cx.notify();
+    }
+
+    /// What the sidebar lists under Inbox: every finished thread that isn't snoozed. The
+    /// Inbox page itself lists them all (`threads_with(Status::Done)`).
     pub fn inbox_threads(&self) -> Vec<(&str, &ThreadSummary)> {
-        let open = self.open().map(|o| (o.host.as_str(), o.id.as_str()));
-        self.all_threads()
-            .into_iter()
-            .filter(|(h, t)| self.unread(h, t) || (open == Some((h, &t.id)) && Status::of(t) == Status::Done))
-            .collect()
+        let mut rows = self.threads_with(Status::Done);
+        rows.retain(|(h, t)| !self.snoozed(h, t));
+        rows
     }
 
     /// The user is looking at this thread: whatever it has now is read.
@@ -391,13 +447,15 @@ impl Dirigent {
     /// Threads with `status`, as the Inbox / Workpool list them: a queue, newest on top.
     /// Working threads are ordered by when their run started, finished ones by when they
     /// finished (their last entry): neither key changes while the thread is on that list,
-    /// so the order is fixed and a thread only moves when it enters the list.
+    /// so the order is fixed and a thread only moves when it enters the list. On top of
+    /// that, `sort_by_status` lifts the pinned ones (and sinks snoozed finished ones).
     pub fn threads_with(&self, status: Status) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.all_threads();
         rows.retain(|(_, t)| Status::of(t) == status);
         if status == Status::Working {
             rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
         }
+        self.sort_by_status(&mut rows);
         rows
     }
 
@@ -859,6 +917,8 @@ impl Dirigent {
             self.hosts.retain(|h| h.name != name);
             self.links.retain(|(h, _), _| *h != name);
             self.seen.retain(|(h, _), _| *h != name);
+            self.snoozed.retain(|(h, _), _| *h != name);
+            self.pinned.retain(|(h, _)| *h != name);
             let _ = self.cache.lock().unwrap().remove_host(&name);
             if self.open().is_some_and(|t| t.host == name) {
                 self.pane = Pane::Settings;
