@@ -125,13 +125,8 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             let selected = group.is_some_and(|s| s.key == g.key);
             // Keep the host when switching to a group that also lives there.
             let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
-            let detail = if g.members.len() > 1 {
-                g.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ")
-            } else if this.hosts.len() > 1 {
-                format!("{}  {}", g.members[0].host, g.members[0].project.path)
-            } else {
-                g.members[0].project.path.clone()
-            };
+            // Hosts are picked in the `on <host>` chip; linked projects' paths differ per host.
+            let detail = if g.members.len() > 1 { String::new() } else { g.members[0].project.path.clone() };
             items.push(menu::item(
                 format!("t/{}", g.key),
                 g.name.clone(),
