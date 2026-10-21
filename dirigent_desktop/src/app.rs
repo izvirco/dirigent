@@ -182,8 +182,6 @@ pub struct Dirigent {
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     resizing: Option<Resize>,
-    /// A 1s re-render loop is alive (see `tick`).
-    ticking: bool,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
     /// The settings page's add-host form.
@@ -277,7 +275,6 @@ impl Dirigent {
             seen,
             log_width,
             resizing: None,
-            ticking: false,
             composer,
             path_input,
             host_name_input,
@@ -302,6 +299,7 @@ impl Dirigent {
             window: window.window_handle(),
         };
         this.restore_pane(cx);
+        this.tick(cx);
         if let Some(e) = hosts_error {
             this.toast(e, cx);
         }
@@ -337,10 +335,6 @@ impl Dirigent {
         self.open().and_then(|t| self.summary(&t.host, &t.id)).is_some_and(|t| t.running())
     }
 
-    fn any_running(&self) -> bool {
-        self.hosts.iter().any(|h| h.threads.iter().any(|t| t.running()))
-    }
-
     /// Finished since the user last opened it (never opened counts too).
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
         Status::of(t) == Status::Done && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
@@ -363,15 +357,24 @@ impl Dirigent {
         let _ = self.cache.lock().unwrap().set_seen(host, id, updated_at);
     }
 
-    /// Every thread on every host, newest first, with its host.
+    /// Every thread on every host, most recently updated first, with its host.
     pub fn all_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         let mut all: Vec<_> = self.hosts.iter().flat_map(|h| h.threads.iter().map(move |t| (h.name.as_str(), t))).collect();
         all.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
         all
     }
 
+    /// Threads with `status`, as the Inbox / Workpool list them: a queue, newest on top.
+    /// Working threads are ordered by when their run started, finished ones by when they
+    /// finished (their last entry): neither key changes while the thread is on that list,
+    /// so the order is fixed and a thread only moves when it enters the list.
     pub fn threads_with(&self, status: Status) -> Vec<(&str, &ThreadSummary)> {
-        self.all_threads().into_iter().filter(|(_, t)| Status::of(t) == status).collect()
+        let mut rows = self.all_threads();
+        rows.retain(|(_, t)| Status::of(t) == status);
+        if status == Status::Working {
+            rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
+        }
+        rows
     }
 
     /// Group key of a project, if the host still lists it.
@@ -470,7 +473,6 @@ impl Dirigent {
                 if let Some(h) = self.host_mut(&host) {
                     h.threads = threads;
                 }
-                self.tick(cx);
                 if let Pane::Thread(t) = &self.pane
                     && t.host == host
                 {
@@ -658,25 +660,16 @@ impl Dirigent {
         let rid = self.next_id();
         self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
         self.focus_composer(cx);
-        self.tick(cx);
         cx.notify();
     }
 
-    /// While any thread runs, re-render once a second so durations count up.
+    /// Re-render once a second, for as long as the app lives, so every clock on screen
+    /// (run and tool timers, `rel_time` ages) advances in whole-second steps.
     fn tick(&mut self, cx: &mut Context<Self>) {
-        if self.ticking || !self.any_running() {
-            return;
-        }
-        self.ticking = true;
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                let go_on = this.update(cx, |this, cx| {
-                    this.ticking = this.any_running();
-                    cx.notify();
-                    this.ticking
-                });
-                if !matches!(go_on, Ok(true)) {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
             }
@@ -1171,7 +1164,6 @@ impl Dirigent {
                 t.log_list.set_follow_mode(FollowMode::Tail);
             }
         }
-        self.tick(cx);
         cx.notify();
     }
 

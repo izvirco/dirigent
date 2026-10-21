@@ -730,7 +730,7 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
         .child(div().text_color(rgb(theme::FG)).child(w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned()))
         .children(w.effort.clone().map(|e| div().text_color(rgb(theme::NAVY_INK)).child(e)))
         .child(dot())
-        .child(div().text_color(rgb(theme::FG_1)).child(duration(w.duration(now))))
+        .child(div().text_color(rgb(theme::FG_1)).child(if live { elapsed(now - w.started) } else { duration(w.duration(now)) }))
         .child(dot())
         .child(div().text_color(rgb(theme::FG_1)).child(tools))
         .children(activity.map(|a| {
@@ -853,8 +853,8 @@ fn render_tool(call: &ToolCall, key: (usize, usize), t: &OpenThread, now: i64, k
     let failed = call.result.as_ref().is_some_and(|r| r.is_error);
     let (time, color) = match (t.streaming.running_since(&call.id), call.started.zip(call.ended)) {
         (Some(since), _) => {
-            let elapsed = duration(now - since);
-            (Some(call.timeout.map(|s| format!("{elapsed} / {}", duration((s * 1000.) as i64))).unwrap_or(elapsed)), theme::WORKING)
+            let so_far = elapsed(now - since);
+            (Some(call.timeout.map(|s| format!("{so_far} / {}", duration((s * 1000.) as i64))).unwrap_or(so_far)), theme::WORKING)
         }
         (None, Some((s, e))) => (Some(duration(e - s)), if failed { theme::ERROR } else { theme::FG_2 }),
         (None, None) => (failed.then(|| "failed".to_owned()), theme::ERROR),
@@ -907,19 +907,47 @@ fn step_id_n((item, step): (usize, usize)) -> u64 {
     (item as u64).wrapping_mul(100_000) ^ step as u64
 }
 
-/// `40ms`, `3.2s`, `12s`, `1m 23s`, `1h 05m`.
+/// A finished span: `34ms` under a tenth of a second, `0.34s` / `0.1s` under a second,
+/// else whole seconds (`12s`, `1m 23s`, `1h 05m`).
 pub fn duration(ms: i64) -> String {
     let ms = ms.max(0);
-    let s = ms as f64 / 1000.;
-    if ms < 1000 {
+    if ms < 100 {
         format!("{ms}ms")
-    } else if s < 10. {
-        format!("{s:.1}s")
-    } else if s < 60. {
-        format!("{}s", s as i64)
-    } else if s < 3600. {
-        format!("{}m {:02}s", s as i64 / 60, s as i64 % 60)
+    } else if ms < 1000 {
+        format!("0.{}s", format!("{:02}", ms / 10).trim_end_matches('0'))
     } else {
-        format!("{}h {:02}m", s as i64 / 3600, (s as i64 % 3600) / 60)
+        elapsed(ms)
+    }
+}
+
+/// A span still running: whole seconds only (`0s`, `12s`, `1m 23s`, `1h 05m`), so it
+/// advances exactly once per `tick` instead of jittering with every event.
+pub fn elapsed(ms: i64) -> String {
+    let s = ms.max(0) / 1000;
+    if s < 60 {
+        format!("{s}s")
+    } else if s < 3600 {
+        format!("{}m {:02}s", s / 60, s % 60)
+    } else {
+        format!("{}h {:02}m", s / 3600, (s % 3600) / 60)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn durations() {
+        assert_eq!(duration(34), "34ms");
+        assert_eq!(duration(100), "0.1s");
+        assert_eq!(duration(340), "0.34s");
+        assert_eq!(duration(999), "0.99s");
+        assert_eq!(duration(1000), "1s");
+        assert_eq!(duration(3200), "3s");
+        assert_eq!(duration(83_000), "1m 23s");
+        assert_eq!(duration(3_900_000), "1h 05m");
+        assert_eq!(elapsed(340), "0s");
+        assert_eq!(elapsed(12_900), "12s");
     }
 }

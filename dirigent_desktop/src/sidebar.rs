@@ -8,7 +8,7 @@ use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
 use crate::theme;
-use crate::thread::duration;
+use crate::thread::{duration, elapsed};
 use dirigent_protocol::ThreadSummary;
 use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Stateful, div, prelude::*, px, rgb};
 
@@ -234,7 +234,7 @@ fn section(
         .into_iter()
         .map(|(host, t)| {
             let elapsed = match (t.running_since, t.last_run_ms) {
-                (Some(since), _) => duration(now - since),
+                (Some(since), _) => elapsed(now - since),
                 (None, Some(ms)) => duration(ms),
                 (None, None) => String::new(),
             };

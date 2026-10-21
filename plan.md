@@ -218,7 +218,10 @@ while offline are dropped.
 
 A thread's status is derived, never stored: `running_since` set → Working, `archived` → Archived, else Done.
 Inbox = Done threads across hosts, Workpool = Working ones, a project page = all of its threads with
-archived ones in a trailing section. A Done thread is _unread_ (accent title) until the user opens it; the sidebar lists unread threads under Inbox, plus the open one while it is finished and not archived:
+archived ones in a trailing section. Inbox and Workpool are fixed queues, newest on top: the Workpool is
+ordered by `running_since`, the Inbox by `updated_at` (= when the run finished, since only entries bump it),
+so a thread moves only when it enters the list. Every on-screen clock is driven by one permanent 1s
+`tick`; running spans show whole seconds (`elapsed`), finished ones `34ms` / `0.34s` / `12s` (`duration`). A Done thread is _unread_ (accent title) until the user opens it; the sidebar lists unread threads under Inbox, plus the open one while it is finished and not archived:
 `seen` remembers each thread's `updated_at` as of the last look, and the open thread is marked seen on
 every `Threads` push, so a run that finishes while you watch is not unread.
 

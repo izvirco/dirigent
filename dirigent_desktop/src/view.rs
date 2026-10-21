@@ -98,7 +98,9 @@ impl Work {
         })
     }
 
-    /// Duration in ms: to `ended`, else to the last tool's end, else to `now`.
+    /// Duration in ms of a finished work: to `ended`, else (a run that never got its final
+    /// message) to the last tool's end, else to `now`. The run in progress uses `now -
+    /// started` directly, so its clock keeps moving between tool calls.
     pub fn duration(&self, now: i64) -> i64 {
         let end = self.ended.or_else(|| self.steps.iter().rev().find_map(|s| if let Step::Tool(t) = s { t.ended } else { None }));
         (end.unwrap_or(now) - self.started).max(0)
@@ -418,7 +420,7 @@ impl Streaming {
                 Step::Tool(t) if &t.id == id => Some(t.name.as_str()),
                 _ => None,
             });
-            return Some(format!("{} {}", name.unwrap_or("tool"), crate::thread::duration(now - since)));
+            return Some(format!("{} {}", name.unwrap_or("tool"), crate::thread::elapsed(now - since)));
         }
         match self.steps.last()? {
             Step::Thinking(_) => Some("thinking".into()),
@@ -574,7 +576,7 @@ mod tests {
         let mut s = Streaming::default();
         assert_eq!(s.activity(&w.steps, 0), None);
         s.running_tools.push(("c".into(), 1000));
-        assert_eq!(s.activity(&w.steps, 3500).as_deref(), Some("bash 2.5s"));
+        assert_eq!(s.activity(&w.steps, 3500).as_deref(), Some("bash 2s"));
         s.running_tools.clear();
         s.steps.push(Step::Thinking("t".into()));
         assert_eq!(s.activity(&w.steps, 0).as_deref(), Some("thinking"));
