@@ -1,10 +1,11 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar and the new-project form.
+//! 40px header bar, the new-project form and the settings page.
 
 use crate::app::{Dirigent, Pane, Target};
 use crate::icons::icon;
-use crate::projects;
+use crate::net::HostStatus;
 use crate::theme::{self, Status};
+use crate::{hosts, projects};
 use dirigent_protocol::ThreadSummary;
 use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgb};
 
@@ -48,8 +49,93 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                         .child(this.path_input.clone()),
                 ),
         ),
+        Pane::Settings => settings_page(this, pane, cx),
         Pane::Thread(_) | Pane::Draft { .. } => pane,
     }
+}
+
+/// Settings: a narrow centered column of sections. For now just Hosts: every host with
+/// its url and status (hover reveals remove), then the add form.
+fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
+    let rows = this.hosts.iter().map(|h| {
+        let (dot, status) = match h.status {
+            HostStatus::Connected => (theme::DONE, "connected"),
+            HostStatus::Connecting => (theme::WARN, "connecting"),
+            HostStatus::Disconnected => (theme::ERROR, "disconnected"),
+        };
+        let name = h.name.clone();
+        div()
+            .id(SharedString::from(format!("host/{name}")))
+            .group("row")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .h(px(38.))
+            .px_2()
+            .border_b_1()
+            .border_color(rgb(theme::LINE_SOFT))
+            .child(div().size(px(6.)).rounded_full().bg(rgb(dot)))
+            .child(div().w(px(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(this.fonts.mono.clone())
+                    .text_size(px(12.))
+                    .text_color(rgb(theme::FG_1))
+                    .child(h.url.clone()),
+            )
+            .child(div().w(px(90.)).flex_shrink_0().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(status))
+            .child(if name == hosts::LOCAL {
+                div().size(px(24.)).into_any_element()
+            } else {
+                div()
+                    .id(SharedString::from(format!("rm-host/{name}")))
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .opacity(0.)
+                    .group_hover("row", |d| d.opacity(1.))
+                    .hover(|d| d.bg(rgb(theme::HOVER)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_host(&name, cx)))
+                    .child(icon("x", theme::FG_1))
+                    .into_any_element()
+            })
+    });
+    let field = |input: gpui::Entity<crate::input::TextInput>| {
+        div().px_3().py_2().rounded_md().bg(rgb(theme::RAISED)).border_1().border_color(rgb(theme::LINE)).child(input)
+    };
+    let form = div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .pt_4()
+        .child(
+            div().text_color(rgb(theme::FG_1)).child("Add a host running dirigent_service, reachable over your tailnet. Enter to add it."),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .child(field(this.host_name_input.clone()).w(px(150.)))
+                .child(field(this.host_url_input.clone()).flex_1()),
+        )
+        .child(div().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(format!("Also editable by hand: {}", hosts::path().display())));
+
+    let hosts = settings_section("Hosts", div().flex().flex_col().children(rows).child(form));
+    let column = div().w_full().max_w(px(600.)).flex().flex_col().gap_8().py_8().px_6().child(hosts);
+    pane.child(header(div().child("Settings"), None)).child(scroll("settings", div().flex().flex_col().items_center().child(column)))
+}
+
+/// A settings section: title over its content.
+fn settings_section(title: &'static str, body: impl IntoElement) -> Div {
+    div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::FG)).child(title)).child(body)
 }
 
 /// The main pane's top bar: a title on the left, optional actions on the right.

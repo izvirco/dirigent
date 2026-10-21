@@ -31,7 +31,7 @@ scripts/ui.sh reset                  # stop + wipe the session's data: fresh ser
 ## Isolation and sessions
 
 Each session lives in `/tmp/dirigent-ui/<session>/` and has its own Xvfb display, service port (7800+),
-`XDG_DATA_HOME` (`data/`), `app.log`, and pid files. The desktop runs its local service embedded on that port
+`XDG_DATA_HOME` (`data/`), `XDG_CONFIG_HOME` (`config/`, so `hosts.toml` starts empty), `app.log`, and pid files. The desktop runs its local service embedded on that port
 (`DIRIGENT_PORT`), so prompting tests work out of the box and real pi auth is used. Set `UI_SESSION=name` on every
 call to run several sessions side by side, e.g. two agents at once. `stop`/`reset` kill only the session's own
 process groups.
@@ -62,7 +62,8 @@ Landmarks at 1100×720 with the default 240 px sidebar (they move when the layou
 compose button (219, 21), Inbox (55, 57), Workpool (66, 85), Projects "+" (218, 133, hover-revealed), first project
 (60, 159) — the latter three shift down ~73 px per thread card listed under Inbox / Workpool (collapse them with the
 chevron at x = 214 on the nav row), first list row (500, 68), draft page project chip (388, 279) and model chip (360, 390), thread composer
-model chip (370, 667), thread header archive / delete (1032, 28) / (1062, 28). The sidebar's drag handle is at
+model chip (370, 667), thread header archive / delete (1032, 28) / (1062, 28). The sidebar's bottom bar: hide/show (30, 699), settings gear (210, 699) → Hosts section: name field (465, 313), address field (745, 313), Enter adds.
+The sidebar's drag handle is at
 x = sidebar width; `[` hides the sidebar and hovering x < 10 peeks it. Clicking a thread's work line (`› model effort ·
 duration · n tool calls`, under the user bubble) or `]` opens the 400 px work log panel on the pane's right; its drag
 handle is the hairline on its left, and `]` / Esc (when nothing is running) close it.
@@ -80,7 +81,8 @@ handle is the hairline on its left, and `]` / Esc (when nothing is running) clos
 - `Xvfb -displayfd` picks a free display; the number is in `/tmp/dirigent-ui/<session>/display`. Then any X tool works:
   `DISPLAY=:N xdotool …`, `DISPLAY=:N import -window root out.png`.
 - The app is launched with `VK_ICD_FILENAMES=$DIRIGENT_UI_VK_ICD` (lavapipe; Xvfb can't present GPU frames),
-  `XDG_DATA_HOME=<session>/data`, and `DIRIGENT_PORT=<port>`, in its own process group (`setsid`).
+  `XDG_DATA_HOME=<session>/data`, `XDG_CONFIG_HOME=<session>/config`, `DIRIGENT_PORT=<port>` and
+  `DIRIGENT_BIND=127.0.0.1` (the embedded service stays off the tailnet), in its own process group (`setsid`).
 - The tool paths from `nix develop` are cached in `/tmp/dirigent-ui/devenv-<hash>.sh`, keyed by `flake.nix` +
   `flake.lock`, so calls take well under a second. `start` still builds through `nix develop`.
 

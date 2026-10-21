@@ -151,7 +151,7 @@ Test: insert thread + entries, read back in order.
 
 ### WebSocket server (`server.rs`)
 
-- `axum` on `0.0.0.0:7777` (`DIRIGENT_PORT`; TODO: bind only to lo + tailscale addresses). Route `/ws`.
+- `axum` on port 7777 (`DIRIGENT_PORT`), bound to `127.0.0.1` plus every address `tailscale ip` reports — never a wildcard, there is no auth. `DIRIGENT_BIND=ip,ip` overrides the list. Route `/ws`.
 - Each connection: send `Hello`, then a task that handles requests and a broadcast receiver for pushes.
 - Pushes come through one `tokio::sync::broadcast<ServerMessage>`.
 
@@ -165,16 +165,25 @@ Status: implemented; `scripts/ui.sh` + `testing.md` cover headless launch/screen
 
 ### Startup
 
-1. Open cache db at `$XDG_DATA_HOME/dirigent/desktop.db`. Load hosts + cached threads. Render immediately.
+1. Open cache db at `$XDG_DATA_HOME/dirigent/desktop.db` and `hosts.toml`. Load hosts + cached threads. Render immediately.
 2. For the `local` host: try to connect to `ws://127.0.0.1:7777/ws` (`DIRIGENT_PORT`); if refused, spawn `dirigent_service` _detached_ (look next to own exe, then `PATH`) and retry with backoff. The service outlives the desktop on purpose: it is the source of truth and keeps agents running. Respawn is rate-limited to once per 10s.
 3. For every host: start a connection task. On connect → `ListThreads` → upsert cache → re-render.
 
-Hosts: `local` plus `DIRIGENT_HOSTS="name=ws://host:7777/ws,..."`, persisted in the cache `hosts` table. No UI to add hosts yet.
+Hosts: `local` (implicit, the embedded service) plus `$XDG_CONFIG_HOME/dirigent/hosts.toml` (`hosts.rs`):
+
+```toml
+[hosts]
+hetzner = "hetzner.tail1234.ts.net"   # host[:port] or ws://host:port/ws; port defaults to 7777
+```
+
+The file is the truth. The Hosts section of the Settings page (gear at the sidebar's bottom right) lists hosts with
+their status, adds one (name + address form) and removes one (hover ✕); both rewrite the file and then `sync_hosts` diffs it against
+the running connections — the same path that picks up hand edits when the page is opened. Removing a host
+(or changing its url) drops its connection and everything cached for it.
 
 ### Cache db
 
 ```sql
-hosts    (name TEXT PK, url TEXT)
 projects (host, id, path, origin, created_at, PRIMARY KEY (host, id))
 links    (host, project_id, group_key)             -- manual cross-host links (desktop-owned)
 threads  (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, last_run_ms, archived, PRIMARY KEY (host, id))
@@ -196,7 +205,7 @@ The sidebar groups projects across hosts: by normalized git origin automatically
 One `App` entity holding:
 
 - `hosts: Vec<HostState>` — `{ name, url, status: Disconnected | Connecting | Connected, threads: Vec<ThreadSummary> }`
-- `pane: Inbox | Workpool | Project { group_key } | NewProject { host } | Draft { target } | Thread(OpenThread)`
+- `pane: Inbox | Workpool | Project { group_key } | NewProject { host } | Settings | Draft { target } | Thread(OpenThread)`
 - `OpenThread` — entries + the `Timeline` folded from them + `streaming` (the in-flight message, running tools, echoed prompt)
 - `pending: Option<(req_id, text)>` — a sent draft waiting for `ThreadCreated` before it can `Prompt`
 - `sidebar_width` / `sidebar_hidden` / `sidebar_peek` — drag-resized width (persisted in `kv`), `[` toggles, hover on the left edge peeks
@@ -222,8 +231,8 @@ IBM Plex Mono only where the content is code (tool calls, results, model ids). S
 state (still accent dot / check / archive box) reused everywhere; no spinners.
 
 - `theme.rs` — palette, fonts, `Status`, and the shared widgets (icon button, button, chip, labeled chip, empty state).
-- `sidebar.rs` — title row with the compose button, Inbox / Workpool, each listing its threads (unread / working) as cards (`project, host … run time` / title / model, the run time live while working; a chevron on the nav row collapses them), project list (`+` on the section header adds one; `⋯` on a row: link/unlink, remove), removed-projects row, host status strip. `docked()` adds a drag handle on its right edge; `peek()` is the hidden state: a 10px hot zone on the window's left edge that grows into a floating copy while hovered.
-- `lists.rs` — the 40px header bar (breadcrumb + actions) and the three list pages. Rows: glyph, title, project, model, age; hover reveals archive.
+- `sidebar.rs` — title row with the compose button, Inbox / Workpool, each listing its threads (unread / working) as cards (`project, host … run time` / title / model, the run time live while working; a chevron on the nav row collapses them), project list (`+` on the section header adds one; `⋯` on a row: link/unlink, remove), removed-projects row, and a bottom bar with the hide/show button and the settings gear. `docked()` adds a drag handle on its right edge; `peek()` is the hidden state: a 10px hot zone on the window's left edge that grows into a floating copy while hovered.
+- `lists.rs` — the 40px header bar (breadcrumb + actions), the three list pages, the new-project form and the settings page (a narrow centered column of sections; Hosts for now). Rows: glyph, title, project, model, age; hover reveals archive.
 - `menu.rs` — the one popup (`Dirigent::menu`): model, effort, draft target, project actions, link target, host picker, delete confirm. Anchored to its trigger with `deferred(anchored())`.
 - `thread.rs` — header (breadcrumb, status, archive, delete) + `list()` of timeline items in a centered 720px reading column + the composer card. User messages are raised, replies are markdown prose, and each turn's _work_ is one line: `› model  effort  duration  n tool calls`, plus what it is doing right now while it runs (`· bash 3.2s`, `thinking`, `writing`, re-rendered every second). The transcript never shows the steps: clicking a work line (or `]`) opens `log_panel()`, a resizable panel split off the pane's right by a hairline, with the full log as a lazy `list()` of steps (`render_step`: thinking, interim prose, tool rows with elapsed time and the call's `timeout`; tool rows expand to all arguments and the output). On a live work the panel follows the latest step unless the user scrolled up (`FollowMode::Tail`), and an open panel follows the next prompt's run. `]` or Esc (when nothing runs) closes it; `]` with it closed opens the run in progress, else the last work. `draft_page()` is the same composer alone, centered in the pane, with a `Create thread in <project>` chip above it.
 - `markdown.rs` — `render(text, mono, keys)`: pulldown-cmark events → block `div`s (paragraph, heading, list, code block, blockquote, table, rule) and inline highlight runs on a `StyledText` (bold, italic, strikethrough, code in mono, links coloured but not clickable), each paragraph a selectable `select::Block`. Inherits size/colour/font from the caller, so it serves replies, user bubbles, and the mono work log alike. `committed(text)` is the prefix up to the last newline.
@@ -256,4 +265,4 @@ Fast-UX rules: thread switch renders cached entries synchronously then requests 
 
 All six phases are implemented.
 
-Out of scope for now: clickable links, forking/branch navigation, extension UI dialogs, images, auth, multi-window, adding hosts from the UI.
+Out of scope for now: clickable links, forking/branch navigation, extension UI dialogs, images, auth, multi-window, editing a host in place (remove and re-add, or edit `hosts.toml`).

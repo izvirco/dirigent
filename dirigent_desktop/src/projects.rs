@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 pub struct HostState {
     pub name: String,
+    pub url: String,
     pub status: HostStatus,
     pub projects: Vec<Project>,
     pub threads: Vec<ThreadSummary>,
@@ -118,7 +119,7 @@ mod tests {
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {
-        HostState { name: name.into(), status: HostStatus::Connected, projects, threads, models: vec![] }
+        HostState { name: name.into(), url: String::new(), status: HostStatus::Connected, projects, threads, models: vec![] }
     }
 
     #[test]

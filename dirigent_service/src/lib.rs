@@ -14,6 +14,7 @@ use anyhow::{Result, anyhow};
 use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -21,7 +22,7 @@ use storage::Storage;
 use tokio::sync::broadcast;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
-const DEFAULT_PORT: u16 = 7777;
+pub const DEFAULT_PORT: u16 = 7777;
 
 /// The local service's port: `DIRIGENT_PORT` or 7777. The desktop uses it both to reach and
 /// to embed the local service, so a test instance with its own port never touches the real one.
@@ -276,8 +277,30 @@ fn runtime_cmd() -> Result<Vec<String>> {
     Ok(vec!["bun".into(), "run".into(), path.to_string_lossy().into_owned()])
 }
 
-/// Run the service until the listener fails. Binds `0.0.0.0:<port>`; an `AddrInUse` error
-/// means another service already owns this host.
+/// Where the service listens: `DIRIGENT_BIND` (comma-separated IPs) if set, else loopback
+/// plus this machine's tailscale addresses, so a host is reachable from the tailnet and
+/// nowhere else. Never a wildcard: there is no auth.
+fn bind_addrs(port: u16) -> Vec<SocketAddr> {
+    let ips: Vec<IpAddr> = match std::env::var("DIRIGENT_BIND") {
+        Ok(list) => list.split(',').filter_map(|s| s.trim().parse().ok()).collect(),
+        Err(_) => std::iter::once(IpAddr::V4(Ipv4Addr::LOCALHOST)).chain(tailscale_ips()).collect(),
+    };
+    ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()
+}
+
+/// The tailnet addresses `tailscale ip` reports; none when tailscale isn't installed or up.
+fn tailscale_ips() -> Vec<IpAddr> {
+    std::process::Command::new("tailscale")
+        .arg("ip")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).lines().filter_map(|l| l.trim().parse().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Run the service until a listener fails. An `AddrInUse` error means another service
+/// already owns this host.
 pub async fn run(port: u16) -> Result<()> {
     let storage = Storage::open(&data_dir().join("service.db"))?;
     let (runtime, mut runtime_rx) = Runtime::start(runtime_cmd()?);
@@ -305,6 +328,5 @@ pub async fn run(port: u16) -> Result<()> {
         }
     });
 
-    // TODO: bind only to loopback + tailscale addresses.
-    server::serve(svc, &format!("0.0.0.0:{port}")).await
+    server::serve(svc, &bind_addrs(port)).await
 }

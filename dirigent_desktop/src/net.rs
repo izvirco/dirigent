@@ -1,8 +1,10 @@
 //! One WebSocket connection per host, on a dedicated tokio thread. Incoming
 //! messages update the cache and are forwarded to the UI through a channel;
-//! outgoing requests come from the UI through a per-host channel.
+//! outgoing requests come from the UI through a per-host channel. Hosts can be
+//! added and removed while running (`hosts.toml` edits).
 
 use crate::cache::Cache;
+use crate::hosts::LOCAL;
 use anyhow::Result;
 use dirigent_protocol::{ClientMessage, ServerMessage};
 use futures::{SinkExt, StreamExt};
@@ -31,27 +33,59 @@ pub type UiSender = futures::channel::mpsc::UnboundedSender<Incoming>;
 
 pub struct Net {
     hosts: HashMap<String, mpsc::UnboundedSender<ClientMessage>>,
+    control: mpsc::UnboundedSender<Control>,
+}
+
+/// To the net thread: start or stop a host's connection task.
+enum Control {
+    Add { name: String, url: String, rx: mpsc::UnboundedReceiver<ClientMessage> },
+    Remove(String),
 }
 
 impl Net {
     /// Spawn the tokio thread and one connection task per `(name, url)`.
     /// The `local` host gets an in-process service started for it if nothing is listening.
     pub fn start(hosts: Vec<(String, String)>, cache: Arc<Mutex<Cache>>, ui: UiSender) -> Self {
-        let mut senders = HashMap::new();
-        let mut tasks = Vec::new();
-        for (name, url) in hosts {
-            let (tx, rx) = mpsc::unbounded_channel();
-            senders.insert(name.clone(), tx);
-            tasks.push(host_loop(name, url, rx, cache.clone(), ui.clone()));
-        }
+        let (control, mut control_rx) = mpsc::unbounded_channel::<Control>();
         std::thread::Builder::new()
             .name("net".into())
             .spawn(move || {
                 let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-                rt.block_on(futures::future::join_all(tasks));
+                rt.block_on(async move {
+                    let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+                    while let Some(cmd) = control_rx.recv().await {
+                        match cmd {
+                            Control::Add { name, url, rx } => {
+                                let task = tokio::spawn(host_loop(name.clone(), url, rx, cache.clone(), ui.clone()));
+                                tasks.insert(name, task);
+                            }
+                            Control::Remove(name) => {
+                                if let Some(task) = tasks.remove(&name) {
+                                    task.abort();
+                                }
+                            }
+                        }
+                    }
+                });
             })
             .expect("spawn net thread");
-        Self { hosts: senders }
+        let mut net = Self { hosts: HashMap::new(), control };
+        for (name, url) in hosts {
+            net.add(name, url);
+        }
+        net
+    }
+
+    pub fn add(&mut self, name: String, url: String) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.hosts.insert(name.clone(), tx);
+        let _ = self.control.send(Control::Add { name, url, rx });
+    }
+
+    /// Drops the connection; the UI gets no final status for it.
+    pub fn remove(&mut self, name: &str) {
+        self.hosts.remove(name);
+        let _ = self.control.send(Control::Remove(name.to_owned()));
     }
 
     pub fn send(&self, host: &str, msg: ClientMessage) {
@@ -109,7 +143,7 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                 eprintln!("[net] {name}: connect {url}: {e}");
                 // Nothing listening locally: run the service in-process. It lives and dies
                 // with the desktop. If it exits (e.g. bind failed), the next refusal retries.
-                if name == "local" && embedded.as_ref().is_none_or(|h| h.is_finished()) {
+                if name == LOCAL && embedded.as_ref().is_none_or(|h| h.is_finished()) {
                     eprintln!("[net] starting embedded service on :{}", dirigent_service::port());
                     embedded = Some(tokio::spawn(async {
                         if let Err(e) = dirigent_service::run(dirigent_service::port()).await {

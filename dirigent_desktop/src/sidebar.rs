@@ -1,11 +1,11 @@
 //! Left pane on the window canvas: Inbox / Workpool, each listing its threads (unread /
-//! working) as small cards, the project list, and a host status strip at the bottom. Docked it has a drag handle on its right edge;
-//! hidden (`[`) it slides in as a floating panel while the mouse rests on the left edge.
+//! working) as small cards, the project list, and at the bottom the hide/show and settings
+//! buttons. Docked it has a drag handle on its right edge; hidden (`[` or the button) it
+//! slides in as a floating panel while the mouse rests on the left edge.
 
 use crate::app::{Dirigent, Menu, Pane, Resize, Section};
 use crate::icons::icon;
 use crate::menu::{self, Side};
-use crate::net::HostStatus;
 use crate::projects::{self, Group};
 use crate::theme;
 use crate::thread::duration;
@@ -31,9 +31,9 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Sidebar, cx)));
     // Inset by the main panel's gutter + border so the title row lines up with the panel's
     // header and the sidebar text sits at the same x as the panel's; same on the right so
-    // selected rows have equal margins.
+    // selected rows have equal margins, and at the bottom so the bottom bar mirrors the title.
     let inset = px(theme::GUTTER + 1.);
-    div().relative().w(px(this.sidebar_width)).h_full().flex_shrink_0().pt(inset).px(inset).child(content(this, cx)).child(handle)
+    div().relative().w(px(this.sidebar_width)).h_full().flex_shrink_0().py(inset).px(inset).child(content(this, cx)).child(handle)
 }
 
 /// Hidden sidebar: a hot zone on the left edge that, while hovered, grows into a floating
@@ -162,22 +162,22 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
             groups.is_empty().then(|| div().px_4().py_1().text_size(px(12.)).text_color(rgb(theme::FG_2)).child("Add a project with +")),
         );
 
-    let hosts_strip = div().flex().flex_row().flex_wrap().gap_3().px_4().py_3().children(this.hosts.iter().map(|host| {
-        let dot = match host.status {
-            HostStatus::Connected => theme::DONE,
-            HostStatus::Connecting => theme::WARN,
-            HostStatus::Disconnected => theme::ERROR,
-        };
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1p5()
-            .text_size(px(11.))
-            .text_color(rgb(theme::FG_2))
-            .child(div().size(px(6.)).rounded_full().bg(rgb(dot)))
-            .child(host.name.clone())
-    }));
+    // Bottom bar: hide / show the sidebar on the left, settings on the right.
+    let hidden = this.sidebar_hidden;
+    let panel_icon = if hidden { "panel-left-open" } else { "panel-left-close" };
+    let bottom = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        // Mirrors the title row: same height and right padding so the gear sits under the
+        // `+`; on the left the button's 6px inner inset is taken off so the glyph starts
+        // at the title's x.
+        .h(px(40.))
+        .pl(px(10.))
+        .pr_2()
+        .child(theme::icon_button("sidebar-toggle", panel_icon, cx, move |this, cx| this.set_sidebar_hidden(!hidden, cx)))
+        .child(theme::icon_button("settings", "settings", cx, |this, cx| this.show_settings(cx)));
 
     div()
         .id("sidebar")
@@ -186,7 +186,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .flex_col()
         .child(title_row)
         .child(div().id("nav").flex_1().overflow_y_scroll().child(nav).child(projects_section))
-        .child(hosts_strip)
+        .child(bottom)
 }
 
 /// A selectable sidebar row (28px). `selected` lifts the background. It has no right

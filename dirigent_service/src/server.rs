@@ -9,14 +9,19 @@ use axum::response::Response;
 use axum::routing::get;
 use dirigent_protocol::{ClientMessage, ServerMessage};
 use futures_util::{SinkExt, StreamExt};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
-pub async fn serve(svc: Arc<Service>, addr: &str) -> anyhow::Result<()> {
+/// Listen on every address (all bound before serving, so a taken port fails fast).
+pub async fn serve(svc: Arc<Service>, addrs: &[SocketAddr]) -> anyhow::Result<()> {
     let app = Router::new().route("/ws", get(upgrade)).with_state(svc);
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    eprintln!("[service] listening on ws://{addr}/ws");
-    axum::serve(listener, app).await?;
+    let mut listeners = Vec::new();
+    for addr in addrs {
+        listeners.push(tokio::net::TcpListener::bind(addr).await?);
+        eprintln!("[service] listening on ws://{addr}/ws");
+    }
+    futures_util::future::try_join_all(listeners.into_iter().map(|l| axum::serve(l, app.clone()).into_future())).await?;
     Ok(())
 }
 

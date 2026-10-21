@@ -2,6 +2,7 @@
 
 mod app;
 mod cache;
+mod hosts;
 mod icons;
 mod input;
 mod lists;
@@ -48,23 +49,8 @@ fn fonts() -> theme::Fonts {
     theme::Fonts { mono: font("DIRIGENT_FONT", "Lilex", "monospace", "DejaVu Sans Mono").into() }
 }
 
-/// `local` (on `DIRIGENT_PORT`, default 7777) plus any `DIRIGENT_HOSTS="name=ws://host:7777/ws,..."`
-/// entries, persisted in the cache.
-fn hosts(cache: &Cache) -> Vec<(String, String)> {
-    let _ = cache.upsert_host("local", &format!("ws://127.0.0.1:{}/ws", dirigent_service::port()));
-    if let Ok(extra) = std::env::var("DIRIGENT_HOSTS") {
-        for pair in extra.split(',').filter(|s| !s.is_empty()) {
-            if let Some((name, url)) = pair.split_once('=') {
-                let _ = cache.upsert_host(name.trim(), url.trim());
-            }
-        }
-    }
-    cache.hosts().unwrap_or_default()
-}
-
 fn main() {
     let cache = Cache::open(&data_dir().join("desktop.db")).expect("open cache");
-    let hosts = hosts(&cache);
     let fonts = fonts();
 
     application().with_assets(icons::Assets).run(move |cx: &mut App| {
@@ -90,7 +76,7 @@ fn main() {
                     titlebar: Some(TitlebarOptions { title: Some("Dirigent".into()), ..Default::default() }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Dirigent::new(cache, hosts, fonts, window, cx)),
+                |window, cx| cx.new(|cx| Dirigent::new(cache, fonts, window, cx)),
             )
             .unwrap();
         if std::env::var_os("DIRIGENT_DEBUG_KEYS").is_some() {

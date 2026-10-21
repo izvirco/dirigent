@@ -10,7 +10,6 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS hosts (name TEXT PRIMARY KEY, url TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS projects (
     host TEXT NOT NULL, id TEXT NOT NULL, path TEXT NOT NULL, origin TEXT, created_at INTEGER NOT NULL,
     PRIMARY KEY (host, id)
@@ -49,13 +48,11 @@ impl Cache {
         Ok(Self { conn })
     }
 
-    pub fn hosts(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT name, url FROM hosts ORDER BY name")?;
-        Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn upsert_host(&self, name: &str, url: &str) -> Result<()> {
-        self.conn.execute("INSERT OR REPLACE INTO hosts (name, url) VALUES (?1, ?2)", params![name, url])?;
+    /// Forget everything cached for a host that was removed from `hosts.toml`.
+    pub fn remove_host(&self, host: &str) -> Result<()> {
+        for table in ["projects", "links", "threads", "entries", "models", "seen"] {
+            self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
+        }
         Ok(())
     }
 

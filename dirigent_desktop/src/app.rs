@@ -3,6 +3,7 @@
 //! pages) and `thread.rs` (one thread + composer).
 
 use crate::cache::Cache;
+use crate::hosts;
 use crate::input::{self, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
 use crate::projects::{self, HostState, Links};
@@ -90,6 +91,8 @@ pub enum Pane {
     NewProject {
         host: String,
     },
+    /// Settings: remote hosts (`hosts.toml`) with their status, and the form to add one.
+    Settings,
     /// New-thread page: the composer alone, centered. The thread is created on the host
     /// when the first message is sent.
     Draft {
@@ -169,6 +172,9 @@ pub struct Dirigent {
     ticking: bool,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
+    /// The settings page's add-host form.
+    pub host_name_input: Entity<TextInput>,
+    pub host_url_input: Entity<TextInput>,
     /// Filter for the model picker's all-models page.
     pub model_search: Entity<TextInput>,
     /// Model (`provider/id`) and thinking level the next prompt is sent with.
@@ -200,17 +206,17 @@ pub struct Dirigent {
 }
 
 impl Dirigent {
-    pub fn new(cache: Cache, hosts: Vec<(String, String)>, fonts: Fonts, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let host_states = hosts
-            .iter()
-            .map(|(name, _)| HostState {
-                name: name.clone(),
-                status: HostStatus::Disconnected,
-                projects: cache.projects(name).unwrap_or_default(),
-                threads: cache.threads(name).unwrap_or_default(),
-                models: cache.models(name),
-            })
-            .collect();
+    pub fn new(cache: Cache, fonts: Fonts, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // `local` is the embedded service; the rest come from hosts.toml.
+        let mut hosts = vec![(hosts::LOCAL.to_owned(), format!("ws://127.0.0.1:{}/ws", dirigent_service::port()))];
+        let hosts_error = match hosts::load() {
+            Ok(remote) => {
+                hosts.extend(remote);
+                None
+            }
+            Err(e) => Some(format!("{e:#}")),
+        };
+        let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let seen = cache.seen().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
         let model = cache.get(LAST_MODEL_KEY);
@@ -236,6 +242,11 @@ impl Dirigent {
         cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(s.queued, window, cx)).detach();
         cx.subscribe_in(&composer, window, |this, _, p: &ImagePasted, window, cx| this.attach(p.0.clone(), window, cx)).detach();
         cx.subscribe_in(&path_input, window, |this, _, _: &Submitted, window, cx| this.add_project(window, cx)).detach();
+        let host_name_input = cx.new(|cx| TextInput::new(cx, "name", true));
+        let host_url_input = cx.new(|cx| TextInput::new(cx, "host:7777 or ws://host:7777/ws", true));
+        for input in [&host_name_input, &host_url_input] {
+            cx.subscribe_in(input, window, |this, _, _: &Submitted, window, cx| this.add_host(window, cx)).detach();
+        }
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
         cx.subscribe(&model_search, |this, _, _: &Submitted, cx| this.pick_first_model(cx)).detach();
 
@@ -255,6 +266,8 @@ impl Dirigent {
             ticking: false,
             composer,
             path_input,
+            host_name_input,
+            host_url_input,
             model_search,
             model,
             effort,
@@ -275,6 +288,9 @@ impl Dirigent {
             window: window.window_handle(),
         };
         this.restore_pane(cx);
+        if let Some(e) = hosts_error {
+            this.toast(e, cx);
+        }
         this
     }
 
@@ -572,6 +588,7 @@ impl Dirigent {
             Pane::Workpool => "workpool".to_owned(),
             Pane::Project { group_key } => format!("project\n{group_key}"),
             Pane::Thread(t) => format!("thread\n{}\n{}", t.host, t.id),
+            Pane::Settings => "settings".to_owned(),
             Pane::Draft { .. } | Pane::NewProject { .. } => return,
         };
         let _ = self.cache.lock().unwrap().set(PANE_KEY, &value);
@@ -583,6 +600,7 @@ impl Dirigent {
         let parts: Vec<&str> = value.split('\n').collect();
         match parts.as_slice() {
             ["workpool"] => self.pane = Pane::Workpool,
+            ["settings"] => self.pane = Pane::Settings,
             ["project", key] => self.pane = Pane::Project { group_key: (*key).to_owned() },
             ["thread", host, id] if self.summary(host, id).is_some() => {
                 let (host, id) = ((*host).to_owned(), (*id).to_owned());
@@ -766,6 +784,90 @@ impl Dirigent {
         let id = self.next_id();
         self.net.send(&host, ClientMessage::AddProject { id, path });
         self.path_input.update(cx, |input, cx| input.set_text("", window, cx));
+    }
+
+    // ---- hosts ----
+
+    /// The settings page; opening it also picks up hand edits to `hosts.toml`.
+    pub fn show_settings(&mut self, cx: &mut Context<Self>) {
+        self.show(Pane::Settings, cx);
+        self.sync_hosts(cx);
+        self.focus(self.host_name_input.focus_handle(cx), cx);
+    }
+
+    /// Make the connections match `hosts.toml`: drop hosts that are gone or whose url
+    /// changed (with everything cached for them), connect the new ones.
+    fn sync_hosts(&mut self, cx: &mut Context<Self>) {
+        let wanted = match hosts::load() {
+            Ok(h) => h,
+            Err(e) => return self.toast(format!("{e:#}"), cx),
+        };
+        let stale: Vec<String> =
+            self.hosts.iter().filter(|h| h.name != hosts::LOCAL && wanted.get(&h.name) != Some(&h.url)).map(|h| h.name.clone()).collect();
+        for name in stale {
+            self.net.remove(&name);
+            self.hosts.retain(|h| h.name != name);
+            self.links.retain(|(h, _), _| *h != name);
+            self.seen.retain(|(h, _), _| *h != name);
+            let _ = self.cache.lock().unwrap().remove_host(&name);
+            if self.open().is_some_and(|t| t.host == name) {
+                self.pane = Pane::Settings;
+            }
+        }
+        for (name, url) in wanted {
+            if self.host(&name).is_none() {
+                self.hosts.push(host_state(&self.cache.lock().unwrap(), &name, &url));
+                self.net.add(name, url);
+            }
+        }
+        cx.notify();
+    }
+
+    fn add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.host_name_input.read(cx).text().trim().to_owned();
+        let url = self.host_url_input.read(cx).text().trim().to_owned();
+        if name.is_empty() || url.is_empty() {
+            return;
+        }
+        if name == hosts::LOCAL {
+            return self.toast("`local` is this machine", cx);
+        }
+        let url = match hosts::normalize(&url) {
+            Ok(u) => u,
+            Err(e) => return self.toast(e.to_string(), cx),
+        };
+        self.edit_hosts(
+            |h| {
+                h.insert(name, url);
+            },
+            cx,
+        );
+        for input in [&self.host_name_input, &self.host_url_input] {
+            input.update(cx, |input, cx| input.set_text("", window, cx));
+        }
+        self.focus(self.host_name_input.focus_handle(cx), cx);
+    }
+
+    pub fn remove_host(&mut self, name: &str, cx: &mut Context<Self>) {
+        let name = name.to_owned();
+        self.edit_hosts(
+            |h| {
+                h.remove(&name);
+            },
+            cx,
+        );
+    }
+
+    /// Rewrite `hosts.toml` through `f`, then apply it.
+    fn edit_hosts(&mut self, f: impl FnOnce(&mut std::collections::BTreeMap<String, String>), cx: &mut Context<Self>) {
+        let result = hosts::load().and_then(|mut h| {
+            f(&mut h);
+            hosts::save(&h)
+        });
+        match result {
+            Ok(()) => self.sync_hosts(cx),
+            Err(e) => self.toast(format!("{e:#}"), cx),
+        }
     }
 
     pub fn remove_project(&mut self, host: &str, project_id: &str, cx: &mut Context<Self>) {
@@ -1092,7 +1194,11 @@ impl Dirigent {
         if self.typed_bracket("[", window, cx) {
             return;
         }
-        self.sidebar_hidden = !self.sidebar_hidden;
+        self.set_sidebar_hidden(!self.sidebar_hidden, cx);
+    }
+
+    pub fn set_sidebar_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        self.sidebar_hidden = hidden;
         self.sidebar_peek = false;
         cx.notify();
     }
@@ -1116,7 +1222,7 @@ impl Dirigent {
 
     /// A bracket key with text in the focused input types the bracket instead of acting.
     fn typed_bracket(&mut self, bracket: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        for input in [&self.composer, &self.path_input, &self.model_search] {
+        for input in [&self.composer, &self.path_input, &self.host_name_input, &self.host_url_input, &self.model_search] {
             if input.focus_handle(cx).is_focused(window) && !input.read(cx).text().is_empty() {
                 input.update(cx, |i, cx| i.replace_text_in_range(None, bracket, window, cx));
                 return true;
@@ -1354,6 +1460,18 @@ fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     let format = gpui::ImageFormat::from_mime_type(mime)?;
     let id = gpui::hash(&bytes);
     Some(Arc::new(gpui::Image { format, bytes, id }))
+}
+
+/// A host as the cache last saw it; the connection fills in the rest.
+fn host_state(cache: &Cache, name: &str, url: &str) -> HostState {
+    HostState {
+        name: name.to_owned(),
+        url: url.to_owned(),
+        status: HostStatus::Disconnected,
+        projects: cache.projects(name).unwrap_or_default(),
+        threads: cache.threads(name).unwrap_or_default(),
+        models: cache.models(name),
+    }
 }
 
 fn decode_blob(mime: &str, data: &str) -> Option<Arc<gpui::Image>> {

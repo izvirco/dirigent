@@ -14,8 +14,8 @@
 #   scripts/ui.sh reset                  stop and wipe the session's data (fresh service + desktop dbs)
 #
 # Each session (UI_SESSION, default "default") gets its own Xvfb display, service port and
-# XDG_DATA_HOME under /tmp/dirigent-ui/<session>. Nothing touches the real desktop, mouse,
-# keyboard, data or the service on :7777, and sessions can run in parallel.
+# XDG_DATA_HOME + XDG_CONFIG_HOME under /tmp/dirigent-ui/<session>. Nothing touches the real
+# desktop, mouse, keyboard, data, config or the service on :7777, and sessions can run in parallel.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
@@ -84,8 +84,9 @@ case "${1:-}" in
     DISPLAY=:$(cat "$DIR/display"); export DISPLAY
     PORT=$(free_port)
     mkdir -p "$DIR/data"
-    env -u WAYLAND_DISPLAY VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" XDG_DATA_HOME="$DIR/data" DIRIGENT_PORT="$PORT" \
-      setsid "$BIN" >"$DIR/app.log" 2>&1 </dev/null &
+    # Own config too (hosts.toml), and the embedded service stays off the tailnet.
+    env -u WAYLAND_DISPLAY VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" XDG_DATA_HOME="$DIR/data" XDG_CONFIG_HOME="$DIR/config" \
+      DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 setsid "$BIN" >"$DIR/app.log" 2>&1 </dev/null &
     echo $! >"$DIR/app.pid"
     WIN=$(timeout 20 xdotool search --sync --onlyvisible --class dirigent | head -1) ||
       { echo "window never appeared, see $DIR/app.log" >&2; exit 1; }
