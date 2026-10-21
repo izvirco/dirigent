@@ -364,26 +364,30 @@ fn step_of(b: &Value) -> Option<Step> {
     })
 }
 
-/// The answers in an `ask_user` reply's `details` as markdown: the question in bold, the
-/// answer under it; or the one-line dismissal.
+/// The answers in an `ask_user` reply's `details` as markdown (`answer_markdown`).
 fn answer_text(details: Option<&Value>) -> Option<String> {
     let d = details?;
-    let questions = d.get("questions")?.as_array()?;
-    let Some(answers) = d.get("answers").and_then(Value::as_array) else {
-        return Some("Dismissed the questions.".into());
-    };
-    let lines: Vec<String> = questions
-        .iter()
-        .enumerate()
-        .map(|(i, q)| {
-            let text = q.get("text").and_then(Value::as_str).unwrap_or("");
-            let picked: Vec<&str> = answers.get(i).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+    let questions = d.get("questions")?.as_array()?.iter().map(|q| q.get("text").and_then(Value::as_str).unwrap_or(""));
+    let answers: Option<Vec<Vec<String>>> = d
+        .get("answers")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|v| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()).collect());
+    Some(answer_markdown(questions, answers.as_ref().map(|a| a.iter().map(|v| v.as_slice()))))
+}
+
+/// The question in bold, the answer under it, per question; or the one-line dismissal.
+/// Shared by the persisted entry and the echo sent ahead of it, so the two look alike.
+fn answer_markdown<'a>(questions: impl Iterator<Item = &'a str>, answers: Option<impl Iterator<Item = &'a [String]>>) -> String {
+    let Some(mut answers) = answers else { return "Dismissed the questions.".into() };
+    questions
+        .map(|text| {
+            let picked = answers.next().unwrap_or(&[]);
             let answer = if picked.is_empty() { "_no answer_".to_owned() } else { picked.join(", ") };
             // A backslash before the newline is markdown's hard break.
             format!("**{text}**\\\n{answer}")
         })
-        .collect();
-    Some(lines.join("\n\n"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// One line for a finished `async_bash` job: `job cargo check · exit 1 · 12s`.
@@ -465,7 +469,9 @@ fn args_multiline(args: Option<&Value>) -> String {
 /// (replaced by the persisted entry when it lands), tools executing right now, and the
 /// optimistic echoes of sent messages with the mode each was sent in, oldest first. A
 /// prompt echo lives until its persisted user entry lands (`confirm_prompt`); steer and
-/// follow-up echoes are replaced by pi's own queues on every `queue_update`.
+/// follow-up echoes are replaced by pi's own queues on every `queue_update`. Answers to
+/// `ask_user` are steers too, but pi's queues don't list custom messages, so they echo
+/// in `answers` (by ask id) until their `dirigent:answer` entry lands (`confirm_answer`).
 ///
 /// Text streams in word by word but is shown a line at a time (`markdown::committed`), so
 /// a delta only counts as a visible change once it completes a line.
@@ -475,9 +481,24 @@ pub struct Streaming {
     /// (tool call id, started at unix ms)
     pub running_tools: Vec<(String, i64)>,
     pub echo: Vec<(String, PromptMode)>,
+    /// (ask id, the answers as `answer_text` renders them)
+    pub answers: Vec<(String, String)>,
 }
 
 impl Streaming {
+    /// The user answered an ask: show it as a pending steer until pi delivers it.
+    pub fn echo_answer(&mut self, ask_id: &str, questions: &[dirigent_protocol::Question], answers: Option<&[Vec<String>]>) {
+        let text = answer_markdown(questions.iter().map(|q| q.text.as_str()), answers.map(|a| a.iter().map(|v| v.as_slice())));
+        self.answers.push((ask_id.to_owned(), text));
+    }
+
+    /// Its `dirigent:answer` entry landed: the echo goes.
+    pub fn confirm_answer(&mut self, entry: &Value) {
+        if let Some(id) = entry.pointer("/details/ask_id").and_then(Value::as_str) {
+            self.answers.retain(|(a, _)| a != id);
+        }
+    }
+
     /// A persisted user message started a run: drop the oldest prompt echo.
     pub fn confirm_prompt(&mut self) {
         if let Some(i) = self.echo.iter().position(|(_, m)| *m == PromptMode::Prompt) {
@@ -542,6 +563,7 @@ impl Streaming {
                 self.steps.clear();
                 self.running_tools.clear();
                 self.echo.clear();
+                self.answers.clear();
                 true
             }
             _ => false,

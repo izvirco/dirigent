@@ -1,7 +1,8 @@
 // Dirigent's own tools: `async_bash` runs a command in the background and tells the model
 // when it ends; `ask_user` puts questions in front of the user as a form in the desktop.
 // Both return at once. The outcome reaches the model later as a custom message through
-// pi's steer / follow-up queues (`notify`), which also wakes an idle agent for a new turn.
+// pi's steer / follow-up queues, which also wakes an idle agent for a new turn. A job picks
+// how it interrupts (`notify`); the user's answers are user input and always steer.
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
@@ -30,7 +31,6 @@ export interface Question {
 export interface Ask {
   id: string;
   questions: Question[];
-  notify: Notify;
 }
 
 /** A background command. Lives as long as its session; the log file outlives both. */
@@ -77,7 +77,7 @@ const TAIL_CHARS = 4000;
 const notifyParam = Type.Optional(
   Type.Union([Type.Literal("asap"), Type.Literal("when_idle")], {
     description:
-      'When to tell you about the outcome: "asap" (default) interrupts you after your current tool calls; "when_idle" waits until you have ended your turn.',
+      'When the result reaches you: "asap" (default) after your current tool calls, "when_idle" once your turn has ended.',
   }),
 );
 
@@ -85,12 +85,10 @@ const asyncBashParams = Type.Object({
   action: Type.Optional(
     Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("kill")], {
       description:
-        '"start" (default) runs `command`; "status" reports on `job_id` (or every job); "kill" stops `job_id`.',
+        '"start" (default) runs `command`; "status" reports on `job_id` (or all jobs); "kill" stops `job_id`.',
     }),
   ),
-  command: Type.Optional(
-    Type.String({ description: "Shell command to run in the background (bash)." }),
-  ),
+  command: Type.Optional(Type.String({ description: "Bash command to run in the background." })),
   job_id: Type.Optional(Type.String({ description: "The job to report on or kill." })),
   notify: notifyParam,
 });
@@ -115,7 +113,6 @@ const askUserParams = Type.Object({
     }),
     { minItems: 1 },
   ),
-  notify: notifyParam,
 });
 
 /** The two tools, bound to `host`. Both are registered on every session; `tools` picks the active ones. */
@@ -124,13 +121,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "async_bash",
     label: "Background command",
     description:
-      "Run a shell command in the background and carry on working. Returns at once with a job id and the path of " +
-      "its log file; a command that ends within two seconds is reported right away instead. When a job ends you " +
-      "receive a message with its exit code, how long it took, the log path and the last lines of output, so a " +
-      "successful run usually needs no further action and a failed one tells you where to read. Use it for " +
-      "builds, test suites, long scripts and servers; use `bash` when you need the output before your next step. " +
-      "Jobs end with the thread's session.",
-    promptSnippet: "Run a command in the background and be told when it finishes",
+      "Run a command in the background. Returns at once with a job id and log path; when the job ends you get a " +
+      "message with its exit code and the last lines of output. For builds, tests and servers; use `bash` when " +
+      "you need the output before your next step.",
+    promptSnippet: "Run a command in the background; a message tells you when it ends",
     parameters: asyncBashParams,
     async execute(_id, params) {
       const action = params.action ?? "start";
@@ -155,18 +149,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "ask_user",
     label: "Ask the user",
     description:
-      "Ask the user one or more questions. They see a form: each question with its options (single or multiple " +
-      "choice), a text field where you allow a custom answer, or a text field alone when there are no options. " +
-      "Returns at once; the answers come to you as a message, so keep working on what does not depend on them, " +
-      "or end your turn to wait. The user may dismiss the questions instead of answering.",
-    promptSnippet: "Ask the user questions (options or free text); answers arrive as a message",
+      "Ask the user one or more questions, shown as a form. Returns at once; the answers arrive as a message, so " +
+      "keep working on what does not depend on them, or end your turn to wait.",
+    promptSnippet: "Ask the user questions; the answers arrive as a message",
     parameters: askUserParams,
     async execute(_id, params) {
-      const ask: Ask = {
-        id: shortId(),
-        questions: params.questions,
-        notify: params.notify ?? "asap",
-      };
+      const ask: Ask = { id: shortId(), questions: params.questions };
       host.onAsk(ask);
       return text(
         `Asked the user (ask ${ask.id}). Their answers arrive as a message; continue with other work or end your turn to wait.`,
@@ -196,7 +184,7 @@ export function deliverAnswers(
     customType: "dirigent:answer",
     content,
     details: { ask_id: ask.id, questions: ask.questions, answers },
-    notify: ask.notify,
+    notify: "asap",
   });
 }
 

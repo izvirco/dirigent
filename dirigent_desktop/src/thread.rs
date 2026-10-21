@@ -11,8 +11,10 @@
 //! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
 //! over the list's left edge: one mark per message, hover to preview, click to jump.
 //! Messages can be pinned (the button next to `copy`); pins colour their marks.
-//! Questions the model asked (`ask_user`) sit as a form above the composer (`ask_card`)
-//! until they are answered or dismissed.
+//! Questions the model asked (`ask_user`) float above the composer (`ask_card`), out of the
+//! transcript's flow, until they are answered or dismissed. Steers (typed, or the answers
+//! to an ask) are user bubbles: `steer · pending` below the work line while pi holds them,
+//! `steer` above it once the model has them.
 
 use crate::app::{AskForm, Dirigent, Menu, OpenThread, Pane, Resize, Target};
 use crate::icons::icon;
@@ -98,7 +100,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(status.glyph())
                 .child(status.label()),
         )
-        .when(matches!(status, Status::Done | Status::Snoozed), |d| {
+        .when(matches!(status, Status::Asking | Status::Done | Status::Snoozed), |d| {
             // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
             d.child(theme::tinted_icon_button(
                 "hdr-snooze",
@@ -140,7 +142,35 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().w_full())
                 .child(ruler::render(this, cx)),
         )
-        .child(div().w_full().flex().flex_col().items_center().gap_3().px_6().pb_5().pt_2().children(asks).child(composer(this, cx)));
+        .child(
+            // The ask stack is a zero-height layer at the composer's top edge that grows
+            // upward (`justify_end`), so it covers the transcript instead of pushing it.
+            div()
+                .relative()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .px_6()
+                .pb_5()
+                .pt_2()
+                .child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h_0()
+                        .px_6()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_end()
+                        .gap_2()
+                        .children(asks),
+                )
+                .child(composer(this, cx)),
+        );
     let titling = this.titling(&host, &id);
     pane.child(header(breadcrumb(project, title, pinned, titling, cx), Some(actions)))
         .child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
@@ -372,48 +402,63 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         )
 }
 
-/// One `ask_user` call as a compact form, four fifths of the composer's width: a numbered
-/// tab per question (accent while shown, a check once answered), the shown question with
-/// each option on its own row (a circle for one choice, a square for several) and, where
-/// the question takes typed text, a row holding the text field. `Next` moves on (Enter in
-/// the field too); once every question has an answer `Answer` takes its place. `Dismiss`
-/// is always there. Goes grey once sent, until the host confirms and the card leaves.
+/// One `ask_user` call as a stack of cards, nine tenths of the composer's width. The
+/// question being answered is a card on top: each option on its own row (a circle for one
+/// choice, a square for several) and, where the question takes typed text, a row holding
+/// the text field. The other questions are collapsed to one-line rows in their order:
+/// answered ones above the card with a check and their answer, the rest below it, each
+/// a step further in and fainter, like a pile of notifications. Clicking a row opens it.
+/// `Next` (Enter in the field too) opens the next unanswered question; once every one
+/// has an answer `Answer` takes its place. `Dismiss` is always there, in the header.
+/// Goes grey once sent, until the host confirms and the card leaves.
 fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let ask_id = form.ask.id.clone();
     let (qi, q) = (form.current, &form.ask.questions[form.current]);
-    let last = qi + 1 == form.ask.questions.len();
     let complete = form.complete(cx);
+    let answers = form.answers(cx);
 
-    let tabs = (0..form.ask.questions.len()).map(|i| {
-        let (shown, answered) = (i == qi, form.answered(i, cx));
+    // A collapsed question: its text, and its answer once it has one.
+    let collapsed = |i: usize, depth: usize| {
+        let question = &form.ask.questions[i];
+        let answer = answers[i].join(", ");
+        let done = !answer.is_empty();
         let ask_id = ask_id.clone();
         div()
-            .id(ElementId::Name(format!("ask/{}/tab/{i}", form.ask.id).into()))
-            .h(px(20.))
-            .min_w(px(20.))
-            .px_1p5()
+            .id(ElementId::Name(format!("ask/{}/row/{i}", form.ask.id).into()))
+            .h(px(24.))
+            .ml(px(6. * depth as f32))
+            .px_2()
             .flex()
+            .flex_row()
             .items_center()
-            .justify_center()
-            .gap_1()
+            .gap_2()
             .rounded_md()
             .cursor_pointer()
-            .text_size(px(11.5))
-            .bg(rgba(if shown { t.accent } else { t.hover }))
-            .text_color(rgba(if shown { t.fg } else { t.fg_1 }))
-            .hover(move |d| d.bg(rgba(if shown { t.accent_active } else { t.line })))
+            .bg(rgba(t.hover))
+            .opacity(1. - 0.15 * depth as f32)
+            .text_size(px(12.))
+            .hover(move |d| d.bg(rgba(t.line)).opacity(1.))
             .on_click(cx.listener(move |this, _, _, cx| this.show_ask_tab(&ask_id, i, cx)))
-            .child(format!("{}", i + 1))
-            .when(answered && !shown, |d| d.child(icon("check", t.done).size(px(10.))))
-    });
+            .child(if done {
+                icon("check", t.done).size(px(11.)).into_any_element()
+            } else {
+                div().size(px(11.)).flex_shrink_0().rounded_full().border_1().border_color(rgba(t.fg_2)).into_any_element()
+            })
+            .child(div().min_w_0().truncate().text_color(rgba(if done { t.fg_1 } else { t.fg })).child(question.text.clone()))
+            .when(done, |d| {
+                d.child(div().flex_1()).child(div().flex_shrink_0().max_w(relative(0.5)).truncate().text_color(rgba(t.fg)).child(answer))
+            })
+    };
+    let above: Vec<_> = (0..qi).map(|i| collapsed(i, 0)).collect();
+    let below: Vec<_> = (qi + 1..form.ask.questions.len()).enumerate().map(|(k, i)| collapsed(i, k)).collect();
 
     // An option row: the mark (filled while picked), then the label or the text field.
     let option_row = |id: ElementId, on: bool, multi: bool, body: AnyElement| {
         let mark = div()
             .size(px(11.))
             .flex_shrink_0()
-            .when(multi, |d| d.rounded_sm())
+            .when(multi, |d| d.rounded(px(2.)))
             .when(!multi, |d| d.rounded_full())
             .border_1()
             .border_color(rgba(if on { t.accent_line } else { t.fg_2 }))
@@ -458,13 +503,10 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
         .on_click(cx.listener(move |this, _, _, cx| this.show_ask_tab(&focus_id, qi, cx)))
     });
 
-    let dismiss_id = ask_id.clone();
-    let dismiss = theme::button(format!("ask-dismiss/{ask_id}"), "x", "Dismiss")
-        .on_click(cx.listener(move |this, _, _, cx| this.dismiss_ask(&dismiss_id, cx)));
-    // `Next` until the last question; `Answer` once every question has something.
-    let (label, primary) = if complete { ("Answer", true) } else { ("Next", !last) };
+    // `Next` while another question waits for an answer; `Answer` once none does.
+    let next = form.next_unanswered(cx).is_some();
     let next_id = ask_id.clone();
-    let action = (complete || !last).then(|| {
+    let action = (complete || next).then(|| {
         div()
             .id(ElementId::Name(format!("ask-next/{ask_id}").into()))
             .h(px(24.))
@@ -475,23 +517,52 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
             .rounded_md()
             .cursor_pointer()
             .text_size(px(12.))
-            .bg(rgba(if primary { t.accent } else { t.hover }))
+            .bg(rgba(if complete { t.accent } else { t.hover }))
             .text_color(rgba(t.fg))
             .font_weight(FontWeight::MEDIUM)
-            .hover(move |d| d.bg(rgba(if primary { t.accent_active } else { t.line })))
+            .hover(move |d| d.bg(rgba(if complete { t.accent_active } else { t.line })))
             .on_click(cx.listener(move |this, _, _, cx| this.next_ask_tab(&next_id, cx)))
-            .child(label)
+            .child(if complete { "Answer" } else { "Next" })
             .when(!complete, |d| d.child(icon("chevron-right", t.fg).size(px(11.))))
     });
+    let card = div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .px_2()
+        .pt_2()
+        .pb_1p5()
+        .rounded_md()
+        .bg(rgba(t.popup))
+        .border_1()
+        .border_color(rgba(t.line))
+        .shadow_sm()
+        .child(div().px_2().text_size(px(13.)).line_height(px(19.)).child(q.text.clone()))
+        .child(div().flex().flex_col().gap_0p5().children(options).children(custom))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_end()
+                .child(div().text_size(px(11.5)).text_color(rgba(t.fg_2)).child(format!("{} of {}", qi + 1, form.ask.questions.len())))
+                .child(div().flex_1())
+                .children(action),
+        );
+
+    let dismiss_id = ask_id.clone();
+    let dismiss = theme::button(format!("ask-dismiss/{ask_id}"), "x", "Dismiss")
+        .on_click(cx.listener(move |this, _, _, cx| this.dismiss_ask(&dismiss_id, cx)));
 
     div()
         .w_full()
-        .max_w(px(theme::COMPOSER * 0.8))
+        .max_w(px(theme::COMPOSER * 0.9))
         .flex()
         .flex_col()
-        .gap_2()
+        .gap_1()
         .px_3()
-        .py_2p5()
+        .pt_2()
+        .pb_2p5()
         .rounded(px(CORNER))
         .bg(rgba(t.raised))
         .shadow_md()
@@ -501,16 +572,17 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
                 .flex()
                 .flex_row()
                 .items_center()
-                .gap_1()
+                .gap_2()
+                .mb_1()
                 .text_size(px(12.))
                 .text_color(rgba(t.fg_1))
                 .child(icon("message-circle-question", t.warn))
-                .child(div().mr_2().child("The agent asks"))
-                .children(tabs),
+                .child(div().flex_1().child("The agent asks"))
+                .child(dismiss),
         )
-        .child(div().text_size(px(13.)).line_height(px(19.)).child(q.text.clone()))
-        .child(div().flex().flex_col().gap_0p5().children(options).children(custom))
-        .child(div().flex().flex_row().items_center().justify_end().gap_1p5().child(dismiss).children(action))
+        .children(above)
+        .child(card)
+        .children(below)
 }
 
 /// Thumbnails of the images referenced from the composer text, under it. Click one to see
@@ -666,8 +738,8 @@ fn stats_card(t: &OpenThread) -> AnyElement {
 }
 
 /// One list item: a timeline item, or (last index) the live tail: the optimistic echoes of
-/// sent messages (prompts above the work in progress, follow-ups below it; steers are
-/// steps of it), the work and its latest prose. Everything sits in the reading column.
+/// sent messages (prompts above the work in progress, follow-ups below it), the work and
+/// its latest prose, then the steers pi still holds. Everything sits in the reading column.
 /// Also what `Dirigent::copy_selection` calls to collect an item's text.
 pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
@@ -688,10 +760,14 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             col = col.child(user_bubble(text, &[], TAIL, t, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
-            col = col.child(work_block(&work, key, true, t, now, keys, cx));
+            col = col.child(work_block(&work, key, true, t, now, &fonts, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, &fonts, keys, cx));
+            }
+            // Pending steers last: the newest user input, closest to the composer.
+            for (_, text, _) in work.steers().filter(|(_, _, queued)| *queued) {
+                col = col.child(steer_bubble(text, true, t, &fonts, keys, cx));
             }
         }
         for text in echo(PromptMode::FollowUp) {
@@ -720,7 +796,7 @@ fn last_prompt_at(t: &OpenThread, now: i64) -> i64 {
 /// rather than when the host confirms the run.
 fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
     let Pane::Thread(t) = &this.pane else { return None };
-    if !this.is_running() && t.streaming.echo.is_empty() {
+    if !this.is_running() && t.streaming.echo.is_empty() && t.streaming.answers.is_empty() {
         return None;
     }
     let (key, mut work) = match t.timeline.open_work() {
@@ -734,8 +810,9 @@ fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
             (TAIL, Work { model: this.model.clone(), effort: this.effort.clone(), started, ..Default::default() })
         }
     };
-    // Steers pi still holds show as queued steps of the run.
+    // Steers pi still holds (typed, or answers on their way) show as queued steps of the run.
     work.steps.extend(t.streaming.queued_steers().map(|text| Step::Steer { text: text.to_owned(), queued: true }));
+    work.steps.extend(t.streaming.answers.iter().map(|(_, text)| Step::Steer { text: text.clone(), queued: true }));
     work.steps.extend(t.streaming.steps.iter().filter_map(|s| match s {
         Step::Text(x) => x.contains('\n').then(|| Step::Text(markdown::committed(x).to_owned())),
         Step::Thinking(x) => x.contains('\n').then(|| Step::Thinking(markdown::committed(x).to_owned())),
@@ -760,7 +837,7 @@ fn render_timeline_item(
             let images: Vec<_> = images.iter().map(|id| blobs.get(id).cloned()).collect();
             user_bubble(text, &images, ix, t, fonts, keys, cx).into_any()
         }
-        Item::Work(w) => work_block(w, ix, false, t, now, keys, cx).into_any(),
+        Item::Work(w) => work_block(w, ix, false, t, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
@@ -887,18 +964,78 @@ fn user_bubble(
         .children(corner_buttons(ix, text, t, cx).map(|b| b.top_2().right_2()))
 }
 
-/// A turn's work in the transcript: the work line, then every steer the user sent during
-/// it, so they stay visible after the run (the model's prose comes and goes).
-fn work_block(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
-    let steers: Vec<_> = w.steers().map(|(six, text, queued)| steer_row((key, six), text, queued, keys, cx)).collect();
-    div().w_full().flex().flex_col().child(work_line(w, key, live, t, now, cx)).children(steers)
+/// A turn's work in the transcript: the steers the model has already taken (user bubbles,
+/// kept after the run) and then the work line. Pending steers are rendered by the tail.
+#[allow(clippy::too_many_arguments)]
+fn work_block(
+    w: &Work,
+    key: usize,
+    live: bool,
+    t: &OpenThread,
+    now: i64,
+    fonts: &Fonts,
+    keys: &mut Keys,
+    cx: &mut Context<Dirigent>,
+) -> Div {
+    let taken: Vec<_> =
+        w.steers().filter(|(_, _, queued)| !queued).map(|(_, text, _)| steer_bubble(text, false, t, fonts, keys, cx)).collect();
+    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, t, now, cx))
 }
 
-/// A steer as a user tool call: `steer` tinted, the message, and `queued` at the right
-/// (where a tool's time sits) until pi hands it to the model, with `cancel` revealed on
-/// hover just before it.
-fn steer_row(key: (usize, usize), text: &str, queued: bool, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
-    let cancel = queued.then(|| {
+/// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
+/// typed steer pi still holds) at the right until the model has it. Answers to an ask are
+/// steers too, but can't be cancelled: the host already has them.
+fn steer_bubble(text: &str, pending: bool, t: &OpenThread, fonts: &Fonts, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
+    let cancelable = pending && t.streaming.queued_steers().any(|s| s == text);
+    let cancel = cancelable.then(|| {
+        let text = text.to_owned();
+        div()
+            .id(ElementId::Name(format!("steer-cancel/{}", gpui::hash(&text)).into()))
+            .cursor_pointer()
+            .text_color(rgba(theme::t().fg_2))
+            .hover(|d| d.text_color(rgba(theme::t().error)))
+            .opacity(0.)
+            .group_hover("msg", |d| d.opacity(1.))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.cancel_queued(text.clone(), cx);
+            }))
+            .child("cancel")
+    });
+    let label = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .mb_1()
+        .text_size(px(11.5))
+        .line_height(px(14.))
+        .child(div().text_color(rgba(theme::t().accent_ink)).child("steer"))
+        .child(div().flex_1())
+        .children(cancel)
+        .when(pending, |d| d.child(div().text_color(rgba(theme::t().fg_2)).child("pending")));
+    div()
+        .group("msg")
+        .relative()
+        .mx(px(-BUBBLE_PAD))
+        .my_2()
+        .px(px(BUBBLE_PAD))
+        .py_2p5()
+        .rounded_lg()
+        .bg(rgba(theme::t().bubble))
+        .when(pending, |d| d.opacity(0.7))
+        .font_family(fonts.prose.clone())
+        .text_size(px(14.))
+        .line_height(px(22.))
+        .child(label)
+        .child(markdown::render(text, &fonts.mono, keys))
+}
+
+/// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
+/// tool's time sits) until pi hands it to the model, with `cancel` revealed on hover just
+/// before it (typed steers only; see `steer_bubble`).
+fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
+    let cancel = (queued && t.streaming.queued_steers().any(|s| s == text)).then(|| {
         let text = text.to_owned();
         div()
             .id(ElementId::NamedInteger(SharedString::from("steer-cancel"), step_id_n(key)))
@@ -1061,7 +1198,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         Step::Thinking(text) => div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys)).into_any(),
         Step::Text(text) => div().py_0p5().text_color(rgba(theme::t().fg)).child(markdown::render(text, mono, keys)).into_any(),
         Step::Tool(call) => render_tool(call, (key, six), t, now_ms(), keys, cx),
-        Step::Steer { text, queued } => steer_row((key, six), text, *queued, keys, cx).into_any(),
+        Step::Steer { text, queued } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
         // A job notice in the row voice: `job` where a tool's name goes, red when it failed.
         Step::Notice(text) => {
             let failed = text.contains("exit ") && !text.contains("exit 0");

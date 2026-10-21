@@ -292,7 +292,7 @@ fn nav_row(
 }
 
 /// A thread under Inbox / Workpool: `project, host … elapsed` / title / model. The title
-/// is accent-colored while the thread is unread and led by an amber pin while pinned. Hovering a finished thread swaps its run
+/// is amber while the model waits on an answer, accent while the thread is unread, and led by an amber pin while pinned. Hovering a finished thread swaps its run
 /// time for a snooze button, which drops it from the sidebar until its next run.
 fn thread_card(
     host: &str,
@@ -316,7 +316,7 @@ fn thread_card(
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
     // Run time and snooze button are stacked so swapping them on hover doesn't shift layout.
-    let snooze = (theme::Status::of(t) == theme::Status::Done).then(|| {
+    let snooze = theme::Status::of(t).finished().then(|| {
         let (h, id) = (h.clone(), id.clone());
         div()
             .id(SharedString::from(format!("snooze/{h}/{id}")))
@@ -366,8 +366,8 @@ fn thread_card(
                 .items_center()
                 .gap_1()
                 .min_w_0()
-                .text_color(rgba(if unread { theme::t().accent_ink } else { theme::t().fg }))
-                .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                .text_color(rgba(this.title_color(host, t)))
+                .when(unread || t.asking(), |d| d.font_weight(FontWeight::MEDIUM))
                 .children(pinned.then(theme::pin_mark))
                 .child(theme::title_text(title_id, title, titling)),
         )

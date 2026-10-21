@@ -113,6 +113,12 @@ impl AskForm {
         (0..self.ask.questions.len()).all(|i| self.answered(i, cx))
     }
 
+    /// The next question after the shown one (wrapping) that still has no answer.
+    pub fn next_unanswered(&self, cx: &App) -> Option<usize> {
+        let n = self.ask.questions.len();
+        (1..n).map(|k| (self.current + k) % n).find(|&i| !self.answered(i, cx))
+    }
+
     /// One list per question: the picked options in order, then the typed text.
     pub fn answers(&self, cx: &App) -> Vec<Vec<String>> {
         self.ask
@@ -459,6 +465,18 @@ impl Dirigent {
         Status::of(t).finished() && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
     }
 
+    /// A thread's title colour in the sidebar and lists: amber while the model waits on an
+    /// answer, accent while unread, else `fg`.
+    pub fn title_color(&self, host: &str, t: &ThreadSummary) -> u32 {
+        if t.asking() {
+            theme::t().warn
+        } else if self.unread(host, t) {
+            theme::t().accent_ink
+        } else {
+            theme::t().fg
+        }
+    }
+
     /// Snoozed and not run since: hidden from the inbox.
     pub fn snoozed(&self, host: &str, t: &ThreadSummary) -> bool {
         self.snoozed.get(&(host.to_owned(), t.id.clone())).is_some_and(|&u| t.updated_at <= u)
@@ -741,6 +759,9 @@ impl Dirigent {
                         // dropped its echo (see `Timeline::push_message`, `Streaming::apply`).
                         Some("user") if t.timeline.open_work().is_none() => t.streaming.confirm_prompt(),
                         _ => {}
+                    }
+                    if entry.json.get("customType").and_then(serde_json::Value::as_str) == Some("dirigent:answer") {
+                        t.streaming.confirm_answer(&entry.json);
                     }
                     let n = t.timeline.items.len();
                     let changed = t.timeline.push(&entry.json);
@@ -1219,13 +1240,14 @@ impl Dirigent {
         }
     }
 
-    /// `Next` (and Enter in a text field): the next question, or send once every one is answered.
+    /// `Next` (and Enter in a text field): the next unanswered question, or send once
+    /// every one is answered.
     pub fn next_ask_tab(&mut self, ask_id: &str, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &self.pane else { return };
         let Some(form) = t.asks.iter().find(|f| f.ask.id == ask_id && !f.sent) else { return };
-        let (current, last, complete) = (form.current, form.ask.questions.len() - 1, form.complete(cx));
-        if current < last {
-            self.show_ask_tab(ask_id, current + 1, cx);
+        let (next, complete) = (form.next_unanswered(cx), form.complete(cx));
+        if let Some(i) = next {
+            self.show_ask_tab(ask_id, i, cx);
         } else if complete {
             self.answer_ask(ask_id, cx);
         }
@@ -1240,12 +1262,16 @@ impl Dirigent {
         self.send_ask(ask_id, false, cx);
     }
 
+    /// Also echoes the answers as a pending steer in the tail (see `Streaming::answers`).
     fn send_ask(&mut self, ask_id: &str, answer: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
         let Some(form) = t.asks.iter_mut().find(|f| f.ask.id == ask_id && !f.sent) else { return };
         form.sent = true;
         let answers = answer.then(|| form.answers(cx));
+        t.streaming.echo_answer(ask_id, &form.ask.questions, answers.as_deref());
+        let tail = t.timeline.items.len();
+        t.list.remeasure_items(tail..tail + 1);
         let (host, thread_id) = (t.host.clone(), t.id.clone());
         self.net.send(&host, ClientMessage::Answer { id, thread_id, ask_id: ask_id.to_owned(), answers });
         self.focus_composer(cx);

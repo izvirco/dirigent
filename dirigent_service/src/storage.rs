@@ -443,11 +443,8 @@ mod tests {
         assert!(s.thread_tools("t1").unwrap().is_empty());
         s.set_tools("t1", &["ask_user".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["ask_user"]);
-        let ask = Ask {
-            id: "a1".into(),
-            questions: vec![Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false }],
-            notify: "asap".into(),
-        };
+        let ask =
+            Ask { id: "a1".into(), questions: vec![Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false }] };
         s.add_ask("t1", &ask, 5).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].asks, vec![ask.clone()]);
         assert_eq!(s.take_ask("t1", "a1").unwrap(), Some(ask));

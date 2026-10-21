@@ -194,14 +194,11 @@ pub enum ServerMessage {
     },
 }
 
-/// Questions the model put to the user with `ask_user`, waiting for an answer. `notify` is
-/// how the runtime queues the answer for the model (`asap` / `when_idle`); clients ignore it.
+/// Questions the model put to the user with `ask_user`, waiting for an answer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ask {
     pub id: String,
     pub questions: Vec<Question>,
-    #[serde(default)]
-    pub notify: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -428,7 +425,6 @@ mod tests {
             asks: vec![Ask {
                 id: "a1".into(),
                 questions: vec![Question { text: "db?".into(), options: vec!["pg".into()], allow_custom: true, multi: false }],
-                notify: "asap".into(),
             }],
         };
         assert!(t.asking());
