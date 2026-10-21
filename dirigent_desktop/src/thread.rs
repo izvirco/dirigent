@@ -7,9 +7,10 @@
 //! turn (`model effort · duration · n tool calls · what it's doing now`). The transcript
 //! never shows the steps themselves: clicking a work line (or `]`) opens `log_panel`, a
 //! resizable panel on the pane's right with the full log, so the reading column only ever
-//! grows. While a
-//! run goes on, the model's latest prose streams below its work line a line at a time; the
-//! next prose, or the final reply, replaces it.
+//! grows. While a run goes on, the model's latest prose streams below its work line a line
+//! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
+//! over the list's left edge: one mark per message, hover to preview, click to jump.
+//! Messages can be pinned (the button next to `copy`); pins colour their marks.
 
 use crate::app::{Dirigent, Menu, OpenThread, Pane, Resize, Target};
 use crate::icons::icon;
@@ -18,6 +19,7 @@ use crate::markdown;
 use crate::menu::{self, Side};
 use crate::picker;
 use crate::projects;
+use crate::ruler;
 use crate::select::{Doc, Keys};
 use crate::theme::{self, Status};
 use crate::view::{Item, Step, ToolCall, Work};
@@ -105,7 +107,17 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .h_full()
         .flex()
         .flex_col()
-        .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().w_full())
+        .child(
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .flex()
+                .flex_col()
+                .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().w_full())
+                .child(ruler::render(this, cx)),
+        )
         .child(div().w_full().flex().flex_col().items_center().px_6().pb_5().pt_2().child(composer(this, cx)));
     pane.child(header(breadcrumb(project, title, cx), Some(actions)))
         .child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
@@ -541,10 +553,14 @@ fn render_timeline_item(
             .text_color(rgb(theme::ERROR))
             .child(keys.plain(text.clone()))
             .into_any(),
-        Item::Notice(text) => {
-            div().w_full().py_1().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(keys.plain(text.clone())).into_any()
-        }
+        Item::Compaction => notice_line(keys.plain("context compacted".to_owned())),
+        Item::Notice(text) => notice_line(keys.plain(text.clone())),
     }
+}
+
+/// A quiet one-liner between messages (compaction, warnings, unknown entries).
+fn notice_line(text: impl IntoElement) -> AnyElement {
+    div().w_full().py_1().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(text).into_any()
 }
 
 fn reply_block(text: &str, ix: usize, t: &OpenThread, mono: &SharedString, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
@@ -556,27 +572,47 @@ fn reply_block(text: &str, ix: usize, t: &OpenThread, mono: &SharedString, keys:
         .text_size(px(14.))
         .line_height(px(22.))
         .child(markdown::render(text, mono, keys))
-        .children(copy_button(ix, text, t, cx))
+        .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP))
+        .children(corner_buttons(ix, text, t, cx))
 }
 
-/// The `copy` button in a message's top right corner, revealed on hover; copies the
-/// message's markdown and shows a check for a moment. Not for the live tail (`TAIL`).
-fn copy_button(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Stateful<Div>> {
+/// How far left of a message's box its pin bar sits.
+const PIN_GAP: f32 = 6.;
+
+/// A pinned message's amber bar in the left margin, `left` px before the block's edge
+/// (so bubbles and replies line up despite the bubble's overhang).
+fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
+    t.pins.contains(&ix).then(|| div().absolute().left(px(-left)).top_1().bottom_1().w(px(2.)).rounded_full().bg(rgb(theme::WARN)))
+}
+
+/// `pin` and `copy` in a message's top right corner, revealed on hover. Copy puts the
+/// message's markdown on the clipboard and shows a check for a moment; pin marks the
+/// message in the ruler and with a bar in the margin (the pin is amber while pinned).
+/// Not for the live tail (`TAIL`).
+fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
     if ix == TAIL {
         return None;
     }
-    let copied = t.copied == Some(ix);
+    let (copied, pinned) = (t.copied == Some(ix), t.pins.contains(&ix));
     let text = text.to_owned();
+    let button = |b: Stateful<Div>| b.bg(rgb(theme::RAISED)).border_1().border_color(rgb(theme::LINE));
+    let tint = if pinned { theme::WARN } else { theme::FG_1 };
+    let pin = button(theme::tinted_icon_button(("pin", ix), "pin", tint, cx, move |this, cx| this.toggle_pin(ix, cx)));
+    let copy = button(theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| {
+        this.copy_item(ix, text.clone(), cx)
+    }));
     Some(
-        theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| this.copy_item(ix, text.clone(), cx))
+        div()
             .absolute()
             .top_0()
             .right_0()
-            .bg(rgb(theme::RAISED))
-            .border_1()
-            .border_color(rgb(theme::LINE))
+            .flex()
+            .flex_row()
+            .gap_1()
             .opacity(if copied { 1. } else { 0. })
-            .group_hover("msg", |d| d.opacity(1.)),
+            .group_hover("msg", |d| d.opacity(1.))
+            .child(pin)
+            .child(copy),
     )
 }
 
@@ -627,7 +663,8 @@ fn user_bubble(
         .line_height(px(22.))
         .child(markdown::render(text, mono, keys))
         .children(thumbs)
-        .children(copy_button(ix, text, t, cx).map(|b| b.top_2().right_2()))
+        .children(pin_bar(ix, t, PIN_GAP))
+        .children(corner_buttons(ix, text, t, cx).map(|b| b.top_2().right_2()))
 }
 
 /// A turn's work in the transcript: the work line, then every steer the user sent during

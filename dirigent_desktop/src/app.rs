@@ -10,14 +10,14 @@ use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, Selection};
 use crate::theme::{self, Fonts, Status};
 use crate::view::{Item, Streaming, Timeline};
-use crate::{lists, sidebar, thread};
+use crate::{lists, ruler, sidebar, thread};
 use base64::Engine;
 use dirigent_protocol::{ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
-    AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment, ListState,
-    MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, actions, div, prelude::*, px, rgb,
+    AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment, ListOffset,
+    ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, actions, div, prelude::*, px, rgb,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -69,6 +69,12 @@ pub struct OpenThread {
     pub log_list: ListState,
     /// The item whose copy button was just clicked (it shows a check for a moment).
     pub copied: Option<usize>,
+    /// Timeline indices of the pinned messages (amber in the ruler; persisted in the cache).
+    pub pins: HashSet<usize>,
+    /// The ruler's animation and hover state (see `ruler.rs`).
+    pub ruler: ruler::State,
+    /// A `jump_to` in progress: the item to center and the frames left to get it there.
+    center_on: Option<(usize, u8)>,
 }
 
 /// Where a new thread will run: a project on a host.
@@ -640,6 +646,9 @@ impl Dirigent {
             log: None,
             log_list: ListState::new(0, ListAlignment::Top, px(300.)),
             copied: None,
+            pins: self.cache.lock().unwrap().pins(host, id).into_iter().collect(),
+            ruler: Default::default(),
+            center_on: None,
         }));
         self.menu = None;
         self.selection.clear();
@@ -1368,6 +1377,50 @@ impl Dirigent {
         cx.notify();
     }
 
+    /// A ruler mark was clicked: scroll the transcript so that item is in the middle of
+    /// the viewport. It goes to the top now; `settle_jump` centers it once it's measured.
+    pub fn jump_to(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
+        t.center_on = Some((ix, 10));
+        // The click blurred the composer; keep typing working.
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// Each frame after a `jump_to`: shift the item to the viewport's middle (a tall one
+    /// stays at its top). Items above it may be unmeasured (0px to `scroll_by`) until
+    /// they've been laid out, so this nudges and re-checks until it lands, a few frames
+    /// at most.
+    fn settle_jump(&mut self, window: &Window) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let Some((ix, tries)) = t.center_on.take() else { return };
+        let vp = t.list.viewport_bounds();
+        if let Some(b) = t.list.bounds_for_item(ix) {
+            let target = vp.top() + ((vp.size.height - b.size.height) / 2.).max(px(0.));
+            let delta = b.top() - target;
+            if delta.abs() < px(1.) {
+                return;
+            }
+            t.list.scroll_by(delta);
+        }
+        if tries > 0 {
+            t.center_on = Some((ix, tries - 1));
+            window.request_animation_frame();
+        }
+    }
+
+    /// A message's pin button: toggle it (the ruler shows pinned marks in amber).
+    pub fn toggle_pin(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let pinned = !t.pins.remove(&ix);
+        if pinned {
+            t.pins.insert(ix);
+        }
+        let _ = self.cache.lock().unwrap().set_pin(&t.host, &t.id, ix, pinned);
+        cx.notify();
+    }
+
     /// Drop a queued steer / follow-up the model hasn't seen yet. Pi confirms with a
     /// `queue_update`; the echo goes now so the row doesn't linger for the round trip.
     pub fn cancel_queued(&mut self, text: String, cx: &mut Context<Self>) {
@@ -1483,8 +1536,9 @@ fn decode_blob(mime: &str, data: &str) -> Option<Arc<gpui::Image>> {
 }
 
 impl Render for Dirigent {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.selection.begin_frame();
+        self.settle_jump(window);
         let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
         let main = match &self.pane {
             Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, cx),

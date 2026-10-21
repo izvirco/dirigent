@@ -1,8 +1,8 @@
 //! Local sqlite cache so the UI renders instantly before any host answers.
 //! Same shape as the service db plus a `host` column. Hosts are the source of truth;
 //! everything here is overwritten whenever fresh data arrives. The only desktop-owned
-//! data is `links` (manual project links), `seen` (unread tracking) and `kv` (last used
-//! cwd/model/...).
+//! data is `links` (manual project links), `seen` (unread tracking), `pins` (pinned
+//! messages) and `kv` (last used cwd/model/...).
 
 use anyhow::Result;
 use dirigent_protocol::{Entry, ModelInfo, Project, ThreadSummary};
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS entries (
 CREATE TABLE IF NOT EXISTS models (host TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS seen (host TEXT NOT NULL, thread_id TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host, thread_id));
+CREATE TABLE IF NOT EXISTS pins (host TEXT NOT NULL, thread_id TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY (host, thread_id, item));
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
@@ -50,7 +51,7 @@ impl Cache {
 
     /// Forget everything cached for a host that was removed from `hosts.toml`.
     pub fn remove_host(&self, host: &str) -> Result<()> {
-        for table in ["projects", "links", "threads", "entries", "models", "seen"] {
+        for table in ["projects", "links", "threads", "entries", "models", "seen", "pins"] {
             self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
         }
         Ok(())
@@ -127,7 +128,12 @@ impl Cache {
                 params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms],
             )?;
         }
-        tx.execute("DELETE FROM entries WHERE host = ?1 AND thread_id NOT IN (SELECT id FROM threads WHERE host = ?1)", [host])?;
+        for table in ["entries", "pins"] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE host = ?1 AND thread_id NOT IN (SELECT id FROM threads WHERE host = ?1)"),
+                [host],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -195,6 +201,25 @@ impl Cache {
             "INSERT OR REPLACE INTO seen (host, thread_id, updated_at) VALUES (?1, ?2, ?3)",
             params![host, thread_id, updated_at],
         )?;
+        Ok(())
+    }
+
+    /// Timeline indices of a thread's pinned messages. Entries only ever append and fold
+    /// deterministically, so an index names the same message every time.
+    pub fn pins(&self, host: &str, thread_id: &str) -> Vec<usize> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT item FROM pins WHERE host = ?1 AND thread_id = ?2") else { return vec![] };
+        stmt.query_map(params![host, thread_id], |r| r.get::<_, i64>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).map(|i| i as usize).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn set_pin(&self, host: &str, thread_id: &str, item: usize, pinned: bool) -> Result<()> {
+        let sql = if pinned {
+            "INSERT OR IGNORE INTO pins (host, thread_id, item) VALUES (?1, ?2, ?3)"
+        } else {
+            "DELETE FROM pins WHERE host = ?1 AND thread_id = ?2 AND item = ?3"
+        };
+        self.conn.execute(sql, params![host, thread_id, item as i64])?;
         Ok(())
     }
 

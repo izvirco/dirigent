@@ -11,6 +11,7 @@ mod menu;
 mod net;
 mod picker;
 mod projects;
+mod ruler;
 mod select;
 mod sidebar;
 mod theme;
