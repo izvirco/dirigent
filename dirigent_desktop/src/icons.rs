@@ -24,6 +24,7 @@ icons!(
     "circle-x",
     "copy",
     "ellipsis",
+    "moon",
     "panel-left-close",
     "panel-left-open",
     "pin",

@@ -185,7 +185,8 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
 }
 
 /// `project › title`, with the project clickable.
-pub fn breadcrumb(project: Option<(String, String)>, title: impl Into<SharedString>, cx: &mut Context<Dirigent>) -> Div {
+/// `project › title`, with an amber pin before the title while `pinned`.
+pub fn breadcrumb(project: Option<(String, String)>, title: impl Into<SharedString>, pinned: bool, cx: &mut Context<Dirigent>) -> Div {
     div()
         .flex()
         .flex_row()
@@ -209,12 +210,13 @@ pub fn breadcrumb(project: Option<(String, String)>, title: impl Into<SharedStri
                 )
                 .child(icon("chevron-right", theme::FG_2).size(px(12.)))
         }))
+        .children(pinned.then(theme::pin_mark))
         .child(div().min_w_0().truncate().child(title.into()))
 }
 
 fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Dirigent>) -> Div {
     let (groups, orphans) = projects::groups(&this.hosts, &this.links);
-    let (name, threads, target): (String, Vec<(&str, &ThreadSummary)>, Option<Target>) = if group_key == projects::ORPHANS {
+    let (name, mut threads, target): (String, Vec<(&str, &ThreadSummary)>, Option<Target>) = if group_key == projects::ORPHANS {
         ("Removed projects".into(), orphans.iter().map(|(h, t)| (h.as_str(), t)).collect(), None)
     } else {
         let Some(g) = groups.iter().find(|g| g.key == group_key) else {
@@ -230,6 +232,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
         .map(|g| g.members.iter().map(|m| format!("{}  {}", m.host, m.project.path)).collect::<Vec<_>>())
         .unwrap_or_default();
 
+    this.sort_by_status(&mut threads);
     let (active, archived): (Vec<_>, Vec<_>) = threads.into_iter().partition(|(_, t)| !t.archived);
     let new_thread = (group_key != projects::ORPHANS).then(|| {
         theme::button("project-new-thread", "plus", "New thread")
@@ -237,7 +240,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
             .into_any_element()
     });
 
-    let title = breadcrumb(None, name, cx);
+    let title = breadcrumb(None, name, false, cx);
     let mut body = div().id("project-page").flex_1().overflow_y_scroll().flex().flex_col();
     if !paths.is_empty() {
         body = body.child(
@@ -270,7 +273,9 @@ fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     div().id(id).flex_1().overflow_y_scroll().flex().flex_col().child(content)
 }
 
-/// Flat rows: status glyph, title (accent while unread), project, model, age. Hover reveals archive.
+/// Flat rows: status glyph, title (accent while unread, an amber pin before it while pinned),
+/// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
+/// moon glyph) and archive.
 fn thread_list(rows: &[(&str, &ThreadSummary)], show_project: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
     let show_host = this.hosts.len() > 1;
@@ -288,11 +293,13 @@ fn thread_row(
 ) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
-    let status = Status::of(t);
+    let status = this.status(host, t);
     let project = if show_project { this.project_name(host, t) } else { String::new() };
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
     let unread = this.unread(host, t);
     let (h2, id2, archived) = (h.clone(), id.clone(), t.archived);
+    let (h3, id3, snoozed) = (h.clone(), id.clone(), status == Status::Snoozed);
+    let pinned = this.pinned(host, &t.id);
     let archive_icon = if archived { "archive-restore" } else { "archive" };
 
     div()
@@ -311,39 +318,59 @@ fn thread_row(
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &id, cx)))
         .child(status.glyph())
         .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(rgb(if unread {
-                    theme::NAVY_INK
-                } else if archived {
-                    theme::FG_1
-                } else {
-                    theme::FG
-                }))
-                .child(title),
+            div().flex_1().min_w_0().flex().flex_row().items_center().gap_2().children(pinned.then(theme::pin_mark)).child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(if unread {
+                        theme::NAVY_INK
+                    } else if archived {
+                        theme::FG_1
+                    } else {
+                        theme::FG
+                    }))
+                    .child(title),
+            ),
         )
         .when(show_host, |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(host.to_owned())))
         .when(!project.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::FG_1)).child(project)))
         .child(div().w(px(150.)).truncate().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(model))
         .child(div().w(px(32.)).text_size(px(11.)).text_color(rgb(theme::FG_2)).child(theme::rel_time(now - t.updated_at)))
-        .child(
-            div()
-                .id(SharedString::from(format!("arch/{h2}/{id2}")))
-                .size(px(24.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .opacity(0.)
-                .group_hover("row", |d| d.opacity(1.))
-                .hover(|d| d.bg(rgb(theme::HOVER)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.set_archived(&h2, &id2, !archived, cx)
-                }))
-                .child(icon(archive_icon, theme::FG_1)),
-        )
+        .when(matches!(status, Status::Done | Status::Snoozed), |d| {
+            let color = if snoozed { theme::WARN } else { theme::FG_1 };
+            d.child(row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| {
+                this.set_snoozed(&h3, &id3, !snoozed, cx)
+            }))
+        })
+        .child(row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::FG_1, false, cx, move |this, cx| {
+            this.set_archived(&h2, &id2, !archived, cx)
+        }))
+}
+
+/// A thread row's trailing action: hidden until the row is hovered (or always shown while
+/// `on`); its click doesn't open the row.
+fn row_action(
+    id: String,
+    name: &'static str,
+    color: u32,
+    on: bool,
+    cx: &mut Context<Dirigent>,
+    on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .size(px(24.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .opacity(if on { 1. } else { 0. })
+        .group_hover("row", |d| d.opacity(1.))
+        .hover(|d| d.bg(rgb(theme::HOVER)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            on_click(this, cx)
+        }))
+        .child(icon(name, color))
 }

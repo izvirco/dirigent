@@ -1,5 +1,5 @@
-//! Left pane on the window canvas: Inbox / Workpool, each listing its threads (unread /
-//! working) as small cards, the project list, and at the bottom the hide/show and settings
+//! Left pane on the window canvas: Inbox / Workpool, each listing its threads (finished
+//! and not snoozed / working) as small cards, the project list, and at the bottom the hide/show and settings
 //! buttons. Docked it has a drag handle on its right edge; hidden (`[` or the button) it
 //! slides in as a floating panel while the mouse rests on the left edge.
 
@@ -214,9 +214,9 @@ fn row(
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
 }
 
-/// Inbox / Workpool: its nav row, then (unless collapsed) a card per thread (unread or
-/// open under Inbox, working under Workpool), each with
-/// how long its agent has run (live) or ran (last run).
+/// Inbox / Workpool: its nav row, then (unless collapsed) a card per thread (finished and
+/// not snoozed under Inbox, working under Workpool), each with how long its agent has run
+/// (live) or ran (last run).
 #[allow(clippy::too_many_arguments)]
 fn section(
     id: &'static str,
@@ -241,7 +241,7 @@ fn section(
             thread_card(host, t, elapsed, this.hosts.len() > 1, this, cx)
         })
         .collect();
-    // Count every thread the page lists (all finished / all working), not just the cards.
+    // Count every thread the page lists (snoozed ones too), not just the cards.
     let n = this
         .threads_with(match section {
             Section::Inbox => theme::Status::Done,
@@ -292,7 +292,8 @@ fn nav_row(
 }
 
 /// A thread under Inbox / Workpool: `project, host … elapsed` / title / model. The title
-/// is accent-colored while the thread is unread.
+/// is accent-colored while the thread is unread and led by an amber pin while pinned. Hovering a finished thread swaps its run
+/// time for a snooze button, which drops it from the sidebar until its next run.
 fn thread_card(
     host: &str,
     t: &ThreadSummary,
@@ -304,6 +305,7 @@ fn thread_card(
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
     let unread = this.unread(host, t);
+    let pinned = this.pinned(host, &t.id);
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
     let mut place = this.project_name(host, t);
     if show_host {
@@ -311,8 +313,31 @@ fn thread_card(
     }
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgb(color)).child(text);
+    // Run time and snooze button are stacked so swapping them on hover doesn't shift layout.
+    let snooze = (theme::Status::of(t) == theme::Status::Done).then(|| {
+        let (h, id) = (h.clone(), id.clone());
+        div()
+            .id(SharedString::from(format!("snooze/{h}/{id}")))
+            .absolute()
+            .top(px(-4.))
+            .right(px(-4.))
+            .size(px(20.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_sm()
+            .opacity(0.)
+            .group_hover("card", |d| d.opacity(1.))
+            .hover(|d| d.bg(rgb(theme::LINE)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.set_snoozed(&h, &id, true, cx)
+            }))
+            .child(icon("moon", theme::FG_1))
+    });
     div()
         .id(SharedString::from(format!("card/{h}/{id}")))
+        .group("card")
         .flex()
         .flex_col()
         .gap_0p5()
@@ -324,21 +349,23 @@ fn thread_card(
         .hover(|d| d.bg(rgb(theme::HOVER)))
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &id, cx)))
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .child(small(place, theme::FG_2).flex_1())
-                .child(small(elapsed, theme::FG_2).flex_shrink_0()),
+            div().flex().flex_row().items_center().gap_2().child(small(place, theme::FG_2).flex_1()).child(
+                div()
+                    .relative()
+                    .flex_shrink_0()
+                    .child(small(elapsed, theme::FG_2).when(snooze.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))))
+                    .children(snooze),
+            ),
         )
         .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_color(rgb(if unread { theme::NAVY_INK } else { theme::FG }))
-                .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
-                .child(title),
+            div().flex().flex_row().items_center().gap_1().children(pinned.then(theme::pin_mark)).child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgb(if unread { theme::NAVY_INK } else { theme::FG }))
+                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                    .child(title),
+            ),
         )
         .when(!model.is_empty(), |d| d.child(small(model, theme::FG_2)))
 }
