@@ -14,9 +14,9 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
     match &this.pane {
         Pane::Inbox => {
-            let rows = this.threads_with(Status::Done);
+            let rows = this.inbox_all();
             pane.child(header(div().child("Inbox"), None)).child(if rows.is_empty() {
-                theme::empty("Nothing waiting", "Threads land here when their agent finishes.").into_any_element()
+                theme::empty("Nothing waiting", "Threads land here when their agent finishes or asks you something.").into_any_element()
             } else {
                 scroll("inbox", thread_list(&rows, true, this, cx)).into_any_element()
             })

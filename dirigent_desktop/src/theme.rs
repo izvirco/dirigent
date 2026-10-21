@@ -214,6 +214,8 @@ pub struct Fonts {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status {
     Working,
+    /// Finished its turn with `ask_user` questions open: the user is the blocker.
+    Asking,
     Done,
     /// Done, but snoozed out of the inbox (desktop-side, see `Dirigent::status`).
     Snoozed,
@@ -227,26 +229,36 @@ impl Status {
             Status::Working
         } else if t.archived {
             Status::Archived
+        } else if t.asking() {
+            Status::Asking
         } else {
             Status::Done
         }
     }
 
+    /// Waiting on the user, one way or the other: what the Inbox lists.
+    pub fn finished(self) -> bool {
+        matches!(self, Status::Asking | Status::Done)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Status::Working => "Working",
+            Status::Asking => "Asking",
             Status::Done => "Done",
             Status::Snoozed => "Snoozed",
             Status::Archived => "Archived",
         }
     }
 
-    /// The status glyph: a still accent dot while working (no spinners), a check when
-    /// done, an amber moon while snoozed, an archive box when archived.
+    /// The status glyph: a still accent dot while working (no spinners), an amber question
+    /// mark while asking, a check when done, an amber moon while snoozed, an archive box
+    /// when archived.
     pub fn glyph(self) -> AnyElement {
         let t = t();
         match self {
             Status::Working => div().size(px(16.)).flex().items_center().justify_center().child(dot(t.working)).into_any_element(),
+            Status::Asking => icon("circle-help", t.warn).into_any_element(),
             Status::Done => icon("circle-check", t.done).into_any_element(),
             Status::Snoozed => icon("moon", t.warn).into_any_element(),
             Status::Archived => icon("archive", t.fg_2).into_any_element(),

@@ -244,12 +244,10 @@ fn section(
         })
         .collect();
     // Count every thread the page lists (snoozed ones too), not just the cards.
-    let n = this
-        .threads_with(match section {
-            Section::Inbox => theme::Status::Done,
-            Section::Workpool => theme::Status::Working,
-        })
-        .len();
+    let n = match section {
+        Section::Inbox => this.inbox_all().len(),
+        Section::Workpool => this.threads_with(theme::Status::Working).len(),
+    };
     div()
         .flex()
         .flex_col()

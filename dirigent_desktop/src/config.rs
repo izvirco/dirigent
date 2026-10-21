@@ -15,6 +15,10 @@
 //! model = "anthropic/claude-haiku-5-5"
 //! reasoning = "low"
 //! prompt = "..."
+//!
+//! [tools]
+//! async_bash = true
+//! ask_user = true
 //! ```
 
 use crate::theme::Fonts;
@@ -38,6 +42,35 @@ pub struct Config {
     pub telemetry: bool,
     pub fonts: FontConfig,
     pub title: TitleGen,
+    pub tools: ToolsConfig,
+}
+
+/// Dirigent's own agent tools (see the runtime's `tools.ts`). Sent with every prompt; a
+/// change reaches a thread with its next message.
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Run a command in the background and be told when it ends.
+    pub async_bash: bool,
+    /// Put questions to the user as a form.
+    pub ask_user: bool,
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self { async_bash: true, ask_user: true }
+    }
+}
+
+impl ToolsConfig {
+    /// The enabled tools by their runtime names, as `Prompt::tools` wants them.
+    pub fn enabled(&self) -> Vec<String> {
+        [("async_bash", self.async_bash), ("ask_user", self.ask_user)]
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .map(|(name, _)| name.to_owned())
+            .collect()
+    }
 }
 
 /// Font families as the user wrote them; `resolve` maps them to installed fonts.
@@ -56,6 +89,7 @@ impl Default for Config {
             telemetry: false,
             fonts: FontConfig::default(),
             title: TitleGen { model: "anthropic/claude-haiku-5-5".into(), reasoning: "low".into(), prompt: DEFAULT_TITLE_PROMPT.into() },
+            tools: ToolsConfig::default(),
         }
     }
 }
@@ -189,6 +223,9 @@ mod tests {
         assert_eq!(c.fonts.code, "Fira Code");
         assert_eq!(c.fonts.ui, "Lilex");
         assert_eq!(c.title.reasoning, "low");
+        assert_eq!(c.tools.enabled(), ["async_bash", "ask_user"]);
+        let c: Config = toml::from_str("[tools]\nask_user = false\n").unwrap();
+        assert_eq!(c.tools.enabled(), ["async_bash"]);
         let round: Config = toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
         assert!(round == Config::default());
     }

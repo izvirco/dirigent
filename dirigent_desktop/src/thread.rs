@@ -11,8 +11,10 @@
 //! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
 //! over the list's left edge: one mark per message, hover to preview, click to jump.
 //! Messages can be pinned (the button next to `copy`); pins colour their marks.
+//! Questions the model asked (`ask_user`) sit as a form above the composer (`ask_card`)
+//! until they are answered or dismissed.
 
-use crate::app::{Dirigent, Menu, OpenThread, Pane, Resize, Target};
+use crate::app::{AskForm, Dirigent, Menu, OpenThread, Pane, Resize, Target};
 use crate::icons::icon;
 use crate::lists::{breadcrumb, header};
 use crate::markdown;
@@ -51,6 +53,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     };
     let list_state = t.list.clone();
     let (host, id) = (t.host.clone(), t.id.clone());
+    let asks: Vec<Div> = t.asks.iter().map(|form| ask_card(form, cx)).collect();
     let summary = this.summary(&host, &id).cloned();
     let title = summary.as_ref().and_then(|s| s.name.clone()).unwrap_or_else(|| "Untitled".into());
     let status = summary.as_ref().map(|s| this.status(&host, s)).unwrap_or(Status::Done);
@@ -137,7 +140,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().w_full())
                 .child(ruler::render(this, cx)),
         )
-        .child(div().w_full().flex().flex_col().items_center().px_6().pb_5().pt_2().child(composer(this, cx)));
+        .child(div().w_full().flex().flex_col().items_center().gap_3().px_6().pb_5().pt_2().children(asks).child(composer(this, cx)));
     let titling = this.titling(&host, &id);
     pane.child(header(breadcrumb(project, title, pinned, titling, cx), Some(actions)))
         .child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
@@ -367,6 +370,147 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(div().flex_1())
                 .child(action),
         )
+}
+
+/// One `ask_user` call as a compact form, four fifths of the composer's width: a numbered
+/// tab per question (accent while shown, a check once answered), the shown question with
+/// each option on its own row (a circle for one choice, a square for several) and, where
+/// the question takes typed text, a row holding the text field. `Next` moves on (Enter in
+/// the field too); once every question has an answer `Answer` takes its place. `Dismiss`
+/// is always there. Goes grey once sent, until the host confirms and the card leaves.
+fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
+    let t = theme::t();
+    let ask_id = form.ask.id.clone();
+    let (qi, q) = (form.current, &form.ask.questions[form.current]);
+    let last = qi + 1 == form.ask.questions.len();
+    let complete = form.complete(cx);
+
+    let tabs = (0..form.ask.questions.len()).map(|i| {
+        let (shown, answered) = (i == qi, form.answered(i, cx));
+        let ask_id = ask_id.clone();
+        div()
+            .id(ElementId::Name(format!("ask/{}/tab/{i}", form.ask.id).into()))
+            .h(px(20.))
+            .min_w(px(20.))
+            .px_1p5()
+            .flex()
+            .items_center()
+            .justify_center()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(11.5))
+            .bg(rgba(if shown { t.accent } else { t.hover }))
+            .text_color(rgba(if shown { t.fg } else { t.fg_1 }))
+            .hover(move |d| d.bg(rgba(if shown { t.accent_active } else { t.line })))
+            .on_click(cx.listener(move |this, _, _, cx| this.show_ask_tab(&ask_id, i, cx)))
+            .child(format!("{}", i + 1))
+            .when(answered && !shown, |d| d.child(icon("check", t.done).size(px(10.))))
+    });
+
+    // An option row: the mark (filled while picked), then the label or the text field.
+    let option_row = |id: ElementId, on: bool, multi: bool, body: AnyElement| {
+        let mark = div()
+            .size(px(11.))
+            .flex_shrink_0()
+            .when(multi, |d| d.rounded_sm())
+            .when(!multi, |d| d.rounded_full())
+            .border_1()
+            .border_color(rgba(if on { t.accent_line } else { t.fg_2 }))
+            .bg(rgba(if on { t.accent_line } else { 0 }));
+        div()
+            .id(id)
+            .w_full()
+            .h(px(26.))
+            .px_2()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(12.5))
+            .text_color(rgba(if on { t.fg } else { t.fg_1 }))
+            .hover(move |d| d.bg(rgba(t.hover)))
+            .child(mark)
+            .child(body)
+    };
+    let options = q.options.iter().enumerate().map(|(oi, o)| {
+        let ask_id = ask_id.clone();
+        option_row(
+            ElementId::Name(format!("ask/{}/{qi}/{oi}", form.ask.id).into()),
+            form.picked[qi].contains(&oi),
+            q.multi,
+            div().child(o.clone()).into_any_element(),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| this.pick_option(&ask_id, qi, oi, cx)))
+    });
+    let custom = form.custom[qi].clone().map(|input| {
+        let focus_id = ask_id.clone();
+        let on = !input.read(cx).text().trim().is_empty();
+        option_row(
+            ElementId::Name(format!("ask/{}/{qi}/custom", form.ask.id).into()),
+            on,
+            q.multi,
+            div().flex_1().min_w_0().child(input).into_any_element(),
+        )
+        .cursor_text()
+        .on_click(cx.listener(move |this, _, _, cx| this.show_ask_tab(&focus_id, qi, cx)))
+    });
+
+    let dismiss_id = ask_id.clone();
+    let dismiss = theme::button(format!("ask-dismiss/{ask_id}"), "x", "Dismiss")
+        .on_click(cx.listener(move |this, _, _, cx| this.dismiss_ask(&dismiss_id, cx)));
+    // `Next` until the last question; `Answer` once every question has something.
+    let (label, primary) = if complete { ("Answer", true) } else { ("Next", !last) };
+    let next_id = ask_id.clone();
+    let action = (complete || !last).then(|| {
+        div()
+            .id(ElementId::Name(format!("ask-next/{ask_id}").into()))
+            .h(px(24.))
+            .px_2p5()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(12.))
+            .bg(rgba(if primary { t.accent } else { t.hover }))
+            .text_color(rgba(t.fg))
+            .font_weight(FontWeight::MEDIUM)
+            .hover(move |d| d.bg(rgba(if primary { t.accent_active } else { t.line })))
+            .on_click(cx.listener(move |this, _, _, cx| this.next_ask_tab(&next_id, cx)))
+            .child(label)
+            .when(!complete, |d| d.child(icon("chevron-right", t.fg).size(px(11.))))
+    });
+
+    div()
+        .w_full()
+        .max_w(px(theme::COMPOSER * 0.8))
+        .flex()
+        .flex_col()
+        .gap_2()
+        .px_3()
+        .py_2p5()
+        .rounded(px(CORNER))
+        .bg(rgba(t.raised))
+        .shadow_md()
+        .when(form.sent, |d| d.opacity(0.5))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .text_size(px(12.))
+                .text_color(rgba(t.fg_1))
+                .child(icon("message-circle-question", t.warn))
+                .child(div().mr_2().child("The agent asks"))
+                .children(tabs),
+        )
+        .child(div().text_size(px(13.)).line_height(px(19.)).child(q.text.clone()))
+        .child(div().flex().flex_col().gap_0p5().children(options).children(custom))
+        .child(div().flex().flex_row().items_center().justify_end().gap_1p5().child(dismiss).children(action))
 }
 
 /// Thumbnails of the images referenced from the composer text, under it. Click one to see
@@ -918,6 +1062,26 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         Step::Text(text) => div().py_0p5().text_color(rgba(theme::t().fg)).child(markdown::render(text, mono, keys)).into_any(),
         Step::Tool(call) => render_tool(call, (key, six), t, now_ms(), keys, cx),
         Step::Steer { text, queued } => steer_row((key, six), text, *queued, keys, cx).into_any(),
+        // A job notice in the row voice: `job` where a tool's name goes, red when it failed.
+        Step::Notice(text) => {
+            let failed = text.contains("exit ") && !text.contains("exit 0");
+            div()
+                .h(px(ROW_H))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().flex_shrink_0().text_color(rgba(if failed { theme::t().error } else { theme::t().done })).child("job"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(rgba(theme::t().fg_1))
+                        .child(keys.plain(text.trim_start_matches("job ").to_owned())),
+                )
+                .into_any()
+        }
     }
 }
 

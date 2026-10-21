@@ -12,7 +12,7 @@ use crate::view::{Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
-use dirigent_protocol::{ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen};
+use dirigent_protocol::{Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
@@ -81,6 +81,52 @@ pub struct OpenThread {
     pub stats_hover: bool,
     /// A `jump_to` in progress: the item to center and the frames left to get it there.
     center_on: Option<(usize, u8)>,
+    /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
+    pub asks: Vec<AskForm>,
+}
+
+/// The user's answers in progress to one `ask_user` call: the picked option indices and
+/// the text field (where the question allows one) per question, one question shown at a
+/// time (`current`).
+pub struct AskForm {
+    pub ask: Ask,
+    pub picked: Vec<HashSet<usize>>,
+    pub custom: Vec<Option<Entity<TextInput>>>,
+    pub current: usize,
+    /// Answered or dismissed; waiting for the host to drop the ask.
+    pub sent: bool,
+}
+
+impl AskForm {
+    /// The typed text for question `i`, if any.
+    fn typed(&self, i: usize, cx: &App) -> Option<String> {
+        self.custom[i].as_ref().map(|input| input.read(cx).text().trim().to_owned()).filter(|t| !t.is_empty())
+    }
+
+    /// Question `i` has an option picked or text typed.
+    pub fn answered(&self, i: usize, cx: &App) -> bool {
+        !self.picked[i].is_empty() || self.typed(i, cx).is_some()
+    }
+
+    /// Every question is answered: the form can be sent.
+    pub fn complete(&self, cx: &App) -> bool {
+        (0..self.ask.questions.len()).all(|i| self.answered(i, cx))
+    }
+
+    /// One list per question: the picked options in order, then the typed text.
+    pub fn answers(&self, cx: &App) -> Vec<Vec<String>> {
+        self.ask
+            .questions
+            .iter()
+            .enumerate()
+            .map(|(i, q)| {
+                let mut a: Vec<String> =
+                    q.options.iter().enumerate().filter(|(j, _)| self.picked[i].contains(j)).map(|(_, o)| o.clone()).collect();
+                a.extend(self.typed(i, cx));
+                a
+            })
+            .collect()
+    }
 }
 
 /// Where a new thread will run: a project on a host.
@@ -410,7 +456,7 @@ impl Dirigent {
 
     /// Finished since the user last opened it (never opened counts too).
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
-        Status::of(t) == Status::Done && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
+        Status::of(t).finished() && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
     }
 
     /// Snoozed and not run since: hidden from the inbox.
@@ -463,11 +509,16 @@ impl Dirigent {
     }
 
     /// What the sidebar lists under Inbox: every finished thread that isn't snoozed. The
-    /// Inbox page itself lists them all (`threads_with(Status::Done)`).
+    /// Inbox page itself lists them all (`inbox_all`).
     pub fn inbox_threads(&self) -> Vec<(&str, &ThreadSummary)> {
-        let mut rows = self.threads_with(Status::Done);
+        let mut rows = self.inbox_all();
         rows.retain(|(h, t)| !self.snoozed(h, t));
         rows
+    }
+
+    /// The Inbox: threads waiting on the user, the ones asking a question first.
+    pub fn inbox_all(&self) -> Vec<(&str, &ThreadSummary)> {
+        self.threads_where(|s| s.finished())
     }
 
     /// The user is looking at this thread: whatever it has now is read.
@@ -490,11 +541,13 @@ impl Dirigent {
     /// so the order is fixed and a thread only moves when it enters the list. On top of
     /// that, `sort_by_status` lifts the pinned ones (and sinks snoozed finished ones).
     pub fn threads_with(&self, status: Status) -> Vec<(&str, &ThreadSummary)> {
+        self.threads_where(|s| s == status)
+    }
+
+    fn threads_where(&self, keep: impl Fn(Status) -> bool) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.all_threads();
-        rows.retain(|(_, t)| Status::of(t) == status);
-        if status == Status::Working {
-            rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
-        }
+        rows.retain(|(_, t)| keep(Status::of(t)));
+        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
         self.sort_by_status(&mut rows);
         rows
     }
@@ -604,6 +657,7 @@ impl Dirigent {
                     let id = t.id.clone();
                     if self.summary(&host, &id).is_some() {
                         self.mark_seen(&host, &id);
+                        self.sync_asks(cx);
                     } else {
                         // The open thread was deleted elsewhere.
                         self.show(Pane::Inbox, cx);
@@ -804,11 +858,13 @@ impl Dirigent {
             ruler: Default::default(),
             stats_hover: false,
             center_on: None,
+            asks: vec![],
         }));
         self.menu = None;
         self.selection.clear();
         self.remember_pane();
         self.mark_seen(host, id);
+        self.sync_asks(cx);
         self.fetch_blobs();
         let rid = self.next_id();
         self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
@@ -1053,6 +1109,147 @@ impl Dirigent {
 
     pub fn toggle_telemetry(&mut self, cx: &mut Context<Self>) {
         self.edit_config(|c| c.telemetry = !c.telemetry, cx);
+    }
+
+    /// A switch in Settings › Config's tools section.
+    pub fn toggle_tool(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.edit_config(
+            |c| match name {
+                "async_bash" => c.tools.async_bash = !c.tools.async_bash,
+                "ask_user" => c.tools.ask_user = !c.tools.ask_user,
+                _ => {}
+            },
+            cx,
+        );
+    }
+
+    // ---- asks ----
+
+    /// Make the open thread's forms match its summary's asks: a form (with a text field
+    /// per question that takes one) for each new ask, forms of answered asks dropped.
+    fn sync_asks(&mut self, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &self.pane else { return };
+        let asks = self.summary(&t.host, &t.id).map(|s| s.asks.clone()).unwrap_or_default();
+        let mut forms = vec![];
+        let Pane::Thread(t) = &mut self.pane else { return };
+        for ask in asks {
+            if let Some(i) = t.asks.iter().position(|f| f.ask.id == ask.id) {
+                forms.push(t.asks.remove(i));
+                continue;
+            }
+            let custom = ask
+                .questions
+                .iter()
+                .enumerate()
+                .map(|(qi, q)| {
+                    (q.allow_custom || q.options.is_empty()).then(|| {
+                        let input =
+                            cx.new(|cx| TextInput::new(cx, if q.options.is_empty() { "Your answer" } else { "Something else" }, true));
+                        let (ask_id, qi) = (ask.id.clone(), qi);
+                        // Enter: on to the next question, or send once every one is answered.
+                        cx.subscribe(&input, {
+                            let ask_id = ask_id.clone();
+                            move |this, _, _: &Submitted, cx| this.next_ask_tab(&ask_id, cx)
+                        })
+                        .detach();
+                        // Typing is the answer to a single-choice question: the picked option goes.
+                        if !q.multi {
+                            cx.subscribe(&input, move |this, input, _: &input::Changed, cx| {
+                                if !input.read(cx).text().trim().is_empty() {
+                                    this.with_ask(&ask_id, cx, |f| f.picked[qi].clear());
+                                }
+                            })
+                            .detach();
+                        }
+                        input
+                    })
+                })
+                .collect();
+            forms.push(AskForm { picked: vec![HashSet::new(); ask.questions.len()], custom, ask, current: 0, sent: false });
+        }
+        t.asks = forms;
+        cx.notify();
+    }
+
+    /// Change the open thread's unsent form for `ask_id` and re-render.
+    fn with_ask(&mut self, ask_id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut AskForm)) {
+        if let Pane::Thread(t) = &mut self.pane
+            && let Some(form) = t.asks.iter_mut().find(|f| f.ask.id == ask_id && !f.sent)
+        {
+            f(form);
+            cx.notify();
+        }
+    }
+
+    /// An option row: pick it (alone, or with the others for a multiple-choice question).
+    /// On a single-choice question it also clears the typed text, which would be a second answer.
+    pub fn pick_option(&mut self, ask_id: &str, question: usize, option: usize, cx: &mut Context<Self>) {
+        let mut clear = None;
+        self.with_ask(ask_id, cx, |form| {
+            let multi = form.ask.questions[question].multi;
+            let picked = &mut form.picked[question];
+            if !picked.remove(&option) {
+                if !multi {
+                    picked.clear();
+                    clear = form.custom[question].clone();
+                }
+                picked.insert(option);
+            }
+        });
+        if let Some(input) = clear {
+            let window = self.window;
+            cx.defer(move |cx| {
+                window.update(cx, |_, window, cx| input.update(cx, |i, cx| i.set_text("", window, cx))).ok();
+            });
+        }
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// A tab: show that question. Its text field, if any, takes focus.
+    pub fn show_ask_tab(&mut self, ask_id: &str, question: usize, cx: &mut Context<Self>) {
+        let mut input = None;
+        self.with_ask(ask_id, cx, |form| {
+            form.current = question.min(form.ask.questions.len() - 1);
+            input = form.custom[form.current].clone();
+        });
+        match input {
+            Some(input) => self.focus(input.focus_handle(cx), cx),
+            None => self.focus_composer(cx),
+        }
+    }
+
+    /// `Next` (and Enter in a text field): the next question, or send once every one is answered.
+    pub fn next_ask_tab(&mut self, ask_id: &str, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &self.pane else { return };
+        let Some(form) = t.asks.iter().find(|f| f.ask.id == ask_id && !f.sent) else { return };
+        let (current, last, complete) = (form.current, form.ask.questions.len() - 1, form.complete(cx));
+        if current < last {
+            self.show_ask_tab(ask_id, current + 1, cx);
+        } else if complete {
+            self.answer_ask(ask_id, cx);
+        }
+    }
+
+    /// Send the form's answers (`None`: dismiss it); the host hands them to the model.
+    pub fn answer_ask(&mut self, ask_id: &str, cx: &mut Context<Self>) {
+        self.send_ask(ask_id, true, cx);
+    }
+
+    pub fn dismiss_ask(&mut self, ask_id: &str, cx: &mut Context<Self>) {
+        self.send_ask(ask_id, false, cx);
+    }
+
+    fn send_ask(&mut self, ask_id: &str, answer: bool, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let Some(form) = t.asks.iter_mut().find(|f| f.ask.id == ask_id && !f.sent) else { return };
+        form.sent = true;
+        let answers = answer.then(|| form.answers(cx));
+        let (host, thread_id) = (t.host.clone(), t.id.clone());
+        self.net.send(&host, ClientMessage::Answer { id, thread_id, ask_id: ask_id.to_owned(), answers });
+        self.focus_composer(cx);
+        cx.notify();
     }
 
     /// A keystroke in a text setting: apply all of them 300ms after the last one.
@@ -1549,6 +1746,7 @@ impl Dirigent {
                 thinking_level: self.effort.clone(),
                 images,
                 title,
+                tools: Some(self.config.tools.enabled()),
             },
         );
         self.remember_model();
@@ -1629,15 +1827,19 @@ impl Dirigent {
 
     /// A bracket key with text in the focused input types the bracket instead of acting.
     fn typed_bracket(&mut self, bracket: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        for input in [
-            &self.composer,
-            &self.path_input,
-            &self.host_name_input,
-            &self.host_url_input,
-            &self.model_search,
-            &self.usage_from,
-            &self.usage_to,
-        ] {
+        let mut inputs = vec![
+            self.composer.clone(),
+            self.path_input.clone(),
+            self.host_name_input.clone(),
+            self.host_url_input.clone(),
+            self.model_search.clone(),
+            self.usage_from.clone(),
+            self.usage_to.clone(),
+        ];
+        if let Pane::Thread(t) = &self.pane {
+            inputs.extend(t.asks.iter().flat_map(|f| f.custom.iter().flatten().cloned()));
+        }
+        for input in inputs {
             if input.focus_handle(cx).is_focused(window) && !input.read(cx).text().is_empty() {
                 input.update(cx, |i, cx| i.replace_text_in_range(None, bracket, window, cx));
                 return true;

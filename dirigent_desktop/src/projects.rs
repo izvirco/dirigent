@@ -128,6 +128,7 @@ mod tests {
             entry_count: 0,
             running_since: None,
             last_run_ms: None,
+            asks: vec![],
             archived: false,
         }
     }

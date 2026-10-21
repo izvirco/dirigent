@@ -2,12 +2,17 @@
 //! `entries.seq` is append order; replaying a thread is `SELECT json ORDER BY seq`.
 //! Images are kept out of the entry JSON in a content-addressed `blobs` table (see `blobs`).
 //! `usage` is derived from the assistant messages (one row each) so spend over time is
-//! one indexed query rather than a scan of every entry's JSON.
+//! one indexed query rather than a scan of every entry's JSON. `asks` holds the model's
+//! open questions to the user (`ask_user`) until they are answered.
+//!
+//! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
+//! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Entry, Project, ThreadSummary, UsageBucket};
+use dirigent_protocol::{Ask, Entry, Project, ThreadSummary, UsageBucket};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
 
 const SCHEMA: &str = "
@@ -56,7 +61,20 @@ CREATE TABLE IF NOT EXISTS usage (
     cost REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS usage_at ON usage (at);
+CREATE TABLE IF NOT EXISTS asks (
+    thread_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (thread_id, id)
+);
 ";
+
+/// Columns added after the table first shipped: `(table, column, declaration)`.
+const COLUMNS: &[(&str, &str, &str)] = &[
+    // The dirigent tools the thread's last prompt enabled, as JSON (`["async_bash", ...]`).
+    ("threads", "tools", "TEXT"),
+];
 
 /// A `usage` row extracted from an assistant message entry. Used both to backfill the table
 /// from existing entries (once, when it is empty) and to add each new entry's row, so the
@@ -95,9 +113,11 @@ impl Storage {
         Self::init(Connection::open_in_memory()?)
     }
 
-    // No migrations yet: when the schema changes, delete the db file.
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        for (table, column, decl) in COLUMNS {
+            ensure_column(&conn, table, column, decl)?;
+        }
         // `usage` is derived data: an empty table on a db with history gets filled in once.
         let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM usage)", [], |r| r.get(0))?;
         if empty {
@@ -130,6 +150,14 @@ impl Storage {
     /// Threads ordered by most recently updated. `running_since` is always `None` here; the caller fills it in.
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
+        let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
+        let mut stmt = self.conn.prepare("SELECT thread_id, json FROM asks ORDER BY created_at")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (thread_id, json) = row?;
+            if let Ok(ask) = serde_json::from_str(&json) {
+                asks.entry(thread_id).or_default().push(ask);
+            }
+        }
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
                     (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms
@@ -150,9 +178,44 @@ impl Storage {
                 running_since: None,
                 last_run_ms: r.get(10)?,
                 archived: r.get(9)?,
+                asks: vec![],
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for t in &mut threads {
+            t.asks = asks.remove(&t.id).unwrap_or_default();
+        }
+        Ok(threads)
+    }
+
+    /// Remember the dirigent tools the client enabled, for the thread's next load.
+    pub fn set_tools(&self, id: &str, tools: &[String]) -> Result<()> {
+        self.conn.execute("UPDATE threads SET tools = ?2 WHERE id = ?1", params![id, serde_json::to_string(tools)?])?;
+        Ok(())
+    }
+
+    /// The tools of the thread's last prompt; none for a thread that never had one.
+    pub fn thread_tools(&self, id: &str) -> Result<Vec<String>> {
+        let json: Option<Option<String>> = self.conn.query_row("SELECT tools FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(json.flatten().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
+    }
+
+    pub fn add_ask(&self, thread_id: &str, ask: &Ask, now: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO asks (thread_id, id, json, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![thread_id, ask.id, serde_json::to_string(ask)?, now],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the ask and return it, if it was still open.
+    pub fn take_ask(&self, thread_id: &str, ask_id: &str) -> Result<Option<Ask>> {
+        let json: Option<String> = self
+            .conn
+            .query_row("SELECT json FROM asks WHERE thread_id = ?1 AND id = ?2", params![thread_id, ask_id], |r| r.get(0))
+            .optional()?;
+        self.conn.execute("DELETE FROM asks WHERE thread_id = ?1 AND id = ?2", params![thread_id, ask_id])?;
+        Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
     /// What the next run will use, ahead of pi's `model_change` / `thinking_level_change` entries.
@@ -179,6 +242,7 @@ impl Storage {
 
     pub fn delete_thread(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM entries WHERE thread_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM asks WHERE thread_id = ?1", [id])?;
         let n = self.conn.execute("DELETE FROM threads WHERE id = ?1", [id])?;
         anyhow::ensure!(n == 1, "no such thread");
         Ok(())
@@ -202,6 +266,7 @@ impl Storage {
             running_since: None,
             last_run_ms: None,
             archived: false,
+            asks: vec![],
         })
     }
 
@@ -326,6 +391,16 @@ impl Storage {
     }
 }
 
+/// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt.query_map([], |r| r.get::<_, String>(1))?.any(|c| c.is_ok_and(|c| c == column));
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
+    Ok(())
+}
+
 /// Explicit session name, or the first line of a user message as a fallback title.
 fn derived_name(entry: &Value) -> Option<String> {
     match entry.get("type")?.as_str()? {
@@ -358,7 +433,46 @@ fn derived_name(entry: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dirigent_protocol::Question;
     use serde_json::json;
+
+    #[test]
+    fn asks_and_tools_live_with_the_thread() {
+        let s = Storage::in_memory().unwrap();
+        s.create_thread("t1", "p", "/x", 0).unwrap();
+        assert!(s.thread_tools("t1").unwrap().is_empty());
+        s.set_tools("t1", &["ask_user".into()]).unwrap();
+        assert_eq!(s.thread_tools("t1").unwrap(), ["ask_user"]);
+        let ask = Ask {
+            id: "a1".into(),
+            questions: vec![Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false }],
+            notify: "asap".into(),
+        };
+        s.add_ask("t1", &ask, 5).unwrap();
+        assert_eq!(s.list_threads().unwrap()[0].asks, vec![ask.clone()]);
+        assert_eq!(s.take_ask("t1", "a1").unwrap(), Some(ask));
+        assert_eq!(s.take_ask("t1", "a1").unwrap(), None);
+        assert!(!s.list_threads().unwrap()[0].asking());
+    }
+
+    /// A db from before `COLUMNS` / `asks` existed gets them on open.
+    #[test]
+    fn old_db_is_upgraded_on_open() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, project_id TEXT, cwd TEXT NOT NULL, name TEXT, header TEXT, model TEXT,
+             thinking_level TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_run_ms INTEGER, archived_at INTEGER);
+             INSERT INTO threads (id, cwd, created_at, updated_at) VALUES ('t1', '/x', 1, 1);",
+        )
+        .unwrap();
+        let s = Storage::init(conn).unwrap();
+        s.set_tools("t1", &["async_bash".into()]).unwrap();
+        assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
+        assert!(s.list_threads().unwrap()[0].asks.is_empty());
+        // Opening again is a no-op.
+        let s = Storage::init(s.conn).unwrap();
+        assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
+    }
 
     #[test]
     fn roundtrip_thread_and_entries() {

@@ -2,6 +2,7 @@
 // stdout is protocol only; logs go to stderr. EOF on stdin = shutdown.
 
 import { Sessions, type TitleGen } from "./sessions";
+import type { Ask } from "./tools";
 
 type Inbound =
   | {
@@ -11,6 +12,7 @@ type Inbound =
       entries: any[];
       model?: string;
       thinking_level?: string;
+      tools?: string[];
     }
   | { type: "unload"; thread_id: string }
   | {
@@ -22,7 +24,9 @@ type Inbound =
       thinking_level?: string;
       images?: { mime_type: string; data: string }[];
       title?: TitleGen;
+      tools?: string[];
     }
+  | { type: "answer"; thread_id: string; ask: Ask; answers: string[][] | null }
   | { type: "abort"; thread_id: string }
   | { type: "cancel_queued"; thread_id: string; text: string }
   | { type: "list_models" }
@@ -34,7 +38,14 @@ const sessions = new Sessions(send);
 async function handle(msg: Inbound): Promise<void> {
   switch (msg.type) {
     case "load":
-      return sessions.load(msg.thread_id, msg.cwd, msg.entries, msg.model, msg.thinking_level);
+      return sessions.load(
+        msg.thread_id,
+        msg.cwd,
+        msg.entries,
+        msg.model,
+        msg.thinking_level,
+        msg.tools,
+      );
     case "unload":
       return sessions.unload(msg.thread_id);
     case "prompt":
@@ -46,7 +57,10 @@ async function handle(msg: Inbound): Promise<void> {
         msg.thinking_level,
         msg.images,
         msg.title,
+        msg.tools,
       );
+    case "answer":
+      return sessions.answer(msg.thread_id, msg.ask, msg.answers);
     case "abort":
       return sessions.abort(msg.thread_id);
     case "cancel_queued":

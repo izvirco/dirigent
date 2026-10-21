@@ -24,6 +24,16 @@ import {
   SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import {
+  type Ask,
+  createTools,
+  deliverAnswers,
+  killJobs,
+  noticeDelivered,
+  requeueNotices,
+  TOOL_NAMES,
+  type ToolHost,
+} from "./tools";
 
 export interface ModelInfo {
   provider: string;
@@ -59,11 +69,11 @@ export type Outbound =
   | ({ type: "title" } & TitleResult)
   | { type: "entry"; thread_id: string; entry: unknown }
   | { type: "event"; thread_id: string; event: unknown }
+  | { type: "ask"; thread_id: string; ask: Ask }
   | { type: "warning"; thread_id: string; message: string }
   | { type: "error"; thread_id?: string; message: string };
 
-interface Live {
-  session: AgentSession;
+interface Live extends ToolHost {
   unsubscribe: () => void;
   // How many of sessionManager's entries have been emitted as `entry` messages.
   forwarded: number;
@@ -85,7 +95,8 @@ export class Sessions {
   /**
    * Create the pi session. `model` ("provider/id") and `thinkingLevel` only apply to a fresh
    * thread (no entries): pi persists them as its first entries, so the thread never shows pi's
-   * default model. A thread with history restores its own from the entries.
+   * default model. A thread with history restores its own from the entries. `tools` names
+   * the dirigent tools (`TOOL_NAMES`) the model gets; the rest are registered but inactive.
    */
   async load(
     threadId: string,
@@ -93,14 +104,24 @@ export class Sessions {
     entries: FileEntry[],
     model?: string,
     thinkingLevel?: string,
+    tools: string[] = [],
   ): Promise<void> {
     if (this.live.has(threadId)) return;
     const fresh = entries.length === 0;
 
+    // The tools hold the session they run in; it exists only after `createAgentSession`.
+    const live = {
+      threadId,
+      cwd,
+      unsubscribe: () => {},
+      forwarded: entries.filter((e) => e.type !== "session").length,
+      jobs: new Map(),
+      notices: new Map(),
+      onAsk: (ask: Ask) => this.send({ type: "ask", thread_id: threadId, ask }),
+    } as Live;
     // Bash runs through our spawnHook so a captured nix dev-shell env can be injected.
-    let env: Record<string, string> | undefined;
     const bash = createBashToolDefinition(cwd, {
-      spawnHook: (ctx) => (env ? { ...ctx, env: { ...ctx.env, ...env } } : ctx),
+      spawnHook: (ctx) => (live.env ? { ...ctx, env: { ...ctx.env, ...live.env } } : ctx),
     });
 
     const { session } = await createAgentSession({
@@ -109,24 +130,23 @@ export class Sessions {
       model: fresh && model ? await this.resolveModel(model) : undefined,
       thinkingLevel: fresh ? (thinkingLevel as ThinkingLevel | undefined) : undefined,
       sessionManager: SessionManager.inMemory(cwd, { id: threadId }, entries),
-      customTools: [bash as ToolDefinition],
+      customTools: [bash as ToolDefinition, ...createTools(live)],
     });
+    live.session = session;
     // Hand every queued steer to the model in the next turn, not one per turn. Set on the
     // agent directly: `session.setSteeringMode` would also write pi's global settings.
     session.agent.steeringMode = "all";
+    applyTools(session, tools);
 
-    const live: Live = {
-      session,
-      unsubscribe: () => {},
-      forwarded: entries.filter((e) => e.type !== "session").length,
-    };
     // Pi appends to the manager right *after* notifying listeners, so flush on a microtask.
     live.unsubscribe = session.subscribe((event) => {
+      if (event.type === "message_start" && event.message.role === "custom")
+        noticeDelivered(live, event.message);
       this.send({ type: "event", thread_id: threadId, event: slim(event) });
       queueMicrotask(() => this.flushEntries(threadId, live));
     });
     if (existsSync(join(cwd, "flake.nix"))) {
-      live.nixEnv = captureNixEnv(cwd, threadId, this.send).then((e) => (env = e));
+      live.nixEnv = captureNixEnv(cwd, threadId, this.send).then((e) => (live.env = e));
     }
     this.live.set(threadId, live);
 
@@ -162,6 +182,7 @@ export class Sessions {
     if (!live) return;
     this.live.delete(threadId);
     live.unsubscribe();
+    killJobs(live);
     this.flushEntries(threadId, live);
     live.session.dispose();
   }
@@ -185,7 +206,8 @@ export class Sessions {
    * as entries, so it survives reloads. `attachments` are base64 images; pi resizes
    * them to the model's limits before persisting. `title` (a thread's first prompt)
    * names the thread from `text` alongside the run: pi persists the name as a
-   * `session_info` entry, which is how the service and clients learn it.
+   * `session_info` entry, which is how the service and clients learn it. `tools`, when
+   * given, is the dirigent tool set from now on (see `load`).
    */
   async prompt(
     threadId: string,
@@ -195,6 +217,7 @@ export class Sessions {
     thinkingLevel?: string,
     attachments: { mime_type: string; data: string }[] = [],
     title?: TitleGen,
+    tools?: string[],
   ): Promise<void> {
     const live = this.live.get(threadId);
     if (!live) throw new Error(`thread not loaded: ${threadId}`);
@@ -206,6 +229,7 @@ export class Sessions {
     if (thinkingLevel && thinkingLevel !== session.thinkingLevel) {
       session.setThinkingLevel(thinkingLevel as ThinkingLevel);
     }
+    if (tools) applyTools(session, tools);
     if (title) {
       this.generateTitle(title, text, session.model)
         .then((r) => session.setSessionName(r.title))
@@ -234,8 +258,9 @@ export class Sessions {
   /** Drop one queued steer or follow-up by text. Pi only clears whole queues, so
    *  take both, remove the first match, and queue the rest again in order. */
   async cancelQueued(threadId: string, text: string): Promise<void> {
-    const session = this.live.get(threadId)?.session;
-    if (!session) return;
+    const live = this.live.get(threadId);
+    if (!live) return;
+    const { session } = live;
     const { steering, followUp } = session.clearQueue();
     const drop = (list: string[]) => {
       const i = list.indexOf(text);
@@ -245,6 +270,15 @@ export class Sessions {
     if (!drop(steering)) drop(followUp);
     for (const t of steering) await session.steer(t);
     for (const t of followUp) await session.followUp(t);
+    await requeueNotices(live);
+  }
+
+  /** The user answered (or dismissed: `answers == null`) an `ask_user` call; tell the model. */
+  async answer(threadId: string, ask: Ask, answers: string[][] | null): Promise<void> {
+    const live = this.live.get(threadId);
+    if (!live) throw new Error(`thread not loaded: ${threadId}`);
+    await live.nixEnv;
+    await deliverAnswers(live, ask, answers);
   }
 
   /**
@@ -285,6 +319,19 @@ export class Sessions {
 
   disposeAll(): void {
     for (const id of Array.from(this.live.keys())) this.unload(id);
+  }
+}
+
+/** Activate the dirigent tools in `tools` (and no other dirigent tool), leaving pi's own tools as they are. */
+function applyTools(session: AgentSession, tools: string[]): void {
+  const ours = new Set<string>(TOOL_NAMES);
+  const wanted = session
+    .getActiveToolNames()
+    .filter((n) => !ours.has(n))
+    .concat(tools.filter((n) => ours.has(n)));
+  const current = session.getActiveToolNames();
+  if (wanted.length !== current.length || wanted.some((n) => !current.includes(n))) {
+    session.setActiveToolsByName(wanted);
   }
 }
 
