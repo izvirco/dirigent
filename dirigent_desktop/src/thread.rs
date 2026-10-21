@@ -112,34 +112,85 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
 }
 
 /// The new-thread page: `Create thread in <project>` above the composer, both centered in
-/// the pane. Leaving the page (sidebar, a thread) keeps whatever was typed.
+/// the pane. Projects linked across hosts are one entry; `on <host>` then picks the host.
+/// Leaving the page (sidebar, a thread) keeps whatever was typed.
 fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let multi = this.hosts.len() > 1;
-    let project = target
-        .as_ref()
-        .and_then(|t| this.host(&t.host)?.projects.iter().find(|p| p.id == t.project_id).map(|p| projects::basename(&p.path).to_owned()));
+    let (groups, _) = projects::groups(&this.hosts, &this.links);
+    let group = target.as_ref().and_then(|t| groups.iter().find(|g| g.has(&t.host, &t.project_id)));
+    let project = group.map(|g| g.name.clone());
     let target_open = this.menu == Some(Menu::Target);
     let target_menu = target_open.then(|| {
         let mut items = Vec::new();
-        for h in &this.hosts {
-            for p in &h.projects {
-                let t = Target { host: h.name.clone(), project_id: p.id.clone() };
-                let selected = target.as_ref() == Some(&t);
-                let detail = if multi { h.name.clone() } else { p.path.clone() };
-                items.push(menu::item(
-                    format!("t/{}/{}", h.name, p.id),
-                    projects::basename(&p.path).to_owned(),
-                    detail,
-                    selected,
-                    move |this, cx| this.set_target(t.clone(), cx),
-                    cx,
-                ));
-            }
+        for g in &groups {
+            let selected = group.is_some_and(|s| s.key == g.key);
+            // Keep the host when switching to a group that also lives there.
+            let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
+            let detail = if g.members.len() > 1 {
+                g.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ")
+            } else if this.hosts.len() > 1 {
+                format!("{}  {}", g.members[0].host, g.members[0].project.path)
+            } else {
+                g.members[0].project.path.clone()
+            };
+            items.push(menu::item(
+                format!("t/{}", g.key),
+                g.name.clone(),
+                detail,
+                selected,
+                move |this, cx| this.set_target(t.clone(), cx),
+                cx,
+            ));
         }
         if items.is_empty() {
             items.push(menu::header("No projects yet. Add one with + in the sidebar."));
         }
         menu::popup(Side::Below(26.), items, cx)
+    });
+    // `on <host>`: a plain chip when the project is on one host, a dropdown when it is linked
+    // across several.
+    let host_chip = target.as_ref().filter(|_| this.hosts.len() > 1).map(|t| {
+        let members = group.map(|g| g.members.as_slice()).unwrap_or_default();
+        let host_open = this.menu == Some(Menu::TargetHost);
+        let host_menu = host_open.then(|| {
+            let items = members
+                .iter()
+                .map(|m| {
+                    let mt: Target = m.into();
+                    let selected = *t == mt;
+                    menu::item(
+                        format!("h/{}", m.host),
+                        m.host.clone(),
+                        m.project.path.clone(),
+                        selected,
+                        move |this, cx| this.set_target(mt.clone(), cx),
+                        cx,
+                    )
+                })
+                .collect();
+            menu::popup(Side::Below(26.), items, cx)
+        });
+        if members.len() > 1 {
+            theme::labeled_chip("host-chip", "on", t.host.clone(), false, host_open)
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::TargetHost, cx)))
+                .children(host_menu)
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .h(px(26.))
+                .px_2()
+                .rounded_md()
+                .bg(rgb(theme::RAISED))
+                .border_1()
+                .border_color(rgb(theme::LINE))
+                .text_size(px(12.))
+                .child(div().text_color(rgb(theme::FG_1)).child("on"))
+                .child(div().font_weight(FontWeight::MEDIUM).child(t.host.clone()))
+                .into_any_element()
+        }
     });
     let where_row = div()
         .flex()
@@ -157,22 +208,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Target, cx)))
             .children(target_menu),
         )
-        .children((multi && target.is_some()).then(|| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .h(px(26.))
-                .px_2()
-                .rounded_md()
-                .bg(rgb(theme::RAISED))
-                .border_1()
-                .border_color(rgb(theme::LINE))
-                .text_size(px(12.))
-                .child(div().text_color(rgb(theme::FG_1)).child("on"))
-                .child(div().font_weight(FontWeight::MEDIUM).child(target.as_ref().map(|t| t.host.clone()).unwrap_or_default()))
-        }));
+        .children(host_chip);
 
     let card = div().w_full().max_w(px(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx));
     // Sits a little above true center so it reads as the page's subject, not its footer.

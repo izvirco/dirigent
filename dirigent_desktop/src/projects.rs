@@ -39,6 +39,19 @@ pub struct Group {
     pub manual: bool,
 }
 
+impl Group {
+    pub fn has(&self, host: &str, project_id: &str) -> bool {
+        self.members.iter().any(|m| m.host == host && m.project.id == project_id)
+    }
+
+    /// The member a new thread goes to: the one on `host` if the group has it, else the
+    /// host of the group's latest thread, else the first member.
+    pub fn member_for(&self, host: Option<&str>) -> &Member {
+        let on = |h: &str| self.members.iter().find(|m| m.host == h);
+        host.and_then(on).or_else(|| self.threads.first().and_then(|(h, _)| on(h))).unwrap_or(&self.members[0])
+    }
+}
+
 /// Manual link → git origin → the project itself.
 pub fn group_key(host: &str, project: &Project, links: &Links) -> String {
     links
@@ -150,5 +163,10 @@ mod tests {
         assert!(notes.manual);
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].1.id, "t2");
+
+        assert!(app.has("box", "b") && !app.has("box", "a"));
+        assert_eq!(app.member_for(Some("local")).host, "local");
+        assert_eq!(app.member_for(None).host, "box"); // t3 is the latest thread
+        assert_eq!(notes.member_for(None).host, "box"); // no threads: first member
     }
 }

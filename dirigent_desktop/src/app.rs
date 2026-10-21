@@ -78,6 +78,12 @@ pub struct Target {
     pub project_id: String,
 }
 
+impl From<&projects::Member> for Target {
+    fn from(m: &projects::Member) -> Self {
+        Target { host: m.host.clone(), project_id: m.project.id.clone() }
+    }
+}
+
 pub enum Pane {
     /// Finished threads, newest first, across every host.
     Inbox,
@@ -131,8 +137,10 @@ pub enum Menu {
     /// Model picker, searchable list of every model the host offers.
     AllModels,
     Effort,
-    /// Draft: which project (and host) the thread will run in.
+    /// Draft: which project group the thread will run in.
     Target,
+    /// Draft: which of the group's hosts.
+    TargetHost,
     /// Sidebar actions for a project group (link / remove).
     Project {
         group_key: String,
@@ -695,8 +703,7 @@ impl Dirigent {
         self.new_draft(None, cx);
     }
 
-    /// The project implied by the current pane: the open thread's, or the project page's
-    /// (when the group lives on one host).
+    /// The project implied by the current pane: the open thread's, or the project page's.
     fn context_target(&self) -> Option<Target> {
         match &self.pane {
             Pane::Thread(t) => {
@@ -707,10 +714,7 @@ impl Dirigent {
             Pane::Project { group_key } => {
                 let (groups, _) = projects::groups(&self.hosts, &self.links);
                 let group = groups.into_iter().find(|g| g.key == *group_key)?;
-                match group.members.as_slice() {
-                    [m] => Some(Target { host: m.host.clone(), project_id: m.project.id.clone() }),
-                    _ => None,
-                }
+                Some(group.member_for(None).into())
             }
             _ => None,
         }

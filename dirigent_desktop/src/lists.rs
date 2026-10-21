@@ -192,11 +192,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
                 .child(header(div().child("Project"), None))
                 .child(theme::empty("This project is gone", "It was removed on its host."));
         };
-        let target = match g.members.as_slice() {
-            [m] => Some(Target { host: m.host.clone(), project_id: m.project.id.clone() }),
-            _ => None,
-        };
-        (g.name.clone(), g.threads.iter().map(|(h, t)| (h.as_str(), t)).collect(), target)
+        (g.name.clone(), g.threads.iter().map(|(h, t)| (h.as_str(), t)).collect(), Some(g.member_for(None).into()))
     };
     let paths = groups
         .iter()
