@@ -63,6 +63,10 @@ pub struct Submitted {
 /// subscriber decides what to do with it, if anything).
 pub struct ImagePasted(pub gpui::Image);
 
+/// Emitted after every edit the user makes (typing, paste, delete, undo, IME commit);
+/// not after `set_text`, so a subscriber filling the input doesn't hear its own write.
+pub struct Changed;
+
 /// Attachment token the composer colors: `[image-N]`.
 pub fn image_token(n: u32) -> String {
     format!("[image-{n}]")
@@ -289,6 +293,7 @@ impl TextInput {
         self.follow_cursor = true;
         self.last_edit = None;
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(Changed);
         cx.notify();
     }
 
@@ -579,6 +584,7 @@ impl TextInput {
 
 impl EventEmitter<Submitted> for TextInput {}
 impl EventEmitter<ImagePasted> for TextInput {}
+impl EventEmitter<Changed> for TextInput {}
 
 impl EntityInputHandler for TextInput {
     fn text_for_range(
@@ -630,6 +636,7 @@ impl EntityInputHandler for TextInput {
         self.marked_range.take();
         self.follow_cursor = true;
         window.notify_text_input_changed(&self.focus_handle);
+        cx.emit(Changed);
         cx.notify();
     }
 

@@ -1,10 +1,12 @@
-//! Settings › Config: the UI over `config.toml` (`config.rs`). Fonts and the title prompt
-//! are text fields that apply on Enter (ctrl+Enter for the prompt); theme, title model,
-//! reasoning and telemetry are chips and a switch that save at once. `Test` opens a sample
-//! first message, runs it through the title settings on the local host, and shows the
-//! title with what it cost.
+//! Settings > Config: the UI over `config.toml` (`config.rs`). Everything saves as it is
+//! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
+//! warning mark on a font field whose family isn't installed; theme, title model,
+//! reasoning and telemetry are chips and a switch that save at once.
+//! `Test` opens a sample first message, runs it through the title settings on the local
+//! host, and shows the title with what it cost.
 
 use crate::app::{Dirigent, Menu, Pane};
+use crate::icons::icon;
 use crate::input::TextInput;
 use crate::lists::{scroll, settings_header, settings_section};
 use crate::menu::{self, Side};
@@ -44,6 +46,8 @@ pub struct State {
     /// Request id and start time of the test in flight.
     pub test_request: Option<(u64, Instant)>,
     pub test_result: Option<Result<TitleResult, String>>,
+    /// Font families in the config that fontconfig doesn't know (a warning on their field).
+    pub missing_fonts: Vec<String>,
 }
 
 impl State {
@@ -58,6 +62,7 @@ impl State {
             testing: false,
             test_request: None,
             test_result: None,
+            missing_fonts: vec![],
         }
     }
 
@@ -140,6 +145,13 @@ fn field(input: Entity<TextInput>) -> Div {
     div().w_full().px_3().py_1p5().rounded_md().bg(rgba(t.raised)).border_1().border_color(rgba(t.line)).text_size(px(12.5)).child(input)
 }
 
+/// A font field: `field` with an amber warning at its right edge while the family the
+/// user typed (= what the config holds, once applied) isn't installed.
+fn font_field(s: &State, input: &Entity<TextInput>, family: &str) -> Div {
+    let missing = s.missing_fonts.iter().any(|m| m == family);
+    field(input.clone()).flex().flex_row().items_center().gap_2().when(missing, |d| d.child(icon("triangle-alert", theme::t().warn)))
+}
+
 fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let theme_open = this.menu == Some(Menu::Theme);
     let theme_menu = theme_open.then(|| {
@@ -157,15 +169,16 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Theme, cx)))
         .children(theme_menu);
     let s = &this.settings;
+    let f = &this.config.fonts;
     settings_section(
         "Appearance",
         div()
             .flex()
             .flex_col()
             .child(row("Theme", theme_chip, Some("Built-in, or a toml file in your theme directory.")))
-            .child(row("UI font", field(s.font_ui.clone()), None))
-            .child(row("Prose font", field(s.font_prose.clone()), None))
-            .child(row("Code font", field(s.font_code.clone()), Some("Installed family names, as fc-match knows them. Enter applies."))),
+            .child(row("UI font", font_field(s, &s.font_ui, &f.ui), None))
+            .child(row("Prose font", font_field(s, &s.font_prose, &f.prose), None))
+            .child(row("Code font", font_field(s, &s.font_code, &f.code), Some("Installed family names, as fc-match knows them."))),
     )
 }
 
@@ -267,12 +280,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                     .py_2()
                     .child(div().text_color(rgba(t.fg_1)).child("Prompt"))
                     .child(field(s.prompt.clone()))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgba(t.fg_2))
-                            .child("The system prompt; the message is the user turn. ctrl+Enter applies."),
-                    ),
+                    .child(div().text_size(px(11.5)).text_color(rgba(t.fg_2)).child("The system prompt; the message is the user turn.")),
             )
             .child(div().flex().flex_row().pt_2().child(test_button))
             .children(test),

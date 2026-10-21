@@ -227,6 +227,9 @@ pub struct Dirigent {
     pub config: config::Config,
     pub fonts: theme::Fonts,
     watch: config::Watch,
+    /// Bumped on every keystroke in a text setting; the 300ms timer it starts only applies
+    /// if no later keystroke bumped it again (`schedule_apply`).
+    config_edit: u64,
     /// The Config page's inputs and title test.
     pub settings: settings::State,
     /// Threads whose title is being generated (since their first prompt), with when it started.
@@ -304,12 +307,14 @@ impl Dirigent {
         for input in [&usage_from, &usage_to] {
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.apply_custom_usage(cx)).detach();
         }
-        let settings = settings::State::new(cx);
+        let mut settings = settings::State::new(cx);
+        // Text settings apply as you type (debounced); nothing to press, nothing to lose.
         for input in [&settings.font_ui, &settings.font_prose, &settings.font_code, &settings.prompt] {
-            cx.subscribe(input, |this, _, _: &Submitted, cx| this.apply_config_fields(cx)).detach();
+            cx.subscribe(input, |this, _, _: &input::Changed, cx| this.schedule_apply(cx)).detach();
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
         let (fonts, missing) = config.fonts.resolve();
+        settings.missing_fonts = missing.clone();
 
         let mut this = Self {
             hosts: host_states,
@@ -342,6 +347,7 @@ impl Dirigent {
             config,
             fonts,
             watch: config::Watch::new(),
+            config_edit: 0,
             settings,
             titling: HashMap::new(),
             attachments: vec![],
@@ -976,31 +982,36 @@ impl Dirigent {
         });
     }
 
-    /// Make `config` the one in force: theme, fonts, and the page's fields if it's open.
-    fn apply_config(&mut self, config: config::Config, cx: &mut Context<Self>) {
+    /// Make `config` the one in force: theme and fonts. Families that don't resolve are
+    /// remembered for the page's warning marks and returned for whoever wants to toast.
+    fn apply_config(&mut self, config: config::Config, cx: &mut Context<Self>) -> Vec<String> {
         let fonts_changed = config.fonts != self.config.fonts;
         self.config = config;
         match theme::load(&self.config.theme) {
             Ok(t) => self.set_theme_now(t, cx),
             Err(e) => self.toast(format!("{e:#}"), cx),
         }
+        let mut missing = vec![];
         if fonts_changed {
-            let (fonts, missing) = self.config.fonts.resolve();
-            self.fonts = fonts;
-            for font in missing {
-                self.toast(format!("font `{font}` is not installed"), cx);
-            }
-        }
-        if matches!(self.pane, Pane::Config) {
-            self.fill_settings(cx);
+            (self.fonts, missing) = self.config.fonts.resolve();
+            self.settings.missing_fonts = missing.clone();
         }
         cx.notify();
+        missing
     }
 
-    /// A hand edit to `config.toml` or a theme file (`watch`, from `tick`).
+    /// A hand edit to `config.toml` or a theme file (`watch`, from `tick`): the file wins,
+    /// so the page's fields are refilled too.
     fn reload_config(&mut self, cx: &mut Context<Self>) {
         match config::load() {
-            Ok(c) => self.apply_config(c, cx),
+            Ok(c) => {
+                for font in self.apply_config(c, cx) {
+                    self.toast(format!("font `{font}` is not installed"), cx);
+                }
+                if matches!(self.pane, Pane::Config) {
+                    self.fill_settings(cx);
+                }
+            }
             Err(e) => self.toast(format!("{e:#}"), cx),
         }
     }
@@ -1044,8 +1055,24 @@ impl Dirigent {
         self.edit_config(|c| c.telemetry = !c.telemetry, cx);
     }
 
-    /// Enter in a font field or ctrl+Enter in the prompt: every text field applies at once.
-    /// An emptied field keeps its old value.
+    /// A keystroke in a text setting: apply all of them 300ms after the last one.
+    fn schedule_apply(&mut self, cx: &mut Context<Self>) {
+        self.config_edit += 1;
+        let edit = self.config_edit;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(300)).await;
+            this.update(cx, |this, cx| {
+                if this.config_edit == edit {
+                    this.apply_config_fields(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write every text setting as it stands. An emptied field keeps its old value (the
+    /// user is mid-edit; the field is not refilled under them).
     fn apply_config_fields(&mut self, cx: &mut Context<Self>) {
         let read = |i: &Entity<TextInput>| i.read(cx).text().trim().to_owned();
         let s = &self.settings;

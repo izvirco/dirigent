@@ -34,6 +34,7 @@ icons!(
     "settings",
     "square",
     "trash-2",
+    "triangle-alert",
     "x",
 );
 
