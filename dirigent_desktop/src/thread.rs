@@ -21,12 +21,12 @@ use crate::picker;
 use crate::projects;
 use crate::ruler;
 use crate::select::{Doc, Keys};
-use crate::theme::{self, Status, dollars, kilo};
+use crate::theme::{self, Fonts, Status, dollars, kilo};
 use crate::view::{Item, Stats, Step, ToolCall, Work};
 use dirigent_protocol::PromptMode;
 use gpui::{
     Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, anchored, deferred,
-    div, img, list, point, prelude::*, px, relative, rgb, rgba,
+    div, img, list, point, prelude::*, px, relative, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -91,7 +91,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .gap_1p5()
                 .mr_2()
                 .text_size(px(12.))
-                .text_color(rgb(theme::FG_1))
+                .text_color(rgba(theme::t().fg_1))
                 .child(status.glyph())
                 .child(status.label()),
         )
@@ -100,14 +100,14 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             d.child(theme::tinted_icon_button(
                 "hdr-snooze",
                 "moon",
-                if snoozed { theme::WARN } else { theme::FG_1 },
+                if snoozed { theme::t().warn } else { theme::t().fg_1 },
                 cx,
                 move |this, cx| this.set_snoozed(&h3, &i3, !snoozed, cx),
             ))
         })
         // Pin: on top of its list (an amber pin before the title shows it); amber while
         // pinned, click again unpins.
-        .child(theme::tinted_icon_button("hdr-pin", "pin", if pinned { theme::WARN } else { theme::FG_1 }, cx, move |this, cx| {
+        .child(theme::tinted_icon_button("hdr-pin", "pin", if pinned { theme::t().warn } else { theme::t().fg_1 }, cx, move |this, cx| {
             this.set_pinned(&h4, &i4, !pinned, cx)
         }))
         .child(theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
@@ -115,7 +115,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         }))
         .child(
             theme::icon_button("hdr-delete", "trash-2", cx, |this, cx| this.toggle_menu(Menu::ConfirmDelete, cx))
-                .when(confirm_open, |d| d.bg(rgb(theme::HOVER)))
+                .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
                 .children(confirm),
         )
         .into_any_element();
@@ -138,7 +138,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(ruler::render(this, cx)),
         )
         .child(div().w_full().flex().flex_col().items_center().px_6().pb_5().pt_2().child(composer(this, cx)));
-    pane.child(header(breadcrumb(project, title, pinned, cx), Some(actions)))
+    let titling = this.titling(&host, &id);
+    pane.child(header(breadcrumb(project, title, pinned, titling, cx), Some(actions)))
         .child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
 }
 
@@ -209,11 +210,11 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
                 .h(px(26.))
                 .px_2()
                 .rounded_md()
-                .bg(rgb(theme::RAISED))
+                .bg(rgba(theme::t().raised))
                 .border_1()
-                .border_color(rgb(theme::LINE))
+                .border_color(rgba(theme::t().line))
                 .text_size(px(12.))
-                .child(div().text_color(rgb(theme::FG_1)).child("on"))
+                .child(div().text_color(rgba(theme::t().fg_1)).child("on"))
                 .child(div().font_weight(FontWeight::MEDIUM).child(t.host.clone()))
                 .into_any_element()
         }
@@ -282,8 +283,8 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .flex()
             .items_center()
             .rounded_md()
-            .text_color(rgb(theme::FG_1))
-            .hover(|d| d.bg(rgb(theme::HOVER)).text_color(rgb(theme::FG)))
+            .text_color(rgba(theme::t().fg_1))
+            .hover(|d| d.bg(rgba(theme::t().hover)).text_color(rgba(theme::t().fg)))
             .on_hover(cx.listener(|this, hovered, _, cx| {
                 if let Pane::Thread(t) = &mut this.pane {
                     t.stats_hover = *hovered;
@@ -306,10 +307,10 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .rounded_full()
             .cursor_pointer()
             // Soft red, the same deep-fill / light-icon pairing as send.
-            .bg(rgb(0x4e2626))
-            .hover(|d| d.bg(rgb(0x643232)))
+            .bg(rgba(theme::t().danger))
+            .hover(|d| d.bg(rgba(theme::t().danger_active)))
             .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-            .child(icon("square", 0xe8a0a0).size(px(11.)))
+            .child(icon("square", theme::t().danger_ink).size(px(11.)))
     } else {
         let ready = has_text && this.model.is_some() && !no_target;
         div()
@@ -320,13 +321,13 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .justify_center()
             .rounded_full()
             .cursor_pointer()
-            .bg(rgb(if ready { theme::NAVY } else { theme::HOVER }))
-            .hover(|d| d.bg(rgb(if ready { 0x2c3e64 } else { theme::LINE })))
+            .bg(rgba(if ready { theme::t().accent } else { theme::t().hover }))
+            .hover(|d| d.bg(rgba(if ready { theme::t().accent_active } else { theme::t().line })))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted { queued: false }));
                 window.focus(&this.composer.focus_handle(cx), cx);
             }))
-            .child(icon("arrow-up", if ready { 0x9fb6e8 } else { theme::FG_2 }))
+            .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))
     };
 
     div()
@@ -336,7 +337,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .flex()
         .flex_col()
         .rounded(px(CORNER))
-        .bg(rgb(theme::RAISED))
+        .bg(rgba(theme::t().raised))
         // No border of its own: the glow rings are the only edge, so it stays soft.
         .border_1()
         .border_color(gpui::transparent_black())
@@ -387,25 +388,25 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
             .items_center()
             .justify_center()
             .rounded_full()
-            .bg(rgb(theme::HOVER))
+            .bg(rgba(theme::t().hover))
             .border_1()
-            .border_color(rgb(theme::LINE))
+            .border_color(rgba(theme::t().line))
             .cursor_pointer()
             .opacity(0.)
             .group_hover("att", |d| d.opacity(1.))
-            .hover(|d| d.bg(rgb(theme::LINE)))
+            .hover(|d| d.bg(rgba(theme::t().line)))
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.remove_attachment(n, window, cx);
             }))
-            .child(icon("x", theme::FG).size(px(11.)));
+            .child(icon("x", theme::t().fg).size(px(11.)));
         thumb_box()
             .id(ElementId::NamedInteger("att".into(), n as u64))
             .group("att")
             .border_1()
-            .border_color(rgb(theme::LINE))
+            .border_color(rgba(theme::t().line))
             .cursor_pointer()
-            .hover(|d| d.border_color(rgb(theme::NAVY_LINE)))
+            .hover(|d| d.border_color(rgba(theme::t().accent_line)))
             .on_click(cx.listener({
                 let image = image.clone();
                 move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
@@ -457,7 +458,12 @@ const BUBBLE_PAD: f32 = 16.;
 fn glow() -> impl Iterator<Item = Div> {
     [0x60, 0x30, 0x14].into_iter().enumerate().map(|(i, alpha)| {
         let out = 2. * (i + 1) as f32;
-        div().absolute().inset(px(-out)).rounded(px(CORNER + out)).border_1().border_color(rgba(theme::NAVY_LINE << 8 | alpha))
+        div()
+            .absolute()
+            .inset(px(-out))
+            .rounded(px(CORNER + out))
+            .border_1()
+            .border_color(rgba(theme::alpha(theme::t().accent_line, alpha)))
     })
 }
 
@@ -481,7 +487,7 @@ fn context_usage(t: &OpenThread) -> Option<u64> {
 fn stats_card(t: &OpenThread) -> AnyElement {
     let s = Stats::of(t.entries.iter().map(|e| &e.json));
     let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
-    let dim = |text: String| div().text_color(rgb(theme::FG_1)).child(text);
+    let dim = |text: String| div().text_color(rgba(theme::t().fg_1)).child(text);
     let card = div()
         .flex()
         .flex_col()
@@ -489,13 +495,13 @@ fn stats_card(t: &OpenThread) -> AnyElement {
         .px_3()
         .py_2()
         .rounded_md()
-        .bg(rgb(theme::HOVER))
+        .bg(rgba(theme::t().popup))
         .border_1()
-        .border_color(rgb(theme::LINE))
+        .border_color(rgba(theme::t().line))
         .shadow_md()
         .text_size(px(12.))
         .line_height(px(18.))
-        .text_color(rgb(theme::FG))
+        .text_color(rgba(theme::t().fg))
         .child(format!("{} in / {} out", kilo(s.input), kilo(s.output)))
         .child(dim(format!("{} cached ({}%)", kilo(s.cached), s.cached_pct())))
         .child(dim(count(s.user_messages, "user message")))
@@ -523,29 +529,29 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
     let live = live_work(this);
     let now = now_ms();
-    let mono = this.fonts.mono.clone();
+    let fonts = this.fonts.clone();
     let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Thread, ix);
     let mut col = div().w_full().max_w(px(theme::COLUMN)).flex().flex_col();
     if ix < t.timeline.items.len() {
         if live.as_ref().is_none_or(|(k, _)| *k != ix) {
-            col = col.child(render_timeline_item(&t.timeline.items[ix], ix, t, blobs, now, &mono, keys, cx));
+            col = col.child(render_timeline_item(&t.timeline.items[ix], ix, t, blobs, now, &fonts, keys, cx));
         }
     } else {
         // Echoes show their text only; the thumbnails come with the persisted entry.
         let echo = |mode| t.streaming.echo.iter().filter(move |(_, m)| *m == mode).map(|(text, _)| text.as_str()).collect::<Vec<_>>();
         for text in echo(PromptMode::Prompt) {
-            col = col.child(user_bubble(text, &[], TAIL, t, &mono, keys, cx));
+            col = col.child(user_bubble(text, &[], TAIL, t, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
             col = col.child(work_block(&work, key, true, t, now, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
-                col = col.child(reply_block(text, TAIL, t, &mono, keys, cx));
+                col = col.child(reply_block(text, TAIL, t, &fonts, keys, cx));
             }
         }
         for text in echo(PromptMode::FollowUp) {
-            col = col.child(user_bubble(text, &[], TAIL, t, &mono, keys, cx));
+            col = col.child(user_bubble(text, &[], TAIL, t, &fonts, keys, cx));
         }
         col = col.pb_6();
     }
@@ -601,24 +607,24 @@ fn render_timeline_item(
     t: &OpenThread,
     blobs: &HashMap<String, Arc<gpui::Image>>,
     now: i64,
-    mono: &SharedString,
+    fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
     match item {
         Item::User { text, images, .. } => {
             let images: Vec<_> = images.iter().map(|id| blobs.get(id).cloned()).collect();
-            user_bubble(text, &images, ix, t, mono, keys, cx).into_any()
+            user_bubble(text, &images, ix, t, fonts, keys, cx).into_any()
         }
         Item::Work(w) => work_block(w, ix, false, t, now, keys, cx).into_any(),
-        Item::Assistant(text) => reply_block(text, ix, t, mono, keys, cx).into_any(),
+        Item::Assistant(text) => reply_block(text, ix, t, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
             .w_full()
             .py(px(2.))
             .text_size(px(STEP_SIZE))
             .line_height(px(19.))
-            .text_color(rgb(theme::ERROR))
+            .text_color(rgba(theme::t().error))
             .child(keys.plain(text.clone()))
             .into_any(),
         Item::Compaction => notice_line(keys.plain("context compacted".to_owned())),
@@ -628,18 +634,19 @@ fn render_timeline_item(
 
 /// A quiet one-liner between messages (compaction, warnings, unknown entries).
 fn notice_line(text: impl IntoElement) -> AnyElement {
-    div().w_full().py_1().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(text).into_any()
+    div().w_full().py_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(text).into_any()
 }
 
-fn reply_block(text: &str, ix: usize, t: &OpenThread, mono: &SharedString, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
+fn reply_block(text: &str, ix: usize, t: &OpenThread, fonts: &Fonts, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
     div()
         .group("msg")
         .relative()
         .w_full()
         .py_1()
+        .font_family(fonts.prose.clone())
         .text_size(px(14.))
         .line_height(px(22.))
-        .child(markdown::render(text, mono, keys))
+        .child(markdown::render(text, &fonts.mono, keys))
         .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP))
         .children(corner_buttons(ix, text, t, cx))
 }
@@ -650,7 +657,7 @@ const PIN_GAP: f32 = 6.;
 /// A pinned message's amber bar in the left margin, `left` px before the block's edge
 /// (so bubbles and replies line up despite the bubble's overhang).
 fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
-    t.pins.contains(&ix).then(|| div().absolute().left(px(-left)).top_1().bottom_1().w(px(2.)).rounded_full().bg(rgb(theme::WARN)))
+    t.pins.contains(&ix).then(|| div().absolute().left(px(-left)).top_1().bottom_1().w(px(2.)).rounded_full().bg(rgba(theme::t().warn)))
 }
 
 /// `pin` and `copy` in a message's top right corner, revealed on hover. Copy puts the
@@ -663,8 +670,8 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirige
     }
     let (copied, pinned) = (t.copied == Some(ix), t.pins.contains(&ix));
     let text = text.to_owned();
-    let button = |b: Stateful<Div>| b.bg(rgb(theme::RAISED)).border_1().border_color(rgb(theme::LINE));
-    let tint = if pinned { theme::WARN } else { theme::FG_1 };
+    let button = |b: Stateful<Div>| b.bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line));
+    let tint = if pinned { theme::t().warn } else { theme::t().fg_1 };
     let pin = button(theme::tinted_icon_button(("pin", ix), "pin", tint, cx, move |this, cx| this.toggle_pin(ix, cx)));
     let copy = button(theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| {
         this.copy_item(ix, text.clone(), cx)
@@ -695,24 +702,24 @@ fn user_bubble(
     images: &[Option<Arc<gpui::Image>>],
     ix: usize,
     t: &OpenThread,
-    mono: &SharedString,
+    fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let thumbs = (!images.is_empty()).then(|| {
         div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, image)| {
             let id = ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64);
-            let box_ = thumb_box().id(id).border_1().border_color(rgb(theme::NAVY_LINE));
+            let box_ = thumb_box().id(id).border_1().border_color(rgba(theme::t().accent_line));
             match image {
                 Some(image) => box_
                     .cursor_pointer()
-                    .hover(|d| d.border_color(rgb(theme::NAVY_INK)))
+                    .hover(|d| d.border_color(rgba(theme::t().accent_ink)))
                     .on_click(cx.listener({
                         let image = image.clone();
                         move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
                     }))
                     .child(thumb(image)),
-                None => box_.bg(rgb(theme::NAVY)),
+                None => box_.bg(rgba(theme::t().accent)),
             }
         }))
     });
@@ -725,11 +732,12 @@ fn user_bubble(
         .px(px(BUBBLE_PAD))
         .py_3()
         .rounded_lg()
-        // A shade under the send button's navy, so bubbles sit back from the chrome.
-        .bg(rgb(0x1c2840))
+        // A shade under the send button's accent, so bubbles sit back from the chrome.
+        .bg(rgba(theme::t().bubble))
+        .font_family(fonts.prose.clone())
         .text_size(px(14.))
         .line_height(px(22.))
-        .child(markdown::render(text, mono, keys))
+        .child(markdown::render(text, &fonts.mono, keys))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
         .children(corner_buttons(ix, text, t, cx).map(|b| b.top_2().right_2()))
@@ -752,8 +760,8 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, keys: &mut Keys, cx:
             .id(ElementId::NamedInteger(SharedString::from("steer-cancel"), step_id_n(key)))
             .flex_shrink_0()
             .cursor_pointer()
-            .text_color(rgb(theme::FG_2))
-            .hover(|d| d.text_color(rgb(theme::ERROR)))
+            .text_color(rgba(theme::t().fg_2))
+            .hover(|d| d.text_color(rgba(theme::t().error)))
             .opacity(0.)
             .group_hover("steer", |d| d.opacity(1.))
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -770,11 +778,11 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, keys: &mut Keys, cx:
         .py(px(2.))
         .text_size(px(STEP_SIZE))
         .line_height(px(19.))
-        .child(div().flex_shrink_0().text_color(rgb(theme::NAVY_INK)).child("steer"))
-        .child(div().flex_1().min_w_0().text_color(rgb(theme::FG_1)).child(keys.plain(text.to_owned())))
+        .child(div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).child("steer"))
+        .child(div().flex_1().min_w_0().text_color(rgba(theme::t().fg_1)).child(keys.plain(text.to_owned())))
         // `cancel` sits left of `queued` so `queued` stays flush right while it's invisible.
         .children(cancel)
-        .when(queued, |d| d.child(div().flex_shrink_0().text_color(rgb(theme::FG_2)).child("queued")))
+        .when(queued, |d| d.child(div().flex_shrink_0().text_color(rgba(theme::t().fg_2)).child("queued")))
 }
 
 /// A turn's work as one line: `› model effort · 1m 23s · 4 tool calls`, plus what it is
@@ -788,19 +796,19 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
         n => format!("{n} tool calls"),
     };
     let activity = live.then(|| t.streaming.activity(&w.steps, now).unwrap_or_else(|| "waiting".into()));
-    let dot = || div().text_color(rgb(theme::FG_2)).child("·");
+    let dot = || div().text_color(rgba(theme::t().fg_2)).child("·");
     row(step_id(key, usize::MAX))
         .my_1()
         .gap_2()
         .text_size(px(STEP_SIZE))
-        .when(shown, |d| d.bg(rgb(theme::RAISED)))
+        .when(shown, |d| d.bg(rgba(theme::t().raised)))
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_log(key, cx)))
-        .child(div().text_color(rgb(theme::FG)).child(w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned()))
-        .children(w.effort.clone().map(|e| div().text_color(rgb(theme::NAVY_INK)).child(e)))
+        .child(div().text_color(rgba(theme::t().fg)).child(w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned()))
+        .children(w.effort.clone().map(|e| div().text_color(rgba(theme::t().accent_ink)).child(e)))
         .child(dot())
-        .child(div().text_color(rgb(theme::FG_1)).child(if live { elapsed(now - w.started) } else { duration(w.duration(now)) }))
+        .child(div().text_color(rgba(theme::t().fg_1)).child(if live { elapsed(now - w.started) } else { duration(w.duration(now)) }))
         .child(dot())
-        .child(div().text_color(rgb(theme::FG_1)).child(tools))
+        .child(div().text_color(rgba(theme::t().fg_1)).child(tools))
         .children(activity.map(|a| {
             div()
                 .flex()
@@ -808,7 +816,7 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
                 .gap_2()
                 .min_w_0()
                 .child(dot())
-                .child(div().min_w_0().truncate().text_color(rgb(theme::WORKING)).child(a))
+                .child(div().min_w_0().truncate().text_color(rgba(theme::t().working)).child(a))
         }))
         .into_any()
 }
@@ -865,7 +873,7 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         .pr_2()
         .flex_shrink_0()
         .text_size(px(12.))
-        .text_color(rgb(theme::FG_2))
+        .text_color(rgba(theme::t().fg_2))
         .child(div().flex_1().child("Work log"))
         .child(theme::icon_button("log-close", "x", cx, move |this, cx| this.toggle_log(key, cx)));
     let handle = div()
@@ -876,7 +884,7 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         .w(px(6.))
         .h_full()
         .cursor_col_resize()
-        .hover(|d| d.bg(rgb(theme::LINE)))
+        .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
     Some(
         div()
@@ -885,7 +893,7 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
             .flex_shrink_0()
             .h_full()
             .border_l_1()
-            .border_color(rgb(theme::LINE_SOFT))
+            .border_color(rgba(theme::t().line_soft))
             .flex()
             .flex_col()
             .child(title)
@@ -901,13 +909,13 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
     let Some(key) = t.log else { return div().into_any() };
     let Some(step) = work.steps.get(six) else {
         let text = if live { "Waiting for the model" } else { "No steps" };
-        return div().h(px(ROW_H)).flex().items_center().text_color(rgb(theme::FG_2)).child(text).into_any();
+        return div().h(px(ROW_H)).flex().items_center().text_color(rgba(theme::t().fg_2)).child(text).into_any();
     };
     let mono = &this.fonts.mono;
     let keys = &mut Keys::new(&this.selection, Doc::Log, six);
     match step {
-        Step::Thinking(text) => div().py_0p5().text_color(rgb(theme::FG_1)).child(markdown::render(text, mono, keys)).into_any(),
-        Step::Text(text) => div().py_0p5().text_color(rgb(theme::FG)).child(markdown::render(text, mono, keys)).into_any(),
+        Step::Thinking(text) => div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys)).into_any(),
+        Step::Text(text) => div().py_0p5().text_color(rgba(theme::t().fg)).child(markdown::render(text, mono, keys)).into_any(),
         Step::Tool(call) => render_tool(call, (key, six), t, now_ms(), keys, cx),
         Step::Steer { text, queued } => steer_row((key, six), text, *queued, keys, cx).into_any(),
     }
@@ -922,29 +930,29 @@ fn render_tool(call: &ToolCall, key: (usize, usize), t: &OpenThread, now: i64, k
     let (time, color) = match (t.streaming.running_since(&call.id), call.started.zip(call.ended)) {
         (Some(since), _) => {
             let so_far = elapsed(now - since);
-            (Some(call.timeout.map(|s| format!("{so_far} / {}", duration((s * 1000.) as i64))).unwrap_or(so_far)), theme::WORKING)
+            (Some(call.timeout.map(|s| format!("{so_far} / {}", duration((s * 1000.) as i64))).unwrap_or(so_far)), theme::t().working)
         }
-        (None, Some((s, e))) => (Some(duration(e - s)), if failed { theme::ERROR } else { theme::FG_2 }),
-        (None, None) => (failed.then(|| "failed".to_owned()), theme::ERROR),
+        (None, Some((s, e))) => (Some(duration(e - s)), if failed { theme::t().error } else { theme::t().fg_2 }),
+        (None, None) => (failed.then(|| "failed".to_owned()), theme::t().error),
     };
     let line = row(step_id(key.0, key.1))
         .gap_2()
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_expanded(key, cx)))
-        .child(div().flex_shrink_0().text_color(rgb(theme::DONE)).child(call.name.clone()))
-        .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::FG_1)).child(call.primary.clone()))
-        .children(time.map(|s| div().flex_shrink_0().text_color(rgb(color)).child(s)));
+        .child(div().flex_shrink_0().text_color(rgba(theme::t().done)).child(call.name.clone()))
+        .child(div().flex_1().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).child(call.primary.clone()))
+        .children(time.map(|s| div().flex_shrink_0().text_color(rgba(color)).child(s)));
     let body = expanded.then(|| {
-        let mut b = div().my_1().px_3().py_2().rounded_md().bg(rgb(theme::RAISED)).flex().flex_col().gap_2();
+        let mut b = div().my_1().px_3().py_2().rounded_md().bg(rgba(theme::t().raised)).flex().flex_col().gap_2();
         if !call.args.is_empty() {
-            b = b.child(div().text_color(rgb(theme::FG_1)).child(keys.plain(call.args.clone())));
+            b = b.child(div().text_color(rgba(theme::t().fg_1)).child(keys.plain(call.args.clone())));
         }
         if let Some(r) = &call.result {
             let mut s: String = r.text.chars().take(MAX_RESULT_CHARS).collect();
             if s.len() < r.text.len() {
                 s.push_str("\n…");
             }
-            let color = if r.is_error { theme::ERROR } else { theme::FG_1 };
-            b = b.child(div().pt_2().border_t_1().border_color(rgb(theme::LINE)).text_color(rgb(color)).child(keys.plain(s)));
+            let color = if r.is_error { theme::t().error } else { theme::t().fg_1 };
+            b = b.child(div().pt_2().border_t_1().border_color(rgba(theme::t().line)).text_color(rgba(color)).child(keys.plain(s)));
         }
         b
     });
@@ -964,7 +972,7 @@ fn row(id: ElementId) -> gpui::Stateful<Div> {
         .flex_row()
         .items_center()
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(theme::RAISED)))
+        .hover(|d| d.bg(rgba(theme::t().raised)))
 }
 
 fn step_id(item: usize, step: usize) -> ElementId {

@@ -2,7 +2,7 @@
 //! The runtime is stateless, so a crash just means "nothing is loaded anymore".
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ImageAttachment, ModelInfo, PromptMode};
+use dirigent_protocol::{ImageAttachment, ModelInfo, PromptMode, TitleGen};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -43,6 +43,8 @@ pub enum RuntimeMessage {
     Models {
         models: Vec<ModelInfo>,
     },
+    /// Reply to `generate_title`.
+    Title(TitleResult),
     /// Synthesized by the supervisor when the child exits; all loaded state is gone.
     #[serde(skip)]
     Crashed,
@@ -70,6 +72,11 @@ enum Command_<'a> {
         model: Option<&'a str>,
         thinking_level: Option<&'a str>,
         images: &'a [ImageAttachment],
+        title: Option<&'a TitleGen>,
+    },
+    GenerateTitle {
+        title: &'a TitleGen,
+        text: &'a str,
     },
     Abort {
         thread_id: &'a str,
@@ -79,6 +86,17 @@ enum Command_<'a> {
         text: &'a str,
     },
     ListModels,
+}
+
+/// A generated title and what it cost (see `ServerMessage::Title`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TitleResult {
+    pub title: String,
+    pub model: String,
+    pub input: u64,
+    pub output: u64,
+    pub cost: f64,
+    pub duration_ms: i64,
 }
 
 pub struct Runtime {
@@ -98,6 +116,9 @@ struct Inner {
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
     pending_models: Vec<oneshot::Sender<Vec<ModelInfo>>>,
+    /// Callers waiting on a `title` reply, FIFO like `pending_models`. A failed generation
+    /// comes back as an `error` without a thread id, which answers the oldest waiter.
+    pending_titles: Vec<oneshot::Sender<Result<TitleResult, String>>>,
     last_activity: HashMap<String, Instant>,
 }
 
@@ -173,9 +194,19 @@ impl Runtime {
                     let _ = w.send(models.clone());
                 }
             }
+            RuntimeMessage::Title(result) => {
+                if !inner.pending_titles.is_empty() {
+                    let _ = inner.pending_titles.remove(0).send(Ok(result.clone()));
+                }
+            }
             RuntimeMessage::Error { thread_id: Some(thread_id), message } => {
                 for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
                     let _ = w.send(Err(message.clone()));
+                }
+            }
+            RuntimeMessage::Error { thread_id: None, message } => {
+                if !inner.pending_titles.is_empty() {
+                    let _ = inner.pending_titles.remove(0).send(Err(message.clone()));
                 }
             }
             RuntimeMessage::Event { thread_id, event } => {
@@ -201,6 +232,7 @@ impl Runtime {
             }
         }
         inner.pending_models.clear();
+        inner.pending_titles.clear();
     }
 
     fn send(&self, cmd: &Command_) -> Result<()> {
@@ -274,6 +306,7 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn prompt(
         &self,
         thread_id: &str,
@@ -282,9 +315,21 @@ impl Runtime {
         model: Option<&str>,
         thinking_level: Option<&str>,
         images: &[ImageAttachment],
+        title: Option<&TitleGen>,
     ) -> Result<()> {
         self.inner.lock().unwrap().last_activity.insert(thread_id.to_owned(), Instant::now());
-        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images })
+        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images, title })
+    }
+
+    pub async fn generate_title(&self, title: &TitleGen, text: &str) -> Result<TitleResult> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.lock().unwrap().pending_titles.push(tx);
+        self.send(&Command_::GenerateTitle { title, text })?;
+        match tokio::time::timeout(LOAD_TIMEOUT, rx).await {
+            Ok(Ok(Ok(result))) => Ok(result),
+            Ok(Ok(Err(message))) => Err(anyhow!("{message}")),
+            _ => Err(anyhow!("runtime did not answer generate_title")),
+        }
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {

@@ -1,7 +1,7 @@
 // dirigent runtime: newline-framed JSON on stdin/stdout, one pi session per thread.
 // stdout is protocol only; logs go to stderr. EOF on stdin = shutdown.
 
-import { Sessions } from "./sessions";
+import { Sessions, type TitleGen } from "./sessions";
 
 type Inbound =
   | {
@@ -21,10 +21,12 @@ type Inbound =
       model?: string;
       thinking_level?: string;
       images?: { mime_type: string; data: string }[];
+      title?: TitleGen;
     }
   | { type: "abort"; thread_id: string }
   | { type: "cancel_queued"; thread_id: string; text: string }
-  | { type: "list_models" };
+  | { type: "list_models" }
+  | { type: "generate_title"; title: TitleGen; text: string };
 
 const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
 const sessions = new Sessions(send);
@@ -43,6 +45,7 @@ async function handle(msg: Inbound): Promise<void> {
         msg.model,
         msg.thinking_level,
         msg.images,
+        msg.title,
       );
     case "abort":
       return sessions.abort(msg.thread_id);
@@ -50,6 +53,10 @@ async function handle(msg: Inbound): Promise<void> {
       return sessions.cancelQueued(msg.thread_id, msg.text);
     case "list_models":
       return sessions.listModels();
+    case "generate_title":
+      return sessions.generateTitle(msg.title, msg.text).then((r) => {
+        send({ type: "title", ...r });
+      });
     default:
       throw new Error(`unknown message type: ${(msg as { type: string }).type}`);
   }

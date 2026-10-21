@@ -8,7 +8,7 @@ use crate::select::{Block, Keys};
 use crate::theme;
 use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*,
-    px, rgb,
+    px, rgba,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use std::iter::Peekable;
@@ -45,7 +45,7 @@ impl Renderer<'_> {
             match e {
                 Event::End(_) => break,
                 Event::Start(tag) => out.push(self.block(tag, ev)),
-                Event::Rule => out.push(div().h(px(1.)).w_full().my_1().bg(rgb(theme::LINE)).into_any()),
+                Event::Rule => out.push(div().h(px(1.)).w_full().my_1().bg(rgba(theme::t().line)).into_any()),
                 inline => {
                     let mut p = Inline::default();
                     p.event(inline, self.mono);
@@ -93,9 +93,9 @@ impl Renderer<'_> {
             }
             Tag::BlockQuote(_) => div()
                 .border_l_2()
-                .border_color(rgb(theme::LINE))
+                .border_color(rgba(theme::t().line))
                 .pl_3()
-                .text_color(rgb(theme::FG_1))
+                .text_color(rgba(theme::t().fg_1))
                 .flex()
                 .flex_col()
                 .gap_2()
@@ -121,7 +121,7 @@ impl Renderer<'_> {
                         div()
                             .flex()
                             .gap_2()
-                            .child(div().flex_shrink_0().min_w(px(16.)).text_color(rgb(theme::FG_1)).child(marker))
+                            .child(div().flex_shrink_0().min_w(px(16.)).text_color(rgba(theme::t().fg_1)).child(marker))
                             .child(div().flex_1().min_w_0().flex().flex_col().gap_1().children(self.blocks(ev)))
                             .into_any(),
                     );
@@ -151,8 +151,8 @@ impl Renderer<'_> {
                     _ => {}
                 }
             }
-            let row = div().flex().w_full().border_b_1().border_color(rgb(theme::LINE_SOFT)).children(cells);
-            rows.push(if head { row.font_weight(FontWeight::SEMIBOLD).border_color(rgb(theme::LINE)) } else { row });
+            let row = div().flex().w_full().border_b_1().border_color(rgba(theme::t().line_soft)).children(cells);
+            rows.push(if head { row.font_weight(FontWeight::SEMIBOLD).border_color(rgba(theme::t().line)) } else { row });
         }
         div().flex().flex_col().w_full().my_1().children(rows).into_any()
     }
@@ -193,9 +193,9 @@ impl Renderer<'_> {
         div()
             .w_full()
             .rounded_md()
-            .bg(rgb(theme::RAISED))
+            .bg(rgba(theme::t().raised))
             .border_1()
-            .border_color(rgb(theme::LINE_SOFT))
+            .border_color(rgba(theme::t().line_soft))
             .px_3()
             .py_2()
             .font_family(self.mono.clone())
@@ -257,11 +257,11 @@ impl Inline {
             h.strikethrough = Some(StrikethroughStyle { thickness: px(1.), color: None });
         }
         if self.link > 0 {
-            h.color = Some(rgb(theme::NAVY_INK).into());
+            h.color = Some(rgba(theme::t().accent_ink).into());
             h.underline = Some(UnderlineStyle { thickness: px(1.), color: None, wavy: false });
         }
         if let Some(mono) = code {
-            h.background_color = Some(rgb(theme::HOVER).into());
+            h.background_color = Some(rgba(theme::t().hover).into());
             self.code_ranges.push((range.clone(), mono.clone()));
         }
         if h != HighlightStyle::default() {

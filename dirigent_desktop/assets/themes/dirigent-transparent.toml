@@ -1,0 +1,41 @@
+# Dirigent theme "dirigent-transparent": the default palette on a black, 90% opaque window.
+# config.toml's `theme = "<name>"` picks it. Colours are #rrggbb, or #rrggbbaa for a translucent one.
+
+# The canvas is pure black at 90% and the main panel on it only 20%, so the window is see-through, blurred where the
+# compositor supports it; inputs and user messages are translucent too so it shows through.
+
+# Surfaces, from the window canvas (behind the sidebar) to the main panel, raised
+# cards and inputs, hover fills, and the two line weights.
+canvas = "#000000e6"
+panel = "#00000033"
+raised = "#111111e6"
+hover = "#1a1a1a80"
+# Menus, toasts and hover cards: they float over everything, so keep them solid.
+popup = "#1a1a1af2"
+line = "#25272d"
+line_soft = "#1c1e23"
+
+# Text: primary, secondary, tertiary.
+fg = "#c8cacf"
+fg_1 = "#8c909a"
+fg_2 = "#5d616a"
+
+# The one accent, spent on live things: a fill (send button, running), a brighter fill
+# for the selected menu row, a line for focus rings, and a tint that reads as text.
+accent = "#22304ee6"
+accent_active = "#2c3f66"
+accent_line = "#3a5080"
+accent_ink = "#7a97cf"
+selection = "#4f6fd155"
+bubble = "#1c284080"
+
+# The stop button: fill, hover fill, icon.
+danger = "#4e2626"
+danger_active = "#643232"
+danger_ink = "#e8a0a0"
+
+# Status: working dot, done check, errors, snoozed / pinned amber.
+working = "#6f8fd4"
+done = "#6aa884"
+error = "#d26a6a"
+warn = "#cfa45a"

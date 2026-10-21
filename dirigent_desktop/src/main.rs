@@ -2,6 +2,7 @@
 
 mod app;
 mod cache;
+mod config;
 mod hosts;
 mod icons;
 mod input;
@@ -13,6 +14,7 @@ mod picker;
 mod projects;
 mod ruler;
 mod select;
+mod settings;
 mod sidebar;
 mod theme;
 mod thread;
@@ -33,27 +35,19 @@ fn data_dir() -> PathBuf {
         .join("dirigent")
 }
 
-/// Resolve a font family through fontconfig (gpui wants a concrete installed name).
-/// `preferred` is used when installed, else the system default for `generic`.
-fn font(env: &str, preferred: &str, generic: &str, fallback: &str) -> String {
-    if let Ok(f) = std::env::var(env) {
-        return f;
-    }
-    let fc_match = |pattern: &str| {
-        let out = std::process::Command::new("fc-match").args(["-f", "%{family[0]}", pattern]).output().ok()?;
-        let s = String::from_utf8(out.stdout).ok()?;
-        (!s.trim().is_empty()).then(|| s.trim().to_owned())
-    };
-    fc_match(preferred).filter(|f| f == preferred).or_else(|| fc_match(generic)).unwrap_or_else(|| fallback.into())
-}
-
-fn fonts() -> theme::Fonts {
-    theme::Fonts { mono: font("DIRIGENT_FONT", "Lilex", "monospace", "DejaVu Sans Mono").into() }
-}
-
 fn main() {
     let cache = Cache::open(&data_dir().join("desktop.db")).expect("open cache");
-    let fonts = fonts();
+    // A broken config.toml still starts the app (on defaults); the watcher picks up the fix.
+    let config = config::load().unwrap_or_else(|e| {
+        eprintln!("[desktop] {e:#}");
+        config::Config::default()
+    });
+    // Before the config watcher takes its first stamp, so the write isn't seen as an edit.
+    if let Err(e) = theme::write_example() {
+        eprintln!("[desktop] {e:#}");
+    }
+    // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
+    let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
 
     application().with_assets(icons::Assets).run(move |cx: &mut App| {
         cx.bind_keys(input::key_bindings());
@@ -73,12 +67,13 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_background,
                     // app_id/title are what testing.md keys on to find this window.
                     app_id: Some("dirigent".into()),
                     titlebar: Some(TitlebarOptions { title: Some("Dirigent".into()), ..Default::default() }),
                     ..Default::default()
                 },
-                |window, cx| cx.new(|cx| Dirigent::new(cache, fonts, window, cx)),
+                |window, cx| cx.new(|cx| Dirigent::new(cache, config, window, cx)),
             )
             .unwrap();
         if std::env::var_os("DIRIGENT_DEBUG_KEYS").is_some() {

@@ -24,11 +24,7 @@ struct File {
 }
 
 pub fn path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .expect("HOME not set")
-        .join("dirigent/hosts.toml")
+    crate::config::dir().join("hosts.toml")
 }
 
 /// Name → url, normalized. A missing file is an empty list; a broken one is an error so

@@ -4,8 +4,8 @@
 use crate::app::Dirigent;
 use crate::theme;
 use gpui::{
-    Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, SharedString, Stateful, anchored, canvas, div, point, prelude::*, px, rgb,
-    size,
+    Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, SharedString, Stateful, anchored, canvas, div, point, prelude::*, px,
+    rgba, size,
 };
 
 /// Gap between trigger and popup.
@@ -60,11 +60,11 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
                         .overflow_y_scroll()
                         .p_1()
                         .rounded_lg()
-                        .bg(rgb(theme::HOVER))
+                        .bg(rgba(theme::t().popup))
                         .border_1()
-                        .border_color(rgb(theme::LINE))
+                        .border_color(rgba(theme::t().line))
                         .shadow_lg()
-                        .text_color(rgb(theme::FG))
+                        .text_color(rgba(theme::t().fg))
                         .on_mouse_down_out(dismiss)
                         .children(items),
                 )
@@ -94,7 +94,7 @@ pub fn item(
     row(id, selected)
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
         .child(div().flex_shrink_0().child(label.into()))
-        .child(div().min_w_0().truncate().text_color(rgb(theme::FG_1)).text_size(px(12.)).child(detail.into()))
+        .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(px(12.)).child(detail.into()))
         .into_any()
 }
 
@@ -112,8 +112,8 @@ pub fn row(id: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
         .px_2()
         .rounded_md()
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(theme::NAVY_ACTIVE)))
-        .hover(|d| d.bg(rgb(theme::LINE)))
+        .when(selected, |d| d.bg(rgba(theme::t().accent_active)))
+        .hover(|d| d.bg(rgba(theme::t().line)))
 }
 
 /// A destructive action: same row, red label.
@@ -124,7 +124,7 @@ pub fn danger(
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
     row(id, false)
-        .text_color(rgb(theme::ERROR))
+        .text_color(rgba(theme::t().error))
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
         .child(label.into())
         .into_any()
@@ -139,12 +139,12 @@ pub fn header(text: impl Into<SharedString>) -> AnyElement {
         .flex()
         .items_center()
         .text_size(px(11.5))
-        .text_color(rgb(theme::FG_2))
+        .text_color(rgba(theme::t().fg_2))
         .child(text.into())
         .into_any()
 }
 
 /// A hairline between sections.
 pub fn separator() -> AnyElement {
-    div().h(px(1.)).flex_shrink_0().my_1().bg(rgb(theme::LINE)).into_any()
+    div().h(px(1.)).flex_shrink_0().my_1().bg(rgba(theme::t().line)).into_any()
 }
