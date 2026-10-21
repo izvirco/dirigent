@@ -66,7 +66,7 @@ model chip (370, 667), thread header archive / delete (1032, 28) / (1062, 28). T
 The sidebar's drag handle is at
 x = sidebar width; `[` hides the sidebar and hovering x < 10 peeks it. Clicking a thread's work line (`› model effort ·
 duration · n tool calls`, under the user bubble) or `]` opens the 400 px work log panel on the pane's right; its drag
-handle is the hairline on its left, and `]` / Esc (when nothing is running) close it.
+handle is the hairline on its left, and `]` / Esc (when nothing is running) close it. The ruler is the 28 px strip at the pane's left edge: the marks are vertically centered at a 7 px pitch, so mark `i` of `n` is at y = list middle + 7·(i − (n − 1) / 2); `move` onto it for the preview, `click` to center that message.
 
 ## Gotchas
 

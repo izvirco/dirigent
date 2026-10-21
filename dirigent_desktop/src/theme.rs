@@ -101,6 +101,17 @@ pub fn icon_button(
     cx: &mut Context<Dirigent>,
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
 ) -> Stateful<Div> {
+    tinted_icon_button(id, name, FG_1, cx, on_click)
+}
+
+/// `icon_button` with the icon in a given colour (a pinned pin is amber).
+pub fn tinted_icon_button(
+    id: impl Into<ElementId>,
+    name: &'static str,
+    color: u32,
+    cx: &mut Context<Dirigent>,
+    on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
+) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
@@ -112,7 +123,7 @@ pub fn icon_button(
         .cursor_pointer()
         .hover(|d| d.bg(rgb(HOVER)))
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
-        .child(icon(name, FG_1))
+        .child(icon(name, color))
 }
 
 /// A small raised button with an icon and a label (header actions).

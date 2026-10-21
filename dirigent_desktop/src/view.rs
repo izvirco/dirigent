@@ -20,7 +20,9 @@ pub enum Item {
     Assistant(String),
     /// Assistant turn ended with an error (API failure, abort, ...).
     Error(String),
-    /// Informational line (warnings, compaction, unknown entries, ...).
+    /// The context was compacted here (its own item so the ruler can mark it).
+    Compaction,
+    /// Informational line (warnings, unknown entries, ...).
     Notice(String),
 }
 
@@ -136,7 +138,7 @@ impl Timeline {
                 None
             }
             "session_info" | "label" | "usage" | "custom" => None,
-            "compaction" => Some(self.add(Item::Notice("context compacted".into()))),
+            "compaction" => Some(self.add(Item::Compaction)),
             "custom_message" => Some(self.add(Item::Notice(text_of(entry.get("content"))))),
             other => Some(self.add(Item::Notice(format!("unknown entry: {other}")))),
         }
@@ -534,11 +536,13 @@ mod tests {
         let entries = [
             json!({"type":"message","message":{"role":"user","content":"hi","timestamp":1}}),
             json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":2,"stopReason":"stop","content":[{"type":"text","text":"yo"}]}}),
+            json!({"type":"compaction","summary":"..."}),
             json!({"type":"wat"}),
         ];
         let t = Timeline::from_entries(entries.iter());
         assert_eq!(t.items[1], Item::Assistant("yo".into()));
-        assert_eq!(t.items[2], Item::Notice("unknown entry: wat".into()));
+        assert_eq!(t.items[2], Item::Compaction);
+        assert_eq!(t.items[3], Item::Notice("unknown entry: wat".into()));
     }
 
     #[test]

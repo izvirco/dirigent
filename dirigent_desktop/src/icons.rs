@@ -26,6 +26,7 @@ icons!(
     "ellipsis",
     "panel-left-close",
     "panel-left-open",
+    "pin",
     "plus",
     "search",
     "settings",
