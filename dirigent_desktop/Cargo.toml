@@ -1,0 +1,23 @@
+[package]
+name = "dirigent_desktop"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirigent_protocol.workspace = true
+dirigent_service = { path = "../dirigent_service" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+gpui = { git = "https://github.com/zed-industries/zed", branch = "main" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main", features = [
+  "wayland",
+  "x11",
+] }
+tokio-tungstenite = "0.28"
+futures = "0.3"
+base64 = "0.22"
+unicode-segmentation = "1"
+pulldown-cmark = { version = "0.13", default-features = false }

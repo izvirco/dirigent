@@ -1,0 +1,321 @@
+//! Wire types between `dirigent_desktop` and `dirigent_service` (JSON over WebSocket).
+//!
+//! Requests carry an `id`, replies carry `reply_to`, pushes have neither.
+//! Pi entries and events stay opaque `serde_json::Value`s so this crate is pi-version-agnostic.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMode {
+    /// Start a run (queued as follow-up if one is already running).
+    Prompt,
+    /// Inject after the current assistant turn.
+    Steer,
+    /// Deliver after the current run finishes.
+    FollowUp,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMessage {
+    ListProjects {
+        id: u64,
+    },
+    /// Register a directory on this host as a project. The user is responsible for it existing.
+    AddProject {
+        id: u64,
+        path: String,
+    },
+    /// Soft delete; the project's threads stay and become orphans.
+    RemoveProject {
+        id: u64,
+        project_id: String,
+    },
+    ListThreads {
+        id: u64,
+    },
+    GetThread {
+        id: u64,
+        thread_id: String,
+    },
+    CreateThread {
+        id: u64,
+        project_id: String,
+    },
+    /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
+    /// `images` are attached to the message; pi resizes them to the model's limits.
+    Prompt {
+        id: u64,
+        thread_id: String,
+        text: String,
+        mode: PromptMode,
+        model: Option<String>,
+        thinking_level: Option<String>,
+        #[serde(default)]
+        images: Vec<ImageAttachment>,
+    },
+    Abort {
+        id: u64,
+        thread_id: String,
+    },
+    /// Drop one steer / follow-up (by text) that pi has queued but not yet handed to the model.
+    CancelQueued {
+        id: u64,
+        thread_id: String,
+        text: String,
+    },
+    /// Hide a finished thread from the inbox (or bring it back). It stays replayable.
+    ArchiveThread {
+        id: u64,
+        thread_id: String,
+        archived: bool,
+    },
+    /// Permanently remove a thread and its entries.
+    DeleteThread {
+        id: u64,
+        thread_id: String,
+    },
+    /// Models this host has credentials for.
+    ListModels {
+        id: u64,
+    },
+    /// The bytes behind an image block's `blob` id (see `ServerMessage::Entry`).
+    GetBlob {
+        id: u64,
+        blob_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerMessage {
+    Hello {
+        host_name: String,
+        version: String,
+    },
+    /// Reply to `ListProjects`, or pushed (`reply_to: None`) whenever a project changes.
+    Projects {
+        reply_to: Option<u64>,
+        projects: Vec<Project>,
+    },
+    ProjectAdded {
+        reply_to: u64,
+        project: Project,
+    },
+    /// Reply to `ListThreads`, or pushed (`reply_to: None`) whenever a thread changes.
+    Threads {
+        reply_to: Option<u64>,
+        threads: Vec<ThreadSummary>,
+    },
+    Thread {
+        reply_to: u64,
+        thread_id: String,
+        header: Value,
+        entries: Vec<Entry>,
+    },
+    ThreadCreated {
+        reply_to: u64,
+        thread: ThreadSummary,
+    },
+    Ok {
+        reply_to: u64,
+    },
+    Error {
+        reply_to: Option<u64>,
+        message: String,
+    },
+    /// Pushed to all clients whenever an entry is persisted for a thread. Image blocks in
+    /// entries carry `blob` (a content hash) instead of `data`; fetch them with `GetBlob`.
+    Entry {
+        thread_id: String,
+        entry: Entry,
+    },
+    /// Pi `AgentSessionEvent`, forwarded as JSON.
+    Event {
+        thread_id: String,
+        event: Value,
+    },
+    Models {
+        reply_to: u64,
+        models: Vec<ModelInfo>,
+    },
+    /// Base64 bytes of a blob.
+    Blob {
+        reply_to: u64,
+        blob_id: String,
+        mime_type: String,
+        data: String,
+    },
+}
+
+/// An image sent with a prompt: base64 bytes and their mime type (`image/png`, ...).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub mime_type: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Project {
+    pub id: String,
+    pub path: String,
+    /// Normalized git `origin` URL, if the directory is a git repo. Used by the desktop to auto-link.
+    pub origin: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub context_window: u64,
+    pub thinking_levels: Vec<String>,
+}
+
+impl ModelInfo {
+    /// `provider/id`, the form used everywhere a model is referenced by string.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.provider, self.id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThreadSummary {
+    pub id: String,
+    /// Missing when the project was removed (orphan thread).
+    pub project_id: Option<String>,
+    pub cwd: String,
+    pub name: Option<String>,
+    /// Current `provider/id` and thinking level, from the latest change entries.
+    pub model: Option<String>,
+    pub thinking_level: Option<String>,
+    /// Unix millis.
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub entry_count: u64,
+    /// Unix millis the current run started, while an agent is working on the thread.
+    pub running_since: Option<i64>,
+    /// How long the last finished run took, in millis.
+    pub last_run_ms: Option<i64>,
+    pub archived: bool,
+}
+
+impl ThreadSummary {
+    pub fn running(&self) -> bool {
+        self.running_since.is_some()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Entry {
+    /// Append order within the thread, starting at 0.
+    pub seq: u64,
+    pub id: String,
+    pub parent_id: Option<String>,
+    /// Pi entry `type` (`message`, `model_change`, ...).
+    pub kind: String,
+    /// The full pi entry.
+    pub json: Value,
+}
+
+impl Entry {
+    /// Build from a raw pi session entry; `seq` is assigned by storage.
+    pub fn from_pi(seq: u64, json: Value) -> Self {
+        let s = |k: &str| json.get(k).and_then(Value::as_str).map(str::to_owned);
+        Self { seq, id: s("id").unwrap_or_default(), parent_id: s("parentId"), kind: s("type").unwrap_or_default(), json }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn roundtrip<T: Serialize + for<'de> Deserialize<'de> + PartialEq + std::fmt::Debug>(v: T) {
+        let s = serde_json::to_string(&v).unwrap();
+        assert_eq!(serde_json::from_str::<T>(&s).unwrap(), v, "{s}");
+    }
+
+    #[test]
+    fn client_messages() {
+        roundtrip(ClientMessage::ListProjects { id: 1 });
+        roundtrip(ClientMessage::AddProject { id: 1, path: "/x".into() });
+        roundtrip(ClientMessage::RemoveProject { id: 1, project_id: "p".into() });
+        roundtrip(ClientMessage::ListThreads { id: 1 });
+        roundtrip(ClientMessage::GetThread { id: 2, thread_id: "t".into() });
+        roundtrip(ClientMessage::CreateThread { id: 3, project_id: "p".into() });
+        roundtrip(ClientMessage::Prompt {
+            id: 4,
+            thread_id: "t".into(),
+            text: "hi".into(),
+            mode: PromptMode::FollowUp,
+            model: Some("a/b".into()),
+            thinking_level: None,
+            images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into() }],
+        });
+        roundtrip(ClientMessage::Abort { id: 5, thread_id: "t".into() });
+        roundtrip(ClientMessage::CancelQueued { id: 9, thread_id: "t".into(), text: "x".into() });
+        roundtrip(ClientMessage::ArchiveThread { id: 7, thread_id: "t".into(), archived: true });
+        roundtrip(ClientMessage::DeleteThread { id: 8, thread_id: "t".into() });
+        roundtrip(ClientMessage::ListModels { id: 6 });
+        roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
+        assert_eq!(
+            serde_json::to_value(ClientMessage::Prompt {
+                id: 4,
+                thread_id: "t".into(),
+                text: "hi".into(),
+                mode: PromptMode::Steer,
+                model: None,
+                thinking_level: None,
+                images: vec![],
+            })
+            .unwrap(),
+            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"thinking_level":null,"images":[]})
+        );
+    }
+
+    #[test]
+    fn server_messages() {
+        let t = ThreadSummary {
+            id: "t".into(),
+            project_id: Some("p".into()),
+            cwd: "/x".into(),
+            name: None,
+            model: None,
+            thinking_level: None,
+            created_at: 1,
+            updated_at: 2,
+            entry_count: 3,
+            running_since: Some(5),
+            last_run_ms: Some(7),
+            archived: false,
+        };
+        let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
+        let m =
+            ModelInfo { provider: "a".into(), id: "b".into(), name: "B".into(), context_window: 1, thinking_levels: vec!["low".into()] };
+        assert_eq!(m.key(), "a/b");
+        roundtrip(ServerMessage::Projects { reply_to: None, projects: vec![p.clone()] });
+        roundtrip(ServerMessage::ProjectAdded { reply_to: 1, project: p });
+        roundtrip(ServerMessage::Models { reply_to: 1, models: vec![m] });
+        let e = Entry::from_pi(0, json!({"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"hi"}}));
+        assert_eq!(e.kind, "message");
+        assert_eq!(e.parent_id, None);
+        roundtrip(ServerMessage::Hello { host_name: "h".into(), version: "0".into() });
+        roundtrip(ServerMessage::Threads { reply_to: None, threads: vec![t.clone()] });
+        roundtrip(ServerMessage::Thread {
+            reply_to: 1,
+            thread_id: "t".into(),
+            header: json!({"type":"session"}),
+            entries: vec![e.clone()],
+        });
+        roundtrip(ServerMessage::ThreadCreated { reply_to: 2, thread: t });
+        roundtrip(ServerMessage::Ok { reply_to: 3 });
+        roundtrip(ServerMessage::Error { reply_to: Some(4), message: "boom".into() });
+        roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });
+        roundtrip(ServerMessage::Event { thread_id: "t".into(), event: json!({"type":"agent_start"}) });
+        roundtrip(ServerMessage::Blob { reply_to: 5, blob_id: "abc".into(), mime_type: "image/png".into(), data: "AAAA".into() });
+    }
+}

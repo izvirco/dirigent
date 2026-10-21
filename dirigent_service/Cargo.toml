@@ -1,0 +1,17 @@
+[package]
+name = "dirigent_service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dirigent_protocol.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+rusqlite.workspace = true
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v7"] }
+sha2 = "0.10"
+base64 = "0.22"

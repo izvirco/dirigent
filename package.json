@@ -1,0 +1,13 @@
+{
+  "name": "dirigent",
+  "private": true,
+  "workspaces": [
+    "dirigent_runtime"
+  ],
+  "scripts": {
+    "lint": "oxlint",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "typecheck": "bun run --filter '*' typecheck"
+  }
+}

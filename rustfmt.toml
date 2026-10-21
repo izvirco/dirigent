@@ -1,0 +1,4 @@
+# Wide lines: gpui builder chains and sqlite statements read better unbroken.
+edition = "2024"
+max_width = 140
+use_small_heuristics = "Max"
