@@ -1,9 +1,11 @@
 //! Sqlite persistence: the host's source of truth for threads and their pi entries.
 //! `entries.seq` is append order; replaying a thread is `SELECT json ORDER BY seq`.
 //! Images are kept out of the entry JSON in a content-addressed `blobs` table (see `blobs`).
+//! `usage` is derived from the assistant messages (one row each) so spend over time is
+//! one indexed query rather than a scan of every entry's JSON.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Entry, Project, ThreadSummary};
+use dirigent_protocol::{Entry, Project, ThreadSummary, UsageBucket};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::path::Path;
@@ -43,7 +45,36 @@ CREATE TABLE IF NOT EXISTS blobs (
     mime TEXT NOT NULL,
     bytes BLOB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS usage (
+    at INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    input INTEGER NOT NULL,
+    output INTEGER NOT NULL,
+    cache_read INTEGER NOT NULL,
+    cache_write INTEGER NOT NULL,
+    cost REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS usage_at ON usage (at);
 ";
+
+/// A `usage` row extracted from an assistant message entry. Used both to backfill the table
+/// from existing entries (once, when it is empty) and to add each new entry's row, so the
+/// two can't disagree. Rows survive their thread's deletion: the money was spent.
+const USAGE_FROM_ENTRIES: &str = "
+    SELECT json_extract(json, '$.message.timestamp'),
+           COALESCE(json_extract(json, '$.message.provider'), ''),
+           COALESCE(json_extract(json, '$.message.model'), ''),
+           COALESCE(json_extract(json, '$.message.usage.input'), 0),
+           COALESCE(json_extract(json, '$.message.usage.output'), 0),
+           COALESCE(json_extract(json, '$.message.usage.cacheRead'), 0),
+           COALESCE(json_extract(json, '$.message.usage.cacheWrite'), 0),
+           COALESCE(json_extract(json, '$.message.usage.cost.total'), 0)
+    FROM entries
+    WHERE kind = 'message'
+      AND json_extract(json, '$.message.role') = 'assistant'
+      AND json_extract(json, '$.message.usage') IS NOT NULL
+      AND json_extract(json, '$.message.timestamp') IS NOT NULL";
 
 pub struct Storage {
     conn: Connection,
@@ -67,6 +98,11 @@ impl Storage {
     // No migrations yet: when the schema changes, delete the db file.
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        // `usage` is derived data: an empty table on a db with history gets filled in once.
+        let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM usage)", [], |r| r.get(0))?;
+        if empty {
+            conn.execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES}"), [])?;
+        }
         Ok(Self { conn })
     }
 
@@ -222,6 +258,10 @@ impl Storage {
             params![thread_id, seq, entry.id, entry.parent_id, entry.kind, entry.json.to_string()],
         )?;
         self.conn.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
+        if entry.kind == "message" {
+            self.conn
+                .execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
+        }
 
         let j = &entry.json;
         match entry.kind.as_str() {
@@ -246,6 +286,32 @@ impl Storage {
             self.conn.execute(sql, params![thread_id, name])?;
         }
         Ok(entry)
+    }
+
+    /// Usage in `since..until`, summed per `bucket`-wide slot from `since` and per
+    /// provider + model, oldest slot first.
+    pub fn usage(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<UsageBucket>> {
+        anyhow::ensure!(bucket > 0, "bucket must be positive");
+        let mut stmt = self.conn.prepare(
+            "SELECT ?1 + ((at - ?1) / ?3) * ?3 AS start, provider, model,
+                    SUM(input), SUM(output), SUM(cache_read), SUM(cache_write), SUM(cost), COUNT(*)
+             FROM usage WHERE at >= ?1 AND at < ?2
+             GROUP BY start, provider, model ORDER BY start",
+        )?;
+        let rows = stmt.query_map(params![since, until, bucket], |r| {
+            Ok(UsageBucket {
+                start: r.get(0)?,
+                provider: r.get(1)?,
+                model: r.get(2)?,
+                input: r.get::<_, i64>(3)? as u64,
+                output: r.get::<_, i64>(4)? as u64,
+                cache_read: r.get::<_, i64>(5)? as u64,
+                cache_write: r.get::<_, i64>(6)? as u64,
+                cost: r.get(7)?,
+                messages: r.get::<_, i64>(8)? as u64,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn blob(&self, id: &str) -> Result<Option<(String, Vec<u8>)>> {
@@ -342,5 +408,32 @@ mod tests {
         assert!(s.list_threads().unwrap().is_empty());
         assert!(s.get_thread("t1").unwrap().is_none());
         assert!(s.delete_thread("t1").is_err());
+    }
+
+    #[test]
+    fn usage_is_bucketed_per_model() {
+        let s = Storage::in_memory().unwrap();
+        s.create_thread("t1", "p", "/x", 0).unwrap();
+        let assistant = |at: i64, model: &str, input: u64, cost: f64| {
+            json!({"type":"message","id":"x","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,
+                "usage":{"input":input,"output":10,"cacheRead":100,"cacheWrite":5,"totalTokens":0,"cost":{"total":cost}}}})
+        };
+        s.append_entry("t1", json!({"type":"message","id":"u","message":{"role":"user","content":"hi","timestamp":1}}), 1).unwrap();
+        s.append_entry("t1", assistant(1000, "a", 1, 0.5), 1).unwrap();
+        s.append_entry("t1", assistant(1500, "a", 2, 0.25), 1).unwrap();
+        s.append_entry("t1", assistant(2500, "b", 4, 1.0), 1).unwrap();
+        s.append_entry("t1", assistant(9000, "a", 8, 1.0), 1).unwrap(); // past `until`
+        let b = s.usage(0, 5000, 1000).unwrap();
+        assert_eq!(b.len(), 2);
+        assert_eq!((b[0].start, b[0].model.as_str(), b[0].input, b[0].cost, b[0].messages), (1000, "a", 3, 0.75, 2));
+        assert_eq!((b[1].start, b[1].model.as_str(), b[1].input, b[1].cache_read), (2000, "b", 4, 100));
+        // An empty `usage` table (a db from before it existed) is rebuilt from the entries on open.
+        s.conn.execute("DELETE FROM usage", []).unwrap();
+        let s = Storage::init(s.conn).unwrap();
+        let total = |s: &Storage| s.usage(0, 10_000, 10_000).unwrap().iter().map(|b| b.messages).sum::<u64>();
+        assert_eq!(total(&s), 4);
+        // Spend outlives the thread.
+        s.delete_thread("t1").unwrap();
+        assert_eq!(total(&s), 4);
     }
 }

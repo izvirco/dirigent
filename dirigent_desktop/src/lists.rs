@@ -1,5 +1,6 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar, the new-project form and the settings page.
+//! 40px header bar, the new-project form and the settings pages (Hosts here, Usage in
+//! `usage.rs`; `settings_header` carries the tabs between them).
 
 use crate::app::{Dirigent, Pane, Target};
 use crate::icons::icon;
@@ -50,6 +51,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 ),
         ),
         Pane::Settings => settings_page(this, pane, cx),
+        Pane::Usage => crate::usage::render(this, pane, cx),
         Pane::Thread(_) | Pane::Draft { .. } => pane,
     }
 }
@@ -130,7 +132,35 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
 
     let hosts = settings_section("Hosts", div().flex().flex_col().children(rows).child(form));
     let column = div().w_full().max_w(px(600.)).flex().flex_col().gap_8().py_8().px_6().child(hosts);
-    pane.child(header(div().child("Settings"), None)).child(scroll("settings", div().flex().flex_col().items_center().child(column)))
+    pane.child(settings_header(Pane::Settings, cx)).child(scroll("settings", div().flex().flex_col().items_center().child(column)))
+}
+
+/// The settings pages' header: `Settings` and the tabs (Hosts, Usage), the open one bright.
+pub fn settings_header(active: Pane, cx: &mut Context<Dirigent>) -> Div {
+    let tab = |label: &'static str, on: bool, cx: &mut Context<Dirigent>, go: fn(&mut Dirigent, &mut Context<Dirigent>)| {
+        div()
+            .id(label)
+            .h(px(24.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .cursor_pointer()
+            .text_color(rgb(if on { theme::FG } else { theme::FG_1 }))
+            .when(on, |d| d.bg(rgb(theme::HOVER)))
+            .hover(|d| d.text_color(rgb(theme::FG)))
+            .on_click(cx.listener(move |this, _, _, cx| go(this, cx)))
+            .child(label)
+    };
+    let title = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(div().mr_3().child("Settings"))
+        .child(tab("Hosts", matches!(active, Pane::Settings), cx, |this, cx| this.show_settings(cx)))
+        .child(tab("Usage", matches!(active, Pane::Usage), cx, |this, cx| this.show_usage(cx)));
+    header(title, None)
 }
 
 /// A settings section: title over its content.

@@ -107,6 +107,52 @@ impl Work {
     }
 }
 
+/// What a thread cost so far, summed over its assistant messages (the context chip's
+/// hover card). `input` is everything fed to the model (fresh + cache read + cache
+/// write); `cached` is the part read from cache.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Stats {
+    pub input: u64,
+    pub output: u64,
+    pub cached: u64,
+    pub cost: f64,
+    pub user_messages: usize,
+    pub assistant_messages: usize,
+    pub compactions: usize,
+}
+
+impl Stats {
+    pub fn of<'a>(entries: impl IntoIterator<Item = &'a Value>) -> Self {
+        let mut s = Self::default();
+        for e in entries {
+            if e.get("type").and_then(Value::as_str) == Some("compaction") {
+                s.compactions += 1;
+            }
+            let Some(msg) = e.get("message") else { continue };
+            match msg.get("role").and_then(Value::as_str) {
+                Some("user") => s.user_messages += 1,
+                Some("assistant") => {
+                    s.assistant_messages += 1;
+                    if let Some(u) = msg.get("usage") {
+                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                        s.input += n("input") + n("cacheRead") + n("cacheWrite");
+                        s.cached += n("cacheRead");
+                        s.output += n("output");
+                        s.cost += u.pointer("/cost/total").and_then(Value::as_f64).unwrap_or(0.);
+                    }
+                }
+                _ => {}
+            }
+        }
+        s
+    }
+
+    /// Share of the prompt tokens that came from cache, in percent.
+    pub fn cached_pct(&self) -> u64 {
+        if self.input == 0 { 0 } else { (self.cached as f64 / self.input as f64 * 100.).round() as u64 }
+    }
+}
+
 /// Builds the timeline entry by entry. Tracks the session's model / thinking level so a
 /// `Work` can be labelled even before its first assistant message says which model ran.
 #[derive(Debug, Default)]
@@ -523,6 +569,23 @@ mod tests {
         assert_eq!(s.echo, vec![("late".into(), PromptMode::FollowUp)]);
         s.apply(&json!({"type":"agent_settled"}), 0);
         assert!(s.echo.is_empty());
+    }
+
+    #[test]
+    fn stats_sum_assistant_usage() {
+        let usage = |input: u64, read: u64, write: u64, output: u64, cost: f64| json!({"type":"message","message":{"role":"assistant","usage":{"input":input,"cacheRead":read,"cacheWrite":write,"output":output,"cost":{"total":cost}}}});
+        let entries = [
+            json!({"type":"message","message":{"role":"user","content":"hi"}}),
+            usage(2, 90, 8, 10, 0.5),
+            json!({"type":"message","message":{"role":"toolResult","content":""}}),
+            usage(0, 95, 5, 20, 0.25),
+            json!({"type":"compaction","summary":".."}),
+            json!({"type":"message","message":{"role":"user","content":"more"}}),
+        ];
+        let s = Stats::of(entries.iter());
+        assert_eq!((s.input, s.output, s.cached, s.cost), (200, 30, 185, 0.75));
+        assert_eq!((s.user_messages, s.assistant_messages, s.compactions), (2, 2, 1));
+        assert_eq!(s.cached_pct(), 93);
     }
 
     #[test]
