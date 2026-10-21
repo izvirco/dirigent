@@ -1,0 +1,38 @@
+# Dirigent theme "gruvbox-light". Copy to ~/.config/dirigent/theme/<name>.toml to make your own;
+# config.toml's `theme = "<name>"` picks it. Colours are #rrggbb, or #rrggbbaa for a translucent one.
+
+# Surfaces, from the window canvas (behind the sidebar) to the main panel, raised
+# cards and inputs, hover fills, and the two line weights.
+canvas = "#f2e5bc"
+panel = "#fbf1c7"
+raised = "#f9f5d7"
+hover = "#ebdbb2"
+# Menus, toasts and hover cards: they float over everything, so keep them solid.
+popup = "#ebdbb2"
+line = "#d5c4a1"
+line_soft = "#ebdbb2"
+
+# Text: primary, secondary, tertiary.
+fg = "#3c3836"
+fg_1 = "#665c54"
+fg_2 = "#928374"
+
+# The one accent, spent on live things: a fill (send button, running), a brighter fill
+# for the selected menu row, a line for focus rings, and a tint that reads as text.
+accent = "#c6d2c2"
+accent_active = "#b2c3b0"
+accent_line = "#8ea99a"
+accent_ink = "#427b58"
+selection = "#8ec07c55"
+bubble = "#e0e3c8"
+
+# The stop button: fill, hover fill, icon.
+danger = "#f2c6b6"
+danger_active = "#eab09a"
+danger_ink = "#9d0006"
+
+# Status: working dot, done check, errors, snoozed / pinned amber.
+working = "#427b58"
+done = "#79740e"
+error = "#cc241d"
+warn = "#b57614"

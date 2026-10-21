@@ -46,6 +46,7 @@ pub enum ClientMessage {
     },
     /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
     /// `images` are attached to the message; pi resizes them to the model's limits.
+    /// `title` (sent with a thread's first prompt) asks the host to name the thread from `text`.
     Prompt {
         id: u64,
         thread_id: String,
@@ -55,6 +56,14 @@ pub enum ClientMessage {
         thinking_level: Option<String>,
         #[serde(default)]
         images: Vec<ImageAttachment>,
+        #[serde(default)]
+        title: Option<TitleGen>,
+    },
+    /// Name `text` the way a thread's first prompt would be named (the settings page's `Test`).
+    GenerateTitle {
+        id: u64,
+        title: TitleGen,
+        text: String,
     },
     Abort {
         id: u64,
@@ -160,6 +169,25 @@ pub enum ServerMessage {
         reply_to: u64,
         buckets: Vec<UsageBucket>,
     },
+    /// Reply to `GenerateTitle`: the title and what producing it cost.
+    Title {
+        reply_to: u64,
+        title: String,
+        model: String,
+        input: u64,
+        output: u64,
+        cost: f64,
+        duration_ms: i64,
+    },
+}
+
+/// How to name a thread from its first prompt: the model (`provider/id`), pi thinking level
+/// and system prompt. Comes from the desktop's `config.toml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TitleGen {
+    pub model: String,
+    pub reasoning: String,
+    pub prompt: String,
 }
 
 /// Usage summed over one time slot for one model (see `ClientMessage::ListUsage`).
@@ -285,6 +313,12 @@ mod tests {
             model: Some("a/b".into()),
             thinking_level: None,
             images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into() }],
+            title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
+        });
+        roundtrip(ClientMessage::GenerateTitle {
+            id: 12,
+            title: TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() },
+            text: "hi".into(),
         });
         roundtrip(ClientMessage::Abort { id: 5, thread_id: "t".into() });
         roundtrip(ClientMessage::CancelQueued { id: 9, thread_id: "t".into(), text: "x".into() });
@@ -302,9 +336,10 @@ mod tests {
                 model: None,
                 thinking_level: None,
                 images: vec![],
+                title: None,
             })
             .unwrap(),
-            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"thinking_level":null,"images":[]})
+            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"thinking_level":null,"images":[],"title":null})
         );
     }
 
@@ -343,6 +378,15 @@ mod tests {
             entries: vec![e.clone()],
         });
         roundtrip(ServerMessage::ThreadCreated { reply_to: 2, thread: t });
+        roundtrip(ServerMessage::Title {
+            reply_to: 3,
+            title: "Fix it".into(),
+            model: "a/c".into(),
+            input: 1,
+            output: 2,
+            cost: 0.5,
+            duration_ms: 9,
+        });
         roundtrip(ServerMessage::Ok { reply_to: 3 });
         roundtrip(ServerMessage::Error { reply_to: Some(4), message: "boom".into() });
         roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });

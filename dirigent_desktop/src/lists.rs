@@ -1,6 +1,6 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar, the new-project form and the settings pages (Hosts here, Usage in
-//! `usage.rs`; `settings_header` carries the tabs between them).
+//! 40px header bar, the new-project form and the settings pages (Hosts here, Config in
+//! `settings.rs`, Usage in `usage.rs`; `settings_header` carries the tabs between them).
 
 use crate::app::{Dirigent, Pane, Target};
 use crate::icons::icon;
@@ -8,7 +8,7 @@ use crate::net::HostStatus;
 use crate::theme::{self, Status};
 use crate::{hosts, projects};
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
 
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
@@ -37,19 +37,20 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .gap_3()
                 .p_6()
                 .max_w(px(560.))
-                .child(div().text_color(rgb(theme::FG_1)).child("Absolute path of a directory on that host. Enter to add it."))
+                .child(div().text_color(rgba(theme::t().fg_1)).child("Absolute path of a directory on that host. Enter to add it."))
                 .child(
                     div()
                         .w_full()
                         .px_3()
                         .py_2()
                         .rounded_md()
-                        .bg(rgb(theme::RAISED))
+                        .bg(rgba(theme::t().raised))
                         .border_1()
-                        .border_color(rgb(theme::LINE))
+                        .border_color(rgba(theme::t().line))
                         .child(this.path_input.clone()),
                 ),
         ),
+        Pane::Config => crate::settings::render(this, pane, cx),
         Pane::Settings => settings_page(this, pane, cx),
         Pane::Usage => crate::usage::render(this, pane, cx),
         Pane::Thread(_) | Pane::Draft { .. } => pane,
@@ -61,9 +62,9 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
     let rows = this.hosts.iter().map(|h| {
         let (dot, status) = match h.status {
-            HostStatus::Connected => (theme::DONE, "connected"),
-            HostStatus::Connecting => (theme::WARN, "connecting"),
-            HostStatus::Disconnected => (theme::ERROR, "disconnected"),
+            HostStatus::Connected => (theme::t().done, "connected"),
+            HostStatus::Connecting => (theme::t().warn, "connecting"),
+            HostStatus::Disconnected => (theme::t().error, "disconnected"),
         };
         let name = h.name.clone();
         div()
@@ -76,8 +77,8 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
             .h(px(38.))
             .px_2()
             .border_b_1()
-            .border_color(rgb(theme::LINE_SOFT))
-            .child(div().size(px(6.)).rounded_full().bg(rgb(dot)))
+            .border_color(rgba(theme::t().line_soft))
+            .child(div().size(px(6.)).rounded_full().bg(rgba(dot)))
             .child(div().w(px(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
             .child(
                 div()
@@ -86,10 +87,10 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
                     .truncate()
                     .font_family(this.fonts.mono.clone())
                     .text_size(px(12.))
-                    .text_color(rgb(theme::FG_1))
+                    .text_color(rgba(theme::t().fg_1))
                     .child(h.url.clone()),
             )
-            .child(div().w(px(90.)).flex_shrink_0().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(status))
+            .child(div().w(px(90.)).flex_shrink_0().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(status))
             .child(if name == hosts::LOCAL {
                 div().size(px(24.)).into_any_element()
             } else {
@@ -103,14 +104,14 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
                     .cursor_pointer()
                     .opacity(0.)
                     .group_hover("row", |d| d.opacity(1.))
-                    .hover(|d| d.bg(rgb(theme::HOVER)))
+                    .hover(|d| d.bg(rgba(theme::t().hover)))
                     .on_click(cx.listener(move |this, _, _, cx| this.remove_host(&name, cx)))
-                    .child(icon("x", theme::FG_1))
+                    .child(icon("x", theme::t().fg_1))
                     .into_any_element()
             })
     });
     let field = |input: gpui::Entity<crate::input::TextInput>| {
-        div().px_3().py_2().rounded_md().bg(rgb(theme::RAISED)).border_1().border_color(rgb(theme::LINE)).child(input)
+        div().px_3().py_2().rounded_md().bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line)).child(input)
     };
     let form = div()
         .flex()
@@ -118,7 +119,9 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
         .gap_3()
         .pt_4()
         .child(
-            div().text_color(rgb(theme::FG_1)).child("Add a host running dirigent_service, reachable over your tailnet. Enter to add it."),
+            div()
+                .text_color(rgba(theme::t().fg_1))
+                .child("Add a host running dirigent_service, reachable over your tailnet. Enter to add it."),
         )
         .child(
             div()
@@ -128,14 +131,16 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
                 .child(field(this.host_name_input.clone()).w(px(150.)))
                 .child(field(this.host_url_input.clone()).flex_1()),
         )
-        .child(div().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(format!("Also editable by hand: {}", hosts::path().display())));
+        .child(
+            div().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(format!("Also editable by hand: {}", hosts::path().display())),
+        );
 
     let hosts = settings_section("Hosts", div().flex().flex_col().children(rows).child(form));
     let column = div().w_full().max_w(px(600.)).flex().flex_col().gap_8().py_8().px_6().child(hosts);
     pane.child(settings_header(Pane::Settings, cx)).child(scroll("settings", div().flex().flex_col().items_center().child(column)))
 }
 
-/// The settings pages' header: `Settings` and the tabs (Hosts, Usage), the open one bright.
+/// The settings pages' header: `Settings` and the tabs (Config, Hosts, Usage), the open one bright.
 pub fn settings_header(active: Pane, cx: &mut Context<Dirigent>) -> Div {
     let tab = |label: &'static str, on: bool, cx: &mut Context<Dirigent>, go: fn(&mut Dirigent, &mut Context<Dirigent>)| {
         div()
@@ -146,9 +151,9 @@ pub fn settings_header(active: Pane, cx: &mut Context<Dirigent>) -> Div {
             .items_center()
             .rounded_md()
             .cursor_pointer()
-            .text_color(rgb(if on { theme::FG } else { theme::FG_1 }))
-            .when(on, |d| d.bg(rgb(theme::HOVER)))
-            .hover(|d| d.text_color(rgb(theme::FG)))
+            .text_color(rgba(if on { theme::t().fg } else { theme::t().fg_1 }))
+            .when(on, |d| d.bg(rgba(theme::t().hover)))
+            .hover(|d| d.text_color(rgba(theme::t().fg)))
             .on_click(cx.listener(move |this, _, _, cx| go(this, cx)))
             .child(label)
     };
@@ -158,14 +163,15 @@ pub fn settings_header(active: Pane, cx: &mut Context<Dirigent>) -> Div {
         .items_center()
         .gap_1()
         .child(div().mr_3().child("Settings"))
+        .child(tab("Config", matches!(active, Pane::Config), cx, |this, cx| this.show_config(cx)))
         .child(tab("Hosts", matches!(active, Pane::Settings), cx, |this, cx| this.show_settings(cx)))
         .child(tab("Usage", matches!(active, Pane::Usage), cx, |this, cx| this.show_usage(cx)));
     header(title, None)
 }
 
 /// A settings section: title over its content.
-fn settings_section(title: &'static str, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::FG)).child(title)).child(body)
+pub fn settings_section(title: &'static str, body: impl IntoElement) -> Div {
+    div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
 }
 
 /// The main pane's top bar: a title on the left, optional actions on the right.
@@ -178,15 +184,21 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .flex_shrink_0()
         .px_4()
         .border_b_1()
-        .border_color(rgb(theme::LINE_SOFT))
+        .border_color(rgba(theme::t().line_soft))
         .font_weight(FontWeight::MEDIUM)
         .child(div().flex_1().min_w_0().flex().flex_row().items_center().gap_1p5().child(title))
         .children(actions)
 }
 
-/// `project › title`, with the project clickable.
-/// `project › title`, with an amber pin before the title while `pinned`.
-pub fn breadcrumb(project: Option<(String, String)>, title: impl Into<SharedString>, pinned: bool, cx: &mut Context<Dirigent>) -> Div {
+/// `project > title`, with the project clickable and an amber pin before the title while
+/// `pinned`. The title breathes while `titling` (its name is being generated).
+pub fn breadcrumb(
+    project: Option<(String, String)>,
+    title: impl Into<SharedString>,
+    pinned: bool,
+    titling: bool,
+    cx: &mut Context<Dirigent>,
+) -> Div {
     div()
         .flex()
         .flex_row()
@@ -202,16 +214,16 @@ pub fn breadcrumb(project: Option<(String, String)>, title: impl Into<SharedStri
                 .child(
                     div()
                         .id("crumb-project")
-                        .text_color(rgb(theme::FG_1))
+                        .text_color(rgba(theme::t().fg_1))
                         .cursor_pointer()
-                        .hover(|d| d.text_color(rgb(theme::FG)))
+                        .hover(|d| d.text_color(rgba(theme::t().fg)))
                         .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
                         .child(name),
                 )
-                .child(icon("chevron-right", theme::FG_2).size(px(12.)))
+                .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
         }))
         .children(pinned.then(theme::pin_mark))
-        .child(div().min_w_0().truncate().child(title.into()))
+        .child(theme::title_text("crumb-title", title, titling))
 }
 
 fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Dirigent>) -> Div {
@@ -240,7 +252,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
             .into_any_element()
     });
 
-    let title = breadcrumb(None, name, false, cx);
+    let title = breadcrumb(None, name, false, false, cx);
     let mut body = div().id("project-page").flex_1().overflow_y_scroll().flex().flex_col();
     if !paths.is_empty() {
         body = body.child(
@@ -248,9 +260,9 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
                 .px_4()
                 .py_2()
                 .border_b_1()
-                .border_color(rgb(theme::LINE_SOFT))
+                .border_color(rgba(theme::t().line_soft))
                 .text_size(px(12.))
-                .text_color(rgb(theme::FG_2))
+                .text_color(rgba(theme::t().fg_2))
                 .children(paths.into_iter().map(|p| div().child(p))),
         );
     }
@@ -265,11 +277,21 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
     pane.child(header(title, new_thread)).child(body)
 }
 
+/// A band between list sections (`Archived`): the canvas colour at 40% over the panel, a
+/// shade darker than the rows without going solid on a see-through theme.
 fn section_label(text: String) -> Div {
-    div().h(px(32.)).px_4().flex().items_center().text_size(px(12.)).text_color(rgb(theme::FG_2)).bg(rgb(theme::CANVAS)).child(text)
+    div()
+        .h(px(32.))
+        .px_4()
+        .flex()
+        .items_center()
+        .text_size(px(12.))
+        .text_color(rgba(theme::t().fg_2))
+        .bg(rgba(theme::alpha(theme::t().canvas, 0x66)))
+        .child(text)
 }
 
-fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
+pub fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     div().id(id).flex_1().overflow_y_scroll().flex().flex_col().child(content)
 }
 
@@ -312,9 +334,9 @@ fn thread_row(
         .h(px(38.))
         .px_4()
         .border_b_1()
-        .border_color(rgb(theme::LINE_SOFT))
+        .border_color(rgba(theme::t().line_soft))
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(theme::RAISED)))
+        .hover(|d| d.bg(rgba(theme::t().raised)))
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &id, cx)))
         .child(status.glyph())
         .child(
@@ -323,27 +345,27 @@ fn thread_row(
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgb(if unread {
-                        theme::NAVY_INK
+                    .text_color(rgba(if unread {
+                        theme::t().accent_ink
                     } else if archived {
-                        theme::FG_1
+                        theme::t().fg_1
                     } else {
-                        theme::FG
+                        theme::t().fg
                     }))
                     .child(title),
             ),
         )
-        .when(show_host, |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(host.to_owned())))
-        .when(!project.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgb(theme::FG_1)).child(project)))
-        .child(div().w(px(150.)).truncate().text_size(px(12.)).text_color(rgb(theme::FG_2)).child(model))
-        .child(div().w(px(32.)).text_size(px(11.)).text_color(rgb(theme::FG_2)).child(theme::rel_time(now - t.updated_at)))
+        .when(show_host, |d| d.child(div().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
+        .when(!project.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgba(theme::t().fg_1)).child(project)))
+        .child(div().w(px(150.)).truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
+        .child(div().w(px(32.)).text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
         .when(matches!(status, Status::Done | Status::Snoozed), |d| {
-            let color = if snoozed { theme::WARN } else { theme::FG_1 };
+            let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             d.child(row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| {
                 this.set_snoozed(&h3, &id3, !snoozed, cx)
             }))
         })
-        .child(row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::FG_1, false, cx, move |this, cx| {
+        .child(row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, false, cx, move |this, cx| {
             this.set_archived(&h2, &id2, !archived, cx)
         }))
 }
@@ -367,7 +389,7 @@ fn row_action(
         .rounded_md()
         .opacity(if on { 1. } else { 0. })
         .group_hover("row", |d| d.opacity(1.))
-        .hover(|d| d.bg(rgb(theme::HOVER)))
+        .hover(|d| d.bg(rgba(theme::t().hover)))
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             on_click(this, cx)

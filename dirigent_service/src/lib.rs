@@ -80,6 +80,7 @@ impl Service {
             | ClientMessage::ArchiveThread { id, .. }
             | ClientMessage::DeleteThread { id, .. }
             | ClientMessage::ListModels { id }
+            | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
             | ClientMessage::ListUsage { id, .. } => *id,
         };
@@ -125,7 +126,7 @@ impl Service {
                 // No push: the creator's `Prompt` follows at once and pushes the thread already running.
                 ServerMessage::ThreadCreated { reply_to: id, thread }
             }
-            ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images } => {
+            ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title } => {
                 // The run starts now, not at pi's `agent_start`: loading the session (and a nix
                 // dev shell) can take seconds, and clients should see the thread working with
                 // the model it will use for all of it.
@@ -135,7 +136,9 @@ impl Service {
                     self.push_threads();
                 }
                 let sent = match self.ensure_loaded(&thread_id, model.as_deref(), thinking_level.as_deref()).await {
-                    Ok(()) => self.runtime.prompt(&thread_id, &text, mode, model.as_deref(), thinking_level.as_deref(), &images),
+                    Ok(()) => {
+                        self.runtime.prompt(&thread_id, &text, mode, model.as_deref(), thinking_level.as_deref(), &images, title.as_ref())
+                    }
                     Err(e) => Err(e),
                 };
                 if sent.is_err() && self.runtime.settle(&thread_id).is_some() {
@@ -145,6 +148,18 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListModels { id } => ServerMessage::Models { reply_to: id, models: self.runtime.list_models().await? },
+            ClientMessage::GenerateTitle { id, title, text } => {
+                let r = self.runtime.generate_title(&title, &text).await?;
+                ServerMessage::Title {
+                    reply_to: id,
+                    title: r.title,
+                    model: r.model,
+                    input: r.input,
+                    output: r.output,
+                    cost: r.cost,
+                    duration_ms: r.duration_ms,
+                }
+            }
             ClientMessage::GetBlob { id, blob_id } => {
                 let (mime_type, bytes) = self.storage.lock().unwrap().blob(&blob_id)?.ok_or_else(|| anyhow!("no such blob"))?;
                 ServerMessage::Blob {
@@ -251,7 +266,7 @@ impl Service {
                 };
                 self.push(ServerMessage::Error { reply_to: None, message });
             }
-            RuntimeMessage::Models { .. } => {}
+            RuntimeMessage::Models { .. } | RuntimeMessage::Title(_) => {}
             RuntimeMessage::Crashed => {
                 self.push(ServerMessage::Error { reply_to: None, message: "runtime restarted".into() });
                 self.push_threads();

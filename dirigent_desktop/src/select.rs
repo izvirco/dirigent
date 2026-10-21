@@ -371,7 +371,7 @@ const STUB: f32 = 2. * RADIUS;
 pub fn paint_selection(rows: &[Row], lh: Pixels, window: &mut Window) {
     for piece in pieces(rows) {
         if let Some(path) = rounded_path(&outline(piece, lh)).and_then(|p| p.build().ok()) {
-            window.paint_path(path, rgba(crate::theme::SELECTION));
+            window.paint_path(path, rgba(crate::theme::t().selection));
         }
     }
 }

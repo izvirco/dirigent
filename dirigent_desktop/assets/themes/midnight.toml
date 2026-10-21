@@ -1,0 +1,38 @@
+# Dirigent theme "midnight". Copy to ~/.config/dirigent/theme/<name>.toml to make your own;
+# config.toml's `theme = "<name>"` picks it. Colours are #rrggbb, or #rrggbbaa for a translucent one.
+
+# Surfaces, from the window canvas (behind the sidebar) to the main panel, raised
+# cards and inputs, hover fills, and the two line weights.
+canvas = "#000000"
+panel = "#0b0b0f"
+raised = "#121218"
+hover = "#1a1a22"
+# Menus, toasts and hover cards: they float over everything, so keep them solid.
+popup = "#1a1a22"
+line = "#24242e"
+line_soft = "#17171e"
+
+# Text: primary, secondary, tertiary.
+fg = "#ececf1"
+fg_1 = "#9a9aa8"
+fg_2 = "#60606e"
+
+# The one accent, spent on live things: a fill (send button, running), a brighter fill
+# for the selected menu row, a line for focus rings, and a tint that reads as text.
+accent = "#2a2550"
+accent_active = "#39336c"
+accent_line = "#4d4690"
+accent_ink = "#9d94e6"
+selection = "#8a7ff055"
+bubble = "#1f1b40"
+
+# The stop button: fill, hover fill, icon.
+danger = "#4e2626"
+danger_active = "#643232"
+danger_ink = "#e8a0a0"
+
+# Status: working dot, done check, errors, snoozed / pinned amber.
+working = "#9d94e6"
+done = "#67b58b"
+error = "#d86a6a"
+warn = "#d2a85a"

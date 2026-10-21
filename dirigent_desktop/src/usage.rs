@@ -20,7 +20,7 @@ use chrono::{Local, NaiveDate, TimeZone};
 use dirigent_protocol::UsageBucket;
 use gpui::{
     Anchor, AnyElement, Bounds, Context, Div, Entity, FontWeight, Hsla, MouseMoveEvent, PathBuilder, Pixels, Point, SharedString, Stateful,
-    TextAlign, TextRun, Window, anchored, canvas, deferred, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgb,
+    TextAlign, TextRun, Window, anchored, canvas, deferred, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba,
     size,
 };
 use std::cell::RefCell;
@@ -38,7 +38,10 @@ const MAX_SLOTS: i64 = 60;
 const TICKS: [i64; 10] = [HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 14 * DAY, 30 * DAY, 90 * DAY];
 const TICK_MIN_PX: f32 = 90.;
 /// Series colours, assigned by rank (biggest spender first).
-const PALETTE: [u32; 6] = [theme::NAVY_INK, theme::DONE, theme::WARN, 0xb48ead, 0x6fb3c9, theme::ERROR];
+fn palette() -> [u32; 6] {
+    let t = theme::t();
+    [t.accent_ink, t.done, t.warn, 0xb48eadff, 0x6fb3c9ff, t.error]
+}
 /// Plot geometry: the room over it for the scale's top label, the time axis under it.
 const BAND: f32 = 18.;
 const AXIS: f32 = 22.;
@@ -279,10 +282,11 @@ impl Model {
             series.slots[i].add(b);
             series.total.add(b);
         }
+        let palette = palette();
         let mut series: Vec<Series> = by_key.into_values().collect();
         series.sort_by(|a, b| b.total.cost.total_cmp(&a.total.cost).then_with(|| a.key.cmp(&b.key)));
         for (i, s) in series.iter_mut().enumerate() {
-            s.color = PALETTE[i % PALETTE.len()];
+            s.color = palette[i % palette.len()];
         }
         let mut total = Totals::default();
         for s in series.iter().filter(|s| !s.hidden) {
@@ -381,12 +385,12 @@ fn hero(this: &Dirigent, model: &Model, cx: &mut Context<Dirigent>) -> Div {
                 .line_height(px(40.))
                 .font_weight(FontWeight::MEDIUM)
                 .child(whole)
-                .child(div().text_color(rgb(theme::FG_1)).child(cents)),
+                .child(div().text_color(rgba(theme::t().fg_1)).child(cents)),
         )
         .child(
             div()
                 .text_size(px(12.))
-                .text_color(rgb(theme::FG_1))
+                .text_color(rgba(theme::t().fg_1))
                 .child(format!("{}, {messages}", window_label(s.since, s.until, s.bucket()))),
         );
 
@@ -401,9 +405,9 @@ fn hero(this: &Dirigent, model: &Model, cx: &mut Context<Dirigent>) -> Div {
             .rounded_md()
             .cursor_pointer()
             .text_size(px(12.))
-            .text_color(rgb(if active { theme::FG } else { theme::FG_1 }))
-            .when(active, |d| d.bg(rgb(theme::HOVER)))
-            .hover(|d| d.text_color(rgb(theme::FG)))
+            .text_color(rgba(if active { theme::t().fg } else { theme::t().fg_1 }))
+            .when(active, |d| d.bg(rgba(theme::t().hover)))
+            .hover(|d| d.text_color(rgba(theme::t().fg)))
             .on_click(cx.listener(move |this, _, _, cx| this.set_usage_range(r, cx)))
             .child(r.label())
     };
@@ -413,9 +417,9 @@ fn hero(this: &Dirigent, model: &Model, cx: &mut Context<Dirigent>) -> Div {
         .items_center()
         .p(px(2.))
         .rounded_md()
-        .bg(rgb(theme::RAISED))
+        .bg(rgba(theme::t().raised))
         .border_1()
-        .border_color(rgb(theme::LINE))
+        .border_color(rgba(theme::t().line))
         .child(seg(Range::Day, cx))
         .child(seg(Range::Week, cx))
         .child(seg(Range::Month, cx))
@@ -449,9 +453,9 @@ fn hero(this: &Dirigent, model: &Model, cx: &mut Context<Dirigent>) -> Div {
             .flex()
             .items_center()
             .rounded_md()
-            .bg(rgb(theme::RAISED))
+            .bg(rgba(theme::t().raised))
             .border_1()
-            .border_color(rgb(theme::LINE))
+            .border_color(rgba(theme::t().line))
             .text_size(px(12.))
             .child(input)
     };
@@ -462,7 +466,7 @@ fn hero(this: &Dirigent, model: &Model, cx: &mut Context<Dirigent>) -> Div {
             .items_center()
             .gap_2()
             .text_size(px(12.))
-            .text_color(rgb(theme::FG_1))
+            .text_color(rgba(theme::t().fg_1))
             .child(field(this.usage_from.clone()))
             .child("to")
             .child(field(this.usage_to.clone()))
@@ -512,7 +516,7 @@ fn chart(this: &Dirigent, model: Rc<Model>, hover_slot: Option<usize>, cx: &mut 
     .size_full();
     let empty = (model.total.messages == 0).then(|| {
         let text = if s.request.is_some() && s.buckets.is_empty() { "Loading" } else { "Nothing spent in this window" };
-        div().absolute().inset_0().flex().items_center().justify_center().pb(px(AXIS)).text_color(rgb(theme::FG_2)).child(text)
+        div().absolute().inset_0().flex().items_center().justify_center().pb(px(AXIS)).text_color(rgba(theme::t().fg_2)).child(text)
     });
     let card = hover_slot.zip(s.hover).map(|(i, p)| readout(&model, i, since, bucket, p, &Layout::new(*s.plot.borrow())));
     div()
@@ -542,8 +546,8 @@ fn chart(this: &Dirigent, model: Rc<Model>, hover_slot: Option<usize>, cx: &mut 
 /// hovered slot.
 fn paint(model: &Model, layout: &Layout, since: i64, bucket: i64, hover: Option<usize>, window: &mut Window, cx: &mut gpui::App) {
     let n = model.slots;
-    let line: Hsla = rgb(theme::LINE).into();
-    let soft: Hsla = rgb(theme::LINE_SOFT).into();
+    let line: Hsla = rgba(theme::t().line).into();
+    let soft: Hsla = rgba(theme::t().line_soft).into();
     let (bounds, plot) = (layout.bounds, layout.plot);
 
     // Time ticks: faint verticals through the plot, labels along the bottom.
@@ -558,7 +562,7 @@ fn paint(model: &Model, layout: &Layout, since: i64, bucket: i64, hover: Option<
             let label = local(t).format(fmt).to_string();
             let w = text_width(&label, 11., window);
             if x - w / 2. >= bounds.left() && x + w / 2. <= bounds.right() {
-                text(&label, 11., theme::FG_2, point(x - w / 2., bounds.bottom() - px(16.)), window, cx);
+                text(&label, 11., theme::t().fg_2, point(x - w / 2., bounds.bottom() - px(16.)), window, cx);
             }
             window.paint_quad(fill(Bounds::new(point(x, plot.top()), size(px(1.), plot.size.height)), soft));
         }
@@ -574,13 +578,13 @@ fn paint(model: &Model, layout: &Layout, since: i64, bucket: i64, hover: Option<
         window.paint_quad(fill(Bounds::new(point(plot.left(), y), size(plot.size.width, px(1.))), soft));
         let label = dollars(max * f);
         let w = text_width(&label, 11., window);
-        text(&label, 11., theme::FG_2, point(plot.right() - w, y - px(16.)), window, cx);
+        text(&label, 11., theme::t().fg_2, point(plot.right() - w, y - px(16.)), window, cx);
     }
 
     // Biggest spender at the back.
     for series in model.visible().collect::<Vec<_>>().into_iter().rev() {
         let pts: Vec<Point<Pixels>> = (0..n).map(|i| point(layout.x(i, n), y_of(series.slots[i].cost))).collect();
-        let color: Hsla = rgb(series.color).into();
+        let color: Hsla = rgba(series.color).into();
         if let Some(area) = area_path(&pts, plot.bottom()) {
             let fade = linear_gradient(180., linear_color_stop(color.opacity(0.22), 0.), linear_color_stop(color.opacity(0.), 1.));
             window.paint_path(area, fade);
@@ -592,15 +596,15 @@ fn paint(model: &Model, layout: &Layout, since: i64, bucket: i64, hover: Option<
 
     if let Some(i) = hover {
         let x = layout.x(i, n);
-        window.paint_quad(fill(Bounds::new(point(x, plot.top()), size(px(1.), plot.size.height)), rgb(theme::FG_2)));
+        window.paint_quad(fill(Bounds::new(point(x, plot.top()), size(px(1.), plot.size.height)), rgba(theme::t().fg_2)));
         for series in model.visible() {
             let c = point(x, y_of(series.slots[i].cost));
             let r = px(3.5);
             window.paint_quad(
-                fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), rgb(series.color))
+                fill(Bounds::new(point(c.x - r, c.y - r), size(r * 2., r * 2.)), rgba(series.color))
                     .corner_radii(r)
                     .border_widths(px(1.5))
-                    .border_color(rgb(theme::PANEL)),
+                    .border_color(rgba(theme::t().panel)),
             );
         }
     }
@@ -675,7 +679,7 @@ fn area_path(pts: &[Point<Pixels>], base: Pixels) -> Option<gpui::Path<Pixels>> 
 }
 
 fn text_width(s: &str, size: f32, window: &mut Window) -> Pixels {
-    shape(s, size, theme::FG, window).width
+    shape(s, size, theme::t().fg, window).width
 }
 
 fn text(s: &str, size: f32, color: u32, origin: Point<Pixels>, window: &mut Window, cx: &mut gpui::App) {
@@ -684,7 +688,7 @@ fn text(s: &str, size: f32, color: u32, origin: Point<Pixels>, window: &mut Wind
 }
 
 fn shape(s: &str, size: f32, color: u32, window: &mut Window) -> gpui::ShapedLine {
-    let run = TextRun { len: s.len(), font: window.text_style().font(), color: rgb(color).into(), ..Default::default() };
+    let run = TextRun { len: s.len(), font: window.text_style().font(), color: rgba(color).into(), ..Default::default() };
     window.text_system().shape_line(SharedString::from(s.to_owned()), px(size), &[run], None)
 }
 
@@ -706,10 +710,10 @@ fn readout(model: &Model, i: usize, since: i64, bucket: i64, mouse: Point<Pixels
             .flex_row()
             .items_center()
             .gap_2()
-            .child(div().size(px(7.)).rounded_full().bg(rgb(s.color)).flex_shrink_0())
+            .child(div().size(px(7.)).rounded_full().bg(rgba(s.color)).flex_shrink_0())
             .child(div().w(px(140.)).truncate().child(s.label.clone()))
-            .child(div().w(px(56.)).flex_shrink_0().text_color(rgb(theme::FG)).child(dollars(t.cost)))
-            .child(div().text_color(rgb(theme::FG_1)).child(t.split()))
+            .child(div().w(px(56.)).flex_shrink_0().text_color(rgba(theme::t().fg)).child(dollars(t.cost)))
+            .child(div().text_color(rgba(theme::t().fg_1)).child(t.split()))
     });
     let card = div()
         .flex()
@@ -718,13 +722,13 @@ fn readout(model: &Model, i: usize, since: i64, bucket: i64, mouse: Point<Pixels
         .px_3()
         .py_2()
         .rounded_md()
-        .bg(rgb(theme::HOVER))
+        .bg(rgba(theme::t().popup))
         .border_1()
-        .border_color(rgb(theme::LINE))
+        .border_color(rgba(theme::t().line))
         .shadow_md()
         .text_size(px(12.))
         .line_height(px(17.))
-        .child(div().text_color(rgb(theme::FG_2)).child(when))
+        .child(div().text_color(rgba(theme::t().fg_2)).child(when))
         .children(rows);
     let right_half = mouse.x > layout.plot.left() + layout.plot.size.width / 2.;
     let (anchor, dx) = if right_half { (Anchor::TopRight, px(-16.)) } else { (Anchor::TopLeft, px(16.)) };
@@ -743,7 +747,7 @@ fn readout(model: &Model, i: usize, since: i64, bucket: i64, mouse: Point<Pixels
 
 /// One row per series with its totals for the window; click a row to hide / show its line.
 fn legend(model: &Model, cx: &mut Context<Dirigent>) -> Div {
-    let col = |w: f32, text: String, color: u32| div().w(px(w)).flex_shrink_0().text_color(rgb(color)).child(text);
+    let col = |w: f32, text: String, color: u32| div().w(px(w)).flex_shrink_0().text_color(rgba(color)).child(text);
     let head = div()
         .flex()
         .flex_row()
@@ -751,20 +755,20 @@ fn legend(model: &Model, cx: &mut Context<Dirigent>) -> Div {
         .gap_3()
         .h(px(24.))
         .text_size(px(11.))
-        .text_color(rgb(theme::FG_2))
+        .text_color(rgba(theme::t().fg_2))
         .child(div().size(px(8.)))
         .child(div().flex_1())
-        .child(col(80., "cost".into(), theme::FG_2))
-        .child(col(80., "in".into(), theme::FG_2))
-        .child(col(80., "out".into(), theme::FG_2))
-        .child(col(80., "cached".into(), theme::FG_2))
-        .child(col(70., "messages".into(), theme::FG_2));
+        .child(col(80., "cost".into(), theme::t().fg_2))
+        .child(col(80., "in".into(), theme::t().fg_2))
+        .child(col(80., "out".into(), theme::t().fg_2))
+        .child(col(80., "cached".into(), theme::t().fg_2))
+        .child(col(70., "messages".into(), theme::t().fg_2));
     let rows = model.series.iter().map(|s| {
         let key = s.key.clone();
-        let fg = if s.hidden { theme::FG_2 } else { theme::FG };
-        let num = if s.hidden { theme::FG_2 } else { theme::FG_1 };
+        let fg = if s.hidden { theme::t().fg_2 } else { theme::t().fg };
+        let num = if s.hidden { theme::t().fg_2 } else { theme::t().fg_1 };
         let swatch = div().size(px(8.)).rounded_full().flex_shrink_0();
-        let swatch = if s.hidden { swatch.border_1().border_color(rgb(s.color)) } else { swatch.bg(rgb(s.color)) };
+        let swatch = if s.hidden { swatch.border_1().border_color(rgba(s.color)) } else { swatch.bg(rgba(s.color)) };
         let t = s.total;
         div()
             .id(SharedString::from(format!("series/{}", s.key)))
@@ -778,8 +782,8 @@ fn legend(model: &Model, cx: &mut Context<Dirigent>) -> Div {
             .rounded_md()
             .cursor_pointer()
             .border_t_1()
-            .border_color(rgb(theme::LINE_SOFT))
-            .hover(|d| d.bg(rgb(theme::RAISED)))
+            .border_color(rgba(theme::t().line_soft))
+            .hover(|d| d.bg(rgba(theme::t().raised)))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_usage_series(&key, cx)))
             .child(swatch)
             .child(
@@ -790,8 +794,10 @@ fn legend(model: &Model, cx: &mut Context<Dirigent>) -> Div {
                     .flex_row()
                     .items_baseline()
                     .gap_2()
-                    .child(div().truncate().text_color(rgb(fg)).child(s.label.clone()))
-                    .when(!s.detail.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(rgb(theme::FG_2)).child(s.detail.clone()))),
+                    .child(div().truncate().text_color(rgba(fg)).child(s.label.clone()))
+                    .when(!s.detail.is_empty(), |d| {
+                        d.child(div().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(s.detail.clone()))
+                    }),
             )
             .child(col(80., dollars(t.cost), fg))
             .child(col(80., kilo(t.input), num))

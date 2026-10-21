@@ -31,7 +31,7 @@ scripts/ui.sh reset                  # stop + wipe the session's data: fresh ser
 ## Isolation and sessions
 
 Each session lives in `/tmp/dirigent-ui/<session>/` and has its own Xvfb display, service port (7800+),
-`XDG_DATA_HOME` (`data/`), `XDG_CONFIG_HOME` (`config/`, so `hosts.toml` starts empty), `app.log`, and pid files. The desktop runs its local service embedded on that port
+`XDG_DATA_HOME` (`data/`), `XDG_CONFIG_HOME` (`config/`, so `hosts.toml` starts empty and `config.toml` is written with defaults), `app.log`, and pid files. The desktop runs its local service embedded on that port
 (`DIRIGENT_PORT`), so prompting tests work out of the box and real pi auth is used. Set `UI_SESSION=name` on every
 call to run several sessions side by side, e.g. two agents at once. `stop`/`reset` kill only the session's own
 process groups.
@@ -62,7 +62,7 @@ Landmarks at 1100×720 with the default 240 px sidebar (they move when the layou
 compose button (219, 21), Inbox (55, 57), Workpool (66, 85), Projects "+" (218, 133, hover-revealed), first project
 (60, 159) — the latter three shift down ~73 px per thread card listed under Inbox / Workpool (collapse them with the
 chevron at x = 214 on the nav row), first list row (500, 68), draft page project chip (388, 279) and model chip (360, 390), thread composer
-model chip (370, 667), thread header snooze / pin / archive / delete (972, 28) / (1002, 28) / (1032, 28) / (1062, 28); a sidebar card's snooze replaces its run time on hover (x = 207). The sidebar's bottom bar: hide/show (30, 699), settings gear (210, 699) → Hosts section: name field (465, 313), address field (745, 313), Enter adds; the Usage tab is at (412, 28): range chips `1d 7d 30d custom` and `‹ ›` top right, legend rows under the chart toggle series.
+model chip (370, 667), thread header snooze / pin / archive / delete (972, 28) / (1002, 28) / (1032, 28) / (1062, 28); a sidebar card's snooze replaces its run time on hover (x = 207). The sidebar's bottom bar: hide/show (30, 699), settings gear (210, 699) → Settings › Config: theme chip (873, 131), font fields (736, 202 / 253 / 304; Enter applies), title model chip (850, 471), reasoning chip (876, 516), `Test` (422, 698) opens the sample message with `Name it` under it, the telemetry switch is at the bottom; the Hosts tab is at (414, 28): name field (465, 313), address field (745, 313), Enter adds; the Usage tab is at (474, 28): range chips `1d 7d 30d custom` and `‹ ›` top right, legend rows under the chart toggle series.
 The sidebar's drag handle is at
 x = sidebar width; `[` hides the sidebar and hovering x < 10 peeks it. Clicking a thread's work line (`› model effort ·
 duration · n tool calls`, under the user bubble) or `]` opens the 400 px work log panel on the pane's right; its drag

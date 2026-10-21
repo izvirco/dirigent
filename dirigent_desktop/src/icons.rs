@@ -2,7 +2,7 @@
 //! gpui's `svg()` through an `AssetSource`. Add an icon: drop the svg in assets/icons
 //! and list it here.
 
-use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, px, rgb, svg};
+use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, px, rgba, svg};
 use std::borrow::Cow;
 
 macro_rules! icons {
@@ -28,6 +28,7 @@ icons!(
     "panel-left-close",
     "panel-left-open",
     "pin",
+    "play",
     "plus",
     "search",
     "settings",
@@ -51,5 +52,5 @@ impl AssetSource for Assets {
 
 /// A 14px icon. `Svg` ignores the inherited text color, so it takes one explicitly.
 pub fn icon(name: &'static str, color: u32) -> Svg {
-    svg().path(format!("icons/{name}.svg")).size(px(14.)).flex_shrink_0().text_color(rgb(color))
+    svg().path(format!("icons/{name}.svg")).size(px(14.)).flex_shrink_0().text_color(rgba(color))
 }

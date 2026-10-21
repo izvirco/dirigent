@@ -3,21 +3,21 @@
 //! pages) and `thread.rs` (one thread + composer).
 
 use crate::cache::Cache;
-use crate::hosts;
 use crate::input::{self, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
 use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, Selection};
-use crate::theme::{self, Fonts, Status};
+use crate::theme::{self, Status};
 use crate::view::{Item, Streaming, Timeline};
+use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
-use dirigent_protocol::{ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary};
+use dirigent_protocol::{ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
     AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, actions, div, prelude::*, px, rgb,
+    ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, actions, div, prelude::*, px, rgba,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -43,6 +43,8 @@ const LOG_MAX: f32 = 800.;
 const COPIED_TTL: Duration = Duration::from_millis(1200);
 /// How often the usage page re-asks the hosts while it shows a window that ends now.
 const USAGE_REFRESH_SECS: u64 = 30;
+/// A thread's title shows as generating for at most this long after its first prompt.
+const TITLING_TTL: Duration = Duration::from_secs(60);
 
 /// Which edge the mouse is dragging.
 #[derive(Clone, Copy, PartialEq)]
@@ -107,7 +109,9 @@ pub enum Pane {
     NewProject {
         host: String,
     },
-    /// Settings: remote hosts (`hosts.toml`) with their status, and the form to add one.
+    /// Settings › Config: `config.toml` (fonts, theme, thread titles, telemetry; `settings.rs`).
+    Config,
+    /// Settings › Hosts: remote hosts (`hosts.toml`) with their status, and the form to add one.
     Settings,
     /// Settings › Usage: tokens and cost over time, across hosts (`usage.rs`).
     Usage,
@@ -167,6 +171,10 @@ pub enum Menu {
     ConfirmDelete,
     /// Usage page: what a series is (model / provider / everything).
     UsageGroup,
+    /// Config page: theme, title model, title reasoning level.
+    Theme,
+    TitleModel,
+    TitleEffort,
 }
 
 pub struct Dirigent {
@@ -214,7 +222,15 @@ pub struct Dirigent {
     pub effort: Option<String>,
     pub presets: Vec<Preset>,
     pub toasts: Vec<(String, Instant)>,
-    pub fonts: Fonts,
+    /// `config.toml` as last loaded or saved, the fonts it resolves to, and the watcher
+    /// that notices hand edits.
+    pub config: config::Config,
+    pub fonts: theme::Fonts,
+    watch: config::Watch,
+    /// The Config page's inputs and title test.
+    pub settings: settings::State,
+    /// Threads whose title is being generated (since their first prompt), with when it started.
+    titling: HashMap<(String, String), Instant>,
     /// Images pasted into the composer, in paste order. Only those whose `[image-N]` token
     /// is still in the text count (`attachments()`); the rest are pruned on send.
     attachments: Vec<Attachment>,
@@ -238,7 +254,7 @@ pub struct Dirigent {
 }
 
 impl Dirigent {
-    pub fn new(cache: Cache, fonts: Fonts, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(cache: Cache, config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // `local` is the embedded service; the rest come from hosts.toml.
         let mut hosts = vec![(hosts::LOCAL.to_owned(), format!("ws://127.0.0.1:{}/ws", dirigent_service::port()))];
         let hosts_error = match hosts::load() {
@@ -288,6 +304,12 @@ impl Dirigent {
         for input in [&usage_from, &usage_to] {
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.apply_custom_usage(cx)).detach();
         }
+        let settings = settings::State::new(cx);
+        for input in [&settings.font_ui, &settings.font_prose, &settings.font_code, &settings.prompt] {
+            cx.subscribe(input, |this, _, _: &Submitted, cx| this.apply_config_fields(cx)).detach();
+        }
+        cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
+        let (fonts, missing) = config.fonts.resolve();
 
         let mut this = Self {
             hosts: host_states,
@@ -317,7 +339,11 @@ impl Dirigent {
             effort,
             presets,
             toasts: vec![],
+            config,
             fonts,
+            watch: config::Watch::new(),
+            settings,
+            titling: HashMap::new(),
             attachments: vec![],
             next_attachment: 1,
             preview: None,
@@ -331,10 +357,18 @@ impl Dirigent {
             focus_handle: cx.focus_handle(),
             window: window.window_handle(),
         };
+        // The window was opened with this theme's background already (see `main`).
+        match theme::load(&this.config.theme) {
+            Ok(t) => theme::set(t),
+            Err(e) => this.toast(format!("{e:#}"), cx),
+        }
         this.restore_pane(cx);
         this.tick(cx);
         if let Some(e) = hosts_error {
             this.toast(e, cx);
+        }
+        for font in missing {
+            this.toast(format!("font `{font}` is not installed"), cx);
         }
         this
     }
@@ -586,6 +620,11 @@ impl Dirigent {
                     self.usage.buckets.insert(host, buckets);
                 }
             }
+            ServerMessage::Title { reply_to, title, model, input, output, cost, duration_ms } => {
+                if self.settings.test_request.take_if(|(id, _)| *id == reply_to).is_some() {
+                    self.settings.test_result = Some(Ok(settings::TitleResult { title, model, input, output, cost, duration_ms }));
+                }
+            }
             ServerMessage::Blob { blob_id, mime_type, data, .. } => {
                 self.blob_requests.remove(&blob_id);
                 if let Some(image) = decode_blob(&mime_type, &data) {
@@ -612,6 +651,10 @@ impl Dirigent {
                 }
             }
             ServerMessage::Error { reply_to, message } => {
+                if self.settings.test_request.take_if(|(id, _)| Some(*id) == reply_to).is_some() {
+                    self.settings.test_result = Some(Err(message));
+                    return;
+                }
                 // A failed create leaves the draft intact so nothing typed is lost.
                 if let Some((_, text, images)) = self.pending.take_if(|(id, ..)| Some(*id) == reply_to) {
                     self.attachments.extend(images);
@@ -623,6 +666,10 @@ impl Dirigent {
                 self.toast(format!("{host}: {message}"), cx)
             }
             ServerMessage::Entry { thread_id, entry } => {
+                // The generated name arrives as pi's `session_info` entry.
+                if entry.kind == "session_info" {
+                    self.titling.remove(&(host.clone(), thread_id.clone()));
+                }
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host
                     && t.id == thread_id
@@ -660,6 +707,10 @@ impl Dirigent {
                 }
             }
             ServerMessage::Event { thread_id, event } => {
+                // A warning on a thread being named is the runtime giving up on the title.
+                if event.get("type").and_then(|v| v.as_str()) == Some("warning") {
+                    self.titling.remove(&(host.clone(), thread_id.clone()));
+                }
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host
                     && t.id == thread_id
@@ -694,6 +745,7 @@ impl Dirigent {
             Pane::Workpool => "workpool".to_owned(),
             Pane::Project { group_key } => format!("project\n{group_key}"),
             Pane::Thread(t) => format!("thread\n{}\n{}", t.host, t.id),
+            Pane::Config => "config".to_owned(),
             Pane::Settings => "settings".to_owned(),
             Pane::Usage => "usage".to_owned(),
             Pane::Draft { .. } | Pane::NewProject { .. } => return,
@@ -707,6 +759,7 @@ impl Dirigent {
         let parts: Vec<&str> = value.split('\n').collect();
         match parts.as_slice() {
             ["workpool"] => self.pane = Pane::Workpool,
+            ["config"] => self.show_config(cx),
             ["settings"] => self.pane = Pane::Settings,
             // The hosts aren't connected yet; the request goes out as each one connects.
             ["usage"] => self.pane = Pane::Usage,
@@ -769,6 +822,10 @@ impl Dirigent {
                     if this.ticks % USAGE_REFRESH_SECS == 0 && matches!(this.pane, Pane::Usage) && this.usage.at_now() {
                         this.request_usage(cx);
                     }
+                    if this.watch.changed() {
+                        this.reload_config(cx);
+                    }
+                    this.titling.retain(|_, since| since.elapsed() < TITLING_TTL);
                     cx.notify()
                 });
                 if alive.is_err() {
@@ -901,6 +958,140 @@ impl Dirigent {
         self.show(Pane::Settings, cx);
         self.sync_hosts(cx);
         self.focus(self.host_name_input.focus_handle(cx), cx);
+    }
+
+    // ---- config ----
+
+    /// The settings gear lands here: `config.toml`'s page.
+    pub fn show_config(&mut self, cx: &mut Context<Self>) {
+        self.show(Pane::Config, cx);
+        self.fill_settings(cx);
+    }
+
+    /// Put the config into the Config page's fields (deferred: the fields need the window).
+    fn fill_settings(&self, cx: &mut Context<Self>) {
+        let (window, settings, config) = (self.window, self.settings.clone(), self.config.clone());
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, cx| settings.fill(&config, window, cx)).ok();
+        });
+    }
+
+    /// Make `config` the one in force: theme, fonts, and the page's fields if it's open.
+    fn apply_config(&mut self, config: config::Config, cx: &mut Context<Self>) {
+        let fonts_changed = config.fonts != self.config.fonts;
+        self.config = config;
+        match theme::load(&self.config.theme) {
+            Ok(t) => self.set_theme_now(t, cx),
+            Err(e) => self.toast(format!("{e:#}"), cx),
+        }
+        if fonts_changed {
+            let (fonts, missing) = self.config.fonts.resolve();
+            self.fonts = fonts;
+            for font in missing {
+                self.toast(format!("font `{font}` is not installed"), cx);
+            }
+        }
+        if matches!(self.pane, Pane::Config) {
+            self.fill_settings(cx);
+        }
+        cx.notify();
+    }
+
+    /// A hand edit to `config.toml` or a theme file (`watch`, from `tick`).
+    fn reload_config(&mut self, cx: &mut Context<Self>) {
+        match config::load() {
+            Ok(c) => self.apply_config(c, cx),
+            Err(e) => self.toast(format!("{e:#}"), cx),
+        }
+    }
+
+    /// Change the config through `f`, write it, apply it. The write is swallowed by the
+    /// watcher so it doesn't come back as a hand edit.
+    fn edit_config(&mut self, f: impl FnOnce(&mut config::Config), cx: &mut Context<Self>) {
+        let mut c = self.config.clone();
+        f(&mut c);
+        self.menu = None;
+        if let Err(e) = config::save(&c) {
+            return self.toast(format!("{e:#}"), cx);
+        }
+        self.watch.changed();
+        self.apply_config(c, cx);
+    }
+
+    /// Make `t` the palette and give the window the background it needs (see-through for a
+    /// translucent canvas). The window call is deferred: listeners don't hold the window.
+    fn set_theme_now(&self, t: theme::Theme, cx: &mut Context<Self>) {
+        theme::set(t);
+        let (window, background) = (self.window, theme::background(&t));
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, _| window.set_background_appearance(background)).ok();
+        });
+    }
+
+    pub fn set_theme(&mut self, name: String, cx: &mut Context<Self>) {
+        self.edit_config(|c| c.theme = name, cx);
+    }
+
+    pub fn set_title_model(&mut self, key: String, cx: &mut Context<Self>) {
+        self.edit_config(|c| c.title.model = key, cx);
+    }
+
+    pub fn set_title_reasoning(&mut self, level: String, cx: &mut Context<Self>) {
+        self.edit_config(|c| c.title.reasoning = level, cx);
+    }
+
+    pub fn toggle_telemetry(&mut self, cx: &mut Context<Self>) {
+        self.edit_config(|c| c.telemetry = !c.telemetry, cx);
+    }
+
+    /// Enter in a font field or ctrl+Enter in the prompt: every text field applies at once.
+    /// An emptied field keeps its old value.
+    fn apply_config_fields(&mut self, cx: &mut Context<Self>) {
+        let read = |i: &Entity<TextInput>| i.read(cx).text().trim().to_owned();
+        let s = &self.settings;
+        let (ui, prose, code, prompt) = (read(&s.font_ui), read(&s.font_prose), read(&s.font_code), read(&s.prompt));
+        self.edit_config(
+            |c| {
+                for (slot, value) in
+                    [(&mut c.fonts.ui, ui), (&mut c.fonts.prose, prose), (&mut c.fonts.code, code), (&mut c.title.prompt, prompt)]
+                {
+                    if !value.is_empty() {
+                        *slot = value;
+                    }
+                }
+            },
+            cx,
+        );
+    }
+
+    pub fn toggle_title_test(&mut self, cx: &mut Context<Self>) {
+        self.settings.testing = !self.settings.testing;
+        if self.settings.testing {
+            self.focus(self.settings.sample.focus_handle(cx), cx);
+        }
+        cx.notify();
+    }
+
+    /// Name the sample message with the current title settings, on the local host.
+    pub fn run_title_test(&mut self, cx: &mut Context<Self>) {
+        if self.settings.test_request.is_some() {
+            return;
+        }
+        let text = self.settings.sample.read(cx).text().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        let id = self.next_id();
+        self.settings.test_request = Some((id, Instant::now()));
+        self.settings.test_result = None;
+        self.net.send(hosts::LOCAL, ClientMessage::GenerateTitle { id, title: self.config.title.clone(), text });
+        cx.notify();
+    }
+
+    /// The thread's title is still being generated (its first prompt was sent recently and
+    /// no name has come back yet).
+    pub fn titling(&self, host: &str, id: &str) -> bool {
+        self.titling.contains_key(&(host.to_owned(), id.to_owned()))
     }
 
     /// Make the connections match `hosts.toml`: drop hosts that are gone or whose url
@@ -1307,6 +1498,12 @@ impl Dirigent {
 
     fn prompt(&mut self, host: &str, thread_id: &str, text: String, images: Vec<Attachment>, mode: PromptMode, cx: &mut Context<Self>) {
         let id = self.next_id();
+        // A thread's first prompt also names it (see `config.toml` `[title]`).
+        let first = mode == PromptMode::Prompt && self.summary(host, thread_id).is_some_and(|s| s.entry_count == 0);
+        let title: Option<TitleGen> = first.then(|| self.config.title.clone());
+        if first {
+            self.titling.insert((host.to_owned(), thread_id.to_owned()), Instant::now());
+        }
         let images = images
             .iter()
             .map(|a| ImageAttachment {
@@ -1324,6 +1521,7 @@ impl Dirigent {
                 model: self.model.clone(),
                 thinking_level: self.effort.clone(),
                 images,
+                title,
             },
         );
         self.remember_model();
@@ -1731,9 +1929,9 @@ impl Render for Dirigent {
             .mr(px(theme::GUTTER))
             .when(!docked, |d| d.ml(px(theme::GUTTER)))
             .rounded_lg()
-            .bg(rgb(theme::PANEL))
+            .bg(rgba(theme::t().panel))
             .border_1()
-            .border_color(rgb(theme::LINE_SOFT))
+            .border_color(rgba(theme::t().line_soft))
             .overflow_hidden()
             .flex()
             .flex_col()
@@ -1756,9 +1954,9 @@ impl Render for Dirigent {
             .size_full()
             .flex()
             .flex_row()
-            .bg(rgb(theme::CANVAS))
-            .text_color(rgb(theme::FG))
-            .font_family(self.fonts.mono.clone())
+            .bg(rgba(theme::t().canvas))
+            .text_color(rgba(theme::t().fg))
+            .font_family(self.fonts.ui.clone())
             // No ligatures, anywhere: `calt` is what Lilex uses for them, `liga` for good measure.
             .font_features(FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)])))
             .text_size(px(13.))
@@ -1777,11 +1975,11 @@ impl Render for Dirigent {
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .bg(rgb(theme::HOVER))
+                        .bg(rgba(theme::t().popup))
                         .border_1()
-                        .border_color(rgb(theme::LINE))
+                        .border_color(rgba(theme::t().line))
                         .shadow_md()
-                        .child(div().size(px(6.)).rounded_full().bg(rgb(theme::ERROR)).flex_shrink_0())
+                        .child(div().size(px(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
                         .child(m)
                 }))
             }))

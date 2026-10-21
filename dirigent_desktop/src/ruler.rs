@@ -13,7 +13,7 @@ use crate::theme;
 use crate::view::Item;
 use gpui::{
     Anchor, AnyElement, Bounds, ClickEvent, Context, Hsla, ListState, MouseMoveEvent, Pixels, Point, anchored, canvas, deferred, div, fill,
-    point, prelude::*, px, rgb, size,
+    point, prelude::*, px, rgba, size,
 };
 use std::cell::RefCell;
 use std::ops::Range;
@@ -51,8 +51,8 @@ pub enum Kind {
 impl Kind {
     fn color(self) -> u32 {
         match self {
-            Kind::User => theme::NAVY_INK,
-            Kind::Assistant | Kind::Compaction => theme::FG_1,
+            Kind::User => theme::t().accent_ink,
+            Kind::Assistant | Kind::Compaction => theme::t().fg_1,
         }
     }
 
@@ -217,8 +217,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 let tw = &mut s.tweens[i];
                 settled &= tw.step(k, if visible.contains(&m.item) { 1. } else { 0. });
                 let w = LENGTH * (1. - SHRINK * tw.on) * tw.grow;
-                let color: Hsla = rgb(if m.pinned { theme::WARN } else { m.kind.color() }).into();
-                let color = if hovered { rgb(theme::FG).into() } else { color.opacity(DIM + (1. - DIM) * tw.on) };
+                let color: Hsla = rgba(if m.pinned { theme::t().warn } else { m.kind.color() }).into();
+                let color = if hovered { rgba(theme::t().fg).into() } else { color.opacity(DIM + (1. - DIM) * tw.on) };
                 let (x, y) = (px(grid.snap(f32::from(bounds.left()) + INSET)), grid.mark_y(i, n));
                 let h = px(grid.snap(if hovered { THICK + 1. } else { THICK }));
                 if m.kind == Kind::Compaction {
@@ -294,14 +294,14 @@ fn preview_card(i: usize, m: &Mark, t: &OpenThread, grid: &Grid, n: usize) -> An
         .px_2p5()
         .py_1p5()
         .rounded_md()
-        .bg(rgb(theme::HOVER))
+        .bg(rgba(theme::t().popup))
         .border_1()
-        .border_color(rgb(theme::LINE))
+        .border_color(rgba(theme::t().line))
         .shadow_md()
         .text_size(px(12.))
         .line_height(px(17.))
-        .child(div().text_size(px(11.)).text_color(rgb(if m.pinned { theme::WARN } else { theme::FG_2 })).child(label))
-        .when(!preview.is_empty(), |d| d.child(div().text_color(rgb(theme::FG)).child(preview)));
+        .child(div().text_size(px(11.)).text_color(rgba(if m.pinned { theme::t().warn } else { theme::t().fg_2 })).child(label))
+        .when(!preview.is_empty(), |d| d.child(div().text_color(rgba(theme::t().fg)).child(preview)));
     // Window-positioned beside the mark; the zero-size absolute wrapper keeps the
     // anchored element out of the flex flow (see AGENTS.md).
     div()

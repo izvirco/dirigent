@@ -10,7 +10,7 @@ use crate::projects::{self, Group};
 use crate::theme;
 use crate::thread::{duration, elapsed};
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Stateful, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Stateful, div, prelude::*, px, rgba};
 
 /// Default width; the user can drag it between `app::SIDEBAR_MIN` and `SIDEBAR_MAX`.
 pub const WIDTH: f32 = 240.;
@@ -27,7 +27,7 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .w(px(6.))
         .h_full()
         .cursor_col_resize()
-        .hover(|d| d.bg(rgb(theme::LINE)))
+        .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Sidebar, cx)));
     // Inset by the main panel's gutter + border so the title row lines up with the panel's
     // header and the sidebar text sits at the same x as the panel's; same on the right so
@@ -54,9 +54,9 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
                     .w(px(this.sidebar_width))
                     .h_full()
                     .rounded_lg()
-                    .bg(rgb(theme::PANEL))
+                    .bg(rgba(theme::t().panel))
                     .border_1()
-                    .border_color(rgb(theme::LINE))
+                    .border_color(rgba(theme::t().line))
                     .shadow_lg()
                     .overflow_hidden()
                     .child(content(this, cx)),
@@ -78,7 +78,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .h(px(40.)) // same as `lists::header`, so the title aligns with the main pane's
         .pl_4()
         .pr_2()
-        .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::FG)).child("Dirigent"))
+        .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
         .child(theme::icon_button("new-thread", "plus", cx, |this, cx| this.new_draft(None, cx)));
 
     // Every row and card in the sidebar can be highlighted (selected / hovered), so each
@@ -97,7 +97,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         let n = orphans.len();
         div().px_2().child(
             row("orphans", selected, cx, |this, cx| this.show(Pane::Project { group_key: projects::ORPHANS.into() }, cx))
-                .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::FG_1)).child("Removed projects"))
+                .child(div().flex_1().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
                 .child(count(n)),
         )
     });
@@ -115,14 +115,14 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .cursor_pointer()
         .opacity(if add_open { 1. } else { 0. })
         .group_hover("section", |d| d.opacity(1.))
-        .when(add_open, |d| d.bg(rgb(theme::HOVER)))
-        .hover(|d| d.bg(rgb(theme::HOVER)))
+        .when(add_open, |d| d.bg(rgba(theme::t().hover)))
+        .hover(|d| d.bg(rgba(theme::t().hover)))
         .on_click(cx.listener(
             move |this, _, _, cx| {
                 if multi_host { this.toggle_menu(Menu::NewProjectHost, cx) } else { this.start_new_project(None, cx) }
             },
         ))
-        .child(icon("plus", theme::FG_1))
+        .child(icon("plus", theme::t().fg_1))
         .children(add_open.then(|| {
             let mut items = vec![menu::header("New project on")];
             items.extend(this.hosts.iter().map(|h| {
@@ -153,13 +153,15 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
                 .flex()
                 .flex_row()
                 .items_center()
-                .child(div().flex_1().text_size(px(12.)).text_color(rgb(theme::FG_2)).child("Projects"))
+                .child(div().flex_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Projects"))
                 .child(add),
         )
         .children(project_rows)
         .children(orphan_row)
         .children(
-            groups.is_empty().then(|| div().px_4().py_1().text_size(px(12.)).text_color(rgb(theme::FG_2)).child("Add a project with +")),
+            groups
+                .is_empty()
+                .then(|| div().px_4().py_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Add a project with +")),
         );
 
     // Bottom bar: hide / show the sidebar on the left, settings on the right.
@@ -177,7 +179,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .pl(px(10.))
         .pr_2()
         .child(theme::icon_button("sidebar-toggle", panel_icon, cx, move |this, cx| this.set_sidebar_hidden(!hidden, cx)))
-        .child(theme::icon_button("settings", "settings", cx, |this, cx| this.show_settings(cx)));
+        .child(theme::icon_button("settings", "settings", cx, |this, cx| this.show_config(cx)));
 
     div()
         .id("sidebar")
@@ -209,8 +211,8 @@ fn row(
         .pl_2()
         .rounded_md()
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(theme::HOVER)))
-        .hover(|d| d.bg(rgb(theme::HOVER)))
+        .when(selected, |d| d.bg(rgba(theme::t().hover)))
+        .hover(|d| d.bg(rgba(theme::t().hover)))
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
 }
 
@@ -269,7 +271,7 @@ fn nav_row(
     cx: &mut Context<Dirigent>,
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
 ) -> Stateful<Div> {
-    let fg = if selected { theme::FG } else { theme::FG_1 };
+    let fg = if selected { theme::t().fg } else { theme::t().fg_1 };
     // Count and chevron are stacked in one box so swapping them doesn't shift layout; the
     // count keeps the text inset, the chevron is centered like the title's `+`.
     let fill = || div().absolute().inset_0().flex().items_center();
@@ -284,10 +286,10 @@ fn nav_row(
                 .justify_center()
                 .opacity(0.)
                 .group_hover("row", |d| d.opacity(1.))
-                .child(icon(if open { "chevron-down" } else { "chevron-right" }, theme::FG_2).size(px(14.))),
+                .child(icon(if open { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(px(14.))),
         );
     row(id, selected, cx, on_click)
-        .child(div().flex_1().text_color(rgb(fg)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
+        .child(div().flex_1().text_color(rgba(fg)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
         .child(fold)
 }
 
@@ -307,12 +309,14 @@ fn thread_card(
     let unread = this.unread(host, t);
     let pinned = this.pinned(host, &t.id);
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
+    let titling = this.titling(host, &t.id);
+    let title_id = SharedString::from(format!("title/{h}/{id}"));
     let mut place = this.project_name(host, t);
     if show_host {
         place = if place.is_empty() { host.to_owned() } else { format!("{place}, {host}") };
     }
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
-    let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgb(color)).child(text);
+    let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
     // Run time and snooze button are stacked so swapping them on hover doesn't shift layout.
     let snooze = (theme::Status::of(t) == theme::Status::Done).then(|| {
         let (h, id) = (h.clone(), id.clone());
@@ -328,12 +332,12 @@ fn thread_card(
             .rounded_sm()
             .opacity(0.)
             .group_hover("card", |d| d.opacity(1.))
-            .hover(|d| d.bg(rgb(theme::LINE)))
+            .hover(|d| d.bg(rgba(theme::t().line)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
                 this.set_snoozed(&h, &id, true, cx)
             }))
-            .child(icon("moon", theme::FG_1))
+            .child(icon("moon", theme::t().fg_1))
     });
     div()
         .id(SharedString::from(format!("card/{h}/{id}")))
@@ -345,35 +349,37 @@ fn thread_card(
         .py_1p5()
         .rounded_md()
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgb(theme::HOVER)))
-        .hover(|d| d.bg(rgb(theme::HOVER)))
+        .when(selected, |d| d.bg(rgba(theme::t().hover)))
+        .hover(|d| d.bg(rgba(theme::t().hover)))
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &id, cx)))
         .child(
-            div().flex().flex_row().items_center().gap_2().child(small(place, theme::FG_2).flex_1()).child(
+            div().flex().flex_row().items_center().gap_2().child(small(place, theme::t().fg_2).flex_1()).child(
                 div()
                     .relative()
                     .flex_shrink_0()
-                    .child(small(elapsed, theme::FG_2).when(snooze.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))))
+                    .child(small(elapsed, theme::t().fg_2).when(snooze.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))))
                     .children(snooze),
             ),
         )
         .child(
-            div().flex().flex_row().items_center().gap_1().children(pinned.then(theme::pin_mark)).child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(rgb(if unread { theme::NAVY_INK } else { theme::FG }))
-                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
-                    .child(title),
-            ),
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .text_color(rgba(if unread { theme::t().accent_ink } else { theme::t().fg }))
+                .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                .children(pinned.then(theme::pin_mark))
+                .child(theme::title_text(title_id, title, titling)),
         )
-        .when(!model.is_empty(), |d| d.child(small(model, theme::FG_2)))
+        .when(!model.is_empty(), |d| d.child(small(model, theme::t().fg_2)))
 }
 
 /// Trailing count on a `row`; its margin is the row's right inset, so it ends where the
 /// cards' text does.
 fn count(n: usize) -> Div {
-    div().mr_2().text_size(px(11.)).text_color(rgb(theme::FG_2)).child(if n > 0 { n.to_string() } else { String::new() })
+    div().mr_2().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(if n > 0 { n.to_string() } else { String::new() })
 }
 
 /// Trailing control box on a `row`: as wide as the title's `+` button and flush with the
@@ -389,7 +395,7 @@ fn trailing(id: SharedString) -> Stateful<Div> {
         .justify_center()
         .rounded_sm()
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(theme::LINE)))
+        .hover(|d| d.bg(rgba(theme::t().line)))
 }
 
 /// Project name, which hosts it spans, and a `⋯` menu that appears on hover.
@@ -446,7 +452,7 @@ fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirig
         }
     }
 
-    let fg = if selected { theme::FG } else { theme::FG_1 };
+    let fg = if selected { theme::t().fg } else { theme::t().fg_1 };
     let k = key.clone();
     div()
         .px_2()
@@ -454,17 +460,17 @@ fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirig
             row(SharedString::from(format!("p/{key}")), selected, cx, move |this, cx| {
                 this.show(Pane::Project { group_key: k.clone() }, cx)
             })
-            .child(div().flex_1().min_w_0().truncate().text_color(rgb(fg)).child(g.name.clone()))
+            .child(div().flex_1().min_w_0().truncate().text_color(rgba(fg)).child(g.name.clone()))
             .child(
                 trailing(SharedString::from(format!("gm/{key}")))
                     .opacity(if menu_open || link_open { 1. } else { 0. })
                     .group_hover("row", |d| d.opacity(1.))
-                    .when(menu_open || link_open, |d| d.bg(rgb(theme::LINE)))
+                    .when(menu_open || link_open, |d| d.bg(rgba(theme::t().line)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.toggle_menu(Menu::Project { group_key: key.clone() }, cx)
                     }))
-                    .child(icon("ellipsis", theme::FG_1))
+                    .child(icon("ellipsis", theme::t().fg_1))
                     .children((menu_open || link_open).then(|| menu::popup(Side::Below(20.), actions, cx))),
             ),
         )

@@ -11,7 +11,7 @@ use gpui::{
     App, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, SharedString, Style, TextRun, TextStyle, UTF16Selection,
-    Window, WrappedLine, actions, div, fill, point, prelude::*, px, quad, relative, rgb, rgba, size,
+    Window, WrappedLine, actions, div, fill, point, prelude::*, px, quad, relative, rgba, size,
 };
 use std::ops::Range;
 use std::time::{Duration, Instant};
@@ -155,14 +155,14 @@ impl Layout {
     /// style stack is active (Taffy's measure callback runs outside it, with window defaults).
     fn shape(text: &SharedString, placeholder: bool, wrap_width: Pixels, font: &Font, window: &Window) -> Self {
         let (style, font_size) = (&font.style, font.size);
-        let color = if placeholder { rgb(crate::theme::FG_2).into() } else { style.color };
+        let color = if placeholder { rgba(crate::theme::t().fg_2).into() } else { style.color };
         let run = |len, color| TextRun { len, font: style.font(), color, background_color: None, underline: None, strikethrough: None };
         // Plain text, with every attachment token in the accent color.
         let mut runs = vec![];
         let mut at = 0;
         for range in if placeholder { vec![] } else { image_tokens(text) } {
             runs.push(run(range.start - at, color));
-            runs.push(run(range.len(), rgb(crate::theme::NAVY_INK).into()));
+            runs.push(run(range.len(), rgba(crate::theme::t().accent_ink).into()));
             at = range.end;
         }
         runs.push(run(text.len() - at, color));
@@ -838,14 +838,21 @@ impl Element for TextElement {
             if focus_handle.is_focused(window)
                 && let Some(cursor) = prepaint.cursor.take()
             {
-                window.paint_quad(fill(cursor, rgb(crate::theme::FG)));
+                window.paint_quad(fill(cursor, rgba(crate::theme::t().fg)));
             }
         });
         if content_h > visible {
             let thumb_h = (visible * (f32::from(visible) / f32::from(content_h))).max(px(20.));
             let thumb_y = (visible - thumb_h) * (f32::from(prepaint.scroll_y) / f32::from(content_h - visible));
             let thumb = Bounds::new(point(bounds.right() - px(4.), bounds.origin.y + thumb_y), size(px(4.), thumb_h));
-            window.paint_quad(quad(thumb, Corners::all(px(2.)), rgba(0x8c909a66), px(0.), rgba(0x00000000), gpui::BorderStyle::default()));
+            window.paint_quad(quad(
+                thumb,
+                Corners::all(px(2.)),
+                rgba(crate::theme::alpha(crate::theme::t().fg_1, 0x66)),
+                px(0.),
+                rgba(0x00000000),
+                gpui::BorderStyle::default(),
+            ));
         }
         let layout = std::mem::replace(&mut prepaint.layout, Layout { lines: vec![], starts: vec![], line_height: lh, text: "".into() });
         self.input.update(cx, |input, _| {

@@ -10,7 +10,7 @@ use crate::icons::icon;
 use crate::menu::{self, ROW_H, Side};
 use crate::theme;
 use dirigent_protocol::ModelInfo;
-use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, px, rgb};
+use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, px, rgba};
 
 /// Both pages share one width so flipping between them doesn't resize the popup.
 const WIDTH: f32 = 430.;
@@ -30,13 +30,13 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let current = this.current_preset();
     let saved = current.as_ref().is_some_and(|c| this.presets.contains(c));
     let left: AnyElement = match &current {
-        Some(_) if !saved => header_button("save-preset", "Save preset", None, theme::NAVY_INK)
+        Some(_) if !saved => header_button("save-preset", "Save preset", None, theme::t().accent_ink)
             .on_click(cx.listener(|this, _, _, cx| this.save_preset(cx)))
             .into_any(),
-        _ => div().px_1p5().text_size(px(11.5)).text_color(rgb(theme::FG_2)).child("Saved presets").into_any(),
+        _ => div().px_1p5().text_size(px(11.5)).text_color(rgba(theme::t().fg_2)).child("Saved presets").into_any(),
     };
     let header = div().flex().flex_row().items_center().justify_between().h(px(ROW_H)).flex_shrink_0().px_0p5().child(left).child(
-        header_button("all-models", "All models", Some("chevron-right"), theme::FG_1)
+        header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1)
             .on_click(cx.listener(|this, _, window, cx| this.open_all_models(window, cx))),
     );
 
@@ -67,9 +67,9 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .hover(|d| d.bg(rgb(theme::LINE)))
+        .hover(|d| d.bg(rgba(theme::t().line)))
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
-        .child(icon("chevron-left", theme::FG_1));
+        .child(icon("chevron-left", theme::t().fg_1));
     let header = div()
         .flex()
         .flex_row()
@@ -78,7 +78,7 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .h(px(ROW_H))
         .flex_shrink_0()
         .child(back)
-        .child(icon("search", theme::FG_2).size(px(13.)))
+        .child(icon("search", theme::t().fg_2).size(px(13.)))
         .child(div().flex_1().min_w_0().text_size(px(13.)).child(this.model_search.clone()));
 
     let models = this.filtered_models(cx);
@@ -123,8 +123,8 @@ fn preset_row(
         .group("preset")
         .on_click(cx.listener(move |this, _, _, cx| this.use_preset(&preset, cx)))
         .child(div().flex_shrink_0().child(name))
-        .child(div().min_w_0().truncate().text_color(rgb(theme::FG_1)).text_size(px(12.)).child(p.model.clone()))
-        .children(p.effort.clone().map(|e| div().flex_shrink_0().text_color(rgb(theme::NAVY_INK)).text_size(px(12.)).child(e)))
+        .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(px(12.)).child(p.model.clone()))
+        .children(p.effort.clone().map(|e| div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).text_size(px(12.)).child(e)))
         .child(div().flex_1())
         .children(index.map(|i| {
             div()
@@ -136,12 +136,12 @@ fn preset_row(
                 .rounded_sm()
                 .opacity(0.)
                 .group_hover("preset", |d| d.opacity(1.))
-                .hover(|d| d.bg(rgb(theme::HOVER)))
+                .hover(|d| d.bg(rgba(theme::t().hover)))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     cx.stop_propagation();
                     this.remove_preset(i, cx);
                 }))
-                .child(icon("x", theme::FG_1).size(px(12.)))
+                .child(icon("x", theme::t().fg_1).size(px(12.)))
         }))
         .into_any()
 }
@@ -159,8 +159,8 @@ fn header_button(id: &'static str, label: &'static str, trailing: Option<&'stati
         .rounded_md()
         .cursor_pointer()
         .text_size(px(12.))
-        .text_color(rgb(color))
-        .hover(|d| d.bg(rgb(theme::LINE)).text_color(rgb(theme::FG)))
+        .text_color(rgba(color))
+        .hover(|d| d.bg(rgba(theme::t().line)).text_color(rgba(theme::t().fg)))
         .child(label)
         .children(trailing.map(|name| icon(name, color).size(px(12.))))
 }

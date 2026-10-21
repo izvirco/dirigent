@@ -33,9 +33,30 @@ export interface ModelInfo {
   thinking_levels: string[];
 }
 
+/** How to name a thread from its first prompt (the desktop's `config.toml` `[title]`). */
+export interface TitleGen {
+  model: string;
+  reasoning: string;
+  prompt: string;
+}
+
+/** A generated title and what it cost. */
+export interface TitleResult {
+  title: string;
+  model: string;
+  input: number;
+  output: number;
+  cost: number;
+  duration_ms: number;
+}
+
+/** Tried in order when the configured title model has no credentials here. */
+const TITLE_FALLBACKS = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"];
+
 export type Outbound =
   | { type: "loaded"; thread_id: string; model?: string; thinking_level: string; header: unknown }
   | { type: "models"; models: ModelInfo[] }
+  | ({ type: "title" } & TitleResult)
   | { type: "entry"; thread_id: string; entry: unknown }
   | { type: "event"; thread_id: string; event: unknown }
   | { type: "warning"; thread_id: string; message: string }
@@ -162,7 +183,9 @@ export class Sessions {
    * Send a prompt, first switching the session to `model` ("provider/id") and
    * `thinkingLevel` if they differ from its current ones. Pi persists the switch
    * as entries, so it survives reloads. `attachments` are base64 images; pi resizes
-   * them to the model's limits before persisting.
+   * them to the model's limits before persisting. `title` (a thread's first prompt)
+   * names the thread from `text` alongside the run: pi persists the name as a
+   * `session_info` entry, which is how the service and clients learn it.
    */
   async prompt(
     threadId: string,
@@ -171,6 +194,7 @@ export class Sessions {
     model?: string,
     thinkingLevel?: string,
     attachments: { mime_type: string; data: string }[] = [],
+    title?: TitleGen,
   ): Promise<void> {
     const live = this.live.get(threadId);
     if (!live) throw new Error(`thread not loaded: ${threadId}`);
@@ -181,6 +205,17 @@ export class Sessions {
     }
     if (thinkingLevel && thinkingLevel !== session.thinkingLevel) {
       session.setThinkingLevel(thinkingLevel as ThinkingLevel);
+    }
+    if (title) {
+      this.generateTitle(title, text, session.model)
+        .then((r) => session.setSessionName(r.title))
+        .catch((e) =>
+          this.send({
+            type: "warning",
+            thread_id: threadId,
+            message: `title generation failed: ${(e as Error).message}`,
+          }),
+        );
     }
     const images: ImageContent[] = attachments.map((a) => ({
       type: "image",
@@ -210,6 +245,42 @@ export class Sessions {
     if (!drop(steering)) drop(followUp);
     for (const t of steering) await session.steer(t);
     for (const t of followUp) await session.followUp(t);
+  }
+
+  /**
+   * One completion: `gen.prompt` as the system prompt, `text` as the user message. Uses
+   * `gen.model` if this host has credentials for it, else the first available fallback,
+   * else `fallback` (the thread's own model). The title is the reply's first line, unquoted.
+   */
+  async generateTitle(gen: TitleGen, text: string, fallback?: Model<Api>): Promise<TitleResult> {
+    const rt = await this.modelRuntime;
+    const available = await rt.getAvailable();
+    const find = (key: string) => available.find((m) => `${m.provider}/${m.id}` === key);
+    const model = find(gen.model) ?? TITLE_FALLBACKS.map(find).find((m) => m) ?? fallback;
+    if (!model) throw new Error(`no credentials for ${gen.model}`);
+    const started = Date.now();
+    const reply = await rt.completeSimple(
+      model,
+      { systemPrompt: gen.prompt, messages: [{ role: "user", content: text, timestamp: started }] },
+      { reasoning: gen.reasoning as ThinkingLevel },
+    );
+    if (reply.stopReason === "error" || reply.stopReason === "aborted") {
+      throw new Error(reply.errorMessage ?? reply.stopReason);
+    }
+    const raw = reply.content
+      .filter((c): c is { type: "text"; text: string } => c.type === "text")
+      .map((c) => c.text)
+      .join("\n");
+    const title = (raw.trim().split("\n")[0] ?? "").replace(/^["'“”`]+|["'“”`.]+$/g, "").trim();
+    if (!title) throw new Error("model returned an empty title");
+    return {
+      title,
+      model: `${model.provider}/${model.id}`,
+      input: reply.usage.input + reply.usage.cacheRead + reply.usage.cacheWrite,
+      output: reply.usage.output,
+      cost: reply.usage.cost.total,
+      duration_ms: Date.now() - started,
+    };
   }
 
   disposeAll(): void {
