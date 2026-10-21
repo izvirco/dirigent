@@ -80,7 +80,8 @@ impl Service {
             | ClientMessage::ArchiveThread { id, .. }
             | ClientMessage::DeleteThread { id, .. }
             | ClientMessage::ListModels { id }
-            | ClientMessage::GetBlob { id, .. } => *id,
+            | ClientMessage::GetBlob { id, .. }
+            | ClientMessage::ListUsage { id, .. } => *id,
         };
         match self.try_handle(req).await {
             Ok(reply) => reply,
@@ -152,6 +153,9 @@ impl Service {
                     mime_type,
                     data: base64::Engine::encode(&base64::prelude::BASE64_STANDARD, bytes),
                 }
+            }
+            ClientMessage::ListUsage { id, since, until, bucket_ms } => {
+                ServerMessage::Usage { reply_to: id, buckets: self.storage.lock().unwrap().usage(since, until, bucket_ms)? }
             }
             ClientMessage::Abort { id, thread_id } => {
                 self.runtime.abort(&thread_id)?;

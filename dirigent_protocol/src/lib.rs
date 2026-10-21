@@ -86,6 +86,14 @@ pub enum ClientMessage {
         id: u64,
         blob_id: String,
     },
+    /// Token / cost usage of every assistant message with `since <= timestamp < until`,
+    /// summed per `bucket_ms`-wide slot (counted from `since`) and per provider + model.
+    ListUsage {
+        id: u64,
+        since: i64,
+        until: i64,
+        bucket_ms: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,6 +156,28 @@ pub enum ServerMessage {
         mime_type: String,
         data: String,
     },
+    Usage {
+        reply_to: u64,
+        buckets: Vec<UsageBucket>,
+    },
+}
+
+/// Usage summed over one time slot for one model (see `ClientMessage::ListUsage`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageBucket {
+    /// Unix millis the slot starts at: `since + n * bucket_ms`.
+    pub start: i64,
+    pub provider: String,
+    pub model: String,
+    /// Fresh input tokens; `cache_read` / `cache_write` are the rest of the prompt.
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// Dollars, as pi prices them.
+    pub cost: f64,
+    /// Assistant messages summed into this bucket.
+    pub messages: u64,
 }
 
 /// An image sent with a prompt: base64 bytes and their mime type (`image/png`, ...).
@@ -262,6 +292,7 @@ mod tests {
         roundtrip(ClientMessage::DeleteThread { id: 8, thread_id: "t".into() });
         roundtrip(ClientMessage::ListModels { id: 6 });
         roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
+        roundtrip(ClientMessage::ListUsage { id: 11, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         assert_eq!(
             serde_json::to_value(ClientMessage::Prompt {
                 id: 4,
@@ -317,5 +348,19 @@ mod tests {
         roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });
         roundtrip(ServerMessage::Event { thread_id: "t".into(), event: json!({"type":"agent_start"}) });
         roundtrip(ServerMessage::Blob { reply_to: 5, blob_id: "abc".into(), mime_type: "image/png".into(), data: "AAAA".into() });
+        roundtrip(ServerMessage::Usage {
+            reply_to: 6,
+            buckets: vec![UsageBucket {
+                start: 0,
+                provider: "anthropic".into(),
+                model: "m".into(),
+                input: 1,
+                output: 2,
+                cache_read: 3,
+                cache_write: 4,
+                cost: 0.5,
+                messages: 1,
+            }],
+        });
     }
 }

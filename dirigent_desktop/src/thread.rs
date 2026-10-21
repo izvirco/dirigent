@@ -21,12 +21,12 @@ use crate::picker;
 use crate::projects;
 use crate::ruler;
 use crate::select::{Doc, Keys};
-use crate::theme::{self, Status};
-use crate::view::{Item, Step, ToolCall, Work};
+use crate::theme::{self, Status, dollars, kilo};
+use crate::view::{Item, Stats, Step, ToolCall, Work};
 use dirigent_protocol::PromptMode;
 use gpui::{
-    AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, div, img, list, prelude::*,
-    px, relative, rgb, rgba,
+    Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, anchored, deferred,
+    div, img, list, point, prelude::*, px, relative, rgb, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -250,9 +250,29 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         menu::popup(Side::Above, items, cx)
     });
 
-    let usage = (!drafting).then(|| this.open().and_then(context_usage)).flatten().map(|used| {
+    // The context chip: tokens in the model's window right now; hovering it shows what the
+    // whole thread has cost so far (`stats_card`).
+    let usage = (!drafting).then(|| this.open().and_then(|t| context_usage(t).map(|u| (t, u)))).flatten().map(|(t, used)| {
         let window = this.current_model().map(|m| m.context_window).unwrap_or(0);
-        if window > 0 { format!("{}/{}", kilo(used), kilo(window)) } else { kilo(used) }
+        let label = if window > 0 { format!("{}/{}", kilo(used), kilo(window)) } else { kilo(used) };
+        div()
+            .id("ctx-usage")
+            .relative()
+            .h(px(24.))
+            .px_1p5()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .text_color(rgb(theme::FG_1))
+            .hover(|d| d.bg(rgb(theme::HOVER)).text_color(rgb(theme::FG)))
+            .on_hover(cx.listener(|this, hovered, _, cx| {
+                if let Pane::Thread(t) = &mut this.pane {
+                    t.stats_hover = *hovered;
+                    cx.notify();
+                }
+            }))
+            .child(label)
+            .children(t.stats_hover.then(|| stats_card(t)))
     });
 
     // One round button in the corner: send, or stop while running. While running, ctrl+Enter
@@ -323,7 +343,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Effort, cx)))
                         .children(effort_menu),
                 )
-                .children(usage.map(|u| div().px_1p5().text_color(rgb(theme::FG_1)).child(u)))
+                .children(usage)
                 .child(div().flex_1())
                 .child(action),
         )
@@ -437,14 +457,43 @@ fn context_usage(t: &OpenThread) -> Option<u64> {
     })
 }
 
-fn kilo(n: u64) -> String {
-    if n >= 1_000_000 {
-        format!("{}M", n / 1_000_000)
-    } else if n >= 1000 {
-        format!("{}k", n / 1000)
-    } else {
-        n.to_string()
-    }
+/// The thread's totals, floated above the context chip while it is hovered: tokens in
+/// and out, how much of the input was cached, message counts, and the bill so far.
+fn stats_card(t: &OpenThread) -> AnyElement {
+    let s = Stats::of(t.entries.iter().map(|e| &e.json));
+    let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+    let dim = |text: String| div().text_color(rgb(theme::FG_1)).child(text);
+    let card = div()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(rgb(theme::HOVER))
+        .border_1()
+        .border_color(rgb(theme::LINE))
+        .shadow_md()
+        .text_size(px(12.))
+        .line_height(px(18.))
+        .text_color(rgb(theme::FG))
+        .child(format!("{} in / {} out", kilo(s.input), kilo(s.output)))
+        .child(dim(format!("{} cached ({}%)", kilo(s.cached), s.cached_pct())))
+        .child(dim(count(s.user_messages, "user message")))
+        .child(dim(count(s.assistant_messages, "assistant message")))
+        .child(dim(count(s.compactions, "compaction")))
+        .child(div().pt_0p5().font_weight(FontWeight::MEDIUM).child(dollars(s.cost)));
+    // Zero-size absolute wrapper so the anchored card sits at the chip's corner, not the
+    // flex static position (see AGENTS.md).
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_0()
+        .child(deferred(
+            anchored().anchor(Anchor::BottomLeft).offset(point(px(0.), px(-6.))).snap_to_window_with_margin(px(8.)).child(card),
+        ))
+        .into_any()
 }
 
 /// One list item: a timeline item, or (last index) the live tail: the optimistic echoes of

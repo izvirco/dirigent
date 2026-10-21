@@ -16,6 +16,7 @@ mod select;
 mod sidebar;
 mod theme;
 mod thread;
+mod usage;
 mod view;
 
 use app::{Abort, Dirigent, NewThread, Quit, ToggleLog, ToggleSidebar};

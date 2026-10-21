@@ -10,7 +10,7 @@ use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, Selection};
 use crate::theme::{self, Fonts, Status};
 use crate::view::{Item, Streaming, Timeline};
-use crate::{lists, ruler, sidebar, thread};
+use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
 use dirigent_protocol::{ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary};
 use futures::StreamExt;
@@ -41,6 +41,8 @@ const LOG_MIN: f32 = 280.;
 const LOG_MAX: f32 = 800.;
 /// How long a message's copy button shows its check.
 const COPIED_TTL: Duration = Duration::from_millis(1200);
+/// How often the usage page re-asks the hosts while it shows a window that ends now.
+const USAGE_REFRESH_SECS: u64 = 30;
 
 /// Which edge the mouse is dragging.
 #[derive(Clone, Copy, PartialEq)]
@@ -73,6 +75,8 @@ pub struct OpenThread {
     pub pins: HashSet<usize>,
     /// The ruler's animation and hover state (see `ruler.rs`).
     pub ruler: ruler::State,
+    /// The composer's context chip is hovered: show the thread's totals (`thread::stats_card`).
+    pub stats_hover: bool,
     /// A `jump_to` in progress: the item to center and the frames left to get it there.
     center_on: Option<(usize, u8)>,
 }
@@ -105,6 +109,8 @@ pub enum Pane {
     },
     /// Settings: remote hosts (`hosts.toml`) with their status, and the form to add one.
     Settings,
+    /// Settings › Usage: tokens and cost over time, across hosts (`usage.rs`).
+    Usage,
     /// New-thread page: the composer alone, centered. The thread is created on the host
     /// when the first message is sent.
     Draft {
@@ -159,6 +165,8 @@ pub enum Menu {
     NewProjectHost,
     /// Thread header: confirm deletion.
     ConfirmDelete,
+    /// Usage page: what a series is (model / provider / everything).
+    UsageGroup,
 }
 
 pub struct Dirigent {
@@ -189,6 +197,13 @@ pub struct Dirigent {
     pub host_url_input: Entity<TextInput>,
     /// Filter for the model picker's all-models page.
     pub model_search: Entity<TextInput>,
+    /// The usage page: window, grouping, hidden series and the hosts' buckets.
+    pub usage: usage::State,
+    /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
+    pub usage_from: Entity<TextInput>,
+    pub usage_to: Entity<TextInput>,
+    /// Seconds since launch, from `tick`.
+    ticks: u64,
     /// Model (`provider/id`) and thinking level the next prompt is sent with.
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -261,6 +276,11 @@ impl Dirigent {
         }
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
         cx.subscribe(&model_search, |this, _, _: &Submitted, cx| this.pick_first_model(cx)).detach();
+        let usage_from = cx.new(|cx| TextInput::new(cx, "2026-01-01", true));
+        let usage_to = cx.new(|cx| TextInput::new(cx, "2026-01-31", true));
+        for input in [&usage_from, &usage_to] {
+            cx.subscribe(input, |this, _, _: &Submitted, cx| this.apply_custom_usage(cx)).detach();
+        }
 
         let mut this = Self {
             hosts: host_states,
@@ -280,6 +300,10 @@ impl Dirigent {
             host_name_input,
             host_url_input,
             model_search,
+            usage: usage::State::new(),
+            usage_from,
+            usage_to,
+            ticks: 0,
             model,
             effort,
             presets,
@@ -441,6 +465,9 @@ impl Dirigent {
                     let rid = self.next_id();
                     self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: id });
                 }
+                if status == HostStatus::Connected && matches!(self.pane, Pane::Usage) {
+                    self.request_usage(cx);
+                }
             }
             Incoming::Message { host, msg } => self.on_server_message(host, *msg, cx),
         }
@@ -494,6 +521,11 @@ impl Dirigent {
                     t.entries = entries;
                     t.list.reset(t.timeline.items.len() + 1);
                     self.fetch_blobs();
+                }
+            }
+            ServerMessage::Usage { reply_to, buckets } => {
+                if self.usage.request == Some(reply_to) {
+                    self.usage.buckets.insert(host, buckets);
                 }
             }
             ServerMessage::Blob { blob_id, mime_type, data, .. } => {
@@ -605,6 +637,7 @@ impl Dirigent {
             Pane::Project { group_key } => format!("project\n{group_key}"),
             Pane::Thread(t) => format!("thread\n{}\n{}", t.host, t.id),
             Pane::Settings => "settings".to_owned(),
+            Pane::Usage => "usage".to_owned(),
             Pane::Draft { .. } | Pane::NewProject { .. } => return,
         };
         let _ = self.cache.lock().unwrap().set(PANE_KEY, &value);
@@ -617,6 +650,8 @@ impl Dirigent {
         match parts.as_slice() {
             ["workpool"] => self.pane = Pane::Workpool,
             ["settings"] => self.pane = Pane::Settings,
+            // The hosts aren't connected yet; the request goes out as each one connects.
+            ["usage"] => self.pane = Pane::Usage,
             ["project", key] => self.pane = Pane::Project { group_key: (*key).to_owned() },
             ["thread", host, id] if self.summary(host, id).is_some() => {
                 let (host, id) = ((*host).to_owned(), (*id).to_owned());
@@ -650,6 +685,7 @@ impl Dirigent {
             copied: None,
             pins: self.cache.lock().unwrap().pins(host, id).into_iter().collect(),
             ruler: Default::default(),
+            stats_hover: false,
             center_on: None,
         }));
         self.menu = None;
@@ -664,12 +700,20 @@ impl Dirigent {
     }
 
     /// Re-render once a second, for as long as the app lives, so every clock on screen
-    /// (run and tool timers, `rel_time` ages) advances in whole-second steps.
+    /// (run and tool timers, `rel_time` ages) advances in whole-second steps. Also keeps
+    /// the usage page's numbers fresh while it is open.
     fn tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                let alive = this.update(cx, |this, cx| {
+                    this.ticks += 1;
+                    if this.ticks % USAGE_REFRESH_SECS == 0 && matches!(this.pane, Pane::Usage) && this.usage.at_now() {
+                        this.request_usage(cx);
+                    }
+                    cx.notify()
+                });
+                if alive.is_err() {
                     break;
                 }
             }
@@ -905,6 +949,79 @@ impl Dirigent {
             }
         }
         self.menu = None;
+        cx.notify();
+    }
+
+    // ---- usage ----
+
+    pub fn show_usage(&mut self, cx: &mut Context<Self>) {
+        self.show(Pane::Usage, cx);
+        self.request_usage(cx);
+    }
+
+    /// Ask every host for the window shown. Replies to older requests are ignored.
+    fn request_usage(&mut self, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.usage.request = Some(id);
+        self.usage.buckets.clear();
+        let (since, until, bucket_ms) = (self.usage.since, self.usage.until, self.usage.bucket());
+        for h in &self.hosts {
+            self.net.send(&h.name, ClientMessage::ListUsage { id, since, until, bucket_ms });
+        }
+        cx.notify();
+    }
+
+    pub fn set_usage_range(&mut self, range: usage::Range, cx: &mut Context<Self>) {
+        if range == usage::Range::Custom {
+            // Seed the fields with the window shown, so Enter alone keeps it.
+            let (from, to) = (usage::day_of(self.usage.since), usage::day_of(self.usage.until - 1));
+            let (window, from_input, to_input) = (self.window, self.usage_from.clone(), self.usage_to.clone());
+            cx.defer(move |cx| {
+                window
+                    .update(cx, |_, window, cx| {
+                        from_input.update(cx, |i, cx| i.set_text(&from, window, cx));
+                        to_input.update(cx, |i, cx| i.set_text(&to, window, cx));
+                    })
+                    .ok();
+            });
+            self.usage.range = range;
+            self.focus(self.usage_from.focus_handle(cx), cx);
+            cx.notify();
+            return;
+        }
+        self.usage.set_range(range);
+        self.request_usage(cx);
+    }
+
+    /// Enter in a date field: show `from..=to` (both `YYYY-MM-DD`).
+    fn apply_custom_usage(&mut self, cx: &mut Context<Self>) {
+        let parse = |input: &Entity<TextInput>, cx: &App| usage::parse_day(input.read(cx).text());
+        match (parse(&self.usage_from, cx), parse(&self.usage_to, cx)) {
+            (Some(from), Some(to)) => {
+                self.usage.set_custom(from, to);
+                self.request_usage(cx);
+            }
+            _ => self.toast("Dates as YYYY-MM-DD", cx),
+        }
+    }
+
+    /// `‹` / `›`: the previous / next window of the same length.
+    pub fn page_usage(&mut self, dir: i64, cx: &mut Context<Self>) {
+        self.usage.page(dir);
+        self.request_usage(cx);
+    }
+
+    pub fn set_usage_group(&mut self, group: usage::Group, cx: &mut Context<Self>) {
+        self.usage.group = group;
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// A legend row was clicked: hide its line, or show it again.
+    pub fn toggle_usage_series(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.usage.hidden.remove(key) {
+            self.usage.hidden.insert(key.to_owned());
+        }
         cx.notify();
     }
 
@@ -1227,7 +1344,15 @@ impl Dirigent {
 
     /// A bracket key with text in the focused input types the bracket instead of acting.
     fn typed_bracket(&mut self, bracket: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        for input in [&self.composer, &self.path_input, &self.host_name_input, &self.host_url_input, &self.model_search] {
+        for input in [
+            &self.composer,
+            &self.path_input,
+            &self.host_name_input,
+            &self.host_url_input,
+            &self.model_search,
+            &self.usage_from,
+            &self.usage_to,
+        ] {
             if input.focus_handle(cx).is_focused(window) && !input.read(cx).text().is_empty() {
                 input.update(cx, |i, cx| i.replace_text_in_range(None, bracket, window, cx));
                 return true;

@@ -226,6 +226,41 @@ pub fn rel_time(age_ms: i64) -> String {
     }
 }
 
+/// Token counts: `812`, `9.5k`, `138k`, `1M`, `1.2M`, `33M`.
+pub fn kilo(n: u64) -> String {
+    let (v, suffix) = if n >= 1_000_000 {
+        (n as f64 / 1e6, "M")
+    } else if n >= 1000 {
+        (n as f64 / 1e3, "k")
+    } else {
+        return n.to_string();
+    };
+    let s = if v < 9.95 { format!("{v:.1}") } else { format!("{}", v.round()) };
+    format!("{}{suffix}", s.strip_suffix(".0").unwrap_or(&s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_numbers() {
+        assert_eq!(kilo(812), "812");
+        assert_eq!(kilo(9_540), "9.5k");
+        assert_eq!(kilo(138_400), "138k");
+        assert_eq!(kilo(1_000_000), "1M");
+        assert_eq!(kilo(1_240_000), "1.2M");
+        assert_eq!(dollars(24.664), "$24.66");
+        assert_eq!(dollars(0.004), "$0.004");
+        assert_eq!(dollars(0.), "$0.00");
+    }
+}
+
+/// Dollars with cents: `$24.66`, `$0.05`; tenths of a cent when there's less than one.
+pub fn dollars(v: f64) -> String {
+    if v > 0. && v < 0.01 { format!("${v:.3}") } else { format!("${v:.2}") }
+}
+
 /// `provider/model-id` → `model-id`.
 pub fn short_model(key: &str) -> &str {
     key.rsplit('/').next().unwrap_or(key)
