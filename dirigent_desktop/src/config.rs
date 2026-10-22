@@ -56,7 +56,7 @@ pub struct ToolsConfig {
     pub async_bash: bool,
     /// Put questions to the user as a form.
     pub ask_user: bool,
-    /// The orchestrator: spawn sub-agents, manage threads, run workflows.
+    /// The orchestrator: spawn sub-agents, manage threads.
     pub dirigent: bool,
 }
 

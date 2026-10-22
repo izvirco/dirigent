@@ -1,11 +1,11 @@
 // Dirigent's own tools: `async_bash` runs a command in the background and tells the model
 // when it ends; `ask_user` puts questions in front of the user as a form in the desktop;
 // `dirigent` is the orchestrator: spawn sub-agent threads, message / read / find / manage
-// threads on this host, open one for the user, and run the project's workflows. All of
-// them return at once. The outcome reaches the model later as a custom message through
-// pi's steer / follow-up queues, which also wakes an idle agent for a new turn. A job picks
-// how it interrupts (`notify`); the user's answers are user input and always steer; a
-// sub-agent or workflow ending is delivered by the service (`deliverNotice`).
+// threads on this host and open one for the user. All of them return at once. The outcome
+// reaches the model later as a custom message through pi's steer / follow-up queues, which
+// also wakes an idle agent for a new turn. A job picks how it interrupts (`notify`); the
+// user's answers are user input and always steer; a sub-agent ending is delivered by the
+// service (`deliverNotice`).
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
@@ -131,23 +131,18 @@ const dirigentParams = Type.Object({
       Type.Literal("snooze"),
       Type.Literal("abort"),
       Type.Literal("open"),
-      Type.Literal("workflows"),
-      Type.Literal("run_workflow"),
     ],
     {
       description:
         "spawn: a sub-agent thread called `name` for `task` (you are told when it finishes, with its reply). " +
         "send: message `thread_id` (`text`; a new turn if idle, else a steer or follow_up). " +
         "read: a thread's final reply (`full` for the whole conversation). " +
-        "status: your sub-agents and workflow runs, or one `thread_id` / `run_id`. " +
+        "status: your sub-agents, or one `thread_id`. " +
         "search: threads whose messages contain `query`. " +
-        "archive / snooze / abort / open (in the user's desktop): act on `thread_id`. " +
-        "workflows: the project's workflows and how to write one. " +
-        "run_workflow: start `name` with `input`; you are told when it ends.",
+        "archive / snooze / abort / open (in the user's desktop): act on `thread_id`.",
     },
   ),
   thread_id: Type.Optional(Type.String()),
-  run_id: Type.Optional(Type.String()),
   task: Type.Optional(Type.String({ description: "spawn: the sub-agent's full prompt." })),
   text: Type.Optional(Type.String({ description: "send: the message." })),
   mode: Type.Optional(
@@ -174,12 +169,8 @@ const dirigentParams = Type.Object({
   snoozed: Type.Optional(Type.Boolean({ description: "snooze: false to wake." })),
   name: Type.Optional(
     Type.String({
-      description:
-        "spawn (required): the sub-agent's name, a few words on what it is for. run_workflow: the workflow's name.",
+      description: "spawn (required): the sub-agent's name, a few words on what it is for.",
     }),
-  ),
-  input: Type.Optional(
-    Type.Record(Type.String(), Type.Unknown(), { description: "run_workflow: its inputs." }),
   ),
 });
 
@@ -248,9 +239,8 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       "Orchestrate threads on this host. Spawn sub-agents (each a thread of its own, started in your " +
       "directory with your model unless told otherwise) and carry on; when one finishes you get a message " +
       "with its reply, so end your turn to wait or keep working meanwhile. Message, read, find, archive, " +
-      "snooze or abort any thread, open one for the user, and list or run the project's workflows " +
-      "(deterministic scripts in .dirigent/workflows that drive this same API).",
-    promptSnippet: "Spawn and manage sub-agent threads, find threads, run workflows",
+      "snooze or abort any thread, and open one for the user.",
+    promptSnippet: "Spawn and manage sub-agent threads, find threads",
     parameters: dirigentParams,
     async execute(_id, p) {
       const d = new Dirigent(await serviceClient(), { threadId: host.threadId });
@@ -283,11 +273,6 @@ export function createTools(host: ToolHost): ToolDefinition[] {
           return text(`${describeThread(r.thread)}\n\n${body}`);
         }
         case "status": {
-          if (p.run_id) {
-            const run = (await d.runs()).find((r) => r.id === p.run_id);
-            if (!run) throw new Error(`no run ${p.run_id}`);
-            return text(describeRun(run));
-          }
           const threads = await d.threads();
           if (p.thread_id) {
             const t = threads.find((t) => t.id === p.thread_id);
@@ -303,15 +288,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
                 a.created_at - b.created_at ||
                 a.id.localeCompare(b.id),
             );
-          const runs = (await d.runs()).filter((r) => r.parent_id === host.threadId);
-          const lines = [
-            `You are thread ${host.threadId}.`,
-            kids.length
-              ? `Sub-agents:\n${kids.map((t) => describeThread(t)).join("\n")}`
-              : "No sub-agents.",
-            runs.length ? `Workflow runs:\n${runs.map(describeRun).join("\n")}` : "",
-          ];
-          return text(lines.filter(Boolean).join("\n"));
+          return text(
+            `You are thread ${host.threadId}.\n` +
+              (kids.length
+                ? `Sub-agents:\n${kids.map((t) => describeThread(t)).join("\n")}`
+                : "No sub-agents."),
+          );
         }
         case "search": {
           const hits = await d.search(need(p.query, "query"), p.limit ?? 10);
@@ -337,70 +319,11 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         case "open":
           await d.open(need(p.thread_id, "thread_id"));
           return text(`Opened ${p.thread_id} for the user.`);
-        case "workflows": {
-          const list = await d.workflows();
-          const lines = list.map((w) =>
-            w.error
-              ? `- ${w.name} (${w.path}): broken: ${w.error}`
-              : `- ${w.name}: ${w.description || "(no description)"}` +
-                (w.input.length
-                  ? `\n    input: ${w.input.map((i) => `${i.name}: ${i.kind}${i.default !== undefined ? ` = ${JSON.stringify(i.default)}` : ""}${i.description ? ` (${i.description})` : ""}`).join(", ")}`
-                  : ""),
-          );
-          return text(
-            `${list.length ? lines.join("\n") : "No workflows yet."}\n\n${WORKFLOW_HOWTO}`,
-          );
-        }
-        case "run_workflow": {
-          const run = await d.runWorkflow(need(p.name, "name"), p.input ?? {});
-          return text(
-            `Started workflow ${run.name} (run ${run.id}). You will get a message when it ends; status with run_id to look in on it.`,
-          );
-        }
       }
     },
   });
 
   return [asyncBash as ToolDefinition, askUser as ToolDefinition, dirigent as ToolDefinition];
-}
-
-/** Shown by the `workflows` action: the file format, with the SDK's real path for types. */
-const WORKFLOW_HOWTO = `To add a workflow, write <project>/.dirigent/workflows/<name>.ts:
-
-  import type { WorkflowDef } from "${import.meta.dir}/workflow";
-  export default {
-    description: "Review a pull request with two agents",
-    input: { pr: { type: "number", description: "PR number" } },
-    async run(d, input) {
-      const a = await d.spawn({ name: "Bug review", task: \`Review PR \${input.pr} for bugs\` });
-      const b = await d.spawn({ name: "Style review", task: \`Review PR \${input.pr} for style\`, model: "anthropic/claude-haiku-5-5" });
-      await d.wait([a, b]);
-      const [ra, rb] = await Promise.all([d.read(a), d.read(b)]);
-      await d.log(\`bugs: \${ra.reply}\\nstyle: \${rb.reply}\`);
-      return { bugs: ra.reply, style: rb.reply };
-    },
-  } satisfies WorkflowDef<{ pr: number }>;
-
-\`d\` has: spawn({name, task, model?, effort?, workspace?, base?}) \u2192 thread id; send(id, text, mode?); read(id, full?) \u2192 {reply, transcript?};
-wait(ids, timeoutMs?) \u2192 summaries once idle; search(query); archive(id); snooze(id); abort(id); open(id); runWorkflow(name, input);
-waitRun(runId); log(text). Every call is a step in the run's trace. Keep the script deterministic: the agents vary, the orchestration shouldn't.
-Run it with run_workflow, or from the desktop's Workflows page.`;
-
-function describeRun(r: {
-  id: string;
-  name: string;
-  started_at: number;
-  ended_at: number | null;
-  exit_code: number | null;
-  steps: number;
-}): string {
-  const state =
-    r.ended_at == null
-      ? `running ${duration(Date.now() - r.started_at)}`
-      : r.exit_code === 0
-        ? `succeeded in ${duration(r.ended_at - r.started_at)}`
-        : `failed (exit ${r.exit_code}) after ${duration(r.ended_at - r.started_at)}`;
-  return `- run ${r.id} workflow ${r.name} [${state}] ${r.steps} steps`;
 }
 
 /**
@@ -430,7 +353,7 @@ export function deliverAnswers(
   });
 }
 
-/** The service's notice (a sub-agent or workflow run ended): hand it to the model. */
+/** The service's notice (a sub-agent ended): hand it to the model. */
 export function deliverNotice(
   host: ToolHost,
   customType: string,

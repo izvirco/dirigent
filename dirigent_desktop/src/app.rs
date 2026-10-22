@@ -13,9 +13,7 @@ use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
-use dirigent_protocol::{
-    Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, RunStep, ServerMessage, ThreadSummary, TitleGen, Vcs, WorkflowRun,
-};
+use dirigent_protocol::{Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
@@ -93,7 +91,7 @@ pub struct OpenThread {
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
     /// The orchestration panel (`orchestra.rs`): the user's choice, or `None` for the
-    /// default (open while the thread has sub-agents or runs; see `orchestra_open`).
+    /// default (open while the thread has a family; see `orchestra_open`).
     pub orchestra: Option<bool>,
 }
 
@@ -300,13 +298,6 @@ pub struct Dirigent {
     seen: HashMap<(String, String), i64>,
     /// Threads kept on top of their status group in the inbox / project lists.
     pinned: HashSet<(String, String)>,
-    /// Every host's workflow runs, as last listed or pushed.
-    pub runs: HashMap<String, Vec<WorkflowRun>>,
-    /// Reported steps by (host, run id): fetched for the open thread's runs, appended to
-    /// from `Step` pushes.
-    run_steps: HashMap<(String, String), Vec<RunStep>>,
-    /// Runs whose fold state the user flipped (see `run_expanded`).
-    run_toggles: HashSet<String>,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     resizing: Option<Resize>,
@@ -451,9 +442,6 @@ impl Dirigent {
             collapsed: HashSet::new(),
             seen,
             pinned,
-            runs: HashMap::new(),
-            run_steps: HashMap::new(),
-            run_toggles: HashSet::new(),
             log_width,
             resizing: None,
             composer,
@@ -553,8 +541,8 @@ impl Dirigent {
         }
     }
 
-    /// `Status::of`, with an idle thread whose sub-agents (or workflow runs) are still at
-    /// it reported as `Waiting`: their results will wake it.
+    /// `Status::of`, with an idle thread whose sub-agents are still at it reported as
+    /// `Waiting`: their results will wake it.
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
         match Status::of(t) {
             Status::Done if self.has_busy_children(host, &t.id) => Status::Waiting,
@@ -562,12 +550,9 @@ impl Dirigent {
         }
     }
 
-    /// A sub-agent (at any depth) is working, or a workflow run started by the thread is live.
+    /// A sub-agent (at any depth) is working.
     fn has_busy_children(&self, host: &str, id: &str) -> bool {
         let Some(h) = self.host(host) else { return false };
-        if self.runs.get(host).is_some_and(|runs| runs.iter().any(|r| r.running() && r.parent_id.as_deref() == Some(id))) {
-            return true;
-        }
         h.threads.iter().filter(|t| t.parent_id.as_deref() == Some(id)).any(|t| t.running() || self.has_busy_children(host, &t.id))
     }
 
@@ -661,7 +646,7 @@ impl Dirigent {
     /// The family of a thread on `host`, for the orchestra panel (`orchestra::lineage`).
     pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
         let Some(h) = self.host(host) else { return vec![] };
-        orchestra::lineage(&h.threads, self.runs.get(host).map(Vec::as_slice).unwrap_or(&[]), id)
+        orchestra::lineage(&h.threads, id)
     }
 
     /// Group key of a project, if the host still lists it.
@@ -831,20 +816,7 @@ impl Dirigent {
                     self.select_thread(&host, &thread_id, cx);
                 }
             }
-            ServerMessage::Search { .. } | ServerMessage::Workflows { .. } | ServerMessage::RunStarted { .. } => {}
-            ServerMessage::Runs { runs, .. } => {
-                self.runs.insert(host, runs);
-                self.request_run_steps();
-            }
-            ServerMessage::Run { run, steps, .. } => {
-                self.run_steps.insert((host, run.id), steps);
-            }
-            ServerMessage::Step { run_id, step } => {
-                let steps = self.run_steps.entry((host, run_id)).or_default();
-                if !steps.iter().any(|s| s.seq == step.seq) {
-                    steps.push(step);
-                }
-            }
+            ServerMessage::Search { .. } => {}
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
                 let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
                 if pending.is_some() {
@@ -1045,7 +1017,6 @@ impl Dirigent {
         self.mark_seen(host, id);
         self.sync_asks(cx);
         self.fetch_blobs();
-        self.request_run_steps();
         let rid = self.next_id();
         self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
         self.request_thread_vcs(host, id);
@@ -1478,53 +1449,17 @@ impl Dirigent {
         );
     }
 
-    // ---- workflows ----
-
-    /// The runs that belong with a thread: the ones it started, and the one it was spawned
-    /// by. Newest first.
-    pub fn thread_runs(&self, host: &str, id: &str) -> Vec<&WorkflowRun> {
-        let own = self.summary(host, id).and_then(|t| t.run_id.clone());
-        let mut runs: Vec<_> = self
-            .runs
-            .get(host)
-            .into_iter()
-            .flatten()
-            .filter(|r| r.parent_id.as_deref() == Some(id) || own.as_deref() == Some(&r.id))
-            .collect();
-        runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
-        runs
-    }
-
-    /// The reported steps of a run, as far as they are known here.
-    pub fn steps_of(&self, host: &str, run_id: &str) -> &[RunStep] {
-        self.run_steps.get(&(host.to_owned(), run_id.to_owned())).map(Vec::as_slice).unwrap_or(&[])
-    }
-
-    /// Ask the host for the steps of the open thread's runs that aren't known yet.
-    fn request_run_steps(&mut self) {
-        let Some((host, id)) = self.open().map(|t| (t.host.clone(), t.id.clone())) else { return };
-        let missing: Vec<String> = self
-            .thread_runs(&host, &id)
-            .into_iter()
-            .filter(|r| !self.run_steps.contains_key(&(host.clone(), r.id.clone())))
-            .map(|r| r.id.clone())
-            .collect();
-        for run_id in missing {
-            let rid = self.next_id();
-            self.run_steps.insert((host.clone(), run_id.clone()), vec![]);
-            self.net.send(&host, ClientMessage::GetRun { id: rid, run_id });
-        }
-    }
+    // ---- orchestration panel ----
 
     /// Whether the orchestration panel is on the pane's right: the work log takes the
     /// spot when it is open; else the user's choice, else whenever there is something to
-    /// show (a family or a run).
+    /// show (a family).
     pub fn orchestra_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
         if t.log.is_some() {
             return false;
         }
-        t.orchestra.unwrap_or_else(|| !self.lineage(&t.host, &t.id).is_empty() || !self.thread_runs(&t.host, &t.id).is_empty())
+        t.orchestra.unwrap_or_else(|| !self.lineage(&t.host, &t.id).is_empty())
     }
 
     /// The panel's agents button: show the orchestration panel (closing the log), or hide
@@ -1539,26 +1474,6 @@ impl Dirigent {
             self.focus_composer(cx);
             cx.notify();
         }
-    }
-
-    /// The run header: fold / unfold its steps.
-    pub fn toggle_run(&mut self, run_id: &str, cx: &mut Context<Self>) {
-        if !self.run_toggles.remove(run_id) {
-            self.run_toggles.insert(run_id.to_owned());
-        }
-        cx.notify();
-    }
-
-    /// Whether a run's steps are shown: the newest and the live ones by default, the
-    /// others folded; a click on the header flips it.
-    pub fn run_expanded(&self, run: &WorkflowRun, newest: bool) -> bool {
-        (run.running() || newest) != self.run_toggles.contains(&run.id)
-    }
-
-    pub fn abort_run(&mut self, host: &str, run_id: &str, cx: &mut Context<Self>) {
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::AbortRun { id, run_id: run_id.to_owned() });
-        cx.notify();
     }
 
     // ---- asks ----
@@ -1776,8 +1691,6 @@ impl Dirigent {
             self.links.retain(|(h, _), _| *h != name);
             self.seen.retain(|(h, _), _| *h != name);
             self.pinned.retain(|(h, _)| *h != name);
-            self.runs.remove(&name);
-            self.run_steps.retain(|(h, _), _| *h != name);
             // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
                 self.set_pane(Pane::Settings, cx);
@@ -2193,7 +2106,7 @@ impl Dirigent {
             self.clear_composer(window, cx);
             self.net.send(
                 &target.host,
-                ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base, parent: None, run: None, name: None },
+                ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base, parent: None, name: None },
             );
             return;
         }

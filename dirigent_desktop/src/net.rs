@@ -113,7 +113,6 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                     ClientMessage::ListProjects { id: CONNECT_LIST_ID },
                     ClientMessage::ListThreads { id: CONNECT_LIST_ID },
                     ClientMessage::ListModels { id: CONNECT_LIST_ID },
-                    ClientMessage::ListRuns { id: CONNECT_LIST_ID },
                 ] {
                     let _ = sink.send(Message::Text(serde_json::to_string(&req).unwrap().into())).await;
                 }

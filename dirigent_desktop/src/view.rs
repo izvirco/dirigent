@@ -241,16 +241,6 @@ impl Timeline {
                     (None, None) => self.add(Item::Notice(text)),
                 })
             }
-            Some("dirigent:workflow") => {
-                let text = workflow_text(details).unwrap_or_else(|| text_of(entry.get("content")));
-                Some(match self.open_work() {
-                    Some(ix) => {
-                        self.work_mut(ix).steps.push(Step::Notice(text));
-                        ix
-                    }
-                    None => self.add(Item::Notice(text)),
-                })
-            }
             _ => Some(self.add(Item::Notice(text_of(entry.get("content"))))),
         }
     }
@@ -449,15 +439,6 @@ fn child_text(details: Option<&Value>) -> Option<String> {
         "finished"
     };
     Some(format!("sub-agent \"{name}\" {what}"))
-}
-
-/// One line for a finished workflow run: `workflow review · exit 0 · 12s`.
-fn workflow_text(details: Option<&Value>) -> Option<String> {
-    let d = details?;
-    let name = d.get("name")?.as_str()?;
-    let exit = d.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
-    let ms = d.get("duration_ms").and_then(Value::as_i64).unwrap_or(0);
-    Some(format!("workflow {name} \u{b7} exit {exit} \u{b7} {}", crate::thread::duration(ms)))
 }
 
 /// Unix millis of an ISO 8601 timestamp (`2026-01-02T03:04:05.678Z`), as pi writes them.
@@ -808,14 +789,11 @@ mod tests {
         let Item::Work(w) = &t.items[0] else { panic!() };
         assert_eq!(w.steps[1], Step::Notice("job cargo check · exit 1 · 12s".into()));
         assert!(matches!(&w.steps[2], Step::Steer { queued: false, .. }));
-        // A sub-agent's end is a link to it when idle, a notice row mid-run; a workflow's end a notice.
+        // A sub-agent's end is a link to it when idle, a notice row mid-run.
         let child = json!({"type":"custom_message","customType":"dirigent:child","content":"raw",
             "details":{"thread_id":"kid","name":"Review","reply":"ok","error":false}});
-        let flow = json!({"type":"custom_message","customType":"dirigent:workflow","content":"raw",
-            "details":{"run_id":"r","name":"review","exit_code":0,"duration_ms":12000}});
-        let t = Timeline::from_entries([&child, &flow]);
+        let t = Timeline::from_entries([&child]);
         assert_eq!(t.items[0], Item::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" finished".into() });
-        assert_eq!(t.items[1], Item::Notice("workflow review \u{b7} exit 0 \u{b7} 12s".into()));
         let t = Timeline::from_entries([&assistant, &child]);
         let Item::Work(w) = &t.items[0] else { panic!() };
         assert_eq!(w.steps[1], Step::Notice("sub-agent \"Review\" finished".into()));

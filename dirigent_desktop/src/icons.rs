@@ -20,7 +20,6 @@ icons!(
     "chevron-left",
     "chevron-right",
     "chevron-up",
-    "circle",
     "circle-check",
     "circle-help",
     "circle-x",
@@ -42,7 +41,6 @@ icons!(
     "square",
     "trash-2",
     "triangle-alert",
-    "workflow",
     "x",
 );
 

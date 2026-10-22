@@ -295,7 +295,7 @@ export class Sessions {
     await requeueNotices(live);
   }
 
-  /** The service has a notice for the model (a sub-agent or workflow ended). */
+  /** The service has a notice for the model (a sub-agent ended). */
   async notify(
     threadId: string,
     customType: string,

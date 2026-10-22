@@ -88,7 +88,7 @@ enum Command_<'a> {
         ask: &'a Ask,
         answers: Option<&'a [Vec<String>]>,
     },
-    /// A notice for the model (a sub-agent or workflow ending): a custom message queued as
+    /// A notice for the model (a sub-agent ending): a custom message queued as
     /// a steer (`asap`) or follow-up (`when_idle`), starting a turn if the model is idle.
     Notify {
         thread_id: &'a str,

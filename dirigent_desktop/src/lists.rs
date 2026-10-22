@@ -190,9 +190,8 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .children(actions)
 }
 
-/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent, a
-/// run's `Workflows` page) an optional segment of its own, and an amber pin before the
-/// title while `pinned`. The title breathes while `titling` (its name is being generated).
+/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent) an
+/// optional segment of its own, and an amber pin before the title while `pinned`. The title breathes while `titling` (its name is being generated).
 pub fn breadcrumb(
     project: Option<(String, String)>,
     via: Option<Stateful<Div>>,

@@ -141,7 +141,6 @@ mod tests {
             workspace: None,
             workspace_missing: false,
             parent_id: None,
-            run_id: None,
             snoozed: false,
             prompted_at: None,
         }

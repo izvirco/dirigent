@@ -44,7 +44,7 @@ pub enum ClientMessage {
     /// project instead of its directory, checked out at `base` (anything git / jj resolve:
     /// a branch, bookmark, commit, revset; default `HEAD` / the parents of `@`).
     /// `parent` makes it a sub-agent of that thread: it starts in the parent's cwd (unless
-    /// `workspace`), and the parent is told when it finishes. `run` ties it to a workflow run.
+    /// `workspace`), and the parent is told when it finishes.
     /// `name` names it from the start (a sub-agent, named by whoever spawns it); a thread
     /// without one is titled from its first prompt.
     CreateThread {
@@ -56,8 +56,6 @@ pub enum ClientMessage {
         base: Option<String>,
         #[serde(default)]
         parent: Option<String>,
-        #[serde(default)]
-        run: Option<String>,
         #[serde(default)]
         name: Option<String>,
     },
@@ -150,40 +148,6 @@ pub enum ClientMessage {
         query: String,
         #[serde(default = "default_limit")]
         limit: u64,
-    },
-    /// The workflows a project has (`.dirigent/workflows/*.ts`), described by running them.
-    ListWorkflows {
-        id: u64,
-        project_id: String,
-    },
-    /// Start a workflow with `input`; `parent` is the thread that asked for it and is told
-    /// when it ends.
-    RunWorkflow {
-        id: u64,
-        project_id: String,
-        name: String,
-        #[serde(default)]
-        input: Value,
-        #[serde(default)]
-        parent: Option<String>,
-    },
-    ListRuns {
-        id: u64,
-    },
-    /// One run with its steps and log.
-    GetRun {
-        id: u64,
-        run_id: String,
-    },
-    /// A workflow run reporting what it did (from the runner's SDK).
-    ReportStep {
-        id: u64,
-        run_id: String,
-        step: Value,
-    },
-    AbortRun {
-        id: u64,
-        run_id: String,
     },
     /// Permanently remove a thread and its entries.
     DeleteThread {
@@ -304,32 +268,6 @@ pub enum ServerMessage {
         reply_to: u64,
         hits: Vec<SearchHit>,
     },
-    Workflows {
-        reply_to: u64,
-        project_id: String,
-        workflows: Vec<Workflow>,
-    },
-    /// Reply to `ListRuns`, or pushed (`reply_to: None`) when a run starts or ends.
-    Runs {
-        reply_to: Option<u64>,
-        runs: Vec<WorkflowRun>,
-    },
-    RunStarted {
-        reply_to: u64,
-        run: WorkflowRun,
-    },
-    /// Reply to `GetRun`.
-    Run {
-        reply_to: u64,
-        run: WorkflowRun,
-        steps: Vec<RunStep>,
-        log: String,
-    },
-    /// Pushed whenever a run reports a step.
-    Step {
-        run_id: String,
-        step: RunStep,
-    },
 }
 
 fn default_limit() -> u64 {
@@ -341,64 +279,6 @@ fn default_limit() -> u64 {
 pub struct SearchHit {
     pub thread_id: String,
     pub snippet: String,
-}
-
-/// A workflow script as its project declares it (see the runtime's `workflow.ts`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Workflow {
-    pub name: String,
-    pub path: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub input: Vec<Param>,
-    /// The script could not be loaded / has no valid default export.
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-/// One declared workflow input: `kind` is `string`, `number` or `boolean`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Param {
-    pub name: String,
-    pub kind: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub default: Option<Value>,
-}
-
-/// A workflow run: a `bun` process the host started for a project's script.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct WorkflowRun {
-    pub id: String,
-    pub project_id: Option<String>,
-    pub name: String,
-    pub input: Value,
-    /// The thread that started it, told when it ends.
-    pub parent_id: Option<String>,
-    pub started_at: i64,
-    pub ended_at: Option<i64>,
-    pub exit_code: Option<i64>,
-    pub steps: u64,
-    /// The steps the script takes against placeholder results (`Dirigent.plan`), taken
-    /// before it started: what the run is expected to do, filled in by its real steps.
-    #[serde(default)]
-    pub plan: Vec<Value>,
-}
-
-impl WorkflowRun {
-    pub fn running(&self) -> bool {
-        self.ended_at.is_none()
-    }
-}
-
-/// What a run reported (see the SDK's `step` kinds: `spawn`, `send`, `wait`, `log`, ...).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct RunStep {
-    pub seq: u64,
-    pub at: i64,
-    pub json: Value,
 }
 
 /// A version control system a directory is under. Jj wins over git in a colocated repo.
@@ -520,9 +400,6 @@ pub struct ThreadSummary {
     /// The thread that spawned this one as a sub-agent.
     #[serde(default)]
     pub parent_id: Option<String>,
-    /// The workflow run that spawned this one.
-    #[serde(default)]
-    pub run_id: Option<String>,
     /// Snoozed and not run since (see `ClientMessage::SnoozeThread`).
     #[serde(default)]
     pub snoozed: bool,
@@ -542,10 +419,10 @@ impl ThreadSummary {
         !self.asks.is_empty()
     }
 
-    /// Not spawned by another thread or a workflow run: what the desktop's lists show.
+    /// Not spawned by another thread: what the desktop's lists show.
     /// Sub-agents are reached through their parent's orchestration panel.
     pub fn top_level(&self) -> bool {
-        self.parent_id.is_none() && self.run_id.is_none()
+        self.parent_id.is_none()
     }
 }
 
@@ -592,24 +469,11 @@ mod tests {
             workspace: true,
             base: Some("main~2".into()),
             parent: Some("t0".into()),
-            run: None,
             name: Some("Review".into()),
         });
         roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
         roundtrip(ClientMessage::FocusThread { id: 18, thread_id: "t".into() });
         roundtrip(ClientMessage::SearchThreads { id: 19, query: "sqlite".into(), limit: 5 });
-        roundtrip(ClientMessage::ListWorkflows { id: 20, project_id: "p".into() });
-        roundtrip(ClientMessage::RunWorkflow {
-            id: 21,
-            project_id: "p".into(),
-            name: "review".into(),
-            input: json!({"pr": 4}),
-            parent: None,
-        });
-        roundtrip(ClientMessage::ListRuns { id: 22 });
-        roundtrip(ClientMessage::GetRun { id: 23, run_id: "r".into() });
-        roundtrip(ClientMessage::ReportStep { id: 24, run_id: "r".into(), step: json!({"kind": "log", "text": "hi"}) });
-        roundtrip(ClientMessage::AbortRun { id: 25, run_id: "r".into() });
         roundtrip(ClientMessage::MoveToWorkspace { id: 14, thread_id: "t".into(), base: None });
         roundtrip(ClientMessage::RemoveWorkspace { id: 15, thread_id: "t".into(), detach: true });
         roundtrip(ClientMessage::VcsStatus { id: 16, path: "/x".into() });
@@ -673,15 +537,7 @@ mod tests {
         let c: ClientMessage = serde_json::from_value(json!({"type":"create_thread","id":1,"project_id":"p"})).unwrap();
         assert_eq!(
             c,
-            ClientMessage::CreateThread {
-                id: 1,
-                project_id: "p".into(),
-                workspace: false,
-                base: None,
-                parent: None,
-                run: None,
-                name: None
-            }
+            ClientMessage::CreateThread { id: 1, project_id: "p".into(), workspace: false, base: None, parent: None, name: None }
         );
         let s: ClientMessage = serde_json::from_value(json!({"type":"search_threads","id":1,"query":"x"})).unwrap();
         assert_eq!(s, ClientMessage::SearchThreads { id: 1, query: "x".into(), limit: 20 });
@@ -714,42 +570,12 @@ mod tests {
             workspace: Some("/ws/t".into()),
             workspace_missing: false,
             parent_id: Some("t0".into()),
-            run_id: None,
             snoozed: true,
             prompted_at: Some(4),
         };
         assert!(t.asking());
-        let run = WorkflowRun {
-            id: "r".into(),
-            project_id: Some("p".into()),
-            name: "review".into(),
-            input: json!({"pr": 4}),
-            parent_id: None,
-            started_at: 1,
-            ended_at: None,
-            exit_code: None,
-            steps: 2,
-            plan: vec![json!({"kind":"start"})],
-        };
-        assert!(run.running());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
         roundtrip(ServerMessage::Search { reply_to: 1, hits: vec![SearchHit { thread_id: "t".into(), snippet: "…sqlite…".into() }] });
-        roundtrip(ServerMessage::Workflows {
-            reply_to: 1,
-            project_id: "p".into(),
-            workflows: vec![Workflow {
-                name: "review".into(),
-                path: "/x/.dirigent/workflows/review.ts".into(),
-                description: "d".into(),
-                input: vec![Param { name: "pr".into(), kind: "number".into(), description: "".into(), default: None }],
-                error: None,
-            }],
-        });
-        roundtrip(ServerMessage::Runs { reply_to: None, runs: vec![run.clone()] });
-        roundtrip(ServerMessage::RunStarted { reply_to: 2, run: run.clone() });
-        let step = RunStep { seq: 0, at: 5, json: json!({"kind":"log","text":"hi"}) };
-        roundtrip(ServerMessage::Run { reply_to: 3, run, steps: vec![step.clone()], log: "out".into() });
-        roundtrip(ServerMessage::Step { run_id: "r".into(), step });
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
         let m =
             ModelInfo { provider: "a".into(), id: "b".into(), name: "B".into(), context_window: 1, thinking_levels: vec!["low".into()] };

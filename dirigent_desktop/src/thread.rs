@@ -297,7 +297,7 @@ const SWITCH_ROW: f32 = 32.;
 /// Width the switcher takes on that row's right: two 26px buttons, a gap, the padding.
 const SWITCH_W: f32 = 68.;
 
-/// The two panel buttons: work log, agents & workflows. The open one is lit and closes
+/// The two panel buttons: work log, agents. The open one is lit and closes
 /// its panel when clicked; the other opens (swaps to) its own. Pinned to the pane's
 /// top-right corner under the header, i.e. where the panels' title row is, so it stays
 /// put whether a panel is open or not.
