@@ -3,7 +3,9 @@
 //! block is a selectable `select::Block`. Text size / colour / font are inherited from the
 //! caller, so the same renderer serves replies, user bubbles, and the mono work log.
 //! Links open in the browser on click: markdown links with a scheme (`https:`, `mailto:`,
-//! ...) and bare `http(s)://` URLs in the text. Images show their alt text.
+//! ...) and bare `http(s)://` URLs in the text. An image whose target is `blob:<id>` (a
+//! reply showing a local file; the host rewrote the link, see `view::blob_links`) is drawn
+//! by the caller's `ImageFn` after its paragraph's text; any other image shows its alt text.
 
 use crate::select::{Block, Keys};
 use crate::theme;
@@ -15,13 +17,16 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, TextMergeStream};
 use std::iter::Peekable;
 use std::ops::Range;
 
+/// How a document shows a `blob:` image, given the id. `None` leaves such links as alt text.
+pub type ImageFn<'a> = Option<&'a mut (dyn FnMut(&str) -> AnyElement + 'a)>;
+
 /// Render `text` as a column of blocks. `mono` is the font for code; `keys` places the
 /// text blocks in their document for selection.
-pub fn render(text: &str, mono: &SharedString, keys: &mut Keys) -> Div {
+pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn) -> Div {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     // Merged so a bare URL the parser split into several text events is found whole.
     let mut events = TextMergeStream::new(Parser::new_ext(text, opts)).peekable();
-    let mut r = Renderer { mono, keys };
+    let mut r = Renderer { mono, keys, image };
     div().flex().flex_col().gap_2().children(r.blocks(&mut events))
 }
 
@@ -33,12 +38,13 @@ pub fn committed(text: &str) -> &str {
 
 type Events<'a> = Peekable<TextMergeStream<'a, Parser<'a>>>;
 
-struct Renderer<'m> {
+struct Renderer<'m, 'i> {
     mono: &'m SharedString,
     keys: &'m mut Keys,
+    image: ImageFn<'i>,
 }
 
-impl Renderer<'_> {
+impl Renderer<'_, '_> {
     /// Blocks until the `End` that closes the enclosing container (or the input ends).
     /// Inline events found here (tight list items, table cells) form an implicit paragraph.
     fn blocks(&mut self, ev: &mut Events) -> Vec<AnyElement> {
@@ -49,10 +55,10 @@ impl Renderer<'_> {
                 Event::Start(tag) => out.push(self.block(tag, ev)),
                 Event::Rule => out.push(div().h(px(1.)).w_full().my_1().bg(rgba(theme::t().line)).into_any()),
                 inline => {
-                    let mut p = Inline::default();
+                    let mut p = Inline::new(self.image.is_some());
                     p.event(inline, self.mono);
                     self.inline_until_block(&mut p, ev);
-                    out.push(p.block(self.keys).into_any());
+                    out.push(self.finish(p));
                 }
             }
         }
@@ -62,7 +68,7 @@ impl Renderer<'_> {
     /// One block from its `Start` tag through its `End`.
     fn block(&mut self, tag: Tag, ev: &mut Events) -> AnyElement {
         match tag {
-            Tag::Paragraph => self.paragraph(ev).into_any(),
+            Tag::Paragraph => self.paragraph(ev),
             Tag::Heading { level, .. } => {
                 let size = match level as u8 {
                     1 => 20.,
@@ -160,8 +166,8 @@ impl Renderer<'_> {
     }
 
     /// Inline content up to the `End` of the enclosing paragraph / heading / cell.
-    fn paragraph(&mut self, ev: &mut Events) -> Block {
-        let mut p = Inline::default();
+    fn paragraph(&mut self, ev: &mut Events) -> AnyElement {
+        let mut p = Inline::new(self.image.is_some());
         let mut depth = 0usize;
         for e in ev.by_ref() {
             match e {
@@ -172,7 +178,18 @@ impl Renderer<'_> {
             }
             p.event(e, self.mono);
         }
-        p.block(self.keys)
+        self.finish(p)
+    }
+
+    /// The paragraph's text block, followed by the images it linked (each on its own row).
+    fn finish(&mut self, mut p: Inline) -> AnyElement {
+        let images = std::mem::take(&mut p.images);
+        if images.is_empty() {
+            return p.block(self.keys).into_any();
+        }
+        let text = (!p.text.is_empty()).then(|| p.block(self.keys));
+        let draw = self.image.as_deref_mut().expect("images are only collected with an ImageFn");
+        div().flex().flex_col().gap_2().children(text).children(images.iter().map(|id| draw(id))).into_any()
     }
 
     /// Inline content of a tight list item: stops before the next block-level event.
@@ -212,7 +229,8 @@ fn is_inline(t: &Tag) -> bool {
 }
 
 /// Accumulates one paragraph's text plus the style of each span, as nesting counters for
-/// the inline tags currently open.
+/// the inline tags currently open. `blob:` images are collected in `images` (their alt
+/// text dropped) when `show_images` is set, else kept as alt text like any other image.
 #[derive(Default)]
 struct Inline {
     text: String,
@@ -227,11 +245,24 @@ struct Inline {
     italic: u32,
     strike: u32,
     link: u32,
+    show_images: bool,
+    images: Vec<String>,
+    /// Inside a collected image's alt text.
+    hidden: u32,
 }
 
 impl Inline {
+    fn new(show_images: bool) -> Self {
+        Self { show_images, ..Default::default() }
+    }
+
     fn event(&mut self, e: Event, mono: &SharedString) {
         match e {
+            Event::Start(Tag::Image { dest_url, .. }) if self.show_images && dest_url.starts_with("blob:") => {
+                self.images.push(dest_url["blob:".len()..].to_owned());
+                self.hidden += 1;
+            }
+            Event::End(TagEnd::Image) if self.hidden > 0 => self.hidden -= 1,
             Event::Text(t) if self.link == 0 => self.text_with_urls(&t),
             Event::Text(t) | Event::InlineHtml(t) | Event::Html(t) => self.push(&t, None),
             Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => self.push(&t, Some(mono)),
@@ -275,7 +306,7 @@ impl Inline {
     }
 
     fn push(&mut self, s: &str, code: Option<&SharedString>) {
-        if s.is_empty() {
+        if s.is_empty() || self.hidden > 0 {
             return;
         }
         let range = self.text.len()..self.text.len() + s.len();
@@ -364,6 +395,26 @@ mod tests {
         assert_eq!(committed("a\nb\nc"), "a\nb\n");
         assert_eq!(committed("abc"), "");
         assert_eq!(committed(""), "");
+    }
+
+    #[test]
+    fn blob_images_leave_the_text() {
+        let mono = SharedString::from("Mono");
+        let id = "b".repeat(64);
+        let src = format!("see ![the home page](blob:{id}) and ![alt](https://x/y.png)");
+        let mut p = Inline::new(true);
+        for e in Parser::new(&src) {
+            p.event(e, &mono);
+        }
+        assert_eq!(p.text, "see  and alt");
+        assert_eq!(p.images, vec![id]);
+        // Without an ImageFn the alt text stays, like any other image.
+        let mut p = Inline::new(false);
+        for e in Parser::new(&src) {
+            p.event(e, &mono);
+        }
+        assert_eq!(p.text, "see the home page and alt");
+        assert!(p.images.is_empty());
     }
 
     #[test]

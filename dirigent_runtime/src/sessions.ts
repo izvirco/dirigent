@@ -19,7 +19,9 @@ import {
   type AgentSessionEvent,
   createAgentSession,
   createBashToolDefinition,
+  DefaultResourceLoader,
   type FileEntry,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
   type ToolDefinition,
@@ -62,6 +64,14 @@ export interface TitleResult {
 
 /** Tried in order when the configured title model has no credentials here. */
 const TITLE_FALLBACKS = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"];
+
+/**
+ * Appended to pi's system prompt. The service reads the linked file into its blobs and
+ * rewrites the link to `blob:<id>` when it persists the reply (`blobs.rs`); the desktop
+ * renders those inline.
+ */
+const IMAGES_PROMPT = `## Showing images
+Your replies are rendered as markdown in a desktop app. To show the user an image file on this machine (a screenshot you took, a chart you rendered), put it in your reply as a markdown image with its path: \`![what it shows](/absolute/path.png)\`. It appears inline in the reply. png, jpg, gif, webp and bmp work; a relative path is taken from the working directory.`;
 
 export type Outbound =
   | { type: "loaded"; thread_id: string; model?: string; thinking_level: string; header: unknown }
@@ -124,8 +134,17 @@ export class Sessions {
       spawnHook: (ctx) => (live.env ? { ...ctx, env: { ...ctx.env, ...live.env } } : ctx),
     });
 
+    // Pi's default loader, plus our note on showing images.
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir: getAgentDir(),
+      appendSystemPromptOverride: (base) => [...base, IMAGES_PROMPT],
+    });
+    await resourceLoader.reload();
+
     const { session } = await createAgentSession({
       cwd,
+      resourceLoader,
       modelRuntime: await this.modelRuntime,
       model: fresh && model ? await this.resolveModel(model) : undefined,
       thinkingLevel: fresh ? (thinkingLevel as ThinkingLevel | undefined) : undefined,

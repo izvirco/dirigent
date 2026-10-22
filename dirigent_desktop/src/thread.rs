@@ -958,6 +958,57 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
 
 /// Thumbnail height (boxes are 3:2) in the composer strip and under user bubbles.
 const THUMB: f32 = 64.;
+/// Tallest an image shown inline in a reply gets; wider ones also shrink to the column.
+const INLINE_IMAGE_H: f32 = 420.;
+
+/// How markdown draws a `blob:` image (`markdown::ImageFn`): the bitmap scaled into the
+/// column, click for full size; a blank accent box while its bytes are on their way.
+/// `seed` (the item / step index) keeps the click ids apart across the document.
+fn inline_image<'a>(
+    blobs: &'a HashMap<String, Arc<gpui::Image>>,
+    seed: u64,
+    cx: &'a Context<Dirigent>,
+) -> impl FnMut(&str) -> AnyElement + 'a {
+    let mut n = 0u64;
+    move |id| {
+        n += 1;
+        let eid = ElementId::NamedInteger("md-img".into(), seed.wrapping_shl(8) | n);
+        match blobs.get(id) {
+            Some(image) => div()
+                .id(eid)
+                .max_w_full()
+                .cursor_pointer()
+                .on_click(cx.listener({
+                    let image = image.clone();
+                    move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
+                }))
+                .child(img(image.clone()).max_w_full().max_h(px(INLINE_IMAGE_H)).rounded_md().object_fit(ObjectFit::Contain))
+                .into_any(),
+            None => div().w(px(THUMB * 3.)).h(px(THUMB * 2.)).rounded_md().bg(rgba(theme::t().accent)).into_any(),
+        }
+    }
+}
+
+/// Thumbnails of the images in a tool's result (`read` on an image file); click for full size.
+fn result_images(images: &[String], blobs: &HashMap<String, Arc<gpui::Image>>, seed: u64, cx: &mut Context<Dirigent>) -> Div {
+    div().flex().flex_row().flex_wrap().gap_3().children(images.iter().enumerate().map(|(i, id)| {
+        let box_ = thumb_box()
+            .id(ElementId::NamedInteger("result-img".into(), seed.wrapping_shl(8) | i as u64))
+            .border_1()
+            .border_color(rgba(theme::t().line));
+        match blobs.get(id) {
+            Some(image) => box_
+                .cursor_pointer()
+                .hover(|d| d.border_color(rgba(theme::t().accent_line)))
+                .on_click(cx.listener({
+                    let image = image.clone();
+                    move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
+                }))
+                .child(thumb(image)),
+            None => box_.bg(rgba(theme::t().accent)),
+        }
+    }))
+}
 
 /// The 3:2 thumbnail box; `thumb` goes inside, centered.
 fn thumb_box() -> Div {
@@ -1086,7 +1137,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             col = col.child(work_block(&work, key, true, t, now, &fonts, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
-                col = col.child(reply_block(text, TAIL, t, &fonts, keys, cx));
+                col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
             }
             // Pending steers last: the newest user input, closest to the composer.
             for (_, text, _) in work.steers().filter(|(_, _, queued)| *queued) {
@@ -1161,7 +1212,7 @@ fn render_timeline_item(
             user_bubble(text, &images, ix, t, fonts, keys, cx).into_any()
         }
         Item::Work(w) => work_block(w, ix, false, t, now, fonts, keys, cx).into_any(),
-        Item::Assistant(text) => reply_block(text, ix, t, fonts, keys, cx).into_any(),
+        Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
             .w_full()
@@ -1181,7 +1232,17 @@ fn notice_line(text: impl IntoElement) -> AnyElement {
     div().w_full().py_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(text).into_any()
 }
 
-fn reply_block(text: &str, ix: usize, t: &OpenThread, fonts: &Fonts, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
+#[allow(clippy::too_many_arguments)]
+fn reply_block(
+    text: &str,
+    ix: usize,
+    t: &OpenThread,
+    blobs: &HashMap<String, Arc<gpui::Image>>,
+    fonts: &Fonts,
+    keys: &mut Keys,
+    cx: &mut Context<Dirigent>,
+) -> Div {
+    let body = markdown::render(text, &fonts.mono, keys, Some(&mut inline_image(blobs, ix as u64, cx)));
     div()
         .group("msg")
         .relative()
@@ -1190,7 +1251,7 @@ fn reply_block(text: &str, ix: usize, t: &OpenThread, fonts: &Fonts, keys: &mut 
         .font_family(fonts.prose.clone())
         .text_size(px(14.))
         .line_height(px(22.))
-        .child(markdown::render(text, &fonts.mono, keys))
+        .child(body)
         .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP))
         .children(corner_buttons(ix, text, t, cx))
 }
@@ -1281,7 +1342,7 @@ fn user_bubble(
         .font_family(fonts.prose.clone())
         .text_size(px(14.))
         .line_height(px(22.))
-        .child(markdown::render(text, &fonts.mono, keys))
+        .child(markdown::render(text, &fonts.mono, keys, None))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
         .children(corner_buttons(ix, text, t, cx).map(|b| b.top_2().right_2()))
@@ -1351,7 +1412,7 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, fonts: &Fonts, keys: 
         .text_size(px(14.))
         .line_height(px(22.))
         .child(label)
-        .child(markdown::render(text, &fonts.mono, keys))
+        .child(markdown::render(text, &fonts.mono, keys, None))
 }
 
 /// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
@@ -1516,11 +1577,15 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         return div().h(px(ROW_H)).flex().items_center().text_color(rgba(theme::t().fg_2)).child(text).into_any();
     };
     let mono = &this.fonts.mono;
+    let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Log, six);
     match step {
-        Step::Thinking(text) => div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys)).into_any(),
-        Step::Text(text) => div().py_0p5().text_color(rgba(theme::t().fg)).child(markdown::render(text, mono, keys)).into_any(),
-        Step::Tool(call) => render_tool(call, (key, six), t, now_ms(), keys, cx),
+        Step::Thinking(text) => div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys, None)).into_any(),
+        Step::Text(text) => {
+            let body = markdown::render(text, mono, keys, Some(&mut inline_image(blobs, step_id_n((key, six)), cx)));
+            div().py_0p5().text_color(rgba(theme::t().fg)).child(body).into_any()
+        }
+        Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),
         Step::Steer { text, queued } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
         // A job notice in the row voice: `job` where a tool's name goes, red when it failed.
         Step::Notice(text) => {
@@ -1547,8 +1612,16 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
 
 /// One tool call on one line: tinted name, primary argument, and its time at the right —
 /// `12s`, `1.3s / 30s` against the timeout while running, red when it failed. Click for
-/// all arguments and the output.
-fn render_tool(call: &ToolCall, key: (usize, usize), t: &OpenThread, now: i64, keys: &mut Keys, cx: &mut Context<Dirigent>) -> AnyElement {
+/// all arguments and the output (thumbnails for the images in it).
+fn render_tool(
+    call: &ToolCall,
+    key: (usize, usize),
+    t: &OpenThread,
+    blobs: &HashMap<String, Arc<gpui::Image>>,
+    now: i64,
+    keys: &mut Keys,
+    cx: &mut Context<Dirigent>,
+) -> AnyElement {
     let expanded = t.expanded.contains(&key);
     let failed = call.result.as_ref().is_some_and(|r| r.is_error);
     let (time, color) = match (t.streaming.running_since(&call.id), call.started.zip(call.ended)) {
@@ -1577,6 +1650,9 @@ fn render_tool(call: &ToolCall, key: (usize, usize), t: &OpenThread, now: i64, k
             }
             let color = if r.is_error { theme::t().error } else { theme::t().fg_1 };
             b = b.child(div().pt_2().border_t_1().border_color(rgba(theme::t().line)).text_color(rgba(color)).child(keys.plain(s)));
+            if !r.images.is_empty() {
+                b = b.child(result_images(&r.images, blobs, step_id_n(key), cx));
+            }
         }
         b
     });

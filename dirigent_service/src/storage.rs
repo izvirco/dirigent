@@ -338,16 +338,21 @@ impl Storage {
     }
 
     /// Append a pi entry; returns it with its assigned `seq` and its images moved to
-    /// `blobs`. Bumps `updated_at`, tracks the current model / thinking level, and derives a
-    /// thread name from a `session_info` entry or, failing that, the first user message.
+    /// `blobs` (inline ones, and the local files a reply links to; see `blobs.rs`). Bumps
+    /// `updated_at`, tracks the current model / thinking level, and derives a thread name
+    /// from a `session_info` entry or, failing that, the first user message.
     pub fn append_entry(&self, thread_id: &str, mut json: Value, now: i64) -> Result<Entry> {
         let mut failed = None;
-        crate::blobs::strip(&mut json, &mut |id, mime, bytes| {
+        let mut store = |id: &str, mime: &str, bytes: &[u8]| {
             if let Err(e) = self.conn.execute("INSERT OR IGNORE INTO blobs (id, mime, bytes) VALUES (?1, ?2, ?3)", params![id, mime, bytes])
             {
                 failed = Some(e);
             }
-        });
+        };
+        if let Some(cwd) = self.thread_cwd(thread_id)? {
+            crate::blobs::link_images(&mut json, std::path::Path::new(&cwd), &mut store);
+        }
+        crate::blobs::strip(&mut json, &mut store);
         if let Some(e) = failed {
             return Err(e.into());
         }

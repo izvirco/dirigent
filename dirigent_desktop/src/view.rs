@@ -70,10 +70,12 @@ pub struct ToolCall {
     pub result: Option<ToolResult>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolResult {
     pub text: String,
     pub is_error: bool,
+    /// Blob ids of the images in the result (a `read` of an image file), in order.
+    pub images: Vec<String>,
 }
 
 impl Work {
@@ -244,6 +246,7 @@ impl Timeline {
                 let result = ToolResult {
                     text: text_of(msg.get("content")),
                     is_error: msg.get("isError").and_then(Value::as_bool).unwrap_or(false),
+                    images: images_of(msg.get("content")),
                 };
                 let duration = msg.get("durationMs").and_then(Value::as_i64);
                 let ix = self.open_work()?;
@@ -446,6 +449,39 @@ pub fn images_of(content: Option<&Value>) -> Vec<String> {
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
         .filter_map(|b| b.get("blob").and_then(Value::as_str).map(str::to_owned))
         .collect()
+}
+
+/// Blob ids of the `blob:<id>` links in markdown text (a reply showing a local image; the
+/// host rewrote the link). Ids are sha256 hex, so the scan stops at the first other byte.
+pub fn blob_links(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices("](blob:").filter_map(|(i, m)| {
+        let rest = &text[i + m.len()..];
+        let n = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        (n == 64).then(|| &rest[..n])
+    })
+}
+
+/// Every blob the timeline shows: user attachments, images the model read, images its
+/// replies and interim prose link to.
+pub fn blobs_shown(items: &[Item]) -> Vec<String> {
+    let mut out = vec![];
+    for item in items {
+        match item {
+            Item::User { images, .. } => out.extend(images.iter().cloned()),
+            Item::Assistant(text) => out.extend(blob_links(text).map(str::to_owned)),
+            Item::Work(w) => {
+                for step in &w.steps {
+                    match step {
+                        Step::Text(text) => out.extend(blob_links(text).map(str::to_owned)),
+                        Step::Tool(t) => out.extend(t.result.iter().flat_map(|r| r.images.iter().cloned())),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The first string argument's first line (`command` for bash, `path` for read/edit, ...).
@@ -751,6 +787,25 @@ mod tests {
             {"type":"text","text":"see [image-1]"},{"type":"image","mimeType":"image/png","blob":"abc"}]}});
         let t = Timeline::from_entries([&e]);
         assert_eq!(t.items[0], Item::User { text: "see [image-1]".into(), images: vec!["abc".into()], at: 1 });
+    }
+
+    #[test]
+    fn images_read_and_shown() {
+        let id = "a".repeat(64);
+        let entries = [
+            json!({"type":"message","message":{"role":"user","content":"look","timestamp":1}}),
+            json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":2,"stopReason":"toolUse","content":[
+                {"type":"toolCall","id":"c1","name":"read","arguments":{"path":"shot.png"}}]}}),
+            json!({"type":"message","message":{"role":"toolResult","toolCallId":"c1","timestamp":3,"content":[
+                {"type":"text","text":"Read image file [image/png]"},{"type":"image","mimeType":"image/png","blob":"read1"}]}}),
+            json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":4,"stopReason":"stop","content":[
+                {"type":"text","text":format!("Here it is:\n\n![home](blob:{id})\n\nand not ![x](blob:short)")}]}}),
+        ];
+        let t = Timeline::from_entries(entries.iter());
+        let Item::Work(w) = &t.items[1] else { panic!() };
+        let Step::Tool(c) = &w.steps[0] else { panic!() };
+        assert_eq!(c.result.as_ref().unwrap().images, vec!["read1".to_owned()]);
+        assert_eq!(blobs_shown(&t.items), vec!["read1".to_owned(), id.clone()]);
     }
 
     #[test]
