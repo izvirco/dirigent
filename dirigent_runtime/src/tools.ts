@@ -165,7 +165,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
   return [asyncBash as ToolDefinition, askUser as ToolDefinition];
 }
 
-/** The user's answers (one list per question, picked options and / or typed text) or `null` when dismissed. */
+/**
+ * The user's answers (one list per question, picked options and / or typed text) or `null` when dismissed.
+ * Each answer is its own `→` line: joining them would make a typed "Kiwi, sliced" look like two picks.
+ */
 export function deliverAnswers(
   host: ToolHost,
   ask: Ask,
@@ -174,7 +177,8 @@ export function deliverAnswers(
   const lines = answers
     ? ask.questions.map((q, i) => {
         const a = answers[i] ?? [];
-        return `- ${q.text}\n  → ${a.length ? a.join(", ") : "(no answer)"}`;
+        const got = a.length ? a.map((x) => `  → ${x}`) : ["  (no answer)"];
+        return [`- ${q.text}`, ...got].join("\n");
       })
     : [];
   const content = answers
