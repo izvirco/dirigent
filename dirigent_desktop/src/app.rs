@@ -8,7 +8,7 @@ use crate::net::{HostStatus, Incoming, Net};
 use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, Selection};
 use crate::theme::{self, Status};
-use crate::view::{Item, Streaming, Timeline};
+use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
@@ -1957,14 +1957,9 @@ impl Dirigent {
     fn fetch_blobs(&mut self) {
         let Pane::Thread(t) = &self.pane else { return };
         let host = t.host.clone();
-        let ids: Vec<String> = t
-            .timeline
-            .items
-            .iter()
-            .filter_map(|i| if let Item::User { images, .. } = i { Some(images) } else { None })
-            .flatten()
-            .filter(|id| !self.blobs.contains_key(*id) && !self.blob_requests.contains(*id))
-            .cloned()
+        let ids: Vec<String> = view::blobs_shown(&t.timeline.items)
+            .into_iter()
+            .filter(|id| !self.blobs.contains_key(id) && !self.blob_requests.contains(id))
             .collect();
         for id in ids {
             let cached = self.cache.lock().unwrap().blob(&id);
