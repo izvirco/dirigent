@@ -114,6 +114,7 @@ impl Cache {
                 running_since: None,
                 last_run_ms: r.get(10)?,
                 archived: r.get(9)?,
+                asks: vec![],
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)

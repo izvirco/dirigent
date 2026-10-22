@@ -14,9 +14,9 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
     match &this.pane {
         Pane::Inbox => {
-            let rows = this.threads_with(Status::Done);
+            let rows = this.inbox_all();
             pane.child(header(div().child("Inbox"), None)).child(if rows.is_empty() {
-                theme::empty("Nothing waiting", "Threads land here when their agent finishes.").into_any_element()
+                theme::empty("Nothing waiting", "Threads land here when their agent finishes or asks you something.").into_any_element()
             } else {
                 scroll("inbox", thread_list(&rows, true, this, cx)).into_any_element()
             })
@@ -295,7 +295,7 @@ pub fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     div().id(id).flex_1().overflow_y_scroll().flex().flex_col().child(content)
 }
 
-/// Flat rows: status glyph, title (accent while unread, an amber pin before it while pinned),
+/// Flat rows: status glyph, title (amber while asking, accent while unread, an amber pin before it while pinned),
 /// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
 /// moon glyph) and archive.
 fn thread_list(rows: &[(&str, &ThreadSummary)], show_project: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
@@ -345,13 +345,7 @@ fn thread_row(
                     .min_w_0()
                     .truncate()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(rgba(if unread {
-                        theme::t().accent_ink
-                    } else if archived {
-                        theme::t().fg_1
-                    } else {
-                        theme::t().fg
-                    }))
+                    .text_color(rgba(if archived && !unread { theme::t().fg_1 } else { this.title_color(host, t) }))
                     .child(title),
             ),
         )
@@ -359,7 +353,7 @@ fn thread_row(
         .when(!project.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgba(theme::t().fg_1)).child(project)))
         .child(div().w(px(150.)).truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
         .child(div().w(px(32.)).text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
-        .when(matches!(status, Status::Done | Status::Snoozed), |d| {
+        .when(matches!(status, Status::Asking | Status::Done | Status::Snoozed), |d| {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             d.child(row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| {
                 this.set_snoozed(&h3, &id3, !snoozed, cx)

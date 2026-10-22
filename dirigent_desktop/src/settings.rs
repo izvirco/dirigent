@@ -1,7 +1,7 @@
 //! Settings > Config: the UI over `config.toml` (`config.rs`). Everything saves as it is
 //! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
 //! warning mark on a font field whose family isn't installed; theme, title model,
-//! reasoning and telemetry are chips and a switch that save at once.
+//! reasoning, the agent tools and telemetry are chips and switches that save at once.
 //! `Test` opens a sample first message, runs it through the title settings on the local
 //! host, and shows the title with what it cost.
 
@@ -99,6 +99,7 @@ pub fn render(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
         .px_6()
         .child(appearance(this, cx))
         .child(titles(this, cx))
+        .child(tools(this, cx))
         .child(telemetry(this, cx))
         .child(
             div()
@@ -312,12 +313,16 @@ fn test_result(s: &State) -> Option<Div> {
     })
 }
 
-fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+/// A switch: a pill with a knob at one end or the other.
+fn switch(
+    id: &'static str,
+    on: bool,
+    cx: &mut Context<Dirigent>,
+    toggle: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
+) -> gpui::Stateful<Div> {
     let t = theme::t();
-    let on = this.config.telemetry;
-    // A switch: a pill with a knob at one end or the other.
-    let switch = div()
-        .id("telemetry")
+    div()
+        .id(id)
         .w(px(34.))
         .h(px(18.))
         .rounded_full()
@@ -326,7 +331,41 @@ fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .p(px(2.))
         .flex()
         .when(on, |d| d.justify_end())
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_telemetry(cx)))
-        .child(div().size(px(14.)).rounded_full().bg(rgba(t.fg)));
+        .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx)))
+        .child(div().size(px(14.)).rounded_full().bg(rgba(t.fg)))
+}
+
+/// The agent tools dirigent adds to pi's: each a switch; the set goes out with every prompt.
+fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let t = theme::t();
+    let c = &this.config.tools;
+    settings_section(
+        "Agent tools",
+        div()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(rgba(t.fg_1))
+                    .child("Tools of Dirigent's own, on top of pi's. A change reaches a thread with its next message."),
+            )
+            .child(row(
+                "async_bash",
+                switch("tool-async-bash", c.async_bash, cx, |this, cx| this.toggle_tool("async_bash", cx)),
+                Some("Runs a command in the background and tells the agent when it ends, so it can keep working meanwhile."),
+            ))
+            .child(row(
+                "ask_user",
+                switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx)),
+                Some("Lets the agent put questions to you as a form; the thread shows as Asking until you answer."),
+            )),
+    )
+}
+
+fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let on = this.config.telemetry;
+    let switch = switch("telemetry", on, cx, |this, cx| this.toggle_telemetry(cx));
     settings_section("Telemetry", row("Usage data", switch, Some("Nothing is sent yet; this only records your choice.")))
 }

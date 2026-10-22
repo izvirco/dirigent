@@ -2,7 +2,7 @@
 //! The runtime is stateless, so a crash just means "nothing is loaded anymore".
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ImageAttachment, ModelInfo, PromptMode, TitleGen};
+use dirigent_protocol::{Ask, ImageAttachment, ModelInfo, PromptMode, TitleGen};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -36,6 +36,11 @@ pub enum RuntimeMessage {
         thread_id: String,
         message: String,
     },
+    /// The model called `ask_user`; the service keeps the ask until it is answered.
+    Ask {
+        thread_id: String,
+        ask: Ask,
+    },
     Error {
         thread_id: Option<String>,
         message: String,
@@ -61,6 +66,8 @@ enum Command_<'a> {
         /// Initial model / thinking level; the runtime only applies them to a fresh thread.
         model: Option<&'a str>,
         thinking_level: Option<&'a str>,
+        /// The dirigent tools to activate (`async_bash`, `ask_user`).
+        tools: &'a [String],
     },
     Unload {
         thread_id: &'a str,
@@ -73,6 +80,13 @@ enum Command_<'a> {
         thinking_level: Option<&'a str>,
         images: &'a [ImageAttachment],
         title: Option<&'a TitleGen>,
+        tools: Option<&'a [String]>,
+    },
+    /// The user's answers to `ask` (`None` = dismissed); the runtime hands them to the model.
+    Answer {
+        thread_id: &'a str,
+        ask: &'a Ask,
+        answers: Option<&'a [Vec<String>]>,
     },
     GenerateTitle {
         title: &'a TitleGen,
@@ -271,6 +285,7 @@ impl Runtime {
         entries: &[Value],
         model: Option<&str>,
         thinking_level: Option<&str>,
+        tools: &[String],
     ) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         let first = {
@@ -282,7 +297,7 @@ impl Runtime {
             waiters.push(tx);
             waiters.len() == 1
         };
-        if first && let Err(e) = self.send(&Command_::Load { thread_id, cwd, entries, model, thinking_level }) {
+        if first && let Err(e) = self.send(&Command_::Load { thread_id, cwd, entries, model, thinking_level, tools }) {
             self.inner.lock().unwrap().pending_loads.remove(thread_id);
             return Err(e);
         }
@@ -316,9 +331,15 @@ impl Runtime {
         thinking_level: Option<&str>,
         images: &[ImageAttachment],
         title: Option<&TitleGen>,
+        tools: Option<&[String]>,
     ) -> Result<()> {
         self.inner.lock().unwrap().last_activity.insert(thread_id.to_owned(), Instant::now());
-        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images, title })
+        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images, title, tools })
+    }
+
+    pub fn answer(&self, thread_id: &str, ask: &Ask, answers: Option<&[Vec<String>]>) -> Result<()> {
+        self.inner.lock().unwrap().last_activity.insert(thread_id.to_owned(), Instant::now());
+        self.send(&Command_::Answer { thread_id, ask, answers })
     }
 
     pub async fn generate_title(&self, title: &TitleGen, text: &str) -> Result<TitleResult> {

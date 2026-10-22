@@ -50,6 +50,8 @@ pub enum Step {
         text: String,
         queued: bool,
     },
+    /// Something that reached the model mid-run on its own: an `async_bash` job ending.
+    Notice(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -187,8 +189,39 @@ impl Timeline {
             }
             "session_info" | "label" | "usage" | "custom" => None,
             "compaction" => Some(self.add(Item::Compaction)),
-            "custom_message" => Some(self.add(Item::Notice(text_of(entry.get("content"))))),
+            "custom_message" => self.push_custom(entry),
             other => Some(self.add(Item::Notice(format!("unknown entry: {other}")))),
+        }
+    }
+
+    /// A custom message is a user turn the user didn't type: the answers to an `ask_user`
+    /// form read as the user's words (a bubble, or a steer inside a running work); an
+    /// `async_bash` job ending is a notice. Anything else shows its text as a notice.
+    fn push_custom(&mut self, entry: &Value) -> Option<usize> {
+        let at = entry.get("timestamp").and_then(Value::as_str).and_then(iso_ms).unwrap_or(0);
+        let details = entry.get("details");
+        match entry.get("customType").and_then(Value::as_str) {
+            Some("dirigent:answer") => {
+                let text = answer_text(details).unwrap_or_else(|| text_of(entry.get("content")));
+                Some(match self.open_work() {
+                    Some(ix) => {
+                        self.work_mut(ix).steps.push(Step::Steer { text, queued: false });
+                        ix
+                    }
+                    None => self.add(Item::User { text, images: vec![], at }),
+                })
+            }
+            Some("dirigent:job") => {
+                let text = job_text(details).unwrap_or_else(|| text_of(entry.get("content")));
+                Some(match self.open_work() {
+                    Some(ix) => {
+                        self.work_mut(ix).steps.push(Step::Notice(text));
+                        ix
+                    }
+                    None => self.add(Item::Notice(text)),
+                })
+            }
+            _ => Some(self.add(Item::Notice(text_of(entry.get("content"))))),
         }
     }
 
@@ -288,7 +321,12 @@ impl Timeline {
 
     /// Start a `Work` at the prompt that triggered it (the last user message), else at `at`.
     fn start_work(&mut self, at: i64) -> usize {
-        let started = self.items.iter().rev().find_map(|i| if let Item::User { at, .. } = i { Some(*at) } else { None }).unwrap_or(at);
+        let started = self
+            .items
+            .iter()
+            .rev()
+            .find_map(|i| if let Item::User { at, .. } = i { Some(*at).filter(|a| *a > 0) } else { None })
+            .unwrap_or(at);
         self.add(Item::Work(Work { model: self.model.clone(), effort: self.effort.clone(), started, ended: None, steps: vec![] }))
     }
 
@@ -307,10 +345,16 @@ fn step_of(b: &Value) -> Option<Step> {
         "thinking" => Step::Thinking(b.get("thinking").and_then(Value::as_str).unwrap_or("(redacted)").to_owned()),
         "toolCall" => {
             let args = b.get("arguments");
+            let name = b.get("name").and_then(Value::as_str).unwrap_or("?");
+            // `ask_user`'s arguments are all nested: its first question stands for the call.
+            let primary = match name {
+                "ask_user" => args_primary(args.and_then(|a| a.pointer("/questions/0"))),
+                _ => args_primary(args),
+            };
             Step::Tool(ToolCall {
                 id: b.get("id").and_then(Value::as_str).unwrap_or("").to_owned(),
-                name: b.get("name").and_then(Value::as_str).unwrap_or("?").to_owned(),
-                primary: args_primary(args),
+                name: name.to_owned(),
+                primary,
                 args: args_multiline(args),
                 timeout: args.and_then(|a| a.get("timeout")).and_then(Value::as_f64),
                 ..Default::default()
@@ -318,6 +362,61 @@ fn step_of(b: &Value) -> Option<Step> {
         }
         _ => return None,
     })
+}
+
+/// The answers in an `ask_user` reply's `details` as markdown (`answer_markdown`).
+fn answer_text(details: Option<&Value>) -> Option<String> {
+    let d = details?;
+    let questions = d.get("questions")?.as_array()?.iter().map(|q| q.get("text").and_then(Value::as_str).unwrap_or(""));
+    let answers: Option<Vec<Vec<String>>> = d
+        .get("answers")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().map(|v| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()).collect());
+    Some(answer_markdown(questions, answers.as_ref().map(|a| a.iter().map(|v| v.as_slice()))))
+}
+
+/// The question in bold, the answer under it, per question; or the one-line dismissal.
+/// Shared by the persisted entry and the echo sent ahead of it, so the two look alike.
+fn answer_markdown<'a>(questions: impl Iterator<Item = &'a str>, answers: Option<impl Iterator<Item = &'a [String]>>) -> String {
+    let Some(mut answers) = answers else { return "Dismissed the questions.".into() };
+    questions
+        .map(|text| {
+            let picked = answers.next().unwrap_or(&[]);
+            let answer = if picked.is_empty() { "_no answer_".to_owned() } else { picked.join(", ") };
+            // A backslash before the newline is markdown's hard break.
+            format!("**{text}**\\\n{answer}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// One line for a finished `async_bash` job: `job cargo check · exit 1 · 12s`.
+fn job_text(details: Option<&Value>) -> Option<String> {
+    let d = details?;
+    let command = d.get("command")?.as_str()?;
+    let exit = d.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
+    let ms = d.get("duration_ms").and_then(Value::as_i64).unwrap_or(0);
+    let first = command.lines().next().unwrap_or("");
+    Some(format!("job {first} · exit {exit} · {}", crate::thread::duration(ms)))
+}
+
+/// Unix millis of an ISO 8601 timestamp (`2026-01-02T03:04:05.678Z`), as pi writes them.
+fn iso_ms(s: &str) -> Option<i64> {
+    let (date, time) = s.split_once('T')?;
+    let mut d = date.split('-').map(|p| p.parse::<i64>());
+    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
+    let time = time.trim_end_matches('Z');
+    let mut t = time.split(':');
+    let (h, min) = (t.next()?.parse::<i64>().ok()?, t.next()?.parse::<i64>().ok()?);
+    let sec: f64 = t.next()?.parse().ok()?;
+    // Days since the epoch, via the civil-from-days algorithm (Howard Hinnant).
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * m + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    Some(((days * 86_400 + h * 3600 + min * 60) as f64 * 1000. + sec * 1000.).round() as i64)
 }
 
 /// Text of a `string | (TextContent | ImageContent)[]` content field (text blocks only).
@@ -370,7 +469,9 @@ fn args_multiline(args: Option<&Value>) -> String {
 /// (replaced by the persisted entry when it lands), tools executing right now, and the
 /// optimistic echoes of sent messages with the mode each was sent in, oldest first. A
 /// prompt echo lives until its persisted user entry lands (`confirm_prompt`); steer and
-/// follow-up echoes are replaced by pi's own queues on every `queue_update`.
+/// follow-up echoes are replaced by pi's own queues on every `queue_update`. Answers to
+/// `ask_user` are steers too, but pi's queues don't list custom messages, so they echo
+/// in `answers` (by ask id) until their `dirigent:answer` entry lands (`confirm_answer`).
 ///
 /// Text streams in word by word but is shown a line at a time (`markdown::committed`), so
 /// a delta only counts as a visible change once it completes a line.
@@ -380,9 +481,24 @@ pub struct Streaming {
     /// (tool call id, started at unix ms)
     pub running_tools: Vec<(String, i64)>,
     pub echo: Vec<(String, PromptMode)>,
+    /// (ask id, the answers as `answer_text` renders them)
+    pub answers: Vec<(String, String)>,
 }
 
 impl Streaming {
+    /// The user answered an ask: show it as a pending steer until pi delivers it.
+    pub fn echo_answer(&mut self, ask_id: &str, questions: &[dirigent_protocol::Question], answers: Option<&[Vec<String>]>) {
+        let text = answer_markdown(questions.iter().map(|q| q.text.as_str()), answers.map(|a| a.iter().map(|v| v.as_slice())));
+        self.answers.push((ask_id.to_owned(), text));
+    }
+
+    /// Its `dirigent:answer` entry landed: the echo goes.
+    pub fn confirm_answer(&mut self, entry: &Value) {
+        if let Some(id) = entry.pointer("/details/ask_id").and_then(Value::as_str) {
+            self.answers.retain(|(a, _)| a != id);
+        }
+    }
+
     /// A persisted user message started a run: drop the oldest prompt echo.
     pub fn confirm_prompt(&mut self) {
         if let Some(i) = self.echo.iter().position(|(_, m)| *m == PromptMode::Prompt) {
@@ -447,6 +563,7 @@ impl Streaming {
                 self.steps.clear();
                 self.running_tools.clear();
                 self.echo.clear();
+                self.answers.clear();
                 true
             }
             _ => false,
@@ -471,7 +588,7 @@ impl Streaming {
         match self.steps.last()? {
             Step::Thinking(_) => Some("thinking".into()),
             Step::Text(_) => Some("writing".into()),
-            Step::Tool(_) | Step::Steer { .. } => None,
+            Step::Tool(_) | Step::Steer { .. } | Step::Notice(_) => None,
         }
     }
 
@@ -569,6 +686,35 @@ mod tests {
         assert_eq!(s.echo, vec![("late".into(), PromptMode::FollowUp)]);
         s.apply(&json!({"type":"agent_settled"}), 0);
         assert!(s.echo.is_empty());
+    }
+
+    #[test]
+    fn custom_messages_are_answers_or_notices() {
+        let answer = json!({"type":"custom_message","customType":"dirigent:answer","timestamp":"2026-01-02T03:04:05.500Z","content":"raw",
+            "details":{"ask_id":"a","questions":[{"text":"Db?"},{"text":"Tests?"}],"answers":[["pg"],[]]}});
+        let job = json!({"type":"custom_message","customType":"dirigent:job","timestamp":"2026-01-02T03:04:05.500Z","content":"raw",
+            "details":{"job_id":"j","command":"cargo check\n","exit_code":1,"duration_ms":12000,"log":"/l"}});
+        let assistant = json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":1767323046000i64,"stopReason":"toolUse","content":[{"type":"toolCall","id":"c","name":"ask_user","arguments":{"questions":[{"text":"Db?"}]}}]}});
+        // Idle: the answer is a user turn whose time starts the next work; the job a notice.
+        let t = Timeline::from_entries([&job, &answer, &assistant]);
+        assert_eq!(t.items[0], Item::Notice("job cargo check · exit 1 · 12s".into()));
+        assert_eq!(t.items[1], Item::User { text: "**Db?**\\\npg\n\n**Tests?**\\\n_no answer_".into(), images: vec![], at: 1767323045500 });
+        let Item::Work(w) = &t.items[2] else { panic!() };
+        assert_eq!(w.started, 1767323045500);
+        let Step::Tool(c) = &w.steps[0] else { panic!() };
+        assert_eq!(c.primary, "Db?");
+        // Mid-run: both go inside the work.
+        let t = Timeline::from_entries([&assistant, &job, &answer]);
+        let Item::Work(w) = &t.items[0] else { panic!() };
+        assert_eq!(w.steps[1], Step::Notice("job cargo check · exit 1 · 12s".into()));
+        assert!(matches!(&w.steps[2], Step::Steer { queued: false, .. }));
+        let dismissed = json!({"type":"custom_message","customType":"dirigent:answer","content":"raw","details":{"ask_id":"a","questions":[],"answers":null}});
+        assert_eq!(
+            Timeline::from_entries([&dismissed]).items[0],
+            Item::User { text: "Dismissed the questions.".into(), images: vec![], at: 0 }
+        );
+        assert_eq!(iso_ms("1970-01-01T00:00:01Z"), Some(1000));
+        assert_eq!(iso_ms("2000-03-01T00:00:00.000Z"), Some(951_868_800_000));
     }
 
     #[test]

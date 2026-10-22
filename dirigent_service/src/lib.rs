@@ -75,6 +75,7 @@ impl Service {
             | ClientMessage::GetThread { id, .. }
             | ClientMessage::CreateThread { id, .. }
             | ClientMessage::Prompt { id, .. }
+            | ClientMessage::Answer { id, .. }
             | ClientMessage::Abort { id, .. }
             | ClientMessage::CancelQueued { id, .. }
             | ClientMessage::ArchiveThread { id, .. }
@@ -126,7 +127,7 @@ impl Service {
                 // No push: the creator's `Prompt` follows at once and pushes the thread already running.
                 ServerMessage::ThreadCreated { reply_to: id, thread }
             }
-            ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title } => {
+            ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
                 // The run starts now, not at pi's `agent_start`: loading the session (and a nix
                 // dev shell) can take seconds, and clients should see the thread working with
                 // the model it will use for all of it.
@@ -135,10 +136,36 @@ impl Service {
                     self.runtime.begin_run(&thread_id);
                     self.push_threads();
                 }
+                if let Some(tools) = &tools {
+                    self.storage.lock().unwrap().set_tools(&thread_id, tools)?;
+                }
                 let sent = match self.ensure_loaded(&thread_id, model.as_deref(), thinking_level.as_deref()).await {
-                    Ok(()) => {
-                        self.runtime.prompt(&thread_id, &text, mode, model.as_deref(), thinking_level.as_deref(), &images, title.as_ref())
-                    }
+                    Ok(()) => self.runtime.prompt(
+                        &thread_id,
+                        &text,
+                        mode,
+                        model.as_deref(),
+                        thinking_level.as_deref(),
+                        &images,
+                        title.as_ref(),
+                        tools.as_deref(),
+                    ),
+                    Err(e) => Err(e),
+                };
+                if sent.is_err() && self.runtime.settle(&thread_id).is_some() {
+                    self.push_threads();
+                }
+                sent?;
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::Answer { id, thread_id, ask_id, answers } => {
+                // Taken before anything else so a second client answering the same ask is refused.
+                let ask = self.storage.lock().unwrap().take_ask(&thread_id, &ask_id)?.ok_or_else(|| anyhow!("already answered"))?;
+                // The answer starts a turn if the model is idle (and is queued if it isn't).
+                self.runtime.begin_run(&thread_id);
+                self.push_threads();
+                let sent = match self.ensure_loaded(&thread_id, None, None).await {
+                    Ok(()) => self.runtime.answer(&thread_id, &ask, answers.as_deref()),
                     Err(e) => Err(e),
                 };
                 if sent.is_err() && self.runtime.settle(&thread_id).is_some() {
@@ -190,6 +217,8 @@ impl Service {
                     let _ = self.runtime.unload(&thread_id);
                 }
                 self.storage.lock().unwrap().delete_thread(&thread_id)?;
+                // Its `async_bash` logs go with it.
+                let _ = std::fs::remove_dir_all(data_dir().join("jobs").join(&thread_id));
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
             }
@@ -202,9 +231,10 @@ impl Service {
         if self.runtime.is_loaded(thread_id) {
             return Ok(());
         }
-        let (cwd, file_entries) = {
+        let (cwd, file_entries, tools) = {
             let storage = self.storage.lock().unwrap();
             let cwd = storage.thread_cwd(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+            let tools = storage.thread_tools(thread_id)?;
             let (header, entries) = storage.get_thread(thread_id)?.unwrap();
             let mut file_entries: Vec<Value> = Vec::with_capacity(entries.len() + 1);
             if !header.is_null() {
@@ -213,9 +243,9 @@ impl Service {
             file_entries.extend(entries.into_iter().map(|e| e.json));
             // Pi wants its images inline again.
             storage.inflate(&mut file_entries);
-            (cwd, file_entries)
+            (cwd, file_entries, tools)
         };
-        self.runtime.load(thread_id, &cwd, &file_entries, model, thinking_level).await
+        self.runtime.load(thread_id, &cwd, &file_entries, model, thinking_level, &tools).await
     }
 
     /// Persist and fan out what the runtime reports.
@@ -251,6 +281,12 @@ impl Service {
             RuntimeMessage::Warning { thread_id, message } => {
                 eprintln!("[service] warning {thread_id}: {message}");
                 self.push(ServerMessage::Event { thread_id, event: json!({ "type": "warning", "message": message }) });
+            }
+            RuntimeMessage::Ask { thread_id, ask } => {
+                if let Err(e) = self.storage.lock().unwrap().add_ask(&thread_id, &ask, now()) {
+                    eprintln!("[service] add ask: {e:#}");
+                }
+                self.push_threads();
             }
             RuntimeMessage::Error { thread_id, message } => {
                 eprintln!("[service] runtime error {thread_id:?}: {message}");

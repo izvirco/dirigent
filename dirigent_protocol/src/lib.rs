@@ -47,6 +47,8 @@ pub enum ClientMessage {
     /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
     /// `images` are attached to the message; pi resizes them to the model's limits.
     /// `title` (sent with a thread's first prompt) asks the host to name the thread from `text`.
+    /// `tools` names the dirigent tools (`async_bash`, `ask_user`) the model gets from now on;
+    /// the host remembers them for the thread. `None` leaves them as they are.
     Prompt {
         id: u64,
         thread_id: String,
@@ -58,6 +60,17 @@ pub enum ClientMessage {
         images: Vec<ImageAttachment>,
         #[serde(default)]
         title: Option<TitleGen>,
+        #[serde(default)]
+        tools: Option<Vec<String>>,
+    },
+    /// The user's answers to an `ask_user` call (see `ThreadSummary::asks`): one list per
+    /// question with the picked options and / or typed text, or `None` when dismissed.
+    /// The host hands them to the model, starting a turn if it is idle.
+    Answer {
+        id: u64,
+        thread_id: String,
+        ask_id: String,
+        answers: Option<Vec<Vec<String>>>,
     },
     /// Name `text` the way a thread's first prompt would be named (the settings page's `Test`).
     GenerateTitle {
@@ -181,6 +194,27 @@ pub enum ServerMessage {
     },
 }
 
+/// Questions the model put to the user with `ask_user`, waiting for an answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ask {
+    pub id: String,
+    pub questions: Vec<Question>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Question {
+    pub text: String,
+    /// Choices; empty means a free-text answer.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// A text field next to the options.
+    #[serde(default)]
+    pub allow_custom: bool,
+    /// Several options may be picked.
+    #[serde(default)]
+    pub multi: bool,
+}
+
 /// How to name a thread from its first prompt: the model (`provider/id`), pi thinking level
 /// and system prompt. Comes from the desktop's `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -259,11 +293,19 @@ pub struct ThreadSummary {
     /// How long the last finished run took, in millis.
     pub last_run_ms: Option<i64>,
     pub archived: bool,
+    /// `ask_user` calls waiting for the user, oldest first.
+    #[serde(default)]
+    pub asks: Vec<Ask>,
 }
 
 impl ThreadSummary {
     pub fn running(&self) -> bool {
         self.running_since.is_some()
+    }
+
+    /// The model is waiting on the user.
+    pub fn asking(&self) -> bool {
+        !self.asks.is_empty()
     }
 }
 
@@ -314,6 +356,13 @@ mod tests {
             thinking_level: None,
             images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into() }],
             title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
+            tools: Some(vec!["async_bash".into()]),
+        });
+        roundtrip(ClientMessage::Answer {
+            id: 13,
+            thread_id: "t".into(),
+            ask_id: "a1".into(),
+            answers: Some(vec![vec!["postgres".into()], vec![]]),
         });
         roundtrip(ClientMessage::GenerateTitle {
             id: 12,
@@ -337,10 +386,25 @@ mod tests {
                 thinking_level: None,
                 images: vec![],
                 title: None,
+                tools: None,
             })
             .unwrap(),
-            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"thinking_level":null,"images":[],"title":null})
+            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"thinking_level":null,"images":[],"title":null,"tools":null})
         );
+    }
+
+    /// Fields added after a host or client shipped are optional on the wire, so the two
+    /// keep talking across an upgrade.
+    #[test]
+    fn added_fields_are_optional() {
+        let t: ThreadSummary = serde_json::from_value(json!({
+            "id":"t","project_id":null,"cwd":"/x","name":null,"model":null,"thinking_level":null,
+            "created_at":1,"updated_at":2,"entry_count":0,"running_since":null,"last_run_ms":null,"archived":false
+        }))
+        .unwrap();
+        assert!(!t.asking());
+        let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
+        assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
     }
 
     #[test]
@@ -358,7 +422,12 @@ mod tests {
             running_since: Some(5),
             last_run_ms: Some(7),
             archived: false,
+            asks: vec![Ask {
+                id: "a1".into(),
+                questions: vec![Question { text: "db?".into(), options: vec!["pg".into()], allow_custom: true, multi: false }],
+            }],
         };
+        assert!(t.asking());
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
         let m =
             ModelInfo { provider: "a".into(), id: "b".into(), name: "B".into(), context_window: 1, thinking_levels: vec!["low".into()] };
