@@ -14,8 +14,8 @@ use crate::icons::icon;
 use anyhow::{Context as _, Result, bail};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
-    Animation, AnimationExt, AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, Svg, WindowBackgroundAppearance, div,
-    prelude::*, pulsating_between, px, rgba,
+    Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Render, SharedString, Stateful, Svg, Window,
+    WindowBackgroundAppearance, div, prelude::*, pulsating_between, px, rgba,
 };
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -351,6 +351,14 @@ pub fn button(id: impl Into<SharedString>, name: &'static str, label: impl Into<
 /// while its menu is `open`.
 pub fn chip(id: impl Into<SharedString>, label: impl Into<SharedString>, dim: bool, open: bool) -> Stateful<Div> {
     let t = t();
+    chip_in(id, label, if dim { t.fg_2 } else { t.fg_1 }, t.fg_2, open)
+}
+
+/// `chip` with its own text colour (kept on hover) and chevron colour (a faint chevron
+/// marks a menu that can't open right now).
+pub fn chip_in(id: impl Into<SharedString>, label: impl Into<SharedString>, color: u32, chevron: u32, open: bool) -> Stateful<Div> {
+    let t = t();
+    let hover_color = if color == t.fg_1 || color == t.fg_2 { t.fg } else { color };
     div()
         .id(ElementId::Name(id.into()))
         .relative()
@@ -362,11 +370,37 @@ pub fn chip(id: impl Into<SharedString>, label: impl Into<SharedString>, dim: bo
         .px_1p5()
         .rounded_md()
         .cursor_pointer()
-        .text_color(rgba(if dim { t.fg_2 } else { t.fg_1 }))
-        .when(open, |d| d.bg(rgba(t.hover)).text_color(rgba(t.fg)))
-        .hover(move |d| d.bg(rgba(t.hover)).text_color(rgba(t.fg)))
+        .text_color(rgba(color))
+        .when(open, |d| d.bg(rgba(t.hover)).text_color(rgba(hover_color)))
+        .hover(move |d| d.bg(rgba(t.hover)).text_color(rgba(hover_color)))
         .child(label.into())
-        .child(icon("chevron-down", t.fg_2).size(px(12.)))
+        .child(icon("chevron-down", chevron).size(px(12.)))
+}
+
+/// One line of text shown under the mouse after a pause; pass to `.tooltip(...)`.
+pub fn tooltip(text: impl Into<SharedString>) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tooltip(text.clone())).into()
+}
+
+struct Tooltip(SharedString);
+
+impl Render for Tooltip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let t = t();
+        div()
+            .px_2()
+            .py_1()
+            .max_w(px(320.))
+            .rounded_md()
+            .bg(rgba(t.popup))
+            .border_1()
+            .border_color(rgba(t.line))
+            .shadow_md()
+            .text_size(px(12.))
+            .text_color(rgba(t.fg))
+            .child(self.0.clone())
+    }
 }
 
 /// A filled chip with a dim prefix and a bright value (`Create thread in  dirigent`).

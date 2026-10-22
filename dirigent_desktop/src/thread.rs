@@ -16,7 +16,7 @@
 //! to an ask) are user bubbles: `steer · pending` below the work line while pi holds them,
 //! `steer` above it once the model has them.
 
-use crate::app::{AskForm, Dirigent, Menu, OpenThread, Pane, Resize, Target};
+use crate::app::{AskForm, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
 use crate::icons::icon;
 use crate::lists::{breadcrumb, header};
 use crate::markdown;
@@ -29,8 +29,8 @@ use crate::theme::{self, Fonts, Status, dollars, kilo};
 use crate::view::{Item, Stats, Step, ToolCall, Work};
 use dirigent_protocol::PromptMode;
 use gpui::{
-    Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, anchored, deferred,
-    div, img, list, point, prelude::*, px, relative, rgba,
+    Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, Window, anchored,
+    deferred, div, img, list, point, prelude::*, px, relative, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -57,6 +57,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (host, id) = (t.host.clone(), t.id.clone());
     let asks: Vec<Div> = t.asks.iter().map(|form| ask_card(form, cx)).collect();
     let summary = this.summary(&host, &id).cloned();
+    let missing = summary.as_ref().is_some_and(|s| s.workspace_missing);
+    let banner = summary
+        .as_ref()
+        .filter(|s| s.workspace_missing)
+        .and_then(|s| s.workspace.as_deref())
+        .map(|w| missing_banner(&host, &id, w, this.fonts.mono.clone(), cx));
     let title = summary.as_ref().and_then(|s| s.name.clone()).unwrap_or_else(|| "Untitled".into());
     let status = summary.as_ref().map(|s| this.status(&host, s)).unwrap_or(Status::Done);
     let archived = summary.as_ref().is_some_and(|s| s.archived);
@@ -70,14 +76,42 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (h4, i4) = (host.clone(), id.clone());
     let snoozed = status == Status::Snoozed;
     let pinned = this.pinned(&host, &id);
+    let workspace = summary.as_ref().and_then(|s| s.workspace.clone());
     let confirm_open = this.menu == Some(Menu::ConfirmDelete);
     let confirm = confirm_open.then(|| {
         let (h, i) = (host.clone(), id.clone());
+        let note = if workspace.is_some() {
+            "This removes the thread, its history and its workspace."
+        } else {
+            "This removes the thread and its history."
+        };
+        menu::popup(
+            Side::BelowRight(26.),
+            vec![menu::header(note), menu::danger("del", "Delete thread", move |this, cx| this.delete_thread(&h, &i, cx), cx)],
+            cx,
+        )
+    });
+    // Archiving a thread with a workspace: remove it (uncommitted changes go with it), or
+    // leave it on disk for the user and just let the thread go.
+    let archive_open = this.menu == Some(Menu::ConfirmArchive);
+    let archive_confirm = archive_open.then(|| {
+        let (h, i) = (host.clone(), id.clone());
+        let (h2, i2) = (host.clone(), id.clone());
+        let dirty = workspace.as_deref().and_then(|w| this.vcs_of(&host, w)).is_some_and(|v| v.dirty);
+        let note = if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." };
         menu::popup(
             Side::BelowRight(26.),
             vec![
-                menu::header("This removes the thread and its history."),
-                menu::danger("del", "Delete thread", move |this, cx| this.delete_thread(&h, &i, cx), cx),
+                menu::header(note),
+                menu::danger("arch-rm", "Archive and remove workspace", move |this, cx| this.archive_with_workspace(&h, &i, false, cx), cx),
+                menu::item(
+                    "arch-keep",
+                    "Archive, keep workspace on disk",
+                    "",
+                    false,
+                    move |this, cx| this.archive_with_workspace(&h2, &i2, true, cx),
+                    cx,
+                ),
             ],
             cx,
         )
@@ -115,9 +149,13 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .child(theme::tinted_icon_button("hdr-pin", "pin", if pinned { theme::t().warn } else { theme::t().fg_1 }, cx, move |this, cx| {
             this.set_pinned(&h4, &i4, !pinned, cx)
         }))
-        .child(theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
-            this.set_archived(&h1, &i1, !archived, cx)
-        }))
+        .child(
+            theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
+                this.set_archived(&h1, &i1, !archived, cx)
+            })
+            .when(archive_open, |d| d.bg(rgba(theme::t().hover)))
+            .children(archive_confirm),
+        )
         .child(
             theme::icon_button("hdr-delete", "trash-2", cx, |this, cx| this.toggle_menu(Menu::ConfirmDelete, cx))
                 .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
@@ -169,11 +207,76 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                         .gap_2()
                         .children(asks),
                 )
+                .children(banner)
                 .child(composer(this, cx)),
         );
     let titling = this.titling(&host, &id);
-    pane.child(header(breadcrumb(project, title, pinned, titling, cx), Some(actions)))
-        .child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
+    // `⎇ dirigent-abcd1234` after the title while the thread works in its own workspace.
+    let branch = workspace.as_deref().map(|w| {
+        let name = workspace_name(w);
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .ml_2()
+            .flex_shrink_0()
+            .font_weight(FontWeight::NORMAL)
+            .text_size(px(12.))
+            .font_family(this.fonts.mono.clone())
+            .text_color(rgba(if missing { theme::t().warn } else { theme::t().fg_1 }))
+            .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(px(12.)))
+            .child(name)
+    });
+    let crumb = div().flex().flex_row().items_center().min_w_0().child(breadcrumb(project, title, pinned, titling, cx)).children(branch);
+    pane.child(header(crumb, Some(actions))).child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
+}
+
+/// A workspace's name is its directory's basename: the host names the directory, the git
+/// branch and the jj workspace alike (`dirigent-<last 8 of the thread id>`, see `vcs.rs`).
+fn workspace_name(dir: &str) -> String {
+    dir.rsplit('/').next().unwrap_or(dir).to_owned()
+}
+
+/// The thread's workspace directory is gone: nothing can run until it is recreated or
+/// the thread goes back to its project directory. Sits where the composer's top edge is.
+fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx: &mut Context<Dirigent>) -> Div {
+    let t = theme::t();
+    let (h1, i1) = (host.to_owned(), id.to_owned());
+    let (h2, i2) = (host.to_owned(), id.to_owned());
+    div()
+        .w_full()
+        .max_w(px(theme::COMPOSER))
+        .mb_2()
+        .px_3()
+        .py_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .rounded_md()
+        .bg(rgba(t.raised))
+        .border_1()
+        .border_color(rgba(t.warn))
+        .text_size(px(12.5))
+        .child(icon("triangle-alert", t.warn))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .child(div().text_color(rgba(t.fg)).child("The thread's workspace was removed outside dirigent."))
+                .child(div().text_size(px(11.5)).text_color(rgba(t.fg_1)).font_family(mono).truncate().child(workspace.to_owned())),
+        )
+        .child(
+            theme::button("ws-recreate", "git-branch", "Recreate")
+                .on_click(cx.listener(move |this, _, _, cx| this.move_to_workspace(&h1, &i1, None, cx))),
+        )
+        .child(
+            theme::button("ws-back", "archive-restore", "Back to project")
+                .on_click(cx.listener(move |this, _, _, cx| this.remove_workspace(&h2, &i2, false, cx))),
+        )
 }
 
 /// The new-thread page: `Create thread in <project>` above the composer, both centered in
@@ -270,10 +373,223 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
         )
         .children(host_chip);
 
-    let card = div().w_full().max_w(px(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx));
+    // The warnings hang off the card's bottom edge in a zero-height layer, so showing or
+    // hiding them (the chip toggles that) never moves the composer.
+    let card =
+        div().relative().w_full().max_w(px(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx)).child(
+            div().absolute().bottom_0().left_0().right_0().h_0().flex().flex_col().items_center().children(draft_warnings(this, cx)),
+        );
     // Sits a little above true center so it reads as the page's subject, not its footer.
     pane.child(header(div().child("New thread"), None))
         .child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(px(80.)).child(card))
+}
+
+/// What a thread started in the project directory would walk into: another thread already
+/// working there (the louder one: two agents in one checkout), or uncommitted changes.
+/// Centered under the composer; each line ends in an `isolate it` link, which flips the
+/// composer's chip. Nothing while isolated.
+fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
+    let (target, path, info) = this.draft_vcs()?;
+    let t = theme::t();
+    let mut lines: Vec<(String, u32)> = vec![];
+    let working = this.working_in(&target.host, path);
+    if let Some(w) = working.first() {
+        let name = w.name.clone().unwrap_or_else(|| "Another thread".into());
+        let text = match working.len() {
+            1 => format!("{name} is working in this checkout right now"),
+            n => format!("{n} threads are working in this checkout right now"),
+        };
+        lines.push((text, t.warn));
+    }
+    if info.is_some_and(|v| v.dirty) {
+        lines.push(("The working copy has uncommitted changes".into(), t.fg_1));
+    }
+    if lines.is_empty() || this.isolate || info.is_none_or(|v| v.vcs.is_none()) {
+        return None;
+    }
+    Some(div().mt_3().flex().flex_col().items_center().gap_1().text_size(px(12.5)).children(lines.into_iter().enumerate().map(
+        |(i, (text, color))| {
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .justify_center()
+                .gap_1p5()
+                .child(icon("triangle-alert", color).size(px(12.)))
+                .child(div().text_color(rgba(color)).child(text))
+                .child(
+                    div()
+                        .id(ElementId::Name(format!("isolate-hint/{i}").into()))
+                        .ml_1()
+                        .cursor_pointer()
+                        .text_color(rgba(t.accent_ink))
+                        .hover(|d| d.underline())
+                        .on_click(cx.listener(|this, _, _, cx| this.set_isolate(true, cx)))
+                        .child("isolate it"),
+                )
+        },
+    )))
+}
+
+/// The composer's workspace chip, first in the footer (only when the project is a git / jj
+/// repo). One chip, three states:
+/// - `in project` (a draft, or a thread still in its project directory): opens the
+///   `New workspace from` popup (`base_picker`); picking a base makes the draft start its
+///   thread in a workspace there (the chip then reads `workspace from <base>`), or moves the
+///   thread there at once. A thread in a dirty checkout can't move (its changes would stay
+///   behind): the chevron goes faint, the popup stays shut, and hovering says why.
+/// - `dirigent-abcd1234` in the accent colour: the thread works in that workspace; opens
+///   the copy path / back to project menu.
+///
+/// Nothing while the thread runs (it can't move then) or its workspace is missing (the
+/// banner takes over).
+fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+    let t = theme::t();
+    let picker_open = this.menu == Some(Menu::Base);
+    let open_picker = |this: &mut Dirigent, window: &mut Window, cx: &mut Context<Dirigent>| match this.menu {
+        Some(Menu::Base) => this.close_menu(cx),
+        _ => this.open_base_picker(window, cx),
+    };
+    match &this.pane {
+        Pane::Draft { .. } => {
+            let (_, _, info) = this.draft_vcs()?;
+            let vcs = info?.vcs?;
+            let label = match this.isolate {
+                true => format!("workspace from {}", this.base.as_deref().unwrap_or(default_base(vcs))),
+                false => "in project".to_owned(),
+            };
+            Some(
+                theme::chip("ws-chip", label, false, picker_open)
+                    .on_click(cx.listener(move |this, _, window, cx| open_picker(this, window, cx)))
+                    .children(picker_open.then(|| base_picker(this, vcs, cx)))
+                    .into_any_element(),
+            )
+        }
+        Pane::Thread(open) => {
+            let s = this.summary(&open.host, &open.id)?;
+            let repo = this.project_path(&open.host, s)?;
+            let info = this.vcs_of(&open.host, &repo)?;
+            let vcs = info.vcs?;
+            if s.running() || s.workspace_missing {
+                return None;
+            }
+            let (host, id) = (open.host.clone(), open.id.clone());
+            Some(match &s.workspace {
+                None if info.dirty => theme::chip_in("ws-chip", "in project", t.fg_1, theme::alpha(t.fg_2, 0x50), false)
+                    .tooltip(theme::tooltip("The working copy has uncommitted changes. Commit them to move the thread into a workspace."))
+                    .into_any_element(),
+                None => theme::chip("ws-chip", "in project", false, picker_open)
+                    .on_click(cx.listener(move |this, _, window, cx| open_picker(this, window, cx)))
+                    .children(picker_open.then(|| base_picker(this, vcs, cx)))
+                    .into_any_element(),
+                Some(w) => {
+                    let kind = match vcs {
+                        dirigent_protocol::Vcs::Git => "worktree",
+                        dirigent_protocol::Vcs::Jj => "workspace",
+                    };
+                    let open_menu = this.menu == Some(Menu::Workspace);
+                    let menu = open_menu.then(|| {
+                        let dirty = this.vcs_of(&host, w).is_some_and(|v| v.dirty);
+                        let (h, i) = (host.clone(), id.clone());
+                        let (h2, i2) = (host.clone(), id.clone());
+                        let path = w.clone();
+                        let items = vec![
+                            menu::header(if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." }),
+                            menu::item("ws-copy", "Copy path", "", false, move |this, cx| this.copy_path(path.clone(), cx), cx),
+                            menu::separator(),
+                            menu::danger(
+                                "ws-rm",
+                                format!("Back to project, remove the {kind}"),
+                                move |this, cx| this.remove_workspace(&h, &i, false, cx),
+                                cx,
+                            ),
+                            menu::item(
+                                "ws-detach",
+                                "Back to project, keep it on disk",
+                                "",
+                                false,
+                                move |this, cx| this.remove_workspace(&h2, &i2, true, cx),
+                                cx,
+                            ),
+                        ];
+                        menu::popup(Side::Above, items, cx)
+                    });
+                    theme::chip_in("ws-chip", workspace_name(w), t.accent_ink, t.fg_2, open_menu)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Workspace, cx)))
+                        .children(menu)
+                        .into_any_element()
+                }
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Height of the base list in the workspace popup (~6 rows).
+const BASE_LIST_H: f32 = 160.;
+
+/// The workspace popup: `in project` alone on top, a hairline, then `New workspace from`
+/// with a search over the repo's branches / tags / bookmarks, the vcs default first.
+/// Enter takes the top match, or the typed text as is when nothing matches (a commit,
+/// `main~3`, a revset). The list follows the repo: it is re-fetched every few seconds
+/// while open (`VCS_REFRESH_SECS`).
+fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Dirigent>) -> AnyElement {
+    let search = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .h(px(menu::ROW_H))
+        .flex_shrink_0()
+        .px_2()
+        .child(div().flex_1().min_w_0().text_size(px(13.)).child(this.base_search.clone()));
+    let typed = this.base_search.read(cx).text().trim().to_owned();
+    let refs = this.filtered_refs(cx);
+    let drafting = matches!(this.pane, Pane::Draft { .. });
+    let isolated = drafting && this.isolate;
+    let current = this.base.clone().filter(|_| isolated);
+    // `in project` is the other choice, apart from every base: on top, selected while that
+    // is the state (a thread here is always in its project; picking it just closes).
+    let in_project = menu::item(
+        "base/none",
+        "in project",
+        "no workspace",
+        !isolated,
+        move |this, cx| if drafting { this.set_isolate(false, cx) } else { this.close_menu(cx) },
+        cx,
+    );
+    let mut items = vec![];
+    if typed.is_empty() {
+        let d = default_base(vcs);
+        items.push(menu::item("base/default", d, "default", isolated && current.is_none(), |this, cx| this.pick_base(None, cx), cx));
+    }
+    for r in &refs {
+        let base = r.clone();
+        items.push(menu::item(
+            format!("base/{r}"),
+            r.clone(),
+            "",
+            current.as_deref() == Some(r),
+            move |this, cx| this.pick_base(Some(base.clone()), cx),
+            cx,
+        ));
+    }
+    if !typed.is_empty() && !refs.contains(&typed) {
+        let base = typed.clone();
+        items.push(menu::item("base/typed", typed, "as typed", false, move |this, cx| this.pick_base(Some(base.clone()), cx), cx));
+    }
+    let list = div().id("base-list").flex().flex_col().max_h(px(BASE_LIST_H)).overflow_y_scroll().children(items).into_any();
+    let body = div()
+        .w(px(360.))
+        .flex()
+        .flex_col()
+        .child(in_project)
+        .child(menu::separator())
+        .child(menu::header("New workspace from"))
+        .child(search)
+        .child(menu::separator())
+        .child(list)
+        .into_any();
+    menu::popup(Side::Above, vec![body], cx)
 }
 
 /// The composer card: text on top, chips (model / effort / context) and the send or stop
@@ -386,6 +702,8 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .gap_1()
                 .px_2()
                 .pb_2()
+                // Where the work happens comes first, then what does it.
+                .children(workspace_chip(this, cx))
                 .child(
                     theme::chip("model-chip", model_label, this.model.is_none(), model_open)
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))

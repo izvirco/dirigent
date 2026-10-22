@@ -36,6 +36,19 @@ CREATE TABLE IF NOT EXISTS pins (host TEXT NOT NULL, thread_id TEXT NOT NULL, it
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
+/// Columns added after the table first shipped: `(table, column, declaration)`.
+const COLUMNS: &[(&str, &str, &str)] = &[("threads", "workspace", "TEXT")];
+
+/// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt.query_map([], |r| r.get::<_, String>(1))?.any(|c| c.is_ok_and(|c| c == column));
+    if !exists {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
+    }
+    Ok(())
+}
+
 pub struct Cache {
     conn: Connection,
 }
@@ -47,8 +60,11 @@ impl Cache {
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        // No migrations yet: when the schema changes, delete the db file.
+        // Schema changes are additive: new tables here, new columns in `COLUMNS`.
         conn.execute_batch(SCHEMA)?;
+        for (table, column, decl) in COLUMNS {
+            ensure_column(&conn, table, column, decl)?;
+        }
         Ok(Self { conn })
     }
 
@@ -97,7 +113,7 @@ impl Cache {
 
     pub fn threads(&self, host: &str) -> Result<Vec<ThreadSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms
+            "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace
              FROM threads WHERE host = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([host], |r| {
@@ -115,6 +131,8 @@ impl Cache {
                 last_run_ms: r.get(10)?,
                 archived: r.get(9)?,
                 asks: vec![],
+                workspace: r.get(11)?,
+                workspace_missing: false,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -127,9 +145,9 @@ impl Cache {
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
         for t in threads {
             tx.execute(
-                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms],
+                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace],
             )?;
         }
         for table in ["entries", "pins"] {

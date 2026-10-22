@@ -40,9 +40,38 @@ pub enum ClientMessage {
         id: u64,
         thread_id: String,
     },
+    /// `workspace` starts the thread in an isolated git worktree / jj workspace of the
+    /// project instead of its directory, checked out at `base` (anything git / jj resolve:
+    /// a branch, bookmark, commit, revset; default `HEAD` / the parents of `@`).
     CreateThread {
         id: u64,
         project_id: String,
+        #[serde(default)]
+        workspace: bool,
+        #[serde(default)]
+        base: Option<String>,
+    },
+    /// Move a thread into its own workspace at `base` (or recreate one that went missing,
+    /// where its branch is resumed and `base` is ignored). Refused while the thread runs
+    /// or the project's working copy is dirty.
+    MoveToWorkspace {
+        id: u64,
+        thread_id: String,
+        #[serde(default)]
+        base: Option<String>,
+    },
+    /// Take the thread back to its project directory. `detach` leaves the workspace on
+    /// disk (the thread just forgets it); otherwise it is removed, uncommitted changes
+    /// included. The git branch stays either way.
+    RemoveWorkspace {
+        id: u64,
+        thread_id: String,
+        detach: bool,
+    },
+    /// Version control state of a directory on this host (see `ServerMessage::VcsStatus`).
+    VcsStatus {
+        id: u64,
+        path: String,
     },
     /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
     /// `images` are attached to the message; pi resizes them to the model's limits.
@@ -182,6 +211,19 @@ pub enum ServerMessage {
         reply_to: u64,
         buckets: Vec<UsageBucket>,
     },
+    /// Reply to `VcsStatus`: `vcs` is `None` for a directory under neither git nor jj (or
+    /// one that doesn't exist); `dirty` means uncommitted changes (for jj: `@` is not
+    /// empty); `branch` is the git branch or the jj change of `@`; `refs` are the names a
+    /// workspace can start from (git branches and tags, jj bookmarks).
+    VcsStatus {
+        reply_to: u64,
+        path: String,
+        vcs: Option<Vcs>,
+        dirty: bool,
+        branch: Option<String>,
+        #[serde(default)]
+        refs: Vec<String>,
+    },
     /// Reply to `GenerateTitle`: the title and what producing it cost.
     Title {
         reply_to: u64,
@@ -192,6 +234,14 @@ pub enum ServerMessage {
         cost: f64,
         duration_ms: i64,
     },
+}
+
+/// A version control system a directory is under. Jj wins over git in a colocated repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Vcs {
+    Git,
+    Jj,
 }
 
 /// Questions the model put to the user with `ask_user`, waiting for an answer.
@@ -296,6 +346,12 @@ pub struct ThreadSummary {
     /// `ask_user` calls waiting for the user, oldest first.
     #[serde(default)]
     pub asks: Vec<Ask>,
+    /// The thread's isolated workspace (`cwd` points into it while attached).
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// The workspace directory is gone (removed outside dirigent); prompts would fail.
+    #[serde(default)]
+    pub workspace_missing: bool,
 }
 
 impl ThreadSummary {
@@ -346,7 +402,10 @@ mod tests {
         roundtrip(ClientMessage::RemoveProject { id: 1, project_id: "p".into() });
         roundtrip(ClientMessage::ListThreads { id: 1 });
         roundtrip(ClientMessage::GetThread { id: 2, thread_id: "t".into() });
-        roundtrip(ClientMessage::CreateThread { id: 3, project_id: "p".into() });
+        roundtrip(ClientMessage::CreateThread { id: 3, project_id: "p".into(), workspace: true, base: Some("main~2".into()) });
+        roundtrip(ClientMessage::MoveToWorkspace { id: 14, thread_id: "t".into(), base: None });
+        roundtrip(ClientMessage::RemoveWorkspace { id: 15, thread_id: "t".into(), detach: true });
+        roundtrip(ClientMessage::VcsStatus { id: 16, path: "/x".into() });
         roundtrip(ClientMessage::Prompt {
             id: 4,
             thread_id: "t".into(),
@@ -403,6 +462,9 @@ mod tests {
         }))
         .unwrap();
         assert!(!t.asking());
+        assert_eq!(t.workspace, None);
+        let c: ClientMessage = serde_json::from_value(json!({"type":"create_thread","id":1,"project_id":"p"})).unwrap();
+        assert_eq!(c, ClientMessage::CreateThread { id: 1, project_id: "p".into(), workspace: false, base: None });
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
     }
@@ -426,6 +488,8 @@ mod tests {
                 id: "a1".into(),
                 questions: vec![Question { text: "db?".into(), options: vec!["pg".into()], allow_custom: true, multi: false }],
             }],
+            workspace: Some("/ws/t".into()),
+            workspace_missing: false,
         };
         assert!(t.asking());
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
@@ -461,6 +525,15 @@ mod tests {
         roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });
         roundtrip(ServerMessage::Event { thread_id: "t".into(), event: json!({"type":"agent_start"}) });
         roundtrip(ServerMessage::Blob { reply_to: 5, blob_id: "abc".into(), mime_type: "image/png".into(), data: "AAAA".into() });
+        roundtrip(ServerMessage::VcsStatus {
+            reply_to: 7,
+            path: "/x".into(),
+            vcs: Some(Vcs::Jj),
+            dirty: true,
+            branch: Some("main".into()),
+            refs: vec!["main".into()],
+        });
+        assert_eq!(serde_json::to_value(Vcs::Jj).unwrap(), json!("jj"));
         roundtrip(ServerMessage::Usage {
             reply_to: 6,
             buckets: vec![UsageBucket {

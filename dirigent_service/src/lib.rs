@@ -9,13 +9,14 @@ mod git;
 mod runtime;
 mod server;
 mod storage;
+mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary};
+use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary, Vcs};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::Storage;
@@ -33,6 +34,8 @@ pub fn port() -> u16 {
 pub struct Service {
     storage: Mutex<Storage>,
     runtime: Arc<Runtime>,
+    /// Threads whose workspace directory was gone at the last `sweep_workspaces`.
+    missing: Mutex<std::collections::HashSet<String>>,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
@@ -47,6 +50,8 @@ impl Service {
         let mut threads = self.storage.lock().unwrap().list_threads()?;
         for t in &mut threads {
             t.running_since = self.runtime.running_since(&t.id);
+            // A workspace removed outside dirigent: the thread can't run until it is dealt with.
+            t.workspace_missing = t.workspace.as_deref().is_some_and(|w| !Path::new(w).is_dir());
         }
         Ok(threads)
     }
@@ -55,6 +60,24 @@ impl Service {
         match self.threads() {
             Ok(threads) => self.push(ServerMessage::Threads { reply_to: None, threads }),
             Err(e) => eprintln!("[service] list threads: {e:#}"),
+        }
+    }
+
+    /// Notice workspaces removed outside dirigent: push the thread list when the set of
+    /// missing ones changed since the last look. Runs periodically and on `GetThread`.
+    fn sweep_workspaces(&self) {
+        let now: std::collections::HashSet<String> = match self.threads() {
+            Ok(threads) => threads.into_iter().filter(|t| t.workspace_missing).map(|t| t.id).collect(),
+            Err(_) => return,
+        };
+        let changed = {
+            let mut missing = self.missing.lock().unwrap();
+            let changed = *missing != now;
+            *missing = now;
+            changed
+        };
+        if changed {
+            self.push_threads();
         }
     }
 
@@ -74,6 +97,9 @@ impl Service {
             | ClientMessage::ListThreads { id }
             | ClientMessage::GetThread { id, .. }
             | ClientMessage::CreateThread { id, .. }
+            | ClientMessage::MoveToWorkspace { id, .. }
+            | ClientMessage::RemoveWorkspace { id, .. }
+            | ClientMessage::VcsStatus { id, .. }
             | ClientMessage::Prompt { id, .. }
             | ClientMessage::Answer { id, .. }
             | ClientMessage::Abort { id, .. }
@@ -114,18 +140,47 @@ impl Service {
             }
             ClientMessage::ListThreads { id } => ServerMessage::Threads { reply_to: Some(id), threads: self.threads()? },
             ClientMessage::GetThread { id, thread_id } => {
+                self.sweep_workspaces();
                 let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
-            ClientMessage::CreateThread { id, project_id } => {
+            ClientMessage::CreateThread { id, project_id, workspace, base } => {
                 let thread_id = uuid::Uuid::now_v7().to_string();
-                let thread = {
+                let mut thread = {
                     let storage = self.storage.lock().unwrap();
                     let cwd = storage.project_path(&project_id)?.ok_or_else(|| anyhow!("no such project"))?;
                     storage.create_thread(&thread_id, &project_id, &cwd, now())?
                 };
+                if workspace {
+                    // A thread that can't get its workspace is never created: the draft stays.
+                    if let Err(e) = self.move_to_workspace(&thread_id, false, base.as_deref()) {
+                        let _ = self.storage.lock().unwrap().delete_thread(&thread_id);
+                        return Err(e);
+                    }
+                    let ws = self.workspace_dir(&thread_id).to_string_lossy().into_owned();
+                    thread.cwd = ws.clone();
+                    thread.workspace = Some(ws);
+                }
                 // No push: the creator's `Prompt` follows at once and pushes the thread already running.
                 ServerMessage::ThreadCreated { reply_to: id, thread }
+            }
+            ClientMessage::MoveToWorkspace { id, thread_id, base } => {
+                self.move_to_workspace(&thread_id, true, base.as_deref())?;
+                self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::RemoveWorkspace { id, thread_id, detach } => {
+                self.remove_workspace(&thread_id, detach)?;
+                self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::VcsStatus { id, path } => {
+                let dir = Path::new(&path);
+                let vcs = vcs::detect(dir);
+                let dirty = vcs.map(|v| vcs::dirty(v, dir)).transpose()?.unwrap_or(false);
+                let branch = vcs.and_then(|v| vcs::branch(v, dir));
+                let refs = vcs.map(|v| vcs::refs(v, dir)).unwrap_or_default();
+                ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
             }
             ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
                 // The run starts now, not at pi's `agent_start`: loading the session (and a nix
@@ -216,6 +271,12 @@ impl Service {
                 if self.runtime.is_loaded(&thread_id) {
                     let _ = self.runtime.unload(&thread_id);
                 }
+                // Its workspace has no owner without the thread.
+                if self.storage.lock().unwrap().thread_workspace(&thread_id)?.is_some()
+                    && let Err(e) = self.remove_workspace(&thread_id, false)
+                {
+                    eprintln!("[service] remove workspace of {thread_id}: {e:#}");
+                }
                 self.storage.lock().unwrap().delete_thread(&thread_id)?;
                 // Its `async_bash` logs go with it.
                 let _ = std::fs::remove_dir_all(data_dir().join("jobs").join(&thread_id));
@@ -223,6 +284,89 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
         })
+    }
+
+    /// `$XDG_DATA_HOME/dirigent/workspaces/<name>`: the directory is named like its branch.
+    fn workspace_dir(&self, thread_id: &str) -> PathBuf {
+        data_dir().join("workspaces").join(vcs::workspace_name(thread_id))
+    }
+
+    /// The repo a thread's project lives in and which system drives it.
+    fn thread_repo(&self, thread_id: &str) -> Result<(PathBuf, Vcs)> {
+        let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+        let repo = PathBuf::from(repo);
+        let vcs = vcs::detect(&repo).ok_or_else(|| anyhow!("{} is not a git or jj repository", repo.display()))?;
+        Ok((repo, vcs))
+    }
+
+    /// Give the thread its own workspace (or recreate one whose directory went missing) and
+    /// point it there. The session is unloaded so the next prompt starts in the new cwd; a
+    /// thread with history also gets a notice entry so the model knows where it is now.
+    /// `must_be_clean`: moving a thread that already worked in the main checkout would
+    /// leave its uncommitted edits behind, so that is refused; a new thread starts from
+    /// HEAD on purpose.
+    fn move_to_workspace(&self, thread_id: &str, must_be_clean: bool, base: Option<&str>) -> Result<()> {
+        anyhow::ensure!(self.runtime.running_since(thread_id).is_none(), "the thread is running");
+        let (repo, vcs) = self.thread_repo(thread_id)?;
+        let recreating = self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some();
+        anyhow::ensure!(
+            recreating || !must_be_clean || !vcs::dirty(vcs, &repo)?,
+            "the working copy has uncommitted changes; commit them first"
+        );
+        let dest = self.workspace_dir(thread_id);
+        vcs::add_workspace(vcs, &repo, &dest, thread_id, base)?;
+        let dest = dest.to_string_lossy().into_owned();
+        let kind = match vcs {
+            Vcs::Git => "git worktree",
+            Vcs::Jj => "jj workspace",
+        };
+        self.relocate(
+            thread_id,
+            &dest,
+            Some(&dest),
+            &format!("Working directory is now {dest}, an isolated {kind} of {}; use paths under it from now on.", repo.display()),
+        )
+    }
+
+    /// Take the thread back to its project directory, removing the workspace unless `detach`.
+    fn remove_workspace(&self, thread_id: &str, detach: bool) -> Result<()> {
+        anyhow::ensure!(self.runtime.running_since(thread_id).is_none(), "the thread is running");
+        let ws = self.storage.lock().unwrap().thread_workspace(thread_id)?.ok_or_else(|| anyhow!("the thread has no workspace"))?;
+        let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+        if !detach {
+            match vcs::detect(Path::new(&repo)) {
+                Some(vcs) => vcs::remove_workspace(vcs, Path::new(&repo), Path::new(&ws), thread_id)?,
+                // The repo itself is gone; all that is left to clean is the directory.
+                None if Path::new(&ws).exists() => std::fs::remove_dir_all(&ws)?,
+                None => {}
+            }
+        }
+        self.relocate(thread_id, &repo, None, &format!("Working directory is now {repo} again; use paths under it from now on."))
+    }
+
+    /// Point the thread at `cwd`, drop its live session, and leave `notice` for the model
+    /// if it has history (a fresh thread learns its cwd from the system prompt).
+    fn relocate(&self, thread_id: &str, cwd: &str, workspace: Option<&str>, notice: &str) -> Result<()> {
+        let storage = self.storage.lock().unwrap();
+        storage.set_cwd(thread_id, cwd, workspace)?;
+        if let Some(parent) = storage.last_entry_id(thread_id)? {
+            let entry = json!({
+                "type": "custom_message",
+                "customType": "dirigent:workspace",
+                "content": notice,
+                "display": true,
+                "id": uuid::Uuid::new_v4().simple().to_string()[..8],
+                "parentId": parent,
+                "timestamp": runtime::iso_now(),
+            });
+            let entry = storage.append_entry(thread_id, entry, now())?;
+            self.push(ServerMessage::Entry { thread_id: thread_id.to_owned(), entry });
+        }
+        drop(storage);
+        if self.runtime.is_loaded(thread_id) {
+            let _ = self.runtime.unload(thread_id);
+        }
+        Ok(())
     }
 
     /// Replay the thread from sqlite into the runtime if it isn't live yet. `model` and
@@ -234,6 +378,11 @@ impl Service {
         let (cwd, file_entries, tools) = {
             let storage = self.storage.lock().unwrap();
             let cwd = storage.thread_cwd(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+            // A jj workspace the user rebased from elsewhere is made current before the
+            // agent runs in it.
+            if storage.thread_workspace(thread_id)?.is_some() {
+                vcs::update_stale(Path::new(&cwd));
+            }
             let tools = storage.thread_tools(thread_id)?;
             let (header, entries) = storage.get_thread(thread_id)?.unwrap();
             let mut file_entries: Vec<Value> = Vec::with_capacity(entries.len() + 1);
@@ -360,7 +509,13 @@ pub async fn run(port: u16) -> Result<()> {
     let storage = Storage::open(&data_dir().join("service.db"))?;
     let (runtime, mut runtime_rx) = Runtime::start(runtime_cmd()?);
     let host_name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "local".into());
-    let svc = Arc::new(Service { storage: Mutex::new(storage), runtime, push: broadcast::channel(1024).0, host_name });
+    let svc = Arc::new(Service {
+        storage: Mutex::new(storage),
+        runtime,
+        missing: Mutex::new(Default::default()),
+        push: broadcast::channel(1024).0,
+        host_name,
+    });
 
     tokio::spawn({
         let svc = svc.clone();
@@ -373,11 +528,16 @@ pub async fn run(port: u16) -> Result<()> {
     tokio::spawn({
         let svc = svc.clone();
         async move {
+            let mut n = 0u64;
             loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                for id in svc.runtime.idle_threads(IDLE_UNLOAD) {
-                    eprintln!("[service] unloading idle {id}");
-                    let _ = svc.runtime.unload(&id);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                svc.sweep_workspaces();
+                n += 1;
+                if n.is_multiple_of(6) {
+                    for id in svc.runtime.idle_threads(IDLE_UNLOAD) {
+                        eprintln!("[service] unloading idle {id}");
+                        let _ = svc.runtime.unload(&id);
+                    }
                 }
             }
         }

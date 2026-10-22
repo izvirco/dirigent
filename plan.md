@@ -86,7 +86,10 @@ enum ClientMessage {
     RemoveProject{ id, project_id },                 // soft delete; threads become orphans
     ListThreads  { id },
     GetThread    { id, thread_id },                  // full entries
-    CreateThread { id, project_id },                 // cwd = the project's path
+    CreateThread { id, project_id, workspace, base },  // cwd = the project's path, or a fresh workspace of it at `base`
+    MoveToWorkspace { id, thread_id, base },         // into its own worktree / jj workspace (also recreates a missing one)
+    RemoveWorkspace { id, thread_id, detach },       // back to the project dir; `detach` leaves the workspace on disk
+    VcsStatus    { id, path },                       // is it a repo, is it dirty, what branch
     Prompt       { id, thread_id, text, mode: PromptMode, model?, thinking_level?, images: Vec<ImageAttachment>, title?: TitleGen, tools?: Vec<String> },
     Answer       { id, thread_id, ask_id, answers: Option<Vec<Vec<String>>> },   // one list per question (options + typed text); None = dismissed
     GenerateTitle{ id, title: TitleGen, text },      // name `text` as a first prompt would be; Settings âº Config's Test
@@ -114,12 +117,14 @@ enum ServerMessage {
     Blob         { reply_to, blob_id, mime_type, data /* base64 */ },
     Usage        { reply_to, buckets: Vec<UsageBucket> },
     Title        { reply_to, title, model, input, output, cost, duration_ms },
+    VcsStatus    { reply_to, path, vcs: Option<Vcs>, dirty, branch: Option<String>, refs: Vec<String> },
 }
 
 struct TitleGen { model /* provider/id */, reasoning /* pi thinking level */, prompt /* system prompt */ }
 
 struct Project       { id, path, origin: Option<String> /* normalized git origin */, created_at }
-struct ThreadSummary { id, project_id: Option<String> /* None = orphan */, cwd, name, model, thinking_level, created_at, updated_at, entry_count, running_since: Option<i64> /* ms, while an agent works */, last_run_ms: Option<i64>, archived, asks: Vec<Ask> /* open ask_user calls */ }
+struct ThreadSummary { id, project_id: Option<String> /* None = orphan */, cwd, name, model, thinking_level, created_at, updated_at, entry_count, running_since: Option<i64> /* ms, while an agent works */, last_run_ms: Option<i64>, archived, asks: Vec<Ask> /* open ask_user calls */, workspace: Option<String>, workspace_missing }
+enum Vcs { Git, Jj }
 struct Ask { id, questions: Vec<Question> }   // Question { text, options, allow_custom, multi }
 struct ModelInfo     { provider, id, name, context_window, thinking_levels }
 struct Entry { seq: u64, id, parent_id: Option<String>, kind: String, json: Value }
@@ -130,7 +135,7 @@ Pi entries and events stay `serde_json::Value` on the wire. The desktop has a sm
 
 No subscribe/unsubscribe for the MVP: the service pushes all events to all clients, clients drop what they aren't viewing.
 
-Fields added after a host or client shipped are `#[serde(default)]` (`Prompt.tools`, `ThreadSummary.asks`), so a desktop and a service of different versions keep talking.
+Fields added after a host or client shipped are `#[serde(default)]` (`Prompt.tools`, `ThreadSummary.asks`, `CreateThread.workspace`), so a desktop and a service of different versions keep talking.
 
 Tests: one round-trip test per message enum (serialize â deserialize equals), plus one that old-shaped messages still parse.
 
@@ -144,7 +149,7 @@ One sqlite file per host at `$XDG_DATA_HOME/dirigent/service.db` (WAL mode).
 
 ```sql
 projects (id TEXT PK, path TEXT, origin TEXT, created_at INTEGER, deleted_at INTEGER)
-threads  (id TEXT PK, project_id TEXT, cwd TEXT, name TEXT, header TEXT, model TEXT, thinking_level TEXT, created_at INTEGER, updated_at INTEGER, last_run_ms INTEGER, archived_at INTEGER, tools TEXT /* json list, from the last Prompt */)
+threads  (id TEXT PK, project_id TEXT, cwd TEXT, name TEXT, header TEXT, model TEXT, thinking_level TEXT, created_at INTEGER, updated_at INTEGER, last_run_ms INTEGER, archived_at INTEGER, tools TEXT /* json list, from the last Prompt */, workspace TEXT /* the thread's isolated dir, while attached */)
 entries  (thread_id TEXT, seq INTEGER, id TEXT, parent_id TEXT, kind TEXT, json TEXT, PRIMARY KEY (thread_id, seq))
 blobs    (id TEXT PK /* sha256 */, mime TEXT, bytes BLOB)
 usage    (at, provider, model, input, output, cache_read, cache_write, cost)   -- one row per assistant message
@@ -155,7 +160,25 @@ asks     (thread_id, id, json, created_at)                                     -
 
 ### Projects
 
-A project is a directory on a host; the user clones it there and adds the absolute path. The host validates the path and records the normalized git `origin` (if any). Removing a project is a soft delete: its threads stay and are shown as orphans. No git management, ever.
+A project is a directory on a host; the user clones it there and adds the absolute path. The host validates the path and records the normalized git `origin` (if any). Removing a project is a soft delete: its threads stay and are shown as orphans. No git management beyond workspaces (below).
+
+### Version control and workspaces (`vcs.rs`)
+
+Everything shells out to `git` / `jj`; jj wins where both apply (a colocated repo is driven by jj). A jj workspace goes stale when its commit is rewritten from another workspace (the user rebases in a terminal) and every jj command in it refuses until `jj workspace update-stale`; `vcs::run` does that once on that error and retries, and `ensure_loaded` runs it before an agent starts in a workspace, so a thread's files follow what was done to its history without anyone noticing. `VcsStatus { path }` answers
+whether a directory is a repo, whether it is dirty (git: `status --porcelain`; jj: `@` is not empty), its branch (jj: the change
+id of `@`) and its `refs` (git branches and tags, jj bookmarks: what a workspace can start from). A thread can work in an **isolated workspace** instead of the project directory: a git worktree on branch
+`dirigent-<last 8 chars of the thread id>`, or a jj workspace of that name (colocated when the repo is), at
+`$XDG_DATA_HOME/dirigent/workspaces/<that name>`, so the directory, the branch and the jj workspace all read the same. A thread in a workspace is just a thread whose `cwd` points there, with
+`threads.workspace` recording the directory it owns. `CreateThread { workspace: true, base }` makes one at `base` (the draft's `isolated` chip and its `from` chip; `base` is any text
+git / jj resolve, a branch, tag, bookmark, commit or revset, default `HEAD` / `@-`; a bad one fails the create and leaves nothing
+behind); `MoveToWorkspace { base }` moves a live thread, refused while it runs or while the main checkout is dirty (its own uncommitted edits
+would stay behind), and recreates a workspace whose directory went missing (the branch is still in the repo). `RemoveWorkspace`
+takes the thread back to the project directory: `detach: false` removes the worktree / forgets the jj workspace and deletes the
+directory (uncommitted changes go with it), `detach: true` leaves it on disk for the user. The git branch is never deleted. Every
+move unloads the session (the next prompt starts in the new cwd) and, for a thread with history, appends a `custom_message` entry
+(`dirigent:workspace`, parent = the last entry) telling the model where it works now. `DeleteThread` removes the thread's
+workspace with it. `Service::threads` stats every workspace (`workspace_missing`), and `sweep_workspaces` (every 10s and on
+`GetThread`) pushes `Threads` when the set of missing ones changes, so a workspace deleted outside dirigent shows up.
 
 Test: insert thread + entries, read back in order.
 
@@ -243,7 +266,7 @@ The page's `Test` opens a sample first message, sends it as `GenerateTitle` to `
 ```sql
 projects (host, id, path, origin, created_at, PRIMARY KEY (host, id))
 links    (host, project_id, group_key)             -- manual cross-host links (desktop-owned)
-threads  (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, last_run_ms, archived, PRIMARY KEY (host, id))
+threads  (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, last_run_ms, archived, workspace, PRIMARY KEY (host, id))
 entries  (host, thread_id, seq, json, PRIMARY KEY (host, thread_id, seq))
 models   (host PK, json)                           -- cached model list so the picker works offline
 blobs    (id PK, mime, bytes)                      -- image bytes by content hash, host-independent
@@ -251,10 +274,10 @@ seen     (host, thread_id, updated_at)             -- the thread's updated_at wh
 snoozed  (host, thread_id, updated_at)             -- the thread's updated_at when the user snoozed it (hidden from the sidebar until it runs again)
 pinned   (host, thread_id)                         -- threads kept on top of their status group
 pins     (host, thread_id, item)                   -- pinned messages, by timeline index
-kv       (key PK, value)                           -- last used model / effort, panel widths, last pane
+kv       (key PK, value)                           -- last used model / effort / isolate, panel widths, last pane
 ```
 
-Same shape as the service db plus a `host` column. Writes happen off the UI thread.
+Same shape as the service db plus a `host` column. Writes happen off the UI thread. Columns added later go through `COLUMNS` / `ensure_column`, like the service db.
 
 ### Project groups (`projects.rs`)
 
@@ -270,6 +293,7 @@ One `App` entity holding:
 - `usage: usage::State`: the usage page's window, grouping, hidden series and each host's buckets
 - `OpenThread` â entries + the `Timeline` folded from them + `streaming` (the in-flight message, running tools, echoed prompt)
 - `pending: Option<(req_id, text)>` â a sent draft waiting for `ThreadCreated` before it can `Prompt`
+- `isolate` (the draft's `isolated` chip, remembered in `kv`) and `vcs: (host, path) -> VcsInfo`, what hosts last said about the draft's project, the open thread's project and its workspace (`request_vcs`: on draft open / target change, thread open, every `Threads` push, when a workspace menu opens, and every `VCS_REFRESH_SECS` (2s) from `tick` while the draft page or a thread is on screen, so branches made and commits moved in a terminal show up without a reopen and the toggle ungreys as soon as the checkout is committed)
 - `sidebar_width` / `sidebar_hidden` / `sidebar_peek` â drag-resized width (persisted in `kv`), `[` toggles, hover on the left edge peeks
 
 The pane is persisted in `kv` on every navigation (inbox / workpool / project / thread; drafts and the
@@ -315,7 +339,7 @@ state (still accent dot / check / amber moon / archive box) reused everywhere; n
 - `markdown.rs` â `render(text, mono, keys)`: pulldown-cmark events â block `div`s (paragraph, heading, list, code block, blockquote, table, rule) and inline highlight runs on a `StyledText` (bold, italic, strikethrough, code in mono, links coloured but not clickable), each paragraph a selectable `select::Block`. Inherits size/colour/font from the caller, so it serves replies, user bubbles, and the mono work log alike. `committed(text)` is the prefix up to the last newline.
 - `select.rs` â mouse selection over the transcript and the work log (two `Doc`s; a selection never spans both). Every paragraph, code block, tool argument / output, steer, error line is a `Block`: a `StyledText` keyed by `(doc, item, seq)` in document order, so a selection is two `(key, byte offset)` positions and blocks in between are selected whole. Blocks register their layout when painted (hit testing, highlight) and their text when constructed; the highlight (`paint_selection`, shared with the composer) is one lyon-filled shape per block, its rows only as wide as their selected text, with every corner rounded â including where a row steps in or out against its neighbours; copying (`ctrl+c`, and the primary selection on mouse up) constructs the selected items again, layout-free, to read off-screen blocks too. Click, double click (word), triple click (block), shift+click, drag with autoscroll at the document's edge; Esc or any other press clears. A press on a block keeps the composer focused. Hovering a user message or reply reveals `pin` and `copy` buttons in its corner (`copy` copies the raw markdown; `pin` see `ruler.rs`).
 - `input.rs` â multiline text input. gpui has no text input widget; implements `EntityInputHandler` for IME + key handling (see zed's `crates/gpui/examples/input.rs`). Ctrl+Enter submits, shift+Enter submits with `queued` set, Enter inserts a newline (single-line inputs submit on Enter). Grows with its text up to 70% of the window, then scrolls with a thin bar; the cursor is kept in view. Double click selects a word, triple everything; a drag keeps following the mouse after it leaves the input (above = to the start, below = to the end). Undo / redo (`ctrl+z`, `ctrl+shift+z` / `ctrl+y`): typing a word is one step, so is a run of deletes; paste, newline and IME commits are steps of their own. `ctrl+c` with nothing selected hands the action on to the root, which copies the transcript selection. Also used single-line for the new-project path. Pasting an image emits `ImagePasted` instead of text; `[image-N]` tokens are shaped in the accent color.
-- Composer: a draft (`ctrl+n`, the compose button, or a project page's button) opens the draft page; the first ctrl+Enter sends `CreateThread`, and `Prompt` follows once `ThreadCreated` arrives (`pending`); the created thread is listed as already working with the picked model, so it never flashes through the inbox. Navigating away keeps the text. Pasted images become `[image-N]` tokens in the text plus a thumbnail strip under it (click to preview full-size, hover â to remove); the text is the truth â only images whose token is still present are sent (`attachments()`), so deleting the token drops the image. Chips: model, effort, context usage (hover it for the thread's totals so far: tokens in / out, cached share, message and compaction counts, cost; `thread::stats_card` over `view::Stats`). While running: ctrl+Enter steers, shift+Enter queues a follow-up, Esc / the stop button aborts. Model list is the host's cached `models`; the thread's own model wins when opening a thread, otherwise the last one used.
+- Composer: a draft (`ctrl+n`, the compose button, or a project page's button) opens the draft page; the first ctrl+Enter sends `CreateThread`, and `Prompt` follows once `ThreadCreated` arrives (`pending`); the created thread is listed as already working with the picked model, so it never flashes through the inbox. Navigating away keeps the text. Pasted images become `[image-N]` tokens in the text plus a thumbnail strip under it (click to preview full-size, hover â to remove); the text is the truth â only images whose token is still present are sent (`attachments()`), so deleting the token drops the image. Chips: workspace (below, first), model, effort, context usage (hover it for the thread's totals so far: tokens in / out, cached share, message and compaction counts, cost; `thread::stats_card` over `view::Stats`). **Workspaces** (`workspace_chip`, only when the project is a git / jj repo): one chip. `in project` (a draft, or a thread still in its project directory) opens the workspace popup (`base_picker`): `in project` alone on top (selected while that is the state), a hairline, then `New workspace from`: a search over the repo's refs with the default (`HEAD` / `@-`) first, Enter takes the top match or the typed text as is (`main~3`, a revset). Picking on a draft sets `Dirigent::isolate` + `base` (the chip reads `workspace from <base>`; the `in project` row undoes it) and goes out with the `CreateThread`; picking on a thread moves it at once; the draft page warns under the composer (centered, in a zero-height layer so the composer never moves) when another thread is working in that checkout (amber, the louder one) or the working copy is dirty, each line followed by an `isolate it` link. A thread in a dirty checkout can't move (its changes would stay behind): the chevron goes faint, the popup stays shut, hovering says why. A thread in a workspace shows its name in the accent colour (`dirigent-abcd1234`, also after the title in the breadcrumb), opening a menu: copy the workspace path, or back to the project with the workspace removed (red) or kept on disk. Nothing while the thread runs. The header's archive button on a thread with a workspace opens `ConfirmArchive` (remove / keep on disk, stating whether the workspace has uncommitted changes); a list row's archive opens the thread with that menu. A workspace that disappeared outside dirigent (`workspace_missing`) turns the breadcrumb's branch amber and puts an amber banner over the composer with `Recreate` and `Back to project`; sending is refused until one is picked. While running: ctrl+Enter steers, shift+Enter queues a follow-up, Esc / the stop button aborts. Model list is the host's cached `models`; the thread's own model wins when opening a thread, otherwise the last one used.
 - `main.rs` â window, config load, keybindings (`ctrl+n` new thread, `[` toggle sidebar, `]` toggle work log â types a bracket instead when the focused input already has text, `ctrl+q` quit).
 - `view.rs` â pi entry/event JSON â `Timeline` of `Item`s (`User` with its image blob ids, rendered as thumbnails once `Dirigent::blobs` has them, `Work { model, effort, started, ended, steps }`, `Assistant`, `Error`, `Compaction`, `Notice`), folded entry by entry; tool results and timings (`durationMs`, timestamps) land in their `ToolCall` step. A user message that arrives while a work is open is a steer and becomes a `Step::Steer` of that work, so one run stays one `Work`. Steers render as user bubbles with a `steer` label: pending ones (pi still holds them) below the work line at the end of the tail, with `pending` and, for typed ones, `cancel` on hover; taken ones above the work line, kept after the run. Answers to an ask are steers too: `Streaming::answers` echoes them (same markdown as the persisted entry) until their `dirigent:answer` entry lands. `custom_message` entries from our tools follow the same rule: a `dirigent:answer` is the user's words (a bubble, or a steer step mid-run; the question in bold, the answer under it) and its ISO `timestamp` starts the work it triggers; a `dirigent:job` is a one-line notice (`job cargo check, exit 1, 12s`: an `Item::Notice`, or a `Step::Notice` row in the log panel mid-run). `Streaming` holds the in-flight message's steps, the tools executing right now (with start times), and the optimistic echoes of sent messages with their `PromptMode`, oldest first (prompts show above the live work, steers as pending bubbles after it, follow-ups below the work). pi drains steers one per turn after that turn's tool calls and persists nothing before, so an echo lives until its user entry lands (`take_echo`) or the run settles.
 
