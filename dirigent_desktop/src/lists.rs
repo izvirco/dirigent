@@ -227,7 +227,7 @@ pub fn breadcrumb(
 }
 
 fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Dirigent>) -> Div {
-    let (groups, orphans) = projects::groups(&this.hosts, &this.links);
+    let (groups, orphans) = this.groups();
     let (name, mut threads, target): (String, Vec<(&str, &ThreadSummary)>, Option<Target>) = if group_key == projects::ORPHANS {
         ("Removed projects".into(), orphans.iter().map(|(h, t)| (h.as_str(), t)).collect(), None)
     } else {

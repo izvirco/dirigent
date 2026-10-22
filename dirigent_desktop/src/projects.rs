@@ -65,16 +65,17 @@ pub fn basename(path: &str) -> &str {
     path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
 }
 
-/// Groups ordered by most recent activity, plus orphan threads (most recent first).
-pub fn groups(hosts: &[HostState], links: &Links) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
+/// Groups in the user's order (`order`: group keys, as dragged in the sidebar), then the
+/// rest by most recent activity; plus orphan threads (most recent first).
+pub fn groups(hosts: &[HostState], links: &Links, order: &[String]) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
     let mut by_key: HashMap<String, Group> = HashMap::new();
-    let mut order: Vec<String> = vec![];
+    let mut seen: Vec<String> = vec![];
     for host in hosts {
         for project in &host.projects {
             let key = group_key(&host.name, project, links);
             let manual = links.contains_key(&(host.name.clone(), project.id.clone()));
             let group = by_key.entry(key.clone()).or_insert_with(|| {
-                order.push(key.clone());
+                seen.push(key.clone());
                 Group { key: key.clone(), name: basename(&project.path).to_owned(), members: vec![], threads: vec![], manual: false }
             });
             group.manual |= manual;
@@ -97,13 +98,19 @@ pub fn groups(hosts: &[HostState], links: &Links) -> (Vec<Group>, Vec<(String, T
         }
     }
 
-    let mut groups: Vec<Group> = order.into_iter().filter_map(|k| by_key.remove(&k)).collect();
+    let mut groups: Vec<Group> = seen.into_iter().filter_map(|k| by_key.remove(&k)).collect();
     for g in &mut groups {
         g.members.sort_by(|a, b| a.host.cmp(&b.host));
         g.threads.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     }
     let latest = |g: &Group| g.threads.first().map(|(_, t)| t.updated_at).unwrap_or(0);
-    groups.sort_by(|a, b| latest(b).cmp(&latest(a)).then_with(|| a.name.cmp(&b.name)));
+    let pos = |g: &Group| order.iter().position(|k| *k == g.key);
+    groups.sort_by(|a, b| match (pos(a), pos(b)) {
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => latest(b).cmp(&latest(a)).then_with(|| a.name.cmp(&b.name)),
+    });
     orphans.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     (groups, orphans)
 }
@@ -155,7 +162,7 @@ mod tests {
         let mut links = Links::new();
         links.insert(("box".into(), "m".into()), "local/n".into());
 
-        let (groups, orphans) = groups(&hosts, &links);
+        let (groups, orphans) = groups(&hosts, &links, &[]);
         assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["app", "notes"]);
         let app = &groups[0];
         assert_eq!(app.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>(), ["box", "local"]);
@@ -171,5 +178,18 @@ mod tests {
         assert_eq!(app.member_for(Some("local")).host, "local");
         assert_eq!(app.member_for(None).host, "box"); // t3 is the latest thread
         assert_eq!(notes.member_for(None).host, "box"); // no threads: first member
+    }
+
+    #[test]
+    fn stored_order_wins_over_activity() {
+        let hosts = vec![host(
+            "local",
+            vec![project("a", "/a", None), project("b", "/b", None), project("c", "/c", None)],
+            vec![thread("t1", Some("a"), 1), thread("t2", Some("b"), 2), thread("t3", Some("c"), 3)],
+        )];
+        let names = |order: &[String]| groups(&hosts, &Links::new(), order).0.into_iter().map(|g| g.name).collect::<Vec<_>>();
+        assert_eq!(names(&[]), ["c", "b", "a"]);
+        // Ordered keys first, as stored (a stale key is ignored); the rest by activity.
+        assert_eq!(names(&["local/a".into(), "gone".into(), "local/c".into()]), ["a", "c", "b"]);
     }
 }

@@ -36,6 +36,8 @@ const LAST_TARGET_KEY: &str = "last_target";
 const LAST_ISOLATE_KEY: &str = "last_isolate";
 const PRESETS_KEY: &str = "presets";
 const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
+/// The sidebar's project order as the user dragged it: a JSON list of group keys.
+const PROJECT_ORDER_KEY: &str = "project_order";
 /// Where the user was when the app last closed (see `remember_pane`).
 const PANE_KEY: &str = "pane";
 const SIDEBAR_MIN: f32 = 180.;
@@ -262,6 +264,10 @@ pub enum Menu {
 pub struct Dirigent {
     pub hosts: Vec<HostState>,
     pub links: Links,
+    /// Project group keys in the order the user dragged them (see `projects::groups`).
+    project_order: Vec<String>,
+    /// The project group being dragged in the sidebar; its row is a gap meanwhile.
+    pub dragging: Option<String>,
     pub pane: Pane,
     pub menu: Option<Menu>,
     /// The current mouse press closed a menu (clicked outside it). Suppresses `toggle_menu`
@@ -361,6 +367,7 @@ impl Dirigent {
         };
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
+        let project_order = cache.get(PROJECT_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let seen = cache.seen().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
         let snoozed = cache.snoozed().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
         let pinned = cache.pinned().unwrap_or_default().into_iter().collect();
@@ -415,6 +422,8 @@ impl Dirigent {
         let mut this = Self {
             hosts: host_states,
             links,
+            project_order,
+            dragging: None,
             pane: Pane::Inbox,
             menu: None,
             menu_dismissed: false,
@@ -1198,7 +1207,7 @@ impl Dirigent {
             }
             Pane::Draft { target } => target.clone(),
             Pane::Project { group_key } => {
-                let (groups, _) = projects::groups(&self.hosts, &self.links);
+                let (groups, _) = self.groups();
                 let group = groups.into_iter().find(|g| g.key == *group_key)?;
                 Some(group.member_for(None).into())
             }
@@ -1695,7 +1704,7 @@ impl Dirigent {
 
     /// Link every member of `group_key` into `target_key` (or clear their manual links).
     pub fn link_group(&mut self, group_key: &str, target_key: Option<&str>, cx: &mut Context<Self>) {
-        let (groups, _) = projects::groups(&self.hosts, &self.links);
+        let (groups, _) = self.groups();
         let Some(group) = groups.iter().find(|g| g.key == group_key) else {
             return;
         };
@@ -1713,6 +1722,28 @@ impl Dirigent {
             }
         }
         self.menu = None;
+        cx.notify();
+    }
+
+    /// The sidebar's project groups and the orphan threads.
+    pub fn groups(&self) -> (Vec<projects::Group>, Vec<(String, ThreadSummary)>) {
+        projects::groups(&self.hosts, &self.links, &self.project_order)
+    }
+
+    /// Put the group at `index` of the sidebar's project list (the drag's live reorder),
+    /// freezing the whole list in its current order so nothing else moves.
+    pub fn move_project(&mut self, group_key: &str, index: usize, cx: &mut Context<Self>) {
+        let mut keys: Vec<String> = self.groups().0.into_iter().map(|g| g.key).collect();
+        let Some(from) = keys.iter().position(|k| k == group_key) else { return };
+        if from == index {
+            return;
+        }
+        let key = keys.remove(from);
+        keys.insert(index.min(keys.len()), key);
+        if let Ok(json) = serde_json::to_string(&keys) {
+            let _ = self.cache.lock().unwrap().set(PROJECT_ORDER_KEY, &json);
+        }
+        self.project_order = keys;
         cx.notify();
     }
 
@@ -2221,6 +2252,9 @@ impl Dirigent {
     }
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.dragging.take().is_some() {
+            cx.notify();
+        }
         if self.selection.is_dragging() {
             self.selection.end_drag();
             // Primary selection (middle click), as any text widget on Linux.

@@ -10,12 +10,48 @@ use crate::projects::{self, Group};
 use crate::theme;
 use crate::thread::{duration, elapsed};
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Stateful, div, prelude::*, px, rgba};
+use gpui::{
+    AnyElement, Context, Div, DragMoveEvent, FontWeight, MouseButton, Render, SharedString, Stateful, Window, div, prelude::*, px, rgba,
+};
 
 /// Default width; the user can drag it between `app::SIDEBAR_MIN` and `SIDEBAR_MAX`.
 pub const WIDTH: f32 = 240.;
 /// Width of the invisible strip along the window's left edge that reveals a hidden sidebar.
 const PEEK_ZONE: f32 = 10.;
+/// A sidebar row's height and the gap between rows: the pitch a dragged project snaps to.
+const ROW: f32 = 28.;
+const GAP: f32 = 4.;
+
+/// A project row being dragged (gpui drag payload): its group key.
+struct DragProject(String);
+
+/// What follows the cursor while a project is dragged: the row as it looks hovered, lifted
+/// by a shadow. Painted as its own root, so it carries its own font and size.
+struct Ghost {
+    name: String,
+    width: f32,
+    font: SharedString,
+}
+
+impl Render for Ghost {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(self.width))
+            .h(px(ROW))
+            .pl_2()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .bg(rgba(theme::t().popup))
+            .border_1()
+            .border_color(rgba(theme::t().line))
+            .shadow_md()
+            .font_family(self.font.clone())
+            .text_size(px(13.))
+            .text_color(rgba(theme::t().fg))
+            .child(div().min_w_0().truncate().child(self.name.clone()))
+    }
+}
 
 /// The sidebar in the layout, with its resize handle.
 pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
@@ -65,7 +101,7 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 }
 
 fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
-    let (groups, orphans) = projects::groups(&this.hosts, &this.links);
+    let (groups, orphans) = this.groups();
     let multi_host = this.hosts.len() > 1;
     let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
     let inbox = this.inbox_threads();
@@ -91,7 +127,19 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .child(section("inbox", "Inbox", Section::Inbox, || Pane::Inbox, theme::t().warn, inbox, now, this, cx))
         .child(section("workpool", "Workpool", Section::Workpool, || Pane::Workpool, theme::t().working, working, now, this, cx));
 
-    let project_rows: Vec<AnyElement> = groups.iter().map(|g| project_row(g, &groups, this, cx)).collect();
+    // Projects reorder by drag: the dragged row leaves a gap that follows the cursor row
+    // by row (`move_project`), so the others shuffle around it as it goes.
+    let dragging = this.dragging.clone().filter(|_| cx.has_active_drag());
+    let project_rows: Vec<AnyElement> =
+        groups.iter().map(|g| project_row(g, &groups, dragging.as_deref() == Some(&g.key), this, cx)).collect();
+    let project_list = div().flex().flex_col().gap(px(GAP)).children(project_rows).on_drag_move(cx.listener(
+        |this, ev: &DragMoveEvent<DragProject>, _, cx| {
+            let n = this.groups().0.len();
+            let slot = (f32::from(ev.event.position.y - ev.bounds.top()) / (ROW + GAP)).floor().max(0.) as usize;
+            let key = ev.drag(cx).0.clone();
+            this.move_project(&key, slot.min(n.saturating_sub(1)), cx);
+        },
+    ));
     let orphan_row = (!orphans.is_empty()).then(|| {
         let selected = matches!(&this.pane, Pane::Project { group_key } if group_key == projects::ORPHANS);
         let n = orphans.len();
@@ -156,7 +204,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
                 .child(div().flex_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Projects"))
                 .child(add),
         )
-        .children(project_rows)
+        .child(project_list)
         .children(orphan_row)
         .children(
             groups
@@ -191,7 +239,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .child(bottom)
 }
 
-/// A selectable sidebar row (28px). `selected` lifts the background. It has no right
+/// A selectable sidebar row (`ROW` tall). `selected` lifts the background. It has no right
 /// padding: the trailing child supplies it (`count` with its margin, or a `trailing` box
 /// that is flush with the nav padding like the title's `+`, so icons line up with it).
 fn row(
@@ -207,7 +255,7 @@ fn row(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(28.))
+        .h(px(ROW))
         .pl_2()
         .rounded_md()
         .cursor_pointer()
@@ -399,8 +447,9 @@ fn trailing(id: SharedString) -> Stateful<Div> {
 }
 
 /// Project name, and on hover a `⋯` menu and a `+` (flush right, under the title's) that
-/// opens a draft for this project.
-fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+/// opens a draft for this project. Grab it to reorder: a `Ghost` follows the cursor and
+/// the row itself is a gap (`dragged`).
+fn project_row(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let selected = matches!(&this.pane, Pane::Project { group_key } if *group_key == key);
     let menu_open = this.menu == Some(Menu::Project { group_key: key.clone() });
@@ -464,11 +513,23 @@ fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirig
             this.new_draft(Some(target.clone()), cx)
         }))
         .child(icon("plus", theme::t().fg_1));
+    // The ghost is as wide as the row: the sidebar minus its insets and the list's padding.
+    let (name, width, font) = (g.name.clone(), this.sidebar_width - 2. * (theme::GUTTER + 1.) - 16., this.fonts.ui.clone());
+    let entity = cx.weak_entity();
     div()
         .px_2()
+        .when(dragged, |d| d.opacity(0.))
         .child(
             row(SharedString::from(format!("p/{key}")), selected, cx, move |this, cx| {
                 this.show(Pane::Project { group_key: k.clone() }, cx)
+            })
+            .on_drag(DragProject(key.clone()), move |DragProject(key), _, _, cx| {
+                let key = key.clone();
+                let _ = entity.update(cx, |this, cx| {
+                    this.dragging = Some(key);
+                    cx.notify();
+                });
+                cx.new(|_| Ghost { name: name.clone(), width, font: font.clone() })
             })
             .child(div().flex_1().min_w_0().truncate().text_color(rgba(fg)).child(g.name.clone()))
             .child(
