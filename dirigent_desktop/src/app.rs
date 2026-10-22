@@ -320,8 +320,9 @@ pub struct Dirigent {
     titling: HashMap<(String, String), Instant>,
     /// Images pasted into the composer, in paste order. Only those whose `[image-N]` token
     /// is still in the text count (`attachments()`); the rest are pruned on send.
+    /// Like the text, they belong to the thread (or draft) in view: `set_pane` saves them to
+    /// the cache and loads the other thread's (see `save_draft`).
     attachments: Vec<Attachment>,
-    next_attachment: u32,
     /// The image shown full-size over everything; click or Esc closes it.
     pub preview: Option<Arc<gpui::Image>>,
     /// Mouse selection in the transcript or the work log.
@@ -386,6 +387,7 @@ impl Dirigent {
         let path_input = cx.new(|cx| TextInput::new(cx, "/absolute/path/to/project", true));
         cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(s.queued, window, cx)).detach();
         cx.subscribe_in(&composer, window, |this, _, p: &ImagePasted, window, cx| this.attach(p.0.clone(), window, cx)).detach();
+        cx.subscribe(&composer, |this, _, _: &input::Changed, cx| this.save_draft(cx)).detach();
         cx.subscribe_in(&path_input, window, |this, _, _: &Submitted, window, cx| this.add_project(window, cx)).detach();
         let host_name_input = cx.new(|cx| TextInput::new(cx, "name", true));
         let host_url_input = cx.new(|cx| TextInput::new(cx, "host:7777 or ws://host:7777/ws", true));
@@ -446,7 +448,6 @@ impl Dirigent {
             settings,
             titling: HashMap::new(),
             attachments: vec![],
-            next_attachment: 1,
             preview: None,
             selection: Selection::default(),
             blobs: HashMap::new(),
@@ -799,13 +800,15 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
-                // A failed create leaves the draft intact so nothing typed is lost.
+                // A failed create puts the draft back so nothing typed is lost: into the
+                // cache, and into the composer if the draft page is still in view.
                 if let Some((_, text, images)) = self.pending.take_if(|(id, ..)| Some(*id) == reply_to) {
-                    self.attachments.extend(images);
-                    let (window, composer) = (self.window, self.composer.clone());
-                    cx.defer(move |cx| {
-                        window.update(cx, |_, window, cx| composer.update(cx, |input, cx| input.set_text(&text, window, cx))).ok();
-                    });
+                    let content = input::Content { selection: text.len()..text.len(), text, reversed: false };
+                    let (host, id) = DRAFT_KEY;
+                    let _ = self.cache.lock().unwrap().set_draft(host, id, &content, &image_rows(&images));
+                    if composer_key(&self.pane).is_some_and(|k| k == DRAFT_KEY) {
+                        self.load_composer(cx);
+                    }
                 }
                 self.toast(format!("{host}: {message}"), cx)
             }
@@ -876,7 +879,7 @@ impl Dirigent {
     // ---- navigation ----
 
     pub fn show(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        self.pane = pane;
+        self.set_pane(pane, cx);
         self.menu = None;
         self.selection.clear();
         self.remember_pane();
@@ -884,8 +887,25 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Persist the pane so the next launch resumes there. Drafts and the new-project form
-    /// are transient (their text isn't persisted), so they leave the last stored pane alone.
+    /// Every pane change goes through here: the composer belongs to the thread (or draft)
+    /// in view, so leaving one saves its text, selection and images and entering another
+    /// restores its own (`composer_key`). Other panes don't show the composer and leave it
+    /// alone.
+    fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        let (from, to) = (composer_key(&self.pane), composer_key(&pane));
+        let (leaving, entering) = (from != to && from.is_some(), from != to && to.is_some());
+        if leaving {
+            self.save_draft(cx);
+        }
+        self.pane = pane;
+        if entering {
+            self.load_composer(cx);
+        }
+    }
+
+    /// Persist the pane so the next launch resumes there. The draft page and the new-project
+    /// form leave the last stored pane alone (the draft's text is kept by `save_draft`, the
+    /// page itself isn't).
     fn remember_pane(&self) {
         let value = match &self.pane {
             Pane::Inbox => "inbox".to_owned(),
@@ -905,12 +925,12 @@ impl Dirigent {
         let Some(value) = self.cache.lock().unwrap().get(PANE_KEY) else { return };
         let parts: Vec<&str> = value.split('\n').collect();
         match parts.as_slice() {
-            ["workpool"] => self.pane = Pane::Workpool,
+            ["workpool"] => self.set_pane(Pane::Workpool, cx),
             ["config"] => self.show_config(cx),
-            ["settings"] => self.pane = Pane::Settings,
+            ["settings"] => self.set_pane(Pane::Settings, cx),
             // The hosts aren't connected yet; the request goes out as each one connects.
-            ["usage"] => self.pane = Pane::Usage,
-            ["project", key] => self.pane = Pane::Project { group_key: (*key).to_owned() },
+            ["usage"] => self.set_pane(Pane::Usage, cx),
+            ["project", key] => self.set_pane(Pane::Project { group_key: (*key).to_owned() }, cx),
             ["thread", host, id] if self.summary(host, id).is_some() => {
                 let (host, id) = ((*host).to_owned(), (*id).to_owned());
                 self.select_thread(&host, &id, cx);
@@ -930,7 +950,7 @@ impl Dirigent {
             self.model = m;
             self.effort = e;
         }
-        self.pane = Pane::Thread(Box::new(OpenThread {
+        let pane = Pane::Thread(Box::new(OpenThread {
             host: host.to_owned(),
             id: id.to_owned(),
             entries,
@@ -947,6 +967,7 @@ impl Dirigent {
             center_on: None,
             asks: vec![],
         }));
+        self.set_pane(pane, cx);
         self.menu = None;
         self.base = None;
         self.selection.clear();
@@ -1155,7 +1176,7 @@ impl Dirigent {
     /// Open the new-thread page. `target` defaults to the project in view, then the last one used.
     pub fn new_draft(&mut self, target: Option<Target>, cx: &mut Context<Self>) {
         let target = target.or_else(|| self.context_target()).or_else(|| self.last_target()).filter(|t| self.target_valid(t));
-        self.pane = Pane::Draft { target };
+        self.set_pane(Pane::Draft { target }, cx);
         self.menu = None;
         self.base = None;
         self.selection.clear();
@@ -1243,6 +1264,7 @@ impl Dirigent {
         if self.open().is_some_and(|t| t.host == host && t.id == thread_id) {
             self.show(Pane::Inbox, cx);
         }
+        let _ = self.cache.lock().unwrap().remove_draft(host, thread_id);
         self.menu = None;
         cx.notify();
     }
@@ -1254,7 +1276,7 @@ impl Dirigent {
         let host =
             host.or_else(|| self.hosts.iter().find(|h| h.status == HostStatus::Connected).or(self.hosts.first()).map(|h| h.name.clone()));
         let Some(host) = host else { return };
-        self.pane = Pane::NewProject { host };
+        self.set_pane(Pane::NewProject { host }, cx);
         self.menu = None;
         self.focus(self.path_input.focus_handle(cx), cx);
         cx.notify();
@@ -1600,10 +1622,11 @@ impl Dirigent {
             self.seen.retain(|(h, _), _| *h != name);
             self.snoozed.retain(|(h, _), _| *h != name);
             self.pinned.retain(|(h, _)| *h != name);
-            let _ = self.cache.lock().unwrap().remove_host(&name);
+            // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
-                self.pane = Pane::Settings;
+                self.set_pane(Pane::Settings, cx);
             }
+            let _ = self.cache.lock().unwrap().remove_host(&name);
         }
         for (name, url) in wanted {
             if self.host(&name).is_none() {
@@ -1871,10 +1894,10 @@ impl Dirigent {
 
     // ---- attachments ----
 
-    /// The pasted image gets the next number and its token goes in at the cursor.
+    /// The pasted image gets the next number in this draft and its token goes in at the
+    /// cursor (which saves the draft, images included, through `Changed`).
     fn attach(&mut self, image: gpui::Image, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.next_attachment;
-        self.next_attachment += 1;
+        let n = self.attachments.iter().map(|a| a.n).max().unwrap_or(0) + 1;
         self.attachments.push(Attachment { n, image: Arc::new(image) });
         self.composer.update(cx, |input, cx| input.replace_text_in_range(None, &format!("{} ", image_token(n)), window, cx));
         cx.notify();
@@ -1894,8 +1917,39 @@ impl Dirigent {
             input.remove_all(&format!("{token} "), window, cx);
             input.remove_all(&token, window, cx);
         });
+        self.save_draft(cx);
         self.focus_composer(cx);
         cx.notify();
+    }
+
+    /// Write what the composer holds under the thread (or draft) in view. Called on every
+    /// edit and when leaving the pane; an empty composer deletes the row instead, so a
+    /// draft that was typed and erased leaves nothing behind (as does leaving a thread
+    /// that was deleted under us).
+    fn save_draft(&self, cx: &App) {
+        let Some((host, id)) = composer_key(&self.pane) else { return };
+        let content = self.composer.read(cx).content();
+        let gone = (host, id) != DRAFT_KEY && self.summary(host, id).is_none();
+        let mut cache = self.cache.lock().unwrap();
+        if gone || content.text.trim().is_empty() {
+            let _ = cache.remove_draft(host, id);
+        } else {
+            // Images are kept while their token is in the text; `attachments()` prunes the rest.
+            let _ = cache.set_draft(host, id, &content, &image_rows(&self.attachments));
+        }
+    }
+
+    /// Fill the composer with the saved draft of the thread (or draft page) in view, or
+    /// empty it. The text goes in deferred, as `set_content` needs the window.
+    fn load_composer(&mut self, cx: &mut Context<Self>) {
+        let Some((host, id)) = composer_key(&self.pane) else { return };
+        let (content, images) = self.cache.lock().unwrap().draft(host, id).unwrap_or_default();
+        self.attachments =
+            images.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, image: image_from(&mime, bytes)? })).collect();
+        let (window, composer) = (self.window, self.composer.clone());
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, cx| composer.update(cx, |input, cx| input.set_content(content, window, cx))).ok();
+        });
     }
 
     /// Make sure every image the open thread shows is in `blobs`: from the cache db, else
@@ -1963,10 +2017,7 @@ impl Dirigent {
             let base = self.base.clone().filter(|_| workspace);
             let id = self.next_id();
             self.pending = Some((id, text, images));
-            self.attachments.clear();
-            self.composer.update(cx, |input, cx| {
-                input.take(window, cx);
-            });
+            self.clear_composer(window, cx);
             self.net.send(&target.host, ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base });
             return;
         }
@@ -1986,11 +2037,19 @@ impl Dirigent {
                 (true, false) => PromptMode::Steer,
                 (true, true) => PromptMode::FollowUp,
             };
-            self.attachments.clear();
-            self.composer.update(cx, |input, cx| {
-                input.take(window, cx);
-            });
+            self.clear_composer(window, cx);
             self.prompt(&host, &thread_id, text, images, mode, cx);
+        }
+    }
+
+    /// Sent: the composer and the saved draft of the thread in view are done with.
+    fn clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attachments.clear();
+        self.composer.update(cx, |input, cx| {
+            input.take(window, cx);
+        });
+        if let Some((host, id)) = composer_key(&self.pane) {
+            let _ = self.cache.lock().unwrap().remove_draft(host, id);
         }
     }
 
@@ -2395,6 +2454,24 @@ impl Focusable for Dirigent {
 
 fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// The cache key of the new-thread draft's composer state (threads use their host and id).
+const DRAFT_KEY: (&str, &str) = ("", "");
+
+/// Whose state the composer shows on `pane`: the open thread's, the new-thread draft's,
+/// or nobody's (the composer isn't on screen).
+fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
+    match pane {
+        Pane::Thread(t) => Some((&t.host, &t.id)),
+        Pane::Draft { .. } => Some(DRAFT_KEY),
+        _ => None,
+    }
+}
+
+/// Attachments as the cache stores them.
+fn image_rows(images: &[Attachment]) -> Vec<(u32, &str, &[u8])> {
+    images.iter().map(|a| (a.n, a.image.format.mime_type(), a.image.bytes.as_slice())).collect()
 }
 
 /// A renderable image from stored bytes; `None` for formats gpui can't decode.

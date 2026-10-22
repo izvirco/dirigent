@@ -274,10 +274,14 @@ seen     (host, thread_id, updated_at)             -- the thread's updated_at wh
 snoozed  (host, thread_id, updated_at)             -- the thread's updated_at when the user snoozed it (hidden from the sidebar until it runs again)
 pinned   (host, thread_id)                         -- threads kept on top of their status group
 pins     (host, thread_id, item)                   -- pinned messages, by timeline index
+drafts   (host, thread_id, text, sel_start, sel_end, reversed)  -- the composer per thread; host = thread_id = '' is the new-thread draft
+draft_images (host, thread_id, n, mime, bytes)     -- its pasted images, by their `[image-N]` number
 kv       (key PK, value)                           -- last used model / effort / isolate, panel widths, last pane
 ```
 
 Same shape as the service db plus a `host` column. Writes happen off the UI thread. Columns added later go through `COLUMNS` / `ensure_column`, like the service db.
+
+The composer is one `TextInput`; `Dirigent::set_pane` saves its text, selection and images under the thread (or draft) being left and loads the one being entered (`save_draft` / `load_composer`). Every edit saves too, so drafts survive a restart; sending, emptying or deleting the thread removes the row.
 
 ### Project groups (`projects.rs`)
 

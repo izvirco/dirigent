@@ -113,6 +113,15 @@ pub struct TextInput {
     last_edit: Option<(Edit, Instant)>,
 }
 
+/// Text with its selection: what a draft keeps per thread (`Dirigent::save_draft`), and
+/// what `set_content` swaps into the input when the user moves between threads.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Content {
+    pub text: String,
+    pub selection: Range<usize>,
+    pub reversed: bool,
+}
+
 /// Content and selection before an edit.
 struct Snapshot {
     content: SharedString,
@@ -263,6 +272,27 @@ impl TextInput {
         self.selection_reversed = false;
         self.marked_range = None;
         self.follow_cursor = true;
+        window.notify_text_input_changed(&self.focus_handle);
+        cx.notify();
+    }
+
+    pub fn content(&self) -> Content {
+        Content { text: self.content.to_string(), selection: self.selected_range.clone(), reversed: self.selection_reversed }
+    }
+
+    /// Replace text and selection with another draft's. Not an edit: the undo history goes
+    /// with the old draft. A selection that doesn't fit the text falls back to its end.
+    pub fn set_content(&mut self, c: Content, window: &Window, cx: &mut Context<Self>) {
+        let fits =
+            c.selection.start <= c.selection.end && c.text.is_char_boundary(c.selection.start) && c.text.is_char_boundary(c.selection.end);
+        self.selected_range = if fits { c.selection } else { c.text.len()..c.text.len() };
+        self.selection_reversed = c.reversed && fits;
+        self.content = c.text.into();
+        self.marked_range = None;
+        self.follow_cursor = true;
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
         window.notify_text_input_changed(&self.focus_handle);
         cx.notify();
     }
