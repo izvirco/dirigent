@@ -1320,27 +1320,29 @@ fn render_timeline_item(
             .into_any(),
         Item::Compaction => notice_line(keys.plain("context compacted".to_owned())),
         Item::Notice(text) => notice_line(keys.plain(text.clone())),
-        // A sub-agent's end: the line opens the sub-agent's thread.
-        Item::Child { thread_id, text } => {
-            let (host, id) = (t.host.clone(), thread_id.clone());
-            div()
-                .id(ElementId::Name(format!("child/{ix}").into()))
-                .w_full()
-                .py_1()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .text_size(px(12.))
-                .text_color(rgba(theme::t().fg_2))
-                .cursor_pointer()
-                .hover(|d| d.text_color(rgba(theme::t().fg)))
-                .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&host, &id, cx)))
-                .child(icon("corner-down-right", theme::t().fg_2).size(px(12.)))
-                .child(text.clone())
-                .into_any()
-        }
+        Item::Child { thread_id, text } => child_line(format!("child/{ix}"), &t.host, thread_id, text, cx),
     }
+}
+
+/// A sub-agent's start or end: `↳ sub-agent "…" started`; the line opens its thread.
+fn child_line(id: String, host: &str, thread_id: &str, text: &str, cx: &mut Context<Dirigent>) -> AnyElement {
+    let (host, thread_id) = (host.to_owned(), thread_id.to_owned());
+    div()
+        .id(ElementId::Name(id.into()))
+        .w_full()
+        .py_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .text_size(px(12.))
+        .text_color(rgba(theme::t().fg_2))
+        .cursor_pointer()
+        .hover(|d| d.text_color(rgba(theme::t().fg)))
+        .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&host, &thread_id, cx)))
+        .child(icon("corner-down-right", theme::t().fg_2).size(px(12.)))
+        .child(text.to_owned())
+        .into_any()
 }
 
 /// A quiet one-liner between messages (compaction, warnings, unknown entries).
@@ -1465,7 +1467,8 @@ fn user_bubble(
 }
 
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,
-/// kept after the run) and then the work line. Pending steers are rendered by the tail.
+/// kept after the run), the work line, then the sub-agents it started or that finished
+/// meanwhile (`Step::Child`). Pending steers are rendered by the tail.
 #[allow(clippy::too_many_arguments)]
 fn work_block(
     w: &Work,
@@ -1479,7 +1482,16 @@ fn work_block(
 ) -> Div {
     let taken: Vec<_> =
         w.steers().filter(|(_, _, queued)| !queued).map(|(_, text, _)| steer_bubble(text, false, t, fonts, keys, cx)).collect();
-    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, t, now, cx))
+    let children: Vec<_> = w
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Step::Child { thread_id, text } => Some(child_line(format!("child/{key}/{i}"), &t.host, thread_id, text, cx)),
+            _ => None,
+        })
+        .collect();
+    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, t, now, cx)).children(children)
 }
 
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
@@ -1669,6 +1681,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         }
         Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),
         Step::Steer { text, queued } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
+        Step::Child { thread_id, text } => child_line(format!("log-child/{key}/{six}"), &t.host, thread_id, text, cx),
         // A job notice in the row voice: `job` where a tool's name goes, red when it failed.
         Step::Notice(text) => {
             let failed = text.contains("exit ") && !text.contains("exit 0");
