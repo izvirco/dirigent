@@ -45,6 +45,8 @@ pub enum ClientMessage {
     /// a branch, bookmark, commit, revset; default `HEAD` / the parents of `@`).
     /// `parent` makes it a sub-agent of that thread: it starts in the parent's cwd (unless
     /// `workspace`), and the parent is told when it finishes. `run` ties it to a workflow run.
+    /// `name` names it from the start (a sub-agent, named by whoever spawns it); a thread
+    /// without one is titled from its first prompt.
     CreateThread {
         id: u64,
         project_id: String,
@@ -56,6 +58,8 @@ pub enum ClientMessage {
         parent: Option<String>,
         #[serde(default)]
         run: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
     },
     /// Move a thread into its own workspace at `base` (or recreate one that went missing,
     /// where its branch is resumed and `base` is ignored). Refused while the thread runs
@@ -522,6 +526,10 @@ pub struct ThreadSummary {
     /// Snoozed and not run since (see `ClientMessage::SnoozeThread`).
     #[serde(default)]
     pub snoozed: bool,
+    /// Unix millis of the last `Prompt` that started a turn (mode `prompt`): when the
+    /// thread was last given a task. Orders a parent's children.
+    #[serde(default)]
+    pub prompted_at: Option<i64>,
 }
 
 impl ThreadSummary {
@@ -585,6 +593,7 @@ mod tests {
             base: Some("main~2".into()),
             parent: Some("t0".into()),
             run: None,
+            name: Some("Review".into()),
         });
         roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
         roundtrip(ClientMessage::FocusThread { id: 18, thread_id: "t".into() });
@@ -662,11 +671,23 @@ mod tests {
         assert!(!t.asking());
         assert_eq!(t.workspace, None);
         let c: ClientMessage = serde_json::from_value(json!({"type":"create_thread","id":1,"project_id":"p"})).unwrap();
-        assert_eq!(c, ClientMessage::CreateThread { id: 1, project_id: "p".into(), workspace: false, base: None, parent: None, run: None });
+        assert_eq!(
+            c,
+            ClientMessage::CreateThread {
+                id: 1,
+                project_id: "p".into(),
+                workspace: false,
+                base: None,
+                parent: None,
+                run: None,
+                name: None
+            }
+        );
         let s: ClientMessage = serde_json::from_value(json!({"type":"search_threads","id":1,"query":"x"})).unwrap();
         assert_eq!(s, ClientMessage::SearchThreads { id: 1, query: "x".into(), limit: 20 });
         assert!(!t.snoozed);
         assert_eq!(t.parent_id, None);
+        assert_eq!(t.prompted_at, None);
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
     }
@@ -695,6 +716,7 @@ mod tests {
             parent_id: Some("t0".into()),
             run_id: None,
             snoozed: true,
+            prompted_at: Some(4),
         };
         assert!(t.asking());
         let run = WorkflowRun {

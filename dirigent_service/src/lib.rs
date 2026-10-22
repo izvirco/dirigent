@@ -13,7 +13,7 @@ mod vcs;
 mod workflows;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs, WorkflowRun};
+use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary, Vcs, WorkflowRun};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -41,9 +41,6 @@ pub struct Service {
     runtime: Arc<Runtime>,
     /// Threads whose workspace directory was gone at the last `sweep_workspaces`.
     missing: Mutex<std::collections::HashSet<String>>,
-    /// The last `TitleGen` a client sent with a first prompt: sub-agents and workflow
-    /// threads (whose prompts come from the SDK, not a desktop) are named with it too.
-    title: Mutex<Option<TitleGen>>,
     /// Live workflow runs (`workflows.rs`).
     runs: workflows::Runs,
     /// `bun run <this> run|describe ...`: the workflow runner next to the runtime.
@@ -167,7 +164,7 @@ impl Service {
                 let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
-            ClientMessage::CreateThread { id, project_id, workspace, base, parent, run } => {
+            ClientMessage::CreateThread { id, project_id, workspace, base, parent, run, name } => {
                 let thread_id = uuid::Uuid::now_v7().to_string();
                 let mut thread = {
                     let storage = self.storage.lock().unwrap();
@@ -186,7 +183,8 @@ impl Service {
                         }
                         None => None,
                     };
-                    let thread = storage.create_thread(&thread_id, &project_id, &cwd, parent.as_deref(), run.as_deref(), now())?;
+                    let thread =
+                        storage.create_thread(&thread_id, &project_id, &cwd, parent.as_deref(), run.as_deref(), name.as_deref(), now())?;
                     // A spawned thread's prompts come from the SDK, which knows nothing of the
                     // user's tool settings: it gets the tools of the thread it descends from.
                     if let Some(from) = parent.as_deref().or(run_parent.as_deref()) {
@@ -230,24 +228,13 @@ impl Service {
             ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
                 // The run starts now, not at pi's `agent_start`: loading the session (and a nix
                 // dev shell) can take seconds, and clients should see the thread working with
-                // the model it will use for all of it.
+                // the model it will use for all of it. A new turn is a new task, too
+                // (`prompted_at`: steers, follow-ups and answers don't count).
                 if mode == PromptMode::Prompt {
-                    self.storage.lock().unwrap().set_model(&thread_id, model.as_deref(), thinking_level.as_deref())?;
+                    self.storage.lock().unwrap().set_prompted(&thread_id, model.as_deref(), thinking_level.as_deref(), now())?;
                     self.runtime.begin_run(&thread_id);
                     self.push_threads();
                 }
-                // A first prompt names the thread: with the client's settings, or (a prompt
-                // from the SDK) the last settings a desktop sent.
-                let title = match title {
-                    Some(t) => {
-                        *self.title.lock().unwrap() = Some(t.clone());
-                        Some(t)
-                    }
-                    None if mode == PromptMode::Prompt && self.storage.lock().unwrap().last_entry_id(&thread_id)?.is_none() => {
-                        self.title.lock().unwrap().clone()
-                    }
-                    None => None,
-                };
                 if let Some(tools) = &tools {
                     self.storage.lock().unwrap().set_tools(&thread_id, tools)?;
                 }
@@ -786,7 +773,6 @@ pub async fn run(port: u16) -> Result<()> {
         storage: Mutex::new(storage),
         runtime,
         missing: Mutex::new(Default::default()),
-        title: Mutex::new(None),
         runs: workflows::Runs::default(),
         workflow_runner,
         url,

@@ -6,7 +6,11 @@ export default {
   description: "Comedian agents each tell a joke, a judge agent ranks them",
   input: {
     count: { type: "number", description: "Number of comedians", default: 3 },
-    themes: { type: "string", description: "Comma-separated themes (blank = each picks a random one)", default: "" },
+    themes: {
+      type: "string",
+      description: "Comma-separated themes (blank = each picks a random one)",
+      default: "",
+    },
     comedianModel: { type: "string", default: "anthropic/claude-haiku-5-5" },
     comedianEffort: { type: "string", default: "medium" },
     judgeModel: { type: "string", default: "anthropic/claude-sonnet-5-5" },
@@ -25,6 +29,7 @@ export default {
           ? `on the theme: "${theme}".`
           : "on a random, unusual theme you pick yourself. Start your reply with `Theme: <theme>` on its own line.";
         return d.spawn({
+          name: `Comedian ${labels[i]}`,
           task: `Tell one original, short joke ${ask} Reply with only the joke, no tools, no preamble.`,
           model: input.comedianModel,
           effort: input.comedianEffort,
@@ -38,6 +43,7 @@ export default {
       .map((l, i) => `Agent ${l}${themes[i] ? ` (theme: ${themes[i]})` : ""}:\n${jokes[i]}`)
       .join("\n\n");
     const judge = await d.spawn({
+      name: "Judge",
       task:
         "Rate these jokes from 1-10 and rank them best to worst. Be a fair, discerning comedy judge. " +
         "Reply with a ranked list: position, author, score, one-sentence reason. No tools.\n\n" +

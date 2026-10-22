@@ -103,6 +103,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "run_id", "TEXT"),
     // `updated_at` as of when the thread was snoozed; snoozed while `updated_at` hasn't moved past it.
     ("threads", "snoozed_at", "INTEGER"),
+    // When the thread was last given a task (a `Prompt` that started a turn).
+    ("threads", "prompted_at", "INTEGER"),
     // The run's planned steps (JSON list), taken before it started.
     ("workflow_runs", "plan", "TEXT"),
 ];
@@ -237,7 +239,7 @@ impl Storage {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
                     (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
-                    t.parent_id, t.run_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at
+                    t.parent_id, t.run_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -261,6 +263,7 @@ impl Storage {
                 parent_id: r.get(12)?,
                 run_id: r.get(13)?,
                 snoozed: r.get(14)?,
+                prompted_at: r.get(15)?,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -300,8 +303,10 @@ impl Storage {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    /// What the next run will use, ahead of pi's `model_change` / `thinking_level_change` entries.
-    pub fn set_model(&self, id: &str, model: Option<&str>, thinking_level: Option<&str>) -> Result<()> {
+    /// A `Prompt` started a turn at `now`; `model` / `thinking_level` are what the run will
+    /// use, ahead of pi's `model_change` / `thinking_level_change` entries.
+    pub fn set_prompted(&self, id: &str, model: Option<&str>, thinking_level: Option<&str>, now: i64) -> Result<()> {
+        self.conn.execute("UPDATE threads SET prompted_at = ?2 WHERE id = ?1", params![id, now])?;
         if let Some(m) = model {
             self.conn.execute("UPDATE threads SET model = ?2 WHERE id = ?1", params![id, m])?;
         }
@@ -419,6 +424,7 @@ impl Storage {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_thread(
         &self,
         id: &str,
@@ -426,17 +432,18 @@ impl Storage {
         cwd: &str,
         parent: Option<&str>,
         run: Option<&str>,
+        name: Option<&str>,
         now: i64,
     ) -> Result<ThreadSummary> {
         self.conn.execute(
-            "INSERT INTO threads (id, project_id, cwd, parent_id, run_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
-            params![id, project_id, cwd, parent, run, now],
+            "INSERT INTO threads (id, project_id, cwd, parent_id, run_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![id, project_id, cwd, parent, run, name, now],
         )?;
         Ok(ThreadSummary {
             id: id.into(),
             project_id: Some(project_id.into()),
             cwd: cwd.into(),
-            name: None,
+            name: name.map(str::to_owned),
             model: None,
             thinking_level: None,
             created_at: now,
@@ -451,6 +458,7 @@ impl Storage {
             parent_id: parent.map(str::to_owned),
             run_id: run.map(str::to_owned),
             snoozed: false,
+            prompted_at: None,
         })
     }
 
@@ -676,7 +684,8 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
     Ok(())
 }
 
-/// Explicit session name, or the first line of a user message as a fallback title.
+/// Explicit session name, or the first line of a user message as a fallback title for a
+/// thread created without a name (shown until its generated title lands, or if that fails).
 fn derived_name(entry: &Value) -> Option<String> {
     match entry.get("type")?.as_str()? {
         "session_info" => entry.get("name")?.as_str().map(str::to_owned),
@@ -714,7 +723,7 @@ mod tests {
     #[test]
     fn asks_and_tools_live_with_the_thread() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
+        s.create_thread("t1", "p", "/x", None, None, None, 0).unwrap();
         assert!(s.thread_tools("t1").unwrap().is_empty());
         s.set_tools("t1", &["ask_user".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["ask_user"]);
@@ -750,7 +759,7 @@ mod tests {
     fn roundtrip_thread_and_entries() {
         let s = Storage::in_memory().unwrap();
         s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
-        s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
+        s.create_thread("t1", "p1", "/x", None, None, None, 10).unwrap();
         s.set_header("t1", &json!({"type":"session","id":"t1"})).unwrap();
         s.append_entry("t1", json!({"type":"model_change","id":"a","parentId":null,"provider":"anthropic","modelId":"m"}), 11).unwrap();
         let e = s
@@ -806,9 +815,9 @@ mod tests {
     #[test]
     fn lineage_snooze_and_search() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("root", "p", "/x", None, None, 1).unwrap();
-        s.create_thread("kid", "p", "/x", Some("root"), None, 2).unwrap();
-        s.create_thread("grandkid", "p", "/x", Some("kid"), Some("r1"), 3).unwrap();
+        s.create_thread("root", "p", "/x", None, None, None, 1).unwrap();
+        s.create_thread("kid", "p", "/x", Some("root"), None, Some("Review"), 2).unwrap();
+        s.create_thread("grandkid", "p", "/x", Some("kid"), Some("r1"), None, 3).unwrap();
         assert_eq!(s.depth("root").unwrap(), 0);
         assert_eq!(s.depth("grandkid").unwrap(), 2);
         assert_eq!(s.thread_parent("kid").unwrap().as_deref(), Some("root"));
@@ -836,6 +845,10 @@ mod tests {
         .unwrap();
         assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
         assert_eq!(s.last_reply("kid").unwrap(), None);
+        // Named by its spawner: its first message doesn't rename it.
+        assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
+        s.set_prompted("kid", None, None, 60).unwrap();
+        assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
         // A new prompt without a reply yet (or aborted): no reply to report.
         s.append_entry("root", json!({"type":"message","id":"u2","message":{"role":"user","content":"and again"}}), 54).unwrap();
         assert_eq!(s.last_reply("root").unwrap(), None);
@@ -885,7 +898,7 @@ mod tests {
     #[test]
     fn usage_is_bucketed_per_model() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
+        s.create_thread("t1", "p", "/x", None, None, None, 0).unwrap();
         let assistant = |at: i64, model: &str, input: u64, cost: f64| {
             json!({"type":"message","id":"x","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,
                 "usage":{"input":input,"output":10,"cacheRead":100,"cacheWrite":5,"totalTokens":0,"cost":{"total":cost}}}})

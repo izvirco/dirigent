@@ -143,6 +143,7 @@ mod tests {
             parent_id: None,
             run_id: None,
             snoozed: false,
+            prompted_at: None,
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

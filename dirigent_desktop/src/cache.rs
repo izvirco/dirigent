@@ -60,6 +60,7 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "parent_id", "TEXT"),
     ("threads", "run_id", "TEXT"),
     ("threads", "snoozed", "INTEGER NOT NULL DEFAULT 0"),
+    ("threads", "prompted_at", "INTEGER"),
 ];
 
 /// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
@@ -146,7 +147,7 @@ impl Cache {
     pub fn threads(&self, host: &str) -> Result<Vec<ThreadSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace,
-                    parent_id, run_id, snoozed
+                    parent_id, run_id, snoozed, prompted_at
              FROM threads WHERE host = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([host], |r| {
@@ -169,6 +170,7 @@ impl Cache {
                 parent_id: r.get(12)?,
                 run_id: r.get(13)?,
                 snoozed: r.get(14)?,
+                prompted_at: r.get(15)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -181,9 +183,9 @@ impl Cache {
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
         for t in threads {
             tx.execute(
-                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, run_id, snoozed)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.run_id, t.snoozed],
+                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, run_id, snoozed, prompted_at)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.run_id, t.snoozed, t.prompted_at],
             )?;
         }
         for table in PER_THREAD {
@@ -401,6 +403,7 @@ mod tests {
             parent_id: None,
             run_id: None,
             snoozed: false,
+            prompted_at: None,
         }
     }
 

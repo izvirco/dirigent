@@ -136,7 +136,7 @@ const dirigentParams = Type.Object({
     ],
     {
       description:
-        "spawn: a sub-agent thread for `task` (you are told when it finishes, with its reply). " +
+        "spawn: a sub-agent thread called `name` for `task` (you are told when it finishes, with its reply). " +
         "send: message `thread_id` (`text`; a new turn if idle, else a steer or follow_up). " +
         "read: a thread's final reply (`full` for the whole conversation). " +
         "status: your sub-agents and workflow runs, or one `thread_id` / `run_id`. " +
@@ -172,7 +172,12 @@ const dirigentParams = Type.Object({
   full: Type.Optional(Type.Boolean()),
   archived: Type.Optional(Type.Boolean({ description: "archive: false to unarchive." })),
   snoozed: Type.Optional(Type.Boolean({ description: "snooze: false to wake." })),
-  name: Type.Optional(Type.String({ description: "run_workflow: the workflow's name." })),
+  name: Type.Optional(
+    Type.String({
+      description:
+        "spawn (required): the sub-agent's name, a few words on what it is for. run_workflow: the workflow's name.",
+    }),
+  ),
   input: Type.Optional(
     Type.Record(Type.String(), Type.Unknown(), { description: "run_workflow: its inputs." }),
   ),
@@ -256,6 +261,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       switch (p.action) {
         case "spawn": {
           const id = await d.spawn({
+            name: need(p.name, "name"),
             task: need(p.task, "task"),
             model: p.model,
             effort: p.effort,
@@ -288,7 +294,15 @@ export function createTools(host: ToolHost): ToolDefinition[] {
             if (!t) throw new Error(`no thread ${p.thread_id}`);
             return text(describeThread(t));
           }
-          const kids = threads.filter((t) => t.parent_id === host.threadId);
+          // In the desktop panel's order: by when each was last given a task.
+          const kids = threads
+            .filter((t) => t.parent_id === host.threadId)
+            .sort(
+              (a, b) =>
+                (a.prompted_at ?? a.created_at) - (b.prompted_at ?? b.created_at) ||
+                a.created_at - b.created_at ||
+                a.id.localeCompare(b.id),
+            );
           const runs = (await d.runs()).filter((r) => r.parent_id === host.threadId);
           const lines = [
             `You are thread ${host.threadId}.`,
@@ -358,8 +372,8 @@ const WORKFLOW_HOWTO = `To add a workflow, write <project>/.dirigent/workflows/<
     description: "Review a pull request with two agents",
     input: { pr: { type: "number", description: "PR number" } },
     async run(d, input) {
-      const a = await d.spawn({ task: \`Review PR \${input.pr} for bugs\` });
-      const b = await d.spawn({ task: \`Review PR \${input.pr} for style\`, model: "anthropic/claude-haiku-5-5" });
+      const a = await d.spawn({ name: "Bug review", task: \`Review PR \${input.pr} for bugs\` });
+      const b = await d.spawn({ name: "Style review", task: \`Review PR \${input.pr} for style\`, model: "anthropic/claude-haiku-5-5" });
       await d.wait([a, b]);
       const [ra, rb] = await Promise.all([d.read(a), d.read(b)]);
       await d.log(\`bugs: \${ra.reply}\\nstyle: \${rb.reply}\`);
@@ -367,7 +381,7 @@ const WORKFLOW_HOWTO = `To add a workflow, write <project>/.dirigent/workflows/<
     },
   } satisfies WorkflowDef<{ pr: number }>;
 
-\`d\` has: spawn({task, model?, effort?, workspace?, base?}) \u2192 thread id; send(id, text, mode?); read(id, full?) \u2192 {reply, transcript?};
+\`d\` has: spawn({name, task, model?, effort?, workspace?, base?}) \u2192 thread id; send(id, text, mode?); read(id, full?) \u2192 {reply, transcript?};
 wait(ids, timeoutMs?) \u2192 summaries once idle; search(query); archive(id); snooze(id); abort(id); open(id); runWorkflow(name, input);
 waitRun(runId); log(text). Every call is a step in the run's trace. Keep the script deterministic: the agents vary, the orchestration shouldn't.
 Run it with run_workflow, or from the desktop's Workflows page.`;

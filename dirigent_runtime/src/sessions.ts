@@ -225,10 +225,11 @@ export class Sessions {
    * Send a prompt, first switching the session to `model` ("provider/id") and
    * `thinkingLevel` if they differ from its current ones. Pi persists the switch
    * as entries, so it survives reloads. `attachments` are base64 images; pi resizes
-   * them to the model's limits before persisting. `title` (a thread's first prompt)
-   * names the thread from `text` alongside the run: pi persists the name as a
-   * `session_info` entry, which is how the service and clients learn it. `tools`, when
-   * given, is the dirigent tool set from now on (see `load`).
+   * them to the model's limits before persisting. `title` (a desktop thread's first
+   * prompt; sub-agents are named by their spawner) names the thread from `text`
+   * alongside the run: pi persists the name as a `session_info` entry, which is how
+   * the service and clients learn it. `tools`, when given, is the dirigent tool set
+   * from now on (see `load`).
    */
   async prompt(
     threadId: string,
@@ -252,10 +253,7 @@ export class Sessions {
     }
     if (tools) applyTools(session, tools);
     if (title) {
-      // A sub-agent's prompt ends with a note about who spawned it (`Dirigent.spawn`);
-      // the thread is named after the task alone.
-      const task = text.split("\n\n---\n")[0] ?? text;
-      this.generateTitle(title, task, session.model)
+      this.generateTitle(title, text, session.model)
         .then((r) => session.setSessionName(r.title))
         .catch((e) =>
           this.send({

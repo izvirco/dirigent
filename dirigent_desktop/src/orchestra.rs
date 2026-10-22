@@ -1,26 +1,88 @@
 //! The orchestration panel: split off the pane's right like the work log (same hairline,
 //! handle and width; one of the two at a time), it shows what the open thread set in
-//! motion. **Agents**: its family tree (the topmost ancestor down through every sub-agent
-//! and the workflow runs in between; the working ones bright, the rest dim; a click opens
-//! a thread). **Workflows**: every run the thread started (or was spawned by) as the list
-//! of steps it was planned to take (`WorkflowRun::plan`, from running the script against
-//! placeholders), each overwritten by the real step as it is reported, so the whole path
-//! is visible from the start and fills in as the run goes. A real step of another kind
-//! than planned marks the point where the run left its plan. Open by default while there
-//! is something to show; the panel switcher (`thread::panel_switch`) toggles it.
+//! motion. **Agents**: its family tree (`lineage`: the topmost ancestor down through every
+//! sub-agent and the workflow runs in between; the working ones bright, the rest dim; a
+//! click opens a thread). **Workflows**: every run the thread started (or was spawned by)
+//! as the list of steps it was planned to take (`WorkflowRun::plan`, from running the
+//! script against placeholders), each overwritten by the real step as it is reported, so
+//! the whole path is visible from the start and fills in as the run goes. A real step of
+//! another kind than planned marks the point where the run left its plan. Open by default
+//! while there is something to show; the panel switcher (`thread::panel_switch`) toggles it.
 
-use crate::app::{Dirigent, LineageNode};
+use crate::app::Dirigent;
 use crate::icons::icon;
 use crate::theme::{self, Status};
 use crate::thread::{duration, elapsed, side_panel};
-use dirigent_protocol::{RunStep, WorkflowRun};
+use dirigent_protocol::{RunStep, ThreadSummary, WorkflowRun};
 use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
 use serde_json::Value;
+use std::collections::HashSet;
 
 const ROW: f32 = 30.;
 const STEP_ROW: f32 = 24.;
 /// Indent per tree level.
 const INDENT: f32 = 16.;
+
+/// One row of the agent tree: a thread or a workflow run, `depth` levels in.
+pub enum LineageNode<'a> {
+    Thread { thread: &'a ThreadSummary, depth: usize },
+    Run { run: &'a WorkflowRun, depth: usize },
+}
+
+/// The family of thread `id` among a host's `threads` and `runs`: from its topmost ancestor
+/// (through parents and the runs that spawned it) down, depth-first. A node's children (a
+/// thread's sub-agents and the runs it started together, or a run's threads) come in the
+/// order they were last given a task: a run when it started, a thread at its last new turn
+/// (`prompted_at`). So a new or re-used child lands last and nothing else moves. Empty for
+/// a thread with no relations.
+pub fn lineage<'a>(threads: &'a [ThreadSummary], runs: &'a [WorkflowRun], id: &str) -> Vec<LineageNode<'a>> {
+    let find = |id: &str| threads.iter().find(|t| t.id == id);
+    let run_of = |t: &ThreadSummary| runs.iter().find(|r| Some(r.id.as_str()) == t.run_id.as_deref());
+    // Up to the root: a thread's parent, or the parent of the run that spawned it.
+    let Some(mut root) = find(id) else { return vec![] };
+    let mut seen = HashSet::new();
+    while seen.insert(&root.id) {
+        match root.parent_id.as_deref().or_else(|| run_of(root).and_then(|r| r.parent_id.as_deref())).and_then(find) {
+            Some(up) => root = up,
+            None => break,
+        }
+    }
+    let mut out = vec![];
+    // A root spawned by a run nobody started from a thread: the run is the root.
+    let root = match run_of(root) {
+        Some(run) => LineageNode::Run { run, depth: 0 },
+        None => LineageNode::Thread { thread: root, depth: 0 },
+    };
+    descend(threads, runs, root, &mut out);
+    if out.len() == 1 { vec![] } else { out }
+}
+
+fn descend<'a>(threads: &'a [ThreadSummary], runs: &'a [WorkflowRun], node: LineageNode<'a>, out: &mut Vec<LineageNode<'a>>) {
+    // Sort key: (last given a task, created, id), so ties come out the same every time.
+    let thread = |t: &'a ThreadSummary, depth| {
+        ((t.prompted_at.unwrap_or(t.created_at), t.created_at, t.id.as_str()), LineageNode::Thread { thread: t, depth })
+    };
+    let mut kids: Vec<_> = match &node {
+        LineageNode::Thread { thread: t, depth } => threads
+            .iter()
+            .filter(|k| k.parent_id.as_deref() == Some(&t.id))
+            .map(|k| thread(k, depth + 1))
+            .chain(
+                runs.iter()
+                    .filter(|r| r.parent_id.as_deref() == Some(&t.id))
+                    .map(|r| ((r.started_at, r.started_at, r.id.as_str()), LineageNode::Run { run: r, depth: depth + 1 })),
+            )
+            .collect(),
+        LineageNode::Run { run, depth } => {
+            threads.iter().filter(|k| k.run_id.as_deref() == Some(&run.id)).map(|k| thread(k, depth + 1)).collect()
+        }
+    };
+    kids.sort_by_key(|(key, _)| *key);
+    out.push(node);
+    for (_, kid) in kids {
+        descend(threads, runs, kid, out);
+    }
+}
 
 pub fn panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     if !this.orchestra_open() {
@@ -215,7 +277,7 @@ fn steps(host: &str, run: &WorkflowRun, actual: &[RunStep], this: &Dirigent, cx:
             (Some(th), "spawn" | "wait" | "done" | "read" | "send" | "archive" | "snooze" | "abort" | "open") => {
                 th.name.clone().unwrap_or_else(|| "Untitled".into())
             }
-            (_, "spawn") => json.get("task").and_then(Value::as_str).unwrap_or("").to_owned(),
+            (_, "spawn") => json.get("name").or_else(|| json.get("task")).and_then(Value::as_str).unwrap_or("").to_owned(),
             (_, "send") => json.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
             (_, "log") => json.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
             (_, "error") => json.get("message").and_then(Value::as_str).unwrap_or("").to_owned(),
@@ -331,4 +393,72 @@ fn short(s: &str) -> String {
 
 fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(id: &str, parent: Option<&str>, run: Option<&str>, created_at: i64, prompted_at: i64) -> ThreadSummary {
+        ThreadSummary {
+            id: id.into(),
+            project_id: None,
+            cwd: "/x".into(),
+            name: None,
+            model: None,
+            thinking_level: None,
+            created_at,
+            updated_at: created_at,
+            entry_count: 0,
+            running_since: None,
+            last_run_ms: None,
+            archived: false,
+            asks: vec![],
+            workspace: None,
+            workspace_missing: false,
+            parent_id: parent.map(str::to_owned),
+            run_id: run.map(str::to_owned),
+            snoozed: false,
+            prompted_at: Some(prompted_at),
+        }
+    }
+
+    /// Children come in the order they were last given a task, threads and runs alike;
+    /// re-used ones (a later `prompted_at`) move last, a run's threads stay under it.
+    #[test]
+    fn lineage_follows_the_last_task() {
+        let threads = [
+            thread("p", None, None, 0, 0),
+            thread("c1", Some("p"), None, 1, 7),
+            thread("c2", Some("p"), None, 2, 2),
+            thread("r1", None, Some("r"), 4, 8),
+            thread("r2", None, Some("r"), 5, 5),
+            thread("c3", Some("p"), None, 6, 6),
+        ];
+        let runs = [WorkflowRun {
+            id: "r".into(),
+            project_id: None,
+            name: "slow".into(),
+            input: Value::Null,
+            parent_id: Some("p".into()),
+            started_at: 3,
+            ended_at: None,
+            exit_code: None,
+            steps: 0,
+            plan: vec![],
+        }];
+        let rows = |id| {
+            lineage(&threads, &runs, id)
+                .iter()
+                .map(|n| match n {
+                    LineageNode::Thread { thread, depth } => format!("{}{}", " ".repeat(*depth), thread.id),
+                    LineageNode::Run { run, depth } => format!("{}{}", " ".repeat(*depth), run.id),
+                })
+                .collect::<Vec<_>>()
+        };
+        let tree = ["p", " c2", " r", "  r2", "  r1", " c3", " c1"];
+        assert_eq!(rows("p"), tree);
+        // The same tree from anywhere in it, up through the run.
+        assert_eq!(rows("r2"), tree);
+    }
 }

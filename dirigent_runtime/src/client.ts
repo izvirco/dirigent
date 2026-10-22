@@ -22,6 +22,8 @@ export interface ThreadSummary {
   parent_id: string | null;
   run_id: string | null;
   snoozed: boolean;
+  /** When it was last given a task (a prompt that started a turn); orders a parent's children. */
+  prompted_at: number | null;
 }
 
 export interface Workflow {
@@ -130,6 +132,8 @@ export interface Self {
 }
 
 export interface SpawnOptions {
+  /** The thread's name, a few words on what it is for. */
+  name: string;
   /** The sub-agent's prompt. */
   task: string;
   /** `provider/id`; defaults to the caller's model. */
@@ -205,6 +209,7 @@ export class Dirigent {
       parent_id: this.self.threadId ?? null,
       run_id: this.self.runId ?? null,
       snoozed: false,
+      prompted_at: null,
     };
   }
 
@@ -223,13 +228,14 @@ export class Dirigent {
     return this.self.threadId ? this.thread(this.self.threadId) : undefined;
   }
 
-  /** Create a sub-agent thread and send it `task`. Returns the new thread's id. */
+  /** Create a sub-agent thread called `name` and send it `task`. Returns the new thread's id. */
   async spawn(opts: SpawnOptions): Promise<string> {
     if (this.planning) {
       const id = `plan-${this.planned + 1}`;
       await this.step({
         kind: "spawn",
         thread_id: id,
+        name: opts.name,
         task: head(opts.task),
         model: opts.model ?? null,
       });
@@ -245,6 +251,7 @@ export class Dirigent {
       base: opts.base ?? null,
       parent: this.self.threadId ?? null,
       run: this.self.runId ?? null,
+      name: opts.name,
     });
     const id = created.thread.id;
     const from = this.self.threadId
@@ -265,6 +272,7 @@ export class Dirigent {
     await this.step({
       kind: "spawn",
       thread_id: id,
+      name: opts.name,
       task: head(opts.task),
       model: opts.model ?? me?.model ?? null,
     });

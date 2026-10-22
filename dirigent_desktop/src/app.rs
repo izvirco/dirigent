@@ -5,6 +5,7 @@
 use crate::cache::Cache;
 use crate::input::{self, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
+use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, Selection};
 use crate::theme::{self, Status};
@@ -163,12 +164,6 @@ pub fn default_base(vcs: Vcs) -> &'static str {
         Vcs::Git => "HEAD",
         Vcs::Jj => "@-",
     }
-}
-
-/// One row of the sidebar's agent tree: a thread or a workflow run, `depth` levels in.
-pub enum LineageNode<'a> {
-    Thread { thread: &'a ThreadSummary, depth: usize },
-    Run { run: &'a WorkflowRun, depth: usize },
 }
 
 /// Where a new thread will run: a project on a host.
@@ -663,61 +658,10 @@ impl Dirigent {
         rows
     }
 
-    /// The family of a thread, for the sidebar: from its topmost ancestor (through parents
-    /// and the runs that spawned it) down through every sub-agent, with the workflow runs a
-    /// thread started under it and the threads a run spawned under the run. Empty for a
-    /// thread with no relations.
+    /// The family of a thread on `host`, for the orchestra panel (`orchestra::lineage`).
     pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
         let Some(h) = self.host(host) else { return vec![] };
-        let runs = self.runs.get(host).map(Vec::as_slice).unwrap_or(&[]);
-        let known = |id: &str| h.threads.iter().any(|t| t.id == id);
-        // Up to the root: a thread's parent, or the parent of the run that spawned it.
-        let mut cur = id;
-        let mut seen = HashSet::new();
-        while seen.insert(cur) {
-            let Some(t) = h.threads.iter().find(|t| t.id == cur) else { break };
-            let up = t
-                .parent_id
-                .as_deref()
-                .or_else(|| runs.iter().find(|r| Some(r.id.as_str()) == t.run_id.as_deref()).and_then(|r| r.parent_id.as_deref()));
-            match up {
-                Some(p) if known(p) => cur = p,
-                _ => break,
-            }
-        }
-        let Some(root) = h.threads.iter().find(|t| t.id == cur) else { return vec![] };
-        let mut out = vec![];
-        // A root spawned by a run nobody started from a thread: the run is the root.
-        match runs.iter().find(|r| Some(r.id.as_str()) == root.run_id.as_deref()) {
-            Some(run) => self.lineage_run(host, run, 0, &mut out),
-            None => self.lineage_thread(host, root, 0, &mut out),
-        }
-        if out.len() == 1 { vec![] } else { out }
-    }
-
-    fn lineage_thread<'a>(&'a self, host: &str, t: &'a ThreadSummary, depth: usize, out: &mut Vec<LineageNode<'a>>) {
-        out.push(LineageNode::Thread { thread: t, depth });
-        let Some(h) = self.host(host) else { return };
-        let mut kids: Vec<_> = h.threads.iter().filter(|k| k.parent_id.as_deref() == Some(&t.id)).collect();
-        kids.sort_by_key(|k| k.created_at);
-        for kid in kids {
-            self.lineage_thread(host, kid, depth + 1, out);
-        }
-        let mut runs: Vec<_> = self.runs.get(host).into_iter().flatten().filter(|r| r.parent_id.as_deref() == Some(&t.id)).collect();
-        runs.sort_by_key(|r| r.started_at);
-        for run in runs {
-            self.lineage_run(host, run, depth + 1, out);
-        }
-    }
-
-    fn lineage_run<'a>(&'a self, host: &str, run: &'a WorkflowRun, depth: usize, out: &mut Vec<LineageNode<'a>>) {
-        out.push(LineageNode::Run { run, depth });
-        let Some(h) = self.host(host) else { return };
-        let mut kids: Vec<_> = h.threads.iter().filter(|k| k.run_id.as_deref() == Some(&run.id)).collect();
-        kids.sort_by_key(|k| k.created_at);
-        for kid in kids {
-            self.lineage_thread(host, kid, depth + 1, out);
-        }
+        orchestra::lineage(&h.threads, self.runs.get(host).map(Vec::as_slice).unwrap_or(&[]), id)
     }
 
     /// Group key of a project, if the host still lists it.
@@ -2249,7 +2193,7 @@ impl Dirigent {
             self.clear_composer(window, cx);
             self.net.send(
                 &target.host,
-                ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base, parent: None, run: None },
+                ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base, parent: None, run: None, name: None },
             );
             return;
         }
