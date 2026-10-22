@@ -378,6 +378,11 @@ impl Service {
         let (cwd, file_entries, tools) = {
             let storage = self.storage.lock().unwrap();
             let cwd = storage.thread_cwd(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+            // A jj workspace the user rebased from elsewhere is made current before the
+            // agent runs in it.
+            if storage.thread_workspace(thread_id)?.is_some() {
+                vcs::update_stale(Path::new(&cwd));
+            }
             let tools = storage.thread_tools(thread_id)?;
             let (header, entries) = storage.get_thread(thread_id)?.unwrap();
             let mut file_entries: Vec<Value> = Vec::with_capacity(entries.len() + 1);

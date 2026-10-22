@@ -495,7 +495,7 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                         let path = w.clone();
                         let items = vec![
                             menu::header(if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." }),
-                            menu::item("ws-copy", "Copy path", w.clone(), false, move |this, cx| this.copy_path(path.clone(), cx), cx),
+                            menu::item("ws-copy", "Copy path", "", false, move |this, cx| this.copy_path(path.clone(), cx), cx),
                             menu::separator(),
                             menu::danger(
                                 "ws-rm",
@@ -525,11 +525,14 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
     }
 }
 
-/// The `New workspace from` popup: a search over the repo's branches / tags / bookmarks,
-/// the vcs default on top. Enter takes the top match, or the typed text as is when nothing
-/// matches (a commit, `main~3`, a revset). A draft already set to a workspace gets an
-/// `in project` row first, to undo that. The list follows the repo: it is re-fetched every
-/// few seconds while open (`VCS_REFRESH_SECS`).
+/// Height of the base list in the workspace popup (~6 rows).
+const BASE_LIST_H: f32 = 160.;
+
+/// The workspace popup: `in project` alone on top, a hairline, then `New workspace from`
+/// with a search over the repo's branches / tags / bookmarks, the vcs default first.
+/// Enter takes the top match, or the typed text as is when nothing matches (a commit,
+/// `main~3`, a revset). The list follows the repo: it is re-fetched every few seconds
+/// while open (`VCS_REFRESH_SECS`).
 fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Dirigent>) -> AnyElement {
     let search = div()
         .flex()
@@ -544,11 +547,18 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
     let drafting = matches!(this.pane, Pane::Draft { .. });
     let isolated = drafting && this.isolate;
     let current = this.base.clone().filter(|_| isolated);
+    // `in project` is the other choice, apart from every base: on top, selected while that
+    // is the state (a thread here is always in its project; picking it just closes).
+    let in_project = menu::item(
+        "base/none",
+        "in project",
+        "no workspace",
+        !isolated,
+        move |this, cx| if drafting { this.set_isolate(false, cx) } else { this.close_menu(cx) },
+        cx,
+    );
     let mut items = vec![];
     if typed.is_empty() {
-        if isolated {
-            items.push(menu::item("base/none", "in project", "no workspace", false, |this, cx| this.set_isolate(false, cx), cx));
-        }
         let d = default_base(vcs);
         items.push(menu::item("base/default", d, "default", isolated && current.is_none(), |this, cx| this.pick_base(None, cx), cx));
     }
@@ -567,11 +577,13 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
         let base = typed.clone();
         items.push(menu::item("base/typed", typed, "as typed", false, move |this, cx| this.pick_base(Some(base.clone()), cx), cx));
     }
-    let list = div().id("base-list").flex().flex_col().max_h(px(240.)).overflow_y_scroll().children(items).into_any();
+    let list = div().id("base-list").flex().flex_col().max_h(px(BASE_LIST_H)).overflow_y_scroll().children(items).into_any();
     let body = div()
         .w(px(360.))
         .flex()
         .flex_col()
+        .child(in_project)
+        .child(menu::separator())
         .child(menu::header("New workspace from"))
         .child(search)
         .child(menu::separator())

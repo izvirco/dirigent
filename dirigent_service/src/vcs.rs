@@ -10,14 +10,34 @@ use dirigent_protocol::Vcs;
 use std::path::Path;
 use std::process::Command;
 
-/// Run a vcs command in `dir`, returning stdout on success and stderr as the error.
+/// Run a vcs command in `dir`, returning stdout on success and stderr as the error. A jj
+/// workspace goes *stale* when its commit is rewritten from another workspace (a rebase in
+/// the user's terminal) and every jj command in it refuses until `workspace update-stale`
+/// brings its files to the new commit; that is done here, once, and the command retried,
+/// so a thread's workspace follows what the user did to its history.
 fn run(program: &str, dir: &Path, args: &[&str]) -> Result<String> {
+    match run_once(program, dir, args) {
+        Err(e) if program == "jj" && e.to_string().contains("working copy is stale") => {
+            run_once("jj", dir, &["workspace", "update-stale"])?;
+            run_once(program, dir, args)
+        }
+        r => r,
+    }
+}
+
+fn run_once(program: &str, dir: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new(program).current_dir(dir).args(args).output().with_context(|| format!("run {program}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(anyhow!("{program} {}: {}", args.join(" "), err.trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Bring a jj workspace up to date with its rewritten commit before an agent works in it
+/// (its own `jj` calls would fail otherwise). A no-op when it isn't stale, or not jj at all.
+pub fn update_stale(path: &Path) {
+    let _ = run("jj", path, &["log", "-r", "@", "--no-graph", "-T", "''"]);
 }
 
 /// Which system owns `path`: jj if it is inside a jj repo, else git, else none.
@@ -203,6 +223,15 @@ mod tests {
         assert!(!dirty(Vcs::Jj, &dest).unwrap());
         assert!(branch(Vcs::Jj, &dest).is_some());
         assert_eq!(refs(Vcs::Jj, repo.path()), ["main"]);
+        // Rebasing the workspace's commit from the main checkout makes it stale; our queries
+        // update it and go on, and its files follow.
+        std::fs::write(repo.path().join("README.md"), "moved").unwrap();
+        run_once("jj", repo.path(), &["describe", "-m", "base"]).unwrap();
+        run_once("jj", repo.path(), &["new"]).unwrap();
+        run_once("jj", repo.path(), &["rebase", "-r", "dirigent-abcdef12@", "-d", "@-"]).unwrap();
+        assert!(run_once("jj", &dest, &["log", "-r", "@", "-T", "''"]).unwrap_err().to_string().contains("stale"));
+        assert!(!dirty(Vcs::Jj, &dest).unwrap());
+        assert_eq!(std::fs::read_to_string(dest.join("README.md")).unwrap(), "moved");
         std::fs::remove_dir_all(&dest).unwrap();
         add_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12", None).unwrap();
         remove_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12").unwrap();
