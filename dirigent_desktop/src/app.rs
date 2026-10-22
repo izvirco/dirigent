@@ -1042,7 +1042,9 @@ impl Dirigent {
     /// so the workspace chip knows what it can offer) and its workspace (dirty before removal).
     fn request_thread_vcs(&mut self, host: &str, id: &str) {
         let Some(s) = self.summary(host, id) else { return };
-        let paths: Vec<String> = self.project_path(host, s).into_iter().chain(s.workspace.clone()).collect();
+        // A missing workspace has nothing to report until it is recreated.
+        let workspace = s.workspace.clone().filter(|_| !s.workspace_missing);
+        let paths: Vec<String> = self.project_path(host, s).into_iter().chain(workspace).collect();
         for p in paths {
             self.request_vcs(host, &p);
         }

@@ -38,7 +38,8 @@ pub fn port() -> u16 {
 pub struct Service {
     storage: Mutex<Storage>,
     runtime: Arc<Runtime>,
-    /// Threads whose workspace directory was gone at the last `sweep_workspaces`.
+    /// Threads whose workspace was gone (or no longer known to the vcs) at the last
+    /// `sweep_workspaces`: what `workspace_missing` reports between sweeps.
     missing: Mutex<std::collections::HashSet<String>>,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
@@ -52,11 +53,12 @@ impl Service {
 
     fn threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut threads = self.storage.lock().unwrap().list_threads()?;
+        let missing = self.missing.lock().unwrap();
         for t in &mut threads {
             t.running_since = self.runtime.running_since(&t.id);
             t.jobs = self.runtime.jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
-            t.workspace_missing = t.workspace.as_deref().is_some_and(|w| !Path::new(w).is_dir());
+            t.workspace_missing = missing.contains(&t.id);
         }
         Ok(threads)
     }
@@ -68,13 +70,20 @@ impl Service {
         }
     }
 
-    /// Notice workspaces removed outside dirigent: push the thread list when the set of
-    /// missing ones changed since the last look. Runs periodically and on `GetThread`.
+    /// Notice workspaces removed outside dirigent (the directory deleted, or the vcs made to
+    /// forget it: `jj workspace forget`, a pruned worktree): push the thread list when the
+    /// set of missing ones changed since the last look. Runs periodically and on `GetThread`;
+    /// the vcs probe is too slow for every `threads()`.
     fn sweep_workspaces(&self) {
-        let now: std::collections::HashSet<String> = match self.threads() {
-            Ok(threads) => threads.into_iter().filter(|t| t.workspace_missing).map(|t| t.id).collect(),
+        let threads = match self.storage.lock().unwrap().list_threads() {
+            Ok(threads) => threads,
             Err(_) => return,
         };
+        let now: std::collections::HashSet<String> = threads
+            .into_iter()
+            .filter(|t| t.workspace.as_deref().is_some_and(|w| !vcs::is_workspace(Path::new(w))))
+            .map(|t| t.id)
+            .collect();
         let changed = {
             let mut missing = self.missing.lock().unwrap();
             let changed = *missing != now;
@@ -198,8 +207,12 @@ impl Service {
             }
             ClientMessage::VcsStatus { id, path } => {
                 let dir = Path::new(&path);
-                let vcs = vcs::detect(dir);
-                let dirty = vcs.map(|v| vcs::dirty(v, dir)).transpose()?.unwrap_or(false);
+                // A background probe, so a working copy the vcs can't answer for (a forgotten
+                // workspace) reads as no repo rather than an error.
+                let (vcs, dirty) = match vcs::detect(dir).map(|v| (v, vcs::dirty(v, dir))) {
+                    Some((v, Ok(dirty))) => (Some(v), dirty),
+                    _ => (None, false),
+                };
                 let branch = vcs.and_then(|v| vcs::branch(v, dir));
                 let refs = vcs.map(|v| vcs::refs(v, dir)).unwrap_or_default();
                 ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
@@ -399,6 +412,11 @@ impl Service {
             "the working copy has uncommitted changes; commit them first"
         );
         let dest = self.workspace_dir(thread_id);
+        // Recreating one the vcs forgot (`jj workspace forget` keeps the files): its leftover
+        // directory makes way. The user picked `Recreate` over `Back to project`.
+        if recreating && dest.exists() && !vcs::is_workspace(&dest) {
+            std::fs::remove_dir_all(&dest)?;
+        }
         vcs::add_workspace(vcs, &repo, &dest, thread_id, base)?;
         let dest = dest.to_string_lossy().into_owned();
         let kind = match vcs {
@@ -448,6 +466,8 @@ impl Service {
             self.push(ServerMessage::Entry { thread_id: thread_id.to_owned(), entry });
         }
         drop(storage);
+        // Its workspace is fresh, or it has none: nothing is missing until a sweep says so.
+        self.missing.lock().unwrap().remove(thread_id);
         if self.runtime.is_loaded(thread_id) {
             let _ = self.runtime.unload(thread_id);
         }
@@ -628,8 +648,8 @@ pub async fn run(port: u16) -> Result<()> {
         let svc = svc.clone();
         async move {
             let mut n = 0u64;
+            // The first sweep at once: `workspace_missing` knows nothing before it.
             loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
                 svc.sweep_workspaces();
                 n += 1;
                 if n.is_multiple_of(6) {
@@ -638,6 +658,7 @@ pub async fn run(port: u16) -> Result<()> {
                         let _ = svc.runtime.unload(&id);
                     }
                 }
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         }
     });
