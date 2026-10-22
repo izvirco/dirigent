@@ -244,7 +244,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
         .map(|g| g.members.iter().map(|m| format!("{}  {}", m.host, m.project.path)).collect::<Vec<_>>())
         .unwrap_or_default();
 
-    this.sort_by_status(&mut threads);
+    this.sort_as_queue(&mut threads);
     let (active, archived): (Vec<_>, Vec<_>) = threads.into_iter().partition(|(_, t)| !t.archived);
     let new_thread = (group_key != projects::ORPHANS).then(|| {
         theme::button("project-new-thread", "plus", "New thread")
