@@ -106,7 +106,8 @@ fn agents(this: &Dirigent, host: &str, id: &str, now: i64, cx: &mut Context<Diri
                         .child(thread.name.clone().unwrap_or_else(|| "Untitled".into())),
                 )
                 .child(small(model).max_w(px(120.)).truncate())
-                .child(small(time).w(px(40.)).text_right())
+                // Fits `12m 01s` at 11px; longer values widen the column rather than wrap.
+                .child(small(time).min_w(px(48.)).whitespace_nowrap().text_right())
                 .into_any_element()
         })
         .collect();
