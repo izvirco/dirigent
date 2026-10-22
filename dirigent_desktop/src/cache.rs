@@ -3,8 +3,11 @@
 //! everything here is overwritten whenever fresh data arrives. The only desktop-owned
 //! data is `links` (manual project links), `seen` (unread tracking), `snoozed` (threads
 //! hidden from the sidebar until their next run), `pinned` (threads kept on top of their
-//! list), `pins` (pinned messages) and `kv` (last used cwd/model/...).
+//! list), `pins` (pinned messages), `drafts` / `draft_images` (what the composer holds per
+//! thread; the new-thread draft is the row with an empty host and thread id) and `kv`
+//! (last used cwd/model/...).
 
+use crate::input::Content;
 use anyhow::Result;
 use dirigent_protocol::{Entry, ModelInfo, Project, ThreadSummary};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -34,7 +37,22 @@ CREATE TABLE IF NOT EXISTS snoozed (host TEXT NOT NULL, thread_id TEXT NOT NULL,
 CREATE TABLE IF NOT EXISTS pinned (host TEXT NOT NULL, thread_id TEXT NOT NULL, PRIMARY KEY (host, thread_id));
 CREATE TABLE IF NOT EXISTS pins (host TEXT NOT NULL, thread_id TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY (host, thread_id, item));
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS drafts (
+    host TEXT NOT NULL, thread_id TEXT NOT NULL, text TEXT NOT NULL,
+    sel_start INTEGER NOT NULL, sel_end INTEGER NOT NULL, reversed INTEGER NOT NULL,
+    PRIMARY KEY (host, thread_id)
+);
+CREATE TABLE IF NOT EXISTS draft_images (
+    host TEXT NOT NULL, thread_id TEXT NOT NULL, n INTEGER NOT NULL, mime TEXT NOT NULL, bytes BLOB NOT NULL,
+    PRIMARY KEY (host, thread_id, n)
+);
 ";
+
+/// A draft's pasted image as stored: its `[image-N]` number, mime type and bytes.
+pub type DraftImage = (u32, String, Vec<u8>);
+
+/// Tables keyed by thread that go with it when it is deleted.
+const PER_THREAD: [&str; 4] = ["entries", "pins", "drafts", "draft_images"];
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
 const COLUMNS: &[(&str, &str, &str)] = &[("threads", "workspace", "TEXT")];
@@ -60,6 +78,15 @@ impl Cache {
         }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        Self::init(conn)
+    }
+
+    #[cfg(test)]
+    pub fn in_memory() -> Result<Self> {
+        Self::init(Connection::open_in_memory()?)
+    }
+
+    fn init(conn: Connection) -> Result<Self> {
         // Schema changes are additive: new tables here, new columns in `COLUMNS`.
         conn.execute_batch(SCHEMA)?;
         for (table, column, decl) in COLUMNS {
@@ -70,7 +97,7 @@ impl Cache {
 
     /// Forget everything cached for a host that was removed from `hosts.toml`.
     pub fn remove_host(&self, host: &str) -> Result<()> {
-        for table in ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "pins"] {
+        for table in ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "pins", "drafts", "draft_images"] {
             self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
         }
         Ok(())
@@ -138,8 +165,8 @@ impl Cache {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Replace the host's thread list with what it reported; entries of threads that
-    /// no longer exist (deleted on the host) go with them.
+    /// Replace the host's thread list with what it reported; entries, pins and drafts of
+    /// threads that no longer exist (deleted on the host) go with them.
     pub fn set_threads(&mut self, host: &str, threads: &[ThreadSummary]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
@@ -150,7 +177,7 @@ impl Cache {
                 params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace],
             )?;
         }
-        for table in ["entries", "pins"] {
+        for table in PER_THREAD {
             tx.execute(
                 &format!("DELETE FROM {table} WHERE host = ?1 AND thread_id NOT IN (SELECT id FROM threads WHERE host = ?1)"),
                 [host],
@@ -278,6 +305,64 @@ impl Cache {
         Ok(())
     }
 
+    /// The composer's saved state for a thread: text with selection, and the pasted images.
+    pub fn draft(&self, host: &str, thread_id: &str) -> Option<(Content, Vec<DraftImage>)> {
+        let content = self
+            .conn
+            .query_row(
+                "SELECT text, sel_start, sel_end, reversed FROM drafts WHERE host = ?1 AND thread_id = ?2",
+                params![host, thread_id],
+                |r| {
+                    Ok(Content {
+                        text: r.get(0)?,
+                        selection: r.get::<_, i64>(1)? as usize..r.get::<_, i64>(2)? as usize,
+                        reversed: r.get(3)?,
+                    })
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()?;
+        let mut stmt = self.conn.prepare("SELECT n, mime, bytes FROM draft_images WHERE host = ?1 AND thread_id = ?2 ORDER BY n").ok()?;
+        let images = stmt
+            .query_map(params![host, thread_id], |r| Ok((r.get::<_, i64>(0)? as u32, r.get(1)?, r.get(2)?)))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+        Some((content, images))
+    }
+
+    /// Save a draft. An image's bytes are written once per `n` (`INSERT OR IGNORE`), so
+    /// saving on every keystroke costs a row update, not the pictures again; images no
+    /// longer in `images` are dropped.
+    pub fn set_draft(&mut self, host: &str, thread_id: &str, content: &Content, images: &[(u32, &str, &[u8])]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT OR REPLACE INTO drafts (host, thread_id, text, sel_start, sel_end, reversed) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![host, thread_id, content.text, content.selection.start as i64, content.selection.end as i64, content.reversed],
+        )?;
+        let keep: Vec<String> = images.iter().map(|(n, ..)| n.to_string()).collect();
+        tx.execute(
+            &format!("DELETE FROM draft_images WHERE host = ?1 AND thread_id = ?2 AND n NOT IN ({})", keep.join(",")),
+            params![host, thread_id],
+        )?;
+        for (n, mime, bytes) in images {
+            tx.execute(
+                "INSERT OR IGNORE INTO draft_images (host, thread_id, n, mime, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![host, thread_id, *n as i64, mime, bytes],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Sent, emptied, or the thread is gone: nothing left to restore.
+    pub fn remove_draft(&self, host: &str, thread_id: &str) -> Result<()> {
+        for table in ["drafts", "draft_images"] {
+            self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1 AND thread_id = ?2"), params![host, thread_id])?;
+        }
+        Ok(())
+    }
+
     pub fn get(&self, key: &str) -> Option<String> {
         self.conn.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0)).optional().ok().flatten()
     }
@@ -285,5 +370,55 @@ impl Cache {
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", params![key, value])?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(id: &str) -> ThreadSummary {
+        ThreadSummary {
+            id: id.into(),
+            project_id: None,
+            cwd: "/p".into(),
+            name: None,
+            model: None,
+            thinking_level: None,
+            created_at: 0,
+            updated_at: 0,
+            entry_count: 0,
+            running_since: None,
+            last_run_ms: None,
+            archived: false,
+            asks: vec![],
+            workspace: None,
+            workspace_missing: false,
+        }
+    }
+
+    #[test]
+    fn drafts_round_trip_and_follow_their_thread() {
+        let mut cache = Cache::in_memory().unwrap();
+        let content = Content { text: "see [image-1] and [image-2]".into(), selection: 4..13, reversed: true };
+        let images = [(1, "image/png", &b"one"[..]), (2, "image/png", &b"two"[..])];
+        cache.set_draft("h", "t", &content, &images).unwrap();
+        cache.set_draft("", "", &Content { text: "new".into(), ..Default::default() }, &[]).unwrap();
+
+        let (got, got_images) = cache.draft("h", "t").unwrap();
+        assert_eq!(got, content);
+        assert_eq!(got_images, vec![(1, "image/png".to_owned(), b"one".to_vec()), (2, "image/png".to_owned(), b"two".to_vec())]);
+
+        // Saving again keeps only the images still listed.
+        cache.set_draft("h", "t", &content, &images[1..]).unwrap();
+        assert_eq!(cache.draft("h", "t").unwrap().1.len(), 1);
+
+        // The host's thread list no longer has `t`: its draft goes, the new-thread draft stays.
+        cache.set_threads("h", &[thread("other")]).unwrap();
+        assert!(cache.draft("h", "t").is_none());
+        assert_eq!(cache.draft("", "").unwrap().0.text, "new");
+
+        cache.remove_draft("", "").unwrap();
+        assert!(cache.draft("", "").is_none());
     }
 }
