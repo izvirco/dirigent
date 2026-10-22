@@ -41,6 +41,11 @@ pub enum RuntimeMessage {
         thread_id: String,
         ask: Ask,
     },
+    /// A thread's count of running `async_bash` jobs changed.
+    Jobs {
+        thread_id: String,
+        running: u32,
+    },
     Error {
         thread_id: Option<String>,
         message: String,
@@ -138,6 +143,8 @@ struct Inner {
     /// Threads with a run in progress, with the start time (unix ms): from the prompt being
     /// sent (`begin_run`) or pi's `agent_start`, until `agent_settled`.
     running: HashMap<String, i64>,
+    /// Running `async_bash` jobs per thread, as the runtime last reported (`jobs`); absent = none.
+    jobs: HashMap<String, u32>,
     /// Callers waiting on a `loaded` reply, per thread.
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
@@ -244,6 +251,12 @@ impl Runtime {
                     inner.running.entry(thread_id.clone()).or_insert_with(now);
                 }
             }
+            RuntimeMessage::Jobs { thread_id, running: 0 } => {
+                inner.jobs.remove(thread_id);
+            }
+            RuntimeMessage::Jobs { thread_id, running } => {
+                inner.jobs.insert(thread_id.clone(), *running);
+            }
             _ => {}
         }
     }
@@ -253,6 +266,7 @@ impl Runtime {
         inner.stdin = None;
         inner.loaded.clear();
         inner.running.clear();
+        inner.jobs.clear();
         for (_, waiters) in inner.pending_loads.drain() {
             for w in waiters {
                 let _ = w.send(Err("runtime exited".into()));
@@ -276,6 +290,11 @@ impl Runtime {
 
     pub fn running_since(&self, thread_id: &str) -> Option<i64> {
         self.inner.lock().unwrap().running.get(thread_id).copied()
+    }
+
+    /// How many `async_bash` jobs the thread has running.
+    pub fn jobs(&self, thread_id: &str) -> u32 {
+        self.inner.lock().unwrap().jobs.get(thread_id).copied().unwrap_or(0)
     }
 
     /// A prompt is on its way: count the thread as running from now, so clients see it work
@@ -389,13 +408,15 @@ impl Runtime {
         self.send(&Command_::CancelQueued { thread_id, text })
     }
 
-    /// Loaded, not running, and quiet for longer than `max_idle`.
+    /// Loaded, not running, no jobs running (unloading would kill them), and quiet for
+    /// longer than `max_idle`.
     pub fn idle_threads(&self, max_idle: Duration) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
         inner
             .loaded
             .iter()
             .filter(|id| !inner.running.contains_key(*id))
+            .filter(|id| !inner.jobs.contains_key(*id))
             .filter(|id| inner.last_activity.get(*id).is_none_or(|t| t.elapsed() > max_idle))
             .cloned()
             .collect()

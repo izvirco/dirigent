@@ -541,19 +541,22 @@ impl Dirigent {
         }
     }
 
-    /// `Status::of`, with an idle thread whose sub-agents are still at it reported as
-    /// `Waiting`: their results will wake it.
+    /// `Status::of`, with an idle thread that has `async_bash` jobs running or sub-agents
+    /// still at it reported as `Waiting`: their results will wake it.
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
         match Status::of(t) {
-            Status::Done if self.has_busy_children(host, &t.id) => Status::Waiting,
+            Status::Done if t.jobs > 0 || self.has_busy_children(host, &t.id) => Status::Waiting,
             s => s,
         }
     }
 
-    /// A sub-agent (at any depth) is working.
+    /// A sub-agent (at any depth) is working or has jobs running.
     fn has_busy_children(&self, host: &str, id: &str) -> bool {
         let Some(h) = self.host(host) else { return false };
-        h.threads.iter().filter(|t| t.parent_id.as_deref() == Some(id)).any(|t| t.running() || self.has_busy_children(host, &t.id))
+        h.threads
+            .iter()
+            .filter(|t| t.parent_id.as_deref() == Some(id))
+            .any(|t| t.running() || t.jobs > 0 || self.has_busy_children(host, &t.id))
     }
 
     pub fn pinned(&self, host: &str, thread_id: &str) -> bool {

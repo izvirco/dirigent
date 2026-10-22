@@ -52,6 +52,7 @@ Messages out (stdout):
 { type: "entry",   thread_id, entry: SessionEntry }             // the persistence path (see below)
 { type: "event",   thread_id, event: AgentSessionEvent }        // raw pi event (message_update stripped of `partial`)
 { type: "ask",     thread_id, ask: Ask }                        // the model called `ask_user`; Ask = { id, questions, notify }
+{ type: "jobs",    thread_id, running }                         // the thread's count of running `async_bash` jobs changed
 { type: "warning", thread_id, message }
 { type: "error",   thread_id?, message }
 ```
@@ -65,7 +66,7 @@ Notes:
 - Load = `createAgentSession({ cwd, sessionManager: SessionManager.inMemory(cwd, {}, entries) })` then `session.subscribe(...)`.
 - A `load` for an already-loaded thread is a no-op. Service decides when to `unload` (idle timeout).
 - **Dirigent tools** (`tools.ts`): three tools of our own on top of pi's, registered on every session; `load.tools` / `prompt.tools` (`["async_bash", "ask_user", "dirigent"]`, from the desktop's `[tools]` config) say which are active (`setActiveToolsByName`). All return at once and report later through `session.sendCustomMessage` (`customType` `dirigent:job` / `dirigent:answer` / `dirigent:child`, `triggerTurn`), queued as a steer (`notify: "asap"`, the default) or a follow-up (`"when_idle"`); an idle agent gets a new turn. The custom message is persisted as a `custom_message` entry like any other, so clients see it through the entry path. Notices pi hasn't delivered yet are remembered and queued again after `cancel_queued` (which clears pi's queues wholesale).
-  - `async_bash { action: start|status|kill, command?, job_id?, notify? }`: `start` spawns `bash -c` in its own process group (nix env included), stdout+stderr to `$XDG_DATA_HOME/dirigent/jobs/<thread>/<job>.log`, and returns the job id and log path; a command that ends within 2s is reported inline instead. When the job ends the model gets exit code, duration, log path and the last 30 lines. Jobs die with the session (`unload`) and the log dir with the thread; a job the model `kill`ed sends no notice.
+  - `async_bash { action: start|status|kill, command?, job_id?, notify? }`: `start` spawns `bash -c` in its own process group (nix env included), stdout+stderr to `$XDG_DATA_HOME/dirigent/jobs/<thread>/<job>.log`, and returns the job id and log path; a command that ends within 2s is reported inline instead. When the job ends the model gets exit code, duration, log path and the last 30 lines. Jobs die with the session (`unload`) and the log dir with the thread; a job the model `kill`ed sends no notice. Whenever a thread's count of running background jobs changes (one outlives the 2s, ends, is killed, the session unloads) the runtime sends `jobs`; the service keeps the counts in memory (they die with the runtime) and puts them on `ThreadSummary.jobs`, so the desktop can show a thread whose turn ended with jobs running as Waiting.
   - `ask_user { questions: [{ text, options?, allow_custom?, multi? }] }`: emits `ask` (the service persists it in `asks` and lists it on the thread) and returns at once. `answer` delivers the answers as the user's message, always as a steer: they are user input, so they go at the earliest point pi allows (like a typed steer).
   - `dirigent { action: spawn|send|read|status|search|archive|snooze|abort|open, ... }`: the orchestrator. It is a **client of the service it runs under** (`client.ts`: a ws `Client` on `DIRIGENT_URL`, which the service sets on the runtime child, plus `Dirigent`, the helpers on top of it), so it needs no runtime→service channel of its own. `spawn { name, task, model?, effort?, workspace?, base? }` is `CreateThread { parent: me, name }` + `Prompt` (the task, then a `---` note saying whose sub-agent it is; the model and effort default to the caller's; the caller names the thread, so nothing generates a title for it), so **a sub-agent is just a thread with a `parent_id`**: peeking, lineage, archive, workspaces, the inbox all come for free. `send` prompts a thread (a new turn if idle, else a steer / follow-up), `read` returns its last final reply (or the whole conversation), `search` is the host's full-text search, `open` asks every desktop to show the thread (`FocusThread`). Nothing waits: when a sub-agent ends, the **service** (not the runtime, which may be restarted meanwhile) sends the parent a `notify` (`dirigent:child` with the child's reply, or that it is waiting on the user), which starts a turn if the parent is idle.
 - Pi's own extension UI requests (`select`/`confirm`/`input`) are still auto-cancelled; our tools don't use them.
@@ -130,7 +131,7 @@ enum ServerMessage {
 struct TitleGen { model /* provider/id */, reasoning /* pi thinking level */, prompt /* system prompt */ }
 
 struct Project       { id, path, origin: Option<String> /* normalized git origin */, created_at }
-struct ThreadSummary { id, project_id: Option<String> /* None = orphan */, cwd, name, model, thinking_level, created_at, updated_at, entry_count, running_since: Option<i64> /* ms, while an agent works */, last_run_ms: Option<i64>, archived, asks: Vec<Ask> /* open ask_user calls */, workspace: Option<String>, workspace_missing, parent_id: Option<String> /* the thread that spawned it */, snoozed, prompted_at: Option<i64> /* the last Prompt that started a turn */ }
+struct ThreadSummary { id, project_id: Option<String> /* None = orphan */, cwd, name, model, thinking_level, created_at, updated_at, entry_count, running_since: Option<i64> /* ms, while an agent works */, last_run_ms: Option<i64>, archived, asks: Vec<Ask> /* open ask_user calls */, workspace: Option<String>, workspace_missing, parent_id: Option<String> /* the thread that spawned it */, snoozed, prompted_at: Option<i64> /* the last Prompt that started a turn */, jobs: u32 /* running async_bash jobs, runtime state */ }
 struct SearchHit     { thread_id, snippet }
 enum Vcs { Git, Jj }
 struct Ask { id, questions: Vec<Question> }   // Question { text, options, allow_custom, multi }
@@ -145,7 +146,7 @@ No subscribe/unsubscribe for the MVP: the service pushes all events to all clien
 
 `CreateThread { parent }` makes a sub-agent (it starts in the parent's cwd unless `workspace`, inherits the parent's tools, and may nest at most 3 deep). `name` names it from the start: sub-agents are named by whoever spawns them, never titled from their prompt.
 
-Fields added after a host or client shipped are `#[serde(default)]` (`Prompt.tools`, `ThreadSummary.asks`, `CreateThread.workspace`, `CreateThread.name`, `ThreadSummary.parent_id`, `ThreadSummary.prompted_at`), so a desktop and a service of different versions keep talking.
+Fields added after a host or client shipped are `#[serde(default)]` (`Prompt.tools`, `ThreadSummary.asks`, `CreateThread.workspace`, `CreateThread.name`, `ThreadSummary.parent_id`, `ThreadSummary.prompted_at`, `ThreadSummary.jobs`), so a desktop and a service of different versions keep talking.
 
 Tests: one round-trip test per message enum (serialize â deserialize equals), plus one that old-shaped messages still parse.
 
@@ -210,7 +211,8 @@ stopped without one, or that it is waiting on the user's answer) through `notify
 - A thread is `running` from the moment a `Prompt` (mode `prompt`) arrives â the service also writes the prompt's model / thinking level and `prompted_at` (when the thread was last given a task; steers, follow-ups and answers don't count) to `threads` right then and pushes `Threads` â until pi's `agent_settled`. Loading a session (and capturing a nix shell) can take seconds; clients see the thread working with its final model the whole time. A prompt that fails before pi starts settles it again.
 - Every `entry_appended` event â insert into `entries`, bump `threads.updated_at`, push `Threads` update to clients.
 - Runtime exits/crashes â clear `loaded`, respawn, log. In-flight prompts get an `Error`. This is the whole point of a stateless runtime.
-- Idle unload: thread with no activity for 30 minutes â `unload`.
+- `jobs` messages: the running-job count per thread, kept beside `running` and cleared with it when the runtime exits; `list_threads` fills `ThreadSummary.jobs` from it.
+- Idle unload (never while it has jobs running, which would kill them): thread with no activity for 30 minutes â `unload`.
 - Thread `name`: `CreateThread.name` (a sub-agent's), else pi's `session_info` entry (which is how the runtime's generated title arrives), else the first line of the first user message (shown meanwhile).
 
 ### WebSocket server (`server.rs`)
@@ -331,7 +333,7 @@ while offline are dropped.
 
 A thread's status is derived, never stored: `running_since` set â Working, `archived` â Archived, open `asks` â
 Asking (an amber question mark and an amber title in the sidebar and lists: the model is waiting on the user), `snoozed` → Snoozed, else Done
-(`Dirigent::status` reports a Done thread whose sub-agents are still at it as Waiting, an hourglass: their results will wake it).
+(`Dirigent::status` reports a Done thread with `async_bash` jobs running (`jobs`) or sub-agents still at it as Waiting, an hourglass: their results will wake it).
 Inbox = Asking, Done and Snoozed threads across hosts (`inbox_all`), Workpool = Working and Waiting ones (`busy_threads`), a project page = all of its threads with
 archived ones in a trailing section. Sidebar, Inbox, Workpool and project rows are grouped by status (`sort_by_status`: working,
 asking, done, snoozed, archived), _pinned_ threads first in each group (the header's pin button, amber while pinned; an amber pin

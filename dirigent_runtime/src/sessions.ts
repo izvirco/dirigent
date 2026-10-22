@@ -82,6 +82,7 @@ export type Outbound =
   | { type: "entry"; thread_id: string; entry: unknown }
   | { type: "event"; thread_id: string; event: unknown }
   | { type: "ask"; thread_id: string; ask: Ask }
+  | { type: "jobs"; thread_id: string; running: number }
   | { type: "warning"; thread_id: string; message: string }
   | { type: "error"; thread_id?: string; message: string };
 
@@ -130,6 +131,7 @@ export class Sessions {
       jobs: new Map(),
       notices: new Map(),
       onAsk: (ask: Ask) => this.send({ type: "ask", thread_id: threadId, ask }),
+      onJobs: (running: number) => this.send({ type: "jobs", thread_id: threadId, running }),
     } as Live;
     // Bash runs through our spawnHook so a captured nix dev-shell env can be injected.
     const bash = createBashToolDefinition(cwd, {

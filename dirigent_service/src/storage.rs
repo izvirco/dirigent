@@ -205,7 +205,7 @@ impl Storage {
             .optional()?)
     }
 
-    /// Threads ordered by most recently updated. `running_since` is always `None` here; the caller fills it in.
+    /// Threads ordered by most recently updated. `running_since` and `jobs` (runtime state) are always unset here; the caller fills them in.
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
@@ -243,6 +243,7 @@ impl Storage {
                 parent_id: r.get(12)?,
                 snoozed: r.get(13)?,
                 prompted_at: r.get(14)?,
+                jobs: 0,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -435,6 +436,7 @@ impl Storage {
             parent_id: parent.map(str::to_owned),
             snoozed: false,
             prompted_at: None,
+            jobs: 0,
         })
     }
 

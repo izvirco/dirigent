@@ -22,6 +22,8 @@ export interface ThreadSummary {
   snoozed: boolean;
   /** When it was last given a task (a prompt that started a turn); orders a parent's children. */
   prompted_at: number | null;
+  /** `async_bash` jobs running in its live session. */
+  jobs: number;
 }
 
 export interface SearchHit {
@@ -239,6 +241,7 @@ export function describeThread(t: ThreadSummary, now = Date.now()): string {
         : t.snoozed
           ? "snoozed"
           : "done";
+  const jobs = t.jobs > 0 ? `, ${t.jobs} job${t.jobs === 1 ? "" : "s"} running` : "";
   const parent = t.parent_id ? ` parent=${t.parent_id}` : "";
-  return `- ${t.id} "${t.name ?? "untitled"}" [${status}] model=${t.model ?? "?"}${parent} cwd=${t.cwd}`;
+  return `- ${t.id} "${t.name ?? "untitled"}" [${status}${jobs}] model=${t.model ?? "?"}${parent} cwd=${t.cwd}`;
 }

@@ -407,6 +407,10 @@ pub struct ThreadSummary {
     /// thread was last given a task. Orders a parent's children.
     #[serde(default)]
     pub prompted_at: Option<i64>,
+    /// `async_bash` jobs running in its live session. Runtime state, never stored: a thread
+    /// whose turn ended with jobs running is waiting on them (they wake it when they end).
+    #[serde(default)]
+    pub jobs: u32,
 }
 
 impl ThreadSummary {
@@ -544,6 +548,7 @@ mod tests {
         assert!(!t.snoozed);
         assert_eq!(t.parent_id, None);
         assert_eq!(t.prompted_at, None);
+        assert_eq!(t.jobs, 0);
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
     }
@@ -572,6 +577,7 @@ mod tests {
             parent_id: Some("t0".into()),
             snoozed: true,
             prompted_at: Some(4),
+            jobs: 2,
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });

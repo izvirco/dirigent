@@ -48,6 +48,8 @@ interface Job {
   ended?: number;
   /** The model killed it: no notice, it knows. */
   killed?: boolean;
+  /** Outlived `GRACE_MS`: the model was told it runs on, and the host counts it (`reportJobs`). */
+  background?: boolean;
   notify: Notify;
   exited: Promise<number>;
 }
@@ -64,6 +66,8 @@ export interface ToolHost {
   /** Notices queued in pi that it has not delivered yet, by job / ask id (see `requeueNotices`). */
   notices: Map<string, Notice>;
   onAsk: (ask: Ask) => void;
+  /** Tell the host how many jobs are running (`reportJobs`). */
+  onJobs: (running: number) => void;
 }
 
 interface Notice {
@@ -207,6 +211,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         if (job.exit !== undefined)
           return text(`job ${job.id} already ended with exit ${job.exit}`);
         killJob(job);
+        reportJobs(host);
         return text(`job ${job.id} killed`);
       }
       if (params.job_id) return text(describe(getJob(host, params.job_id), true));
@@ -372,6 +377,7 @@ export async function requeueNotices(host: ToolHost): Promise<void> {
 /** Every job's process group, when the session goes. */
 export function killJobs(host: ToolHost): void {
   for (const job of host.jobs.values()) if (job.exit === undefined) killJob(job);
+  reportJobs(host);
 }
 
 async function startJob(host: ToolHost, command: string, notify: Notify): Promise<string> {
@@ -406,7 +412,10 @@ async function startJob(host: ToolHost, command: string, notify: Notify): Promis
   host.jobs.set(id, job);
   const quick = await Promise.race([job.exited, sleep(GRACE_MS).then(() => undefined)]);
   if (quick !== undefined) return describe(job, true);
+  job.background = true;
+  reportJobs(host);
   job.exited.then(() => {
+    reportJobs(host);
     if (job.killed) return;
     return deliver(host, `job-${id}`, {
       customType: "dirigent:job",
@@ -422,6 +431,17 @@ async function startJob(host: ToolHost, command: string, notify: Notify): Promis
     });
   });
   return `job ${id} started: \`${command}\`\nlog: ${log}\nYou will be told when it ends.`;
+}
+
+/**
+ * Send the host the thread's count of running background jobs: started past the grace
+ * window (an inline one never counts), not ended, not killed. Called wherever that changes.
+ */
+function reportJobs(host: ToolHost): void {
+  let running = 0;
+  for (const j of host.jobs.values())
+    if (j.background && j.exit === undefined && !j.killed) running++;
+  host.onJobs(running);
 }
 
 function finish(job: Job, code: number, error?: string): number {

@@ -169,6 +169,7 @@ impl Cache {
                 parent_id: r.get(12)?,
                 snoozed: r.get(13)?,
                 prompted_at: r.get(14)?,
+                jobs: 0,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -401,6 +402,7 @@ mod tests {
             parent_id: None,
             snoozed: false,
             prompted_at: None,
+            jobs: 0,
         }
     }
 

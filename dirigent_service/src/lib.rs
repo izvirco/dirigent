@@ -54,6 +54,7 @@ impl Service {
         let mut threads = self.storage.lock().unwrap().list_threads()?;
         for t in &mut threads {
             t.running_since = self.runtime.running_since(&t.id);
+            t.jobs = self.runtime.jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
             t.workspace_missing = t.workspace.as_deref().is_some_and(|w| !Path::new(w).is_dir());
         }
@@ -525,6 +526,7 @@ impl Service {
                 }
                 self.push_threads();
             }
+            RuntimeMessage::Jobs { .. } => self.push_threads(),
             RuntimeMessage::Error { thread_id, message } => {
                 eprintln!("[service] runtime error {thread_id:?}: {message}");
                 // A prompt that failed before pi started (unknown model, nix shell) never settles.
