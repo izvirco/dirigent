@@ -1,8 +1,8 @@
-//! The orchestration panel: split off the pane's right like the work log (same hairline,
+//! The lineage panel: split off the pane's right like the work log (same hairline,
 //! handle and width; one of the two at a time), it shows the open thread's family tree
 //! (`lineage`: the topmost ancestor down through every sub-agent; the working ones bright,
 //! the rest dim; a click opens a thread). Open by default while there is something to
-//! show; the panel switcher (`thread::panel_switch`) toggles it.
+//! show; the header's `Lineage` tab toggles it.
 
 use crate::app::Dirigent;
 use crate::theme::{self, Status};
@@ -52,7 +52,7 @@ fn descend<'a>(threads: &'a [ThreadSummary], node: LineageNode<'a>, out: &mut Ve
 }
 
 pub fn panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
-    if !this.orchestra_open() {
+    if !this.lineage_open() {
         return None;
     }
     let open = this.open()?;
@@ -71,7 +71,7 @@ pub fn panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
             .child("Sub-agents this thread spawns show up here.")
             .into_any_element(),
     };
-    Some(side_panel("Agents", body, this, cx))
+    Some(side_panel(body, this, cx))
 }
 
 /// The family tree, when the thread has any relations.

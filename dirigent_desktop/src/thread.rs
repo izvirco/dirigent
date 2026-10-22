@@ -75,6 +75,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (h4, i4) = (host.clone(), id.clone());
     let snoozed = status == Status::Snoozed;
     let pinned = this.pinned(&host, &id);
+    let log_on = t.log.is_some();
+    let lineage_on = this.lineage_open();
     let workspace = summary.as_ref().and_then(|s| s.workspace.clone());
     let confirm_open = this.menu == Some(Menu::ConfirmDelete);
     let confirm = confirm_open.then(|| {
@@ -121,18 +123,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .items_center()
         .gap_1()
         .font_weight(FontWeight::NORMAL)
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .mr_2()
-                .text_size(px(12.))
-                .text_color(rgba(theme::t().fg_1))
-                .child(status.glyph())
-                .child(status.label()),
-        )
         .when(matches!(status, Status::Asking | Status::Done | Status::Snoozed), |d| {
             // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
             d.child(theme::tinted_icon_button(
@@ -159,6 +149,17 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             theme::icon_button("hdr-delete", "trash-2", cx, |this, cx| this.toggle_menu(Menu::ConfirmDelete, cx))
                 .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
                 .children(confirm),
+        )
+        // The side panels' tabs, outermost: the open one closes its panel, the other swaps to it.
+        .child(
+            div()
+                .ml_2()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .child(theme::tab("Work log", log_on, cx, |this, cx| this.toggle_last_log(cx)))
+                .child(theme::tab("Lineage", lineage_on, cx, |this, cx| this.toggle_lineage(cx))),
         )
         .into_any_element();
 
@@ -237,8 +238,13 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
             .child(p.name.clone().unwrap_or_else(|| "Untitled".into()))
     });
-    let crumb =
-        div().flex().flex_row().items_center().min_w_0().child(breadcrumb(project, parent, title, pinned, titling, cx)).children(branch);
+    let crumb = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w_0()
+        .child(breadcrumb(project, parent, Some(status), title, pinned, titling, cx))
+        .children(branch);
     pane.child(header(crumb, Some(actions))).child(
         div()
             .relative()
@@ -248,26 +254,14 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .flex_row()
             .child(column)
             .children(log_panel(this, cx))
-            .children(crate::orchestra::panel(this, cx))
-            .child(panel_switch(this, cx)),
+            .children(crate::orchestra::panel(this, cx)),
     )
 }
 
 /// A panel split off the pane's right by a hairline, `log_width` wide, with a drag handle
-/// on its left edge: the work log and the orchestration panel are both built on it. Its
-/// title row leaves room on the right for the switcher, which `render` draws over the
-/// same spot whether a panel is open or not (`panel_switch`).
-pub fn side_panel(title: &'static str, body: impl IntoElement, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let title = div()
-        .flex()
-        .items_center()
-        .h(px(SWITCH_ROW))
-        .pl_4()
-        .pr(px(SWITCH_W))
-        .flex_shrink_0()
-        .text_size(px(12.))
-        .text_color(rgba(theme::t().fg_2))
-        .child(title);
+/// on its left edge: the work log and the lineage panel are both built on it. Untitled:
+/// the header's tab for it is lit.
+pub fn side_panel(body: impl IntoElement, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let handle = div()
         .id("panel-resize")
         .absolute()
@@ -287,41 +281,8 @@ pub fn side_panel(title: &'static str, body: impl IntoElement, this: &Dirigent, 
         .border_color(rgba(theme::t().line_soft))
         .flex()
         .flex_col()
-        .child(title)
         .child(body)
         .child(handle)
-}
-
-/// Height of the panels' title row, which the switcher sits in.
-const SWITCH_ROW: f32 = 32.;
-/// Width the switcher takes on that row's right: two 26px buttons, a gap, the padding.
-const SWITCH_W: f32 = 68.;
-
-/// The two panel buttons: work log, agents. The open one is lit and closes
-/// its panel when clicked; the other opens (swaps to) its own. Pinned to the pane's
-/// top-right corner under the header, i.e. where the panels' title row is, so it stays
-/// put whether a panel is open or not.
-pub fn panel_switch(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let t = theme::t();
-    let log_on = this.open().is_some_and(|o| o.log.is_some());
-    let agents_on = this.orchestra_open();
-    let lit = |on: bool| if on { t.accent_ink } else { t.fg_1 };
-    div()
-        .absolute()
-        .top(px((SWITCH_ROW - 26.) / 2.))
-        .right_2()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .child(
-            theme::tinted_icon_button("panel-log", "list", lit(log_on), cx, |this, cx| this.toggle_last_log(cx))
-                .when(log_on, |d| d.bg(rgba(t.hover))),
-        )
-        .child(
-            theme::tinted_icon_button("panel-agents", "git-fork", lit(agents_on), cx, |this, cx| this.toggle_orchestra(cx))
-                .when(agents_on, |d| d.bg(rgba(t.hover))),
-        )
 }
 
 /// A workspace's name is its directory's basename: the host names the directory, the git
@@ -1658,7 +1619,7 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         }),
     );
     let body = steps.flex_1().w_full().text_size(px(STEP_SIZE)).line_height(px(19.));
-    Some(side_panel("Work log", body, this, cx))
+    Some(side_panel(body, this, cx))
 }
 
 /// One step of the shown work as a log list item; a placeholder while it has none.

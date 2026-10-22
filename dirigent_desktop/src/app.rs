@@ -90,9 +90,9 @@ pub struct OpenThread {
     center_on: Option<(usize, u8)>,
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
-    /// The orchestration panel (`orchestra.rs`): the user's choice, or `None` for the
-    /// default (open while the thread has a family; see `orchestra_open`).
-    pub orchestra: Option<bool>,
+    /// The lineage panel (`orchestra.rs`): the user's choice, or `None` for the
+    /// default (open while the thread has a family; see `lineage_open`).
+    pub lineage: Option<bool>,
 }
 
 /// The user's answers in progress to one `ask_user` call: the picked option indices and
@@ -1007,7 +1007,7 @@ impl Dirigent {
             stats_hover: false,
             center_on: None,
             asks: vec![],
-            orchestra: None,
+            lineage: None,
         }));
         self.set_pane(pane, cx);
         self.menu = None;
@@ -1449,25 +1449,25 @@ impl Dirigent {
         );
     }
 
-    // ---- orchestration panel ----
+    // ---- lineage panel ----
 
-    /// Whether the orchestration panel is on the pane's right: the work log takes the
+    /// Whether the lineage panel is on the pane's right: the work log takes the
     /// spot when it is open; else the user's choice, else whenever there is something to
     /// show (a family).
-    pub fn orchestra_open(&self) -> bool {
+    pub fn lineage_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
         if t.log.is_some() {
             return false;
         }
-        t.orchestra.unwrap_or_else(|| !self.lineage(&t.host, &t.id).is_empty())
+        t.lineage.unwrap_or_else(|| !self.lineage(&t.host, &t.id).is_empty())
     }
 
-    /// The panel's agents button: show the orchestration panel (closing the log), or hide
-    /// it if it is the one showing.
-    pub fn toggle_orchestra(&mut self, cx: &mut Context<Self>) {
-        let open = self.orchestra_open();
+    /// The header's `Lineage` tab: show the lineage panel (closing the log), or hide it
+    /// if it is the one showing.
+    pub fn toggle_lineage(&mut self, cx: &mut Context<Self>) {
+        let open = self.lineage_open();
         if let Pane::Thread(t) = &mut self.pane {
-            t.orchestra = Some(!open);
+            t.lineage = Some(!open);
             if !open {
                 t.log = None;
             }
@@ -2238,7 +2238,7 @@ impl Dirigent {
         self.toggle_last_log(cx);
     }
 
-    /// The panel's log button: close the log, or open it on the run in progress, else the last work.
+    /// The header's `Work log` tab: close the log, or open it on the run in progress, else the last work.
     pub fn toggle_last_log(&mut self, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &self.pane else { return };
         let key = match t.log {

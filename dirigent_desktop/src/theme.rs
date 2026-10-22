@@ -252,17 +252,6 @@ impl Status {
         matches!(self, Status::Working | Status::Waiting)
     }
 
-    pub fn label(self) -> &'static str {
-        match self {
-            Status::Working => "Working",
-            Status::Waiting => "Waiting",
-            Status::Asking => "Asking",
-            Status::Done => "Done",
-            Status::Snoozed => "Snoozed",
-            Status::Archived => "Archived",
-        }
-    }
-
     /// The status glyph: a still accent dot while working (no spinners), an hourglass
     /// while waiting on sub-agents, an amber question mark while asking, a check when
     /// done, an amber moon while snoozed, an archive box when archived.
@@ -334,6 +323,30 @@ pub fn tinted_icon_button(
         .hover(|d| d.bg(rgba(t().hover)))
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
         .child(icon(name, color))
+}
+
+/// A text tab in a header: the settings pages' Config / Hosts / Usage, a thread's panels.
+/// The active one (`on`) is bright on the hover colour.
+pub fn tab(
+    label: &'static str,
+    on: bool,
+    cx: &mut Context<Dirigent>,
+    go: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
+) -> Stateful<Div> {
+    div()
+        .id(label)
+        .h(px(24.))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgba(if on { t().fg } else { t().fg_1 }))
+        .when(on, |d| d.bg(rgba(t().hover)))
+        .hover(|d| d.text_color(rgba(t().fg)))
+        .on_click(cx.listener(move |this, _, _, cx| go(this, cx)))
+        .child(label)
 }
 
 /// A small raised button with an icon and a label (header actions).
