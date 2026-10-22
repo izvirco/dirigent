@@ -1700,11 +1700,12 @@ impl Dirigent {
         self.request_usage(cx);
     }
 
-    /// Ask every host for the window shown. Replies to older requests are ignored.
+    /// Ask every host for the window shown. Replies to older requests are ignored. The
+    /// buckets already shown stay up until each host's reply replaces them, so a refresh
+    /// of unchanged data is invisible.
     fn request_usage(&mut self, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.usage.request = Some(id);
-        self.usage.buckets.clear();
         let (since, until, bucket_ms) = (self.usage.since, self.usage.until, self.usage.bucket());
         for h in &self.hosts {
             self.net.send(&h.name, ClientMessage::ListUsage { id, since, until, bucket_ms });
