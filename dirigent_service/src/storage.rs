@@ -3,13 +3,16 @@
 //! Images are kept out of the entry JSON in a content-addressed `blobs` table (see `blobs`).
 //! `usage` is derived from the assistant messages (one row each) so spend over time is
 //! one indexed query rather than a scan of every entry's JSON. `asks` holds the model's
-//! open questions to the user (`ask_user`) until they are answered.
+//! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
+//! full-text index of every message's text (derived like `usage`, backfilled once), for
+//! `SearchThreads`. `workflow_runs` / `workflow_steps` record every workflow the host ran
+//! and what it reported.
 //!
 //! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
 //! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, Project, ThreadSummary, UsageBucket};
+use dirigent_protocol::{Ask, Entry, Project, RunStep, SearchHit, ThreadSummary, UsageBucket, WorkflowRun};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -68,6 +71,24 @@ CREATE TABLE IF NOT EXISTS asks (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (thread_id, id)
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5 (thread_id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id TEXT PRIMARY KEY,
+    project_id TEXT,
+    name TEXT NOT NULL,
+    input TEXT NOT NULL,
+    parent_id TEXT,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    exit_code INTEGER
+);
+CREATE TABLE IF NOT EXISTS workflow_steps (
+    run_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    at INTEGER NOT NULL,
+    json TEXT NOT NULL,
+    PRIMARY KEY (run_id, seq)
+);
 ";
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
@@ -76,7 +97,26 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "tools", "TEXT"),
     // The thread's isolated workspace directory (see `vcs`), while attached.
     ("threads", "workspace", "TEXT"),
+    // The thread that spawned this one as a sub-agent (`dirigent` tool), if any.
+    ("threads", "parent_id", "TEXT"),
+    // The workflow run that spawned this one, if any.
+    ("threads", "run_id", "TEXT"),
+    // `updated_at` as of when the thread was snoozed; snoozed while `updated_at` hasn't moved past it.
+    ("threads", "snoozed_at", "INTEGER"),
+    // The run's planned steps (JSON list), taken before it started.
+    ("workflow_runs", "plan", "TEXT"),
 ];
+
+/// The searchable text of a message entry: user and assistant text blocks. Used both to
+/// backfill `entries_fts` once and to index each new entry, so the two can't disagree.
+const FTS_FROM_ENTRIES: &str = "
+    SELECT thread_id,
+           COALESCE(json_extract(json, '$.message.content'),
+                    (SELECT group_concat(json_extract(b.value, '$.text'), ' ')
+                     FROM json_each(json_extract(json, '$.message.content')) b
+                     WHERE json_extract(b.value, '$.type') = 'text'))
+    FROM entries
+    WHERE kind = 'message' AND json_extract(json, '$.message.role') IN ('user', 'assistant')";
 
 /// A `usage` row extracted from an assistant message entry. Used both to backfill the table
 /// from existing entries (once, when it is empty) and to add each new entry's row, so the
@@ -124,6 +164,10 @@ impl Storage {
         let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM usage)", [], |r| r.get(0))?;
         if empty {
             conn.execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES}"), [])?;
+        }
+        let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM entries_fts)", [], |r| r.get(0))?;
+        if empty {
+            conn.execute(&format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES}"), [])?;
         }
         Ok(Self { conn })
     }
@@ -192,7 +236,8 @@ impl Storage {
         }
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
-                    (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace
+                    (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
+                    t.parent_id, t.run_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -213,6 +258,9 @@ impl Storage {
                 asks: vec![],
                 workspace: r.get(11)?,
                 workspace_missing: false,
+                parent_id: r.get(12)?,
+                run_id: r.get(13)?,
+                snoozed: r.get(14)?,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -274,18 +322,115 @@ impl Storage {
         Ok(())
     }
 
+    /// Snooze as of the thread's current `updated_at` (its next run wakes it), or wake it.
+    pub fn set_snoozed(&self, id: &str, snoozed: bool) -> Result<()> {
+        let sql = if snoozed {
+            "UPDATE threads SET snoozed_at = updated_at WHERE id = ?1"
+        } else {
+            "UPDATE threads SET snoozed_at = NULL WHERE id = ?1"
+        };
+        let n = self.conn.execute(sql, [id])?;
+        anyhow::ensure!(n == 1, "no such thread");
+        Ok(())
+    }
+
+    /// The thread that spawned this one, if any.
+    pub fn thread_parent(&self, id: &str) -> Result<Option<String>> {
+        let p: Option<Option<String>> =
+            self.conn.query_row("SELECT parent_id FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(p.flatten())
+    }
+
+    /// How many ancestors the thread has (0 for a root).
+    pub fn depth(&self, id: &str) -> Result<usize> {
+        let mut depth = 0;
+        let mut cur = self.thread_parent(id)?;
+        while let Some(p) = cur {
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            cur = self.thread_parent(&p)?;
+        }
+        Ok(depth)
+    }
+
+    /// The text of the thread's last final assistant message (the reply that ended a turn),
+    /// if it came after the latest user message: an aborted run has no reply.
+    pub fn last_reply(&self, thread_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
+               AND json_extract(json, '$.message.role') = 'assistant'
+               AND json_extract(json, '$.message.stopReason') IN ('stop', 'length')
+               AND seq > (SELECT COALESCE(MAX(seq), -1) FROM entries
+                          WHERE thread_id = ?1 AND kind = 'message' AND json_extract(json, '$.message.role') = 'user')
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        let json: Option<String> = stmt.query_row([thread_id], |r| r.get(0)).optional()?;
+        let Some(json) = json else { return Ok(None) };
+        let v: Value = serde_json::from_str(&json)?;
+        let text = v.pointer("/message/content").and_then(Value::as_array).map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        Ok(text.filter(|t| !t.trim().is_empty()))
+    }
+
+    /// Full-text search: the best-matching passage per thread, best thread first. Every
+    /// word of `query` must match (as a prefix), in any message of the thread.
+    pub fn search(&self, query: &str, limit: u64) -> Result<Vec<SearchHit>> {
+        // Quote each word so punctuation in the query can't break FTS5's syntax.
+        let terms: Vec<String> = query.split_whitespace().map(|w| format!("\"{}\"*", w.replace('"', "\"\""))).collect();
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        // `snippet` can't be aggregated, so the best rows come out message by message and
+        // the first one per thread wins.
+        let mut stmt = self.conn.prepare(
+            "SELECT thread_id, snippet(entries_fts, 1, '', '', '\u{2026}', 16)
+             FROM entries_fts WHERE entries_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![terms.join(" "), (limit * 20) as i64], |r| {
+            Ok(SearchHit { thread_id: r.get(0)?, snippet: r.get::<_, String>(1)?.split_whitespace().collect::<Vec<_>>().join(" ") })
+        })?;
+        let mut hits: Vec<SearchHit> = vec![];
+        for hit in rows {
+            let hit = hit?;
+            if !hits.iter().any(|h| h.thread_id == hit.thread_id) {
+                hits.push(hit);
+            }
+            if hits.len() as u64 >= limit {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
     pub fn delete_thread(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM entries WHERE thread_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM entries_fts WHERE thread_id = ?1", [id])?;
         self.conn.execute("DELETE FROM asks WHERE thread_id = ?1", [id])?;
         let n = self.conn.execute("DELETE FROM threads WHERE id = ?1", [id])?;
         anyhow::ensure!(n == 1, "no such thread");
         Ok(())
     }
 
-    pub fn create_thread(&self, id: &str, project_id: &str, cwd: &str, now: i64) -> Result<ThreadSummary> {
+    pub fn create_thread(
+        &self,
+        id: &str,
+        project_id: &str,
+        cwd: &str,
+        parent: Option<&str>,
+        run: Option<&str>,
+        now: i64,
+    ) -> Result<ThreadSummary> {
         self.conn.execute(
-            "INSERT INTO threads (id, project_id, cwd, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![id, project_id, cwd, now],
+            "INSERT INTO threads (id, project_id, cwd, parent_id, run_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id, project_id, cwd, parent, run, now],
         )?;
         Ok(ThreadSummary {
             id: id.into(),
@@ -303,6 +448,9 @@ impl Storage {
             asks: vec![],
             workspace: None,
             workspace_missing: false,
+            parent_id: parent.map(str::to_owned),
+            run_id: run.map(str::to_owned),
+            snoozed: false,
         })
     }
 
@@ -367,6 +515,10 @@ impl Storage {
         if entry.kind == "message" {
             self.conn
                 .execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
+            self.conn.execute(
+                &format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"),
+                params![thread_id, seq],
+            )?;
         }
 
         let j = &entry.json;
@@ -420,6 +572,65 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    // ---- workflow runs ----
+
+    pub fn add_run(&self, run: &WorkflowRun) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workflow_runs (id, project_id, name, input, parent_id, started_at, plan) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                run.id,
+                run.project_id,
+                run.name,
+                run.input.to_string(),
+                run.parent_id,
+                run.started_at,
+                Value::Array(run.plan.clone()).to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn end_run(&self, id: &str, exit_code: i64, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE workflow_runs SET ended_at = ?2, exit_code = ?3 WHERE id = ?1 AND ended_at IS NULL",
+            params![id, now, exit_code],
+        )?;
+        Ok(())
+    }
+
+    /// Every run, newest first.
+    pub fn list_runs(&self) -> Result<Vec<WorkflowRun>> {
+        let mut stmt = self.conn.prepare(&format!("{RUN_SELECT} ORDER BY started_at DESC"))?;
+        let rows = stmt.query_map([], run_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn get_run(&self, id: &str) -> Result<Option<WorkflowRun>> {
+        Ok(self.conn.query_row(&format!("{RUN_SELECT} WHERE r.id = ?1"), [id], run_from_row).optional()?)
+    }
+
+    pub fn add_step(&self, run_id: &str, json: &Value, now: i64) -> Result<RunStep> {
+        let seq: i64 =
+            self.conn.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM workflow_steps WHERE run_id = ?1", [run_id], |r| r.get(0))?;
+        self.conn.execute(
+            "INSERT INTO workflow_steps (run_id, seq, at, json) VALUES (?1, ?2, ?3, ?4)",
+            params![run_id, seq, now, json.to_string()],
+        )?;
+        Ok(RunStep { seq: seq as u64, at: now, json: json.clone() })
+    }
+
+    pub fn run_steps(&self, run_id: &str) -> Result<Vec<RunStep>> {
+        let mut stmt = self.conn.prepare("SELECT seq, at, json FROM workflow_steps WHERE run_id = ?1 ORDER BY seq")?;
+        let rows = stmt.query_map([run_id], |r| {
+            Ok(RunStep {
+                seq: r.get::<_, i64>(0)? as u64,
+                at: r.get(1)?,
+                json: serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or(Value::Null),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn blob(&self, id: &str) -> Result<Option<(String, Vec<u8>)>> {
         Ok(self.conn.query_row("SELECT mime, bytes FROM blobs WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
     }
@@ -430,6 +641,29 @@ impl Storage {
             crate::blobs::inflate(e, &mut |id| self.blob(id).ok().flatten().map(|(_, bytes)| bytes));
         }
     }
+}
+
+const RUN_SELECT: &str = "SELECT r.id, r.project_id, r.name, r.input, r.parent_id, r.started_at, r.ended_at, r.exit_code,
+                                 (SELECT COUNT(*) FROM workflow_steps s WHERE s.run_id = r.id), r.plan
+                          FROM workflow_runs r";
+
+fn run_from_row(r: &rusqlite::Row) -> rusqlite::Result<WorkflowRun> {
+    Ok(WorkflowRun {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        name: r.get(2)?,
+        input: serde_json::from_str(&r.get::<_, String>(3)?).unwrap_or(Value::Null),
+        parent_id: r.get(4)?,
+        started_at: r.get(5)?,
+        ended_at: r.get(6)?,
+        exit_code: r.get(7)?,
+        steps: r.get::<_, i64>(8)? as u64,
+        plan: r
+            .get::<_, Option<String>>(9)?
+            .and_then(|p| serde_json::from_str::<Value>(&p).ok())
+            .and_then(|v| v.as_array().cloned())
+            .unwrap_or_default(),
+    })
 }
 
 /// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
@@ -480,7 +714,7 @@ mod tests {
     #[test]
     fn asks_and_tools_live_with_the_thread() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", 0).unwrap();
+        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
         assert!(s.thread_tools("t1").unwrap().is_empty());
         s.set_tools("t1", &["ask_user".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["ask_user"]);
@@ -516,7 +750,7 @@ mod tests {
     fn roundtrip_thread_and_entries() {
         let s = Storage::in_memory().unwrap();
         s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
-        s.create_thread("t1", "p1", "/x", 10).unwrap();
+        s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
         s.set_header("t1", &json!({"type":"session","id":"t1"})).unwrap();
         s.append_entry("t1", json!({"type":"model_change","id":"a","parentId":null,"provider":"anthropic","modelId":"m"}), 11).unwrap();
         let e = s
@@ -570,9 +804,88 @@ mod tests {
     }
 
     #[test]
+    fn lineage_snooze_and_search() {
+        let s = Storage::in_memory().unwrap();
+        s.create_thread("root", "p", "/x", None, None, 1).unwrap();
+        s.create_thread("kid", "p", "/x", Some("root"), None, 2).unwrap();
+        s.create_thread("grandkid", "p", "/x", Some("kid"), Some("r1"), 3).unwrap();
+        assert_eq!(s.depth("root").unwrap(), 0);
+        assert_eq!(s.depth("grandkid").unwrap(), 2);
+        assert_eq!(s.thread_parent("kid").unwrap().as_deref(), Some("root"));
+        let by_id = |s: &Storage, id: &str| s.list_threads().unwrap().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(by_id(&s, "grandkid").run_id.as_deref(), Some("r1"));
+
+        // Snoozed until the thread's next entry moves `updated_at`.
+        s.set_snoozed("root", true).unwrap();
+        assert!(by_id(&s, "root").snoozed);
+        s.append_entry("root", json!({"type":"message","id":"u","message":{"role":"user","content":"find the sqlite bug"}}), 50).unwrap();
+        assert!(!by_id(&s, "root").snoozed);
+        s.set_snoozed("root", true).unwrap();
+        s.set_snoozed("root", false).unwrap();
+        assert!(!by_id(&s, "root").snoozed);
+
+        // Search covers user and assistant text; the last final reply is what a parent reads.
+        let assistant = |id: &str, stop: &str, text: &str| json!({"type":"message","id":id,"message":{"role":"assistant","stopReason":stop,"content":[{"type":"text","text":text}]}});
+        s.append_entry("root", assistant("a1", "toolUse", "looking at storage.rs"), 51).unwrap();
+        s.append_entry("root", assistant("a2", "stop", "The bug is a missing index on usage.at"), 52).unwrap();
+        s.append_entry(
+            "kid",
+            json!({"type":"message","id":"k","message":{"role":"user","content":[{"type":"text","text":"write docs"}]}}),
+            53,
+        )
+        .unwrap();
+        assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
+        assert_eq!(s.last_reply("kid").unwrap(), None);
+        // A new prompt without a reply yet (or aborted): no reply to report.
+        s.append_entry("root", json!({"type":"message","id":"u2","message":{"role":"user","content":"and again"}}), 54).unwrap();
+        assert_eq!(s.last_reply("root").unwrap(), None);
+        let hits = s.search("sqlite", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].thread_id, "root");
+        assert!(hits[0].snippet.contains("sqlite"));
+        assert_eq!(s.search("docs", 10).unwrap()[0].thread_id, "kid");
+        assert!(s.search("\"weird) syntax", 10).unwrap().is_empty());
+        assert_eq!(s.search("", 10).unwrap().len(), 0);
+        // The index is rebuilt from the entries when it is empty (a db from before it existed).
+        s.conn.execute("DELETE FROM entries_fts", []).unwrap();
+        let s = Storage::init(s.conn).unwrap();
+        assert_eq!(s.search("index", 10).unwrap()[0].thread_id, "root");
+        s.delete_thread("root").unwrap();
+        assert!(s.search("index", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn workflow_runs_and_steps() {
+        let s = Storage::in_memory().unwrap();
+        let run = WorkflowRun {
+            id: "r1".into(),
+            project_id: Some("p".into()),
+            name: "review".into(),
+            input: json!({"pr": 4}),
+            parent_id: Some("t".into()),
+            started_at: 10,
+            ended_at: None,
+            exit_code: None,
+            steps: 0,
+            plan: vec![json!({"kind":"start"}), json!({"kind":"finish"})],
+        };
+        s.add_run(&run).unwrap();
+        assert_eq!(s.get_run("r1").unwrap(), Some(run.clone()));
+        let step = s.add_step("r1", &json!({"kind":"log","text":"hi"}), 11).unwrap();
+        assert_eq!(step.seq, 0);
+        assert_eq!(s.add_step("r1", &json!({"kind":"spawn"}), 12).unwrap().seq, 1);
+        assert_eq!(s.run_steps("r1").unwrap().len(), 2);
+        s.end_run("r1", 0, 20).unwrap();
+        let got = s.list_runs().unwrap();
+        assert_eq!((got[0].ended_at, got[0].exit_code, got[0].steps), (Some(20), Some(0), 2));
+        assert!(!got[0].running());
+        assert!(s.get_run("nope").unwrap().is_none());
+    }
+
+    #[test]
     fn usage_is_bucketed_per_model() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", 0).unwrap();
+        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
         let assistant = |at: i64, model: &str, input: u64, cost: f64| {
             json!({"type":"message","id":"x","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,
                 "usage":{"input":input,"output":10,"cacheRead":100,"cacheWrite":5,"totalTokens":0,"cost":{"total":cost}}}})

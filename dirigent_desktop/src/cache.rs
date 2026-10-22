@@ -1,8 +1,8 @@
 //! Local sqlite cache so the UI renders instantly before any host answers.
 //! Same shape as the service db plus a `host` column. Hosts are the source of truth;
 //! everything here is overwritten whenever fresh data arrives. The only desktop-owned
-//! data is `links` (manual project links), `seen` (unread tracking), `snoozed` (threads
-//! hidden from the sidebar until their next run), `pinned` (threads kept on top of their
+//! data is `links` (manual project links), `seen` (unread tracking), `snoozed` (legacy:
+//! snoozes from before the hosts kept them, handed over once), `pinned` (threads kept on top of their
 //! list), `pins` (pinned messages), `drafts` / `draft_images` (what the composer holds per
 //! thread; the new-thread draft is the row with an empty host and thread id) and `kv`
 //! (last used cwd/model/...).
@@ -55,7 +55,12 @@ pub type DraftImage = (u32, String, Vec<u8>);
 const PER_THREAD: [&str; 4] = ["entries", "pins", "drafts", "draft_images"];
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
-const COLUMNS: &[(&str, &str, &str)] = &[("threads", "workspace", "TEXT")];
+const COLUMNS: &[(&str, &str, &str)] = &[
+    ("threads", "workspace", "TEXT"),
+    ("threads", "parent_id", "TEXT"),
+    ("threads", "run_id", "TEXT"),
+    ("threads", "snoozed", "INTEGER NOT NULL DEFAULT 0"),
+];
 
 /// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
 fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
@@ -140,7 +145,8 @@ impl Cache {
 
     pub fn threads(&self, host: &str) -> Result<Vec<ThreadSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace
+            "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace,
+                    parent_id, run_id, snoozed
              FROM threads WHERE host = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([host], |r| {
@@ -160,6 +166,9 @@ impl Cache {
                 asks: vec![],
                 workspace: r.get(11)?,
                 workspace_missing: false,
+                parent_id: r.get(12)?,
+                run_id: r.get(13)?,
+                snoozed: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -172,9 +181,9 @@ impl Cache {
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
         for t in threads {
             tx.execute(
-                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
-                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace],
+                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, run_id, snoozed)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.run_id, t.snoozed],
             )?;
         }
         for table in PER_THREAD {
@@ -253,21 +262,16 @@ impl Cache {
         Ok(())
     }
 
-    /// The `updated_at` of every snoozed thread as of when it was snoozed.
-    pub fn snoozed(&self) -> Result<Vec<(String, String, i64)>> {
-        let mut stmt = self.conn.prepare("SELECT host, thread_id, updated_at FROM snoozed")?;
-        Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
-    }
-
-    /// `Some(updated_at)` snoozes the thread as of that update, `None` wakes it.
-    pub fn set_snoozed(&self, host: &str, thread_id: &str, updated_at: Option<i64>) -> Result<()> {
-        match updated_at {
-            Some(u) => self
-                .conn
-                .execute("INSERT OR REPLACE INTO snoozed (host, thread_id, updated_at) VALUES (?1, ?2, ?3)", params![host, thread_id, u])?,
-            None => self.conn.execute("DELETE FROM snoozed WHERE host = ?1 AND thread_id = ?2", params![host, thread_id])?,
-        };
-        Ok(())
+    /// Snoozes from before snooze moved to the hosts: the threads of `host` still snoozed by
+    /// the old rule (not updated since), handed over to the host once and then forgotten.
+    pub fn take_legacy_snoozes(&self, host: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.thread_id FROM snoozed s JOIN threads t ON t.host = s.host AND t.id = s.thread_id
+             WHERE s.host = ?1 AND t.updated_at <= s.updated_at",
+        )?;
+        let ids = stmt.query_map([host], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        self.conn.execute("DELETE FROM snoozed WHERE host = ?1", [host])?;
+        Ok(ids)
     }
 
     /// Every pinned thread.
@@ -394,7 +398,24 @@ mod tests {
             asks: vec![],
             workspace: None,
             workspace_missing: false,
+            parent_id: None,
+            run_id: None,
+            snoozed: false,
         }
+    }
+
+    #[test]
+    fn legacy_snoozes_are_handed_over_once() {
+        let mut cache = Cache::in_memory().unwrap();
+        let mut t = thread("t");
+        t.updated_at = 5;
+        let mut u = thread("u");
+        u.updated_at = 9;
+        cache.set_threads("h", &[t, u]).unwrap();
+        cache.conn.execute("INSERT INTO snoozed VALUES ('h', 't', 5), ('h', 'u', 7), ('h', 'gone', 1)", []).unwrap();
+        // `u` ran since it was snoozed, `gone` is no longer listed: only `t` is still snoozed.
+        assert_eq!(cache.take_legacy_snoozes("h").unwrap(), vec!["t".to_owned()]);
+        assert!(cache.take_legacy_snoozes("h").unwrap().is_empty());
     }
 
     #[test]

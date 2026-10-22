@@ -1,8 +1,11 @@
 // Dirigent's own tools: `async_bash` runs a command in the background and tells the model
-// when it ends; `ask_user` puts questions in front of the user as a form in the desktop.
-// Both return at once. The outcome reaches the model later as a custom message through
+// when it ends; `ask_user` puts questions in front of the user as a form in the desktop;
+// `dirigent` is the orchestrator: spawn sub-agent threads, message / read / find / manage
+// threads on this host, open one for the user, and run the project's workflows. All of
+// them return at once. The outcome reaches the model later as a custom message through
 // pi's steer / follow-up queues, which also wakes an idle agent for a new turn. A job picks
-// how it interrupts (`notify`); the user's answers are user input and always steer.
+// how it interrupts (`notify`); the user's answers are user input and always steer; a
+// sub-agent or workflow ending is delivered by the service (`deliverNotice`).
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
@@ -14,8 +17,9 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { Client, Dirigent, describeThread } from "./client";
 
-export const TOOL_NAMES = ["async_bash", "ask_user"] as const;
+export const TOOL_NAMES = ["async_bash", "ask_user", "dirigent"] as const;
 
 /** When a notice reaches the model: after the current tool batch, or once it is idle. */
 export type Notify = "asap" | "when_idle";
@@ -115,7 +119,77 @@ const askUserParams = Type.Object({
   ),
 });
 
-/** The two tools, bound to `host`. Both are registered on every session; `tools` picks the active ones. */
+const dirigentParams = Type.Object({
+  action: Type.Union(
+    [
+      Type.Literal("spawn"),
+      Type.Literal("send"),
+      Type.Literal("read"),
+      Type.Literal("status"),
+      Type.Literal("search"),
+      Type.Literal("archive"),
+      Type.Literal("snooze"),
+      Type.Literal("abort"),
+      Type.Literal("open"),
+      Type.Literal("workflows"),
+      Type.Literal("run_workflow"),
+    ],
+    {
+      description:
+        "spawn: a sub-agent thread for `task` (you are told when it finishes, with its reply). " +
+        "send: message `thread_id` (`text`; a new turn if idle, else a steer or follow_up). " +
+        "read: a thread's final reply (`full` for the whole conversation). " +
+        "status: your sub-agents and workflow runs, or one `thread_id` / `run_id`. " +
+        "search: threads whose messages contain `query`. " +
+        "archive / snooze / abort / open (in the user's desktop): act on `thread_id`. " +
+        "workflows: the project's workflows and how to write one. " +
+        "run_workflow: start `name` with `input`; you are told when it ends.",
+    },
+  ),
+  thread_id: Type.Optional(Type.String()),
+  run_id: Type.Optional(Type.String()),
+  task: Type.Optional(Type.String({ description: "spawn: the sub-agent's full prompt." })),
+  text: Type.Optional(Type.String({ description: "send: the message." })),
+  mode: Type.Optional(
+    Type.Union([Type.Literal("steer"), Type.Literal("follow_up")], {
+      description:
+        "send, when the thread is running: interrupt it (steer, default) or wait for its turn to end.",
+    }),
+  ),
+  model: Type.Optional(
+    Type.String({ description: "spawn: `provider/id`; default: your own model." }),
+  ),
+  effort: Type.Optional(Type.String({ description: "spawn: thinking level; default: your own." })),
+  workspace: Type.Optional(
+    Type.Boolean({
+      description:
+        "spawn: give it its own git worktree / jj workspace (from `base`, default HEAD) instead of your directory. Use it when sub-agents edit files in parallel.",
+    }),
+  ),
+  base: Type.Optional(Type.String()),
+  query: Type.Optional(Type.String()),
+  limit: Type.Optional(Type.Number()),
+  full: Type.Optional(Type.Boolean()),
+  archived: Type.Optional(Type.Boolean({ description: "archive: false to unarchive." })),
+  snoozed: Type.Optional(Type.Boolean({ description: "snooze: false to wake." })),
+  name: Type.Optional(Type.String({ description: "run_workflow: the workflow's name." })),
+  input: Type.Optional(
+    Type.Record(Type.String(), Type.Unknown(), { description: "run_workflow: its inputs." }),
+  ),
+});
+
+/** One connection to the service for the whole runtime, made on first use and remade if it drops. */
+let shared: Promise<Client> | undefined;
+async function serviceClient(): Promise<Client> {
+  if (shared) {
+    const c = await shared.catch(() => undefined);
+    if (c?.alive) return c;
+  }
+  shared = Client.connect();
+  return shared;
+}
+
+/** The three tools, bound to `host`. All are registered on every session; `tools` picks the active ones. */
 export function createTools(host: ToolHost): ToolDefinition[] {
   const asyncBash = defineTool({
     name: "async_bash",
@@ -162,7 +236,157 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     },
   });
 
-  return [asyncBash as ToolDefinition, askUser as ToolDefinition];
+  const dirigent = defineTool({
+    name: "dirigent",
+    label: "Dirigent",
+    description:
+      "Orchestrate threads on this host. Spawn sub-agents (each a thread of its own, started in your " +
+      "directory with your model unless told otherwise) and carry on; when one finishes you get a message " +
+      "with its reply, so end your turn to wait or keep working meanwhile. Message, read, find, archive, " +
+      "snooze or abort any thread, open one for the user, and list or run the project's workflows " +
+      "(deterministic scripts in .dirigent/workflows that drive this same API).",
+    promptSnippet: "Spawn and manage sub-agent threads, find threads, run workflows",
+    parameters: dirigentParams,
+    async execute(_id, p) {
+      const d = new Dirigent(await serviceClient(), { threadId: host.threadId });
+      const need = (v: string | undefined, what: string) => {
+        if (!v) throw new Error(`\`${what}\` is required for ${p.action}`);
+        return v;
+      };
+      switch (p.action) {
+        case "spawn": {
+          const id = await d.spawn({
+            task: need(p.task, "task"),
+            model: p.model,
+            effort: p.effort,
+            workspace: p.workspace,
+            base: p.base,
+          });
+          return text(
+            `Spawned sub-agent thread ${id}. You will get a message with its reply when it finishes; ` +
+              `use status / read to look in on it, send to steer it.`,
+          );
+        }
+        case "send": {
+          await d.send(need(p.thread_id, "thread_id"), need(p.text, "text"), p.mode);
+          return text(`Sent to ${p.thread_id}.`);
+        }
+        case "read": {
+          const r = await d.read(need(p.thread_id, "thread_id"), p.full);
+          const body = p.full ? (r.transcript ?? "(empty)") : (r.reply ?? "(no final reply yet)");
+          return text(`${describeThread(r.thread)}\n\n${body}`);
+        }
+        case "status": {
+          if (p.run_id) {
+            const run = (await d.runs()).find((r) => r.id === p.run_id);
+            if (!run) throw new Error(`no run ${p.run_id}`);
+            return text(describeRun(run));
+          }
+          const threads = await d.threads();
+          if (p.thread_id) {
+            const t = threads.find((t) => t.id === p.thread_id);
+            if (!t) throw new Error(`no thread ${p.thread_id}`);
+            return text(describeThread(t));
+          }
+          const kids = threads.filter((t) => t.parent_id === host.threadId);
+          const runs = (await d.runs()).filter((r) => r.parent_id === host.threadId);
+          const lines = [
+            `You are thread ${host.threadId}.`,
+            kids.length
+              ? `Sub-agents:\n${kids.map((t) => describeThread(t)).join("\n")}`
+              : "No sub-agents.",
+            runs.length ? `Workflow runs:\n${runs.map(describeRun).join("\n")}` : "",
+          ];
+          return text(lines.filter(Boolean).join("\n"));
+        }
+        case "search": {
+          const hits = await d.search(need(p.query, "query"), p.limit ?? 10);
+          if (hits.length === 0) return text("No thread matches.");
+          return text(
+            hits
+              .map(
+                (h) =>
+                  `${h.thread ? describeThread(h.thread) : `- ${h.thread_id}`}\n    \u2026${h.snippet}\u2026`,
+              )
+              .join("\n"),
+          );
+        }
+        case "archive":
+          await d.archive(need(p.thread_id, "thread_id"), p.archived ?? true);
+          return text(`${p.archived === false ? "Unarchived" : "Archived"} ${p.thread_id}.`);
+        case "snooze":
+          await d.snooze(need(p.thread_id, "thread_id"), p.snoozed ?? true);
+          return text(`${p.snoozed === false ? "Woke" : "Snoozed"} ${p.thread_id}.`);
+        case "abort":
+          await d.abort(need(p.thread_id, "thread_id"));
+          return text(`Aborted ${p.thread_id}.`);
+        case "open":
+          await d.open(need(p.thread_id, "thread_id"));
+          return text(`Opened ${p.thread_id} for the user.`);
+        case "workflows": {
+          const list = await d.workflows();
+          const lines = list.map((w) =>
+            w.error
+              ? `- ${w.name} (${w.path}): broken: ${w.error}`
+              : `- ${w.name}: ${w.description || "(no description)"}` +
+                (w.input.length
+                  ? `\n    input: ${w.input.map((i) => `${i.name}: ${i.kind}${i.default !== undefined ? ` = ${JSON.stringify(i.default)}` : ""}${i.description ? ` (${i.description})` : ""}`).join(", ")}`
+                  : ""),
+          );
+          return text(
+            `${list.length ? lines.join("\n") : "No workflows yet."}\n\n${WORKFLOW_HOWTO}`,
+          );
+        }
+        case "run_workflow": {
+          const run = await d.runWorkflow(need(p.name, "name"), p.input ?? {});
+          return text(
+            `Started workflow ${run.name} (run ${run.id}). You will get a message when it ends; status with run_id to look in on it.`,
+          );
+        }
+      }
+    },
+  });
+
+  return [asyncBash as ToolDefinition, askUser as ToolDefinition, dirigent as ToolDefinition];
+}
+
+/** Shown by the `workflows` action: the file format, with the SDK's real path for types. */
+const WORKFLOW_HOWTO = `To add a workflow, write <project>/.dirigent/workflows/<name>.ts:
+
+  import type { WorkflowDef } from "${import.meta.dir}/workflow";
+  export default {
+    description: "Review a pull request with two agents",
+    input: { pr: { type: "number", description: "PR number" } },
+    async run(d, input) {
+      const a = await d.spawn({ task: \`Review PR \${input.pr} for bugs\` });
+      const b = await d.spawn({ task: \`Review PR \${input.pr} for style\`, model: "anthropic/claude-haiku-5-5" });
+      await d.wait([a, b]);
+      const [ra, rb] = await Promise.all([d.read(a), d.read(b)]);
+      await d.log(\`bugs: \${ra.reply}\\nstyle: \${rb.reply}\`);
+      return { bugs: ra.reply, style: rb.reply };
+    },
+  } satisfies WorkflowDef<{ pr: number }>;
+
+\`d\` has: spawn({task, model?, effort?, workspace?, base?}) \u2192 thread id; send(id, text, mode?); read(id, full?) \u2192 {reply, transcript?};
+wait(ids, timeoutMs?) \u2192 summaries once idle; search(query); archive(id); snooze(id); abort(id); open(id); runWorkflow(name, input);
+waitRun(runId); log(text). Every call is a step in the run's trace. Keep the script deterministic: the agents vary, the orchestration shouldn't.
+Run it with run_workflow, or from the desktop's Workflows page.`;
+
+function describeRun(r: {
+  id: string;
+  name: string;
+  started_at: number;
+  ended_at: number | null;
+  exit_code: number | null;
+  steps: number;
+}): string {
+  const state =
+    r.ended_at == null
+      ? `running ${duration(Date.now() - r.started_at)}`
+      : r.exit_code === 0
+        ? `succeeded in ${duration(r.ended_at - r.started_at)}`
+        : `failed (exit ${r.exit_code}) after ${duration(r.ended_at - r.started_at)}`;
+  return `- run ${r.id} workflow ${r.name} [${state}] ${r.steps} steps`;
 }
 
 /**
@@ -190,6 +414,17 @@ export function deliverAnswers(
     details: { ask_id: ask.id, questions: ask.questions, answers },
     notify: "asap",
   });
+}
+
+/** The service's notice (a sub-agent or workflow run ended): hand it to the model. */
+export function deliverNotice(
+  host: ToolHost,
+  customType: string,
+  content: string,
+  details: Record<string, unknown>,
+  notify: Notify,
+): Promise<void> {
+  return deliver(host, `${customType}-${shortId()}`, { customType, content, details, notify });
 }
 
 /** Pi's `clearQueue` (used by `cancelQueued`) drops queued custom messages too: queue ours again. */

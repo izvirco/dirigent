@@ -360,6 +360,13 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 "ask_user",
                 switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx)),
                 Some("Lets the agent put questions to you as a form; the thread shows as Asking until you answer."),
+            ))
+            .child(row(
+                "dirigent",
+                switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx)),
+                Some(
+                    "The orchestrator: spawn sub-agent threads, message and read threads, find and open them, run the project's workflows.",
+                ),
             )),
     )
 }

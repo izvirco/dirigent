@@ -10,6 +10,7 @@ mod lists;
 mod markdown;
 mod menu;
 mod net;
+mod orchestra;
 mod picker;
 mod projects;
 mod ruler;

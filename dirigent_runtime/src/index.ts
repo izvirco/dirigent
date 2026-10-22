@@ -2,7 +2,7 @@
 // stdout is protocol only; logs go to stderr. EOF on stdin = shutdown.
 
 import { Sessions, type TitleGen } from "./sessions";
-import type { Ask } from "./tools";
+import type { Ask, Notify } from "./tools";
 
 type Inbound =
   | {
@@ -27,6 +27,14 @@ type Inbound =
       tools?: string[];
     }
   | { type: "answer"; thread_id: string; ask: Ask; answers: string[][] | null }
+  | {
+      type: "notify";
+      thread_id: string;
+      custom_type: string;
+      content: string;
+      details: Record<string, unknown>;
+      notify: Notify;
+    }
   | { type: "abort"; thread_id: string }
   | { type: "cancel_queued"; thread_id: string; text: string }
   | { type: "list_models" }
@@ -61,6 +69,8 @@ async function handle(msg: Inbound): Promise<void> {
       );
     case "answer":
       return sessions.answer(msg.thread_id, msg.ask, msg.answers);
+    case "notify":
+      return sessions.notify(msg.thread_id, msg.custom_type, msg.content, msg.details, msg.notify);
     case "abort":
       return sessions.abort(msg.thread_id);
     case "cancel_queued":

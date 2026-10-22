@@ -85,7 +85,8 @@ pub fn groups(hosts: &[HostState], links: &Links, order: &[String]) -> (Vec<Grou
 
     let mut orphans = vec![];
     for host in hosts {
-        for thread in &host.threads {
+        // Sub-agents are listed under their parent (the orchestration panel), not here.
+        for thread in host.threads.iter().filter(|t| t.top_level()) {
             let key = thread
                 .project_id
                 .as_ref()
@@ -139,6 +140,9 @@ mod tests {
             archived: false,
             workspace: None,
             workspace_missing: false,
+            parent_id: None,
+            run_id: None,
+            snoozed: false,
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

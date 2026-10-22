@@ -214,16 +214,20 @@ pub struct Fonts {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status {
     Working,
+    /// Idle, but with sub-agents still working for it (derived from the thread list, see
+    /// `Dirigent::status`): their replies will wake it.
+    Waiting,
     /// Finished its turn with `ask_user` questions open: the user is the blocker.
     Asking,
     Done,
-    /// Done, but snoozed out of the inbox (desktop-side, see `Dirigent::status`).
+    /// Done, but snoozed out of the sidebar until its next run.
     Snoozed,
     Archived,
 }
 
 impl Status {
-    /// Status from the host's view of the thread; never `Snoozed`, that's desktop state.
+    /// Status from the host's view of the thread alone; `Waiting` needs the other threads
+    /// (`Dirigent::status`).
     pub fn of(t: &ThreadSummary) -> Self {
         if t.running() {
             Status::Working
@@ -231,19 +235,27 @@ impl Status {
             Status::Archived
         } else if t.asking() {
             Status::Asking
+        } else if t.snoozed {
+            Status::Snoozed
         } else {
             Status::Done
         }
     }
 
-    /// Waiting on the user, one way or the other: what the Inbox lists.
+    /// Waiting on the user, one way or the other: what the Inbox lists (snoozed ones too).
     pub fn finished(self) -> bool {
-        matches!(self, Status::Asking | Status::Done)
+        matches!(self, Status::Asking | Status::Done | Status::Snoozed)
+    }
+
+    /// An agent is at it, directly or through sub-agents: what the Workpool lists.
+    pub fn busy(self) -> bool {
+        matches!(self, Status::Working | Status::Waiting)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Status::Working => "Working",
+            Status::Waiting => "Waiting",
             Status::Asking => "Asking",
             Status::Done => "Done",
             Status::Snoozed => "Snoozed",
@@ -251,13 +263,14 @@ impl Status {
         }
     }
 
-    /// The status glyph: a still accent dot while working (no spinners), an amber question
-    /// mark while asking, a check when done, an amber moon while snoozed, an archive box
-    /// when archived.
+    /// The status glyph: a still accent dot while working (no spinners), an hourglass
+    /// while waiting on sub-agents, an amber question mark while asking, a check when
+    /// done, an amber moon while snoozed, an archive box when archived.
     pub fn glyph(self) -> AnyElement {
         let t = t();
         match self {
             Status::Working => div().size(px(16.)).flex().items_center().justify_center().child(dot(t.working)).into_any_element(),
+            Status::Waiting => icon("hourglass", t.working).into_any_element(),
             Status::Asking => icon("circle-help", t.warn).into_any_element(),
             Status::Done => icon("circle-check", t.done).into_any_element(),
             Status::Snoozed => icon("moon", t.warn).into_any_element(),

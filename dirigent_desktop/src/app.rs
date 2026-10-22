@@ -12,7 +12,9 @@ use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
-use dirigent_protocol::{Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs};
+use dirigent_protocol::{
+    Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, RunStep, ServerMessage, ThreadSummary, TitleGen, Vcs, WorkflowRun,
+};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
@@ -89,6 +91,9 @@ pub struct OpenThread {
     center_on: Option<(usize, u8)>,
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
+    /// The orchestration panel (`orchestra.rs`): the user's choice, or `None` for the
+    /// default (open while the thread has sub-agents or runs; see `orchestra_open`).
+    pub orchestra: Option<bool>,
 }
 
 /// The user's answers in progress to one `ask_user` call: the picked option indices and
@@ -158,6 +163,12 @@ pub fn default_base(vcs: Vcs) -> &'static str {
         Vcs::Git => "HEAD",
         Vcs::Jj => "@-",
     }
+}
+
+/// One row of the sidebar's agent tree: a thread or a workflow run, `depth` levels in.
+pub enum LineageNode<'a> {
+    Thread { thread: &'a ThreadSummary, depth: usize },
+    Run { run: &'a WorkflowRun, depth: usize },
 }
 
 /// Where a new thread will run: a project on a host.
@@ -292,11 +303,15 @@ pub struct Dirigent {
     /// Per thread, its `updated_at` when the user last looked at it; a finished thread
     /// updated since (or never looked at) is unread.
     seen: HashMap<(String, String), i64>,
-    /// Per snoozed thread, its `updated_at` when the user snoozed it: hidden from the
-    /// inbox until its next run bumps `updated_at` past that.
-    snoozed: HashMap<(String, String), i64>,
     /// Threads kept on top of their status group in the inbox / project lists.
     pinned: HashSet<(String, String)>,
+    /// Every host's workflow runs, as last listed or pushed.
+    pub runs: HashMap<String, Vec<WorkflowRun>>,
+    /// Reported steps by (host, run id): fetched for the open thread's runs, appended to
+    /// from `Step` pushes.
+    run_steps: HashMap<(String, String), Vec<RunStep>>,
+    /// Runs whose fold state the user flipped (see `run_expanded`).
+    run_toggles: HashSet<String>,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     resizing: Option<Resize>,
@@ -378,7 +393,6 @@ impl Dirigent {
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let project_order = cache.get(PROJECT_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let seen = cache.seen().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
-        let snoozed = cache.snoozed().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
         let pinned = cache.pinned().unwrap_or_default().into_iter().collect();
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
@@ -441,8 +455,10 @@ impl Dirigent {
             sidebar_peek: false,
             collapsed: HashSet::new(),
             seen,
-            snoozed,
             pinned,
+            runs: HashMap::new(),
+            run_steps: HashMap::new(),
+            run_toggles: HashSet::new(),
             log_width,
             resizing: None,
             composer,
@@ -542,17 +558,22 @@ impl Dirigent {
         }
     }
 
-    /// Snoozed and not run since: hidden from the inbox.
-    pub fn snoozed(&self, host: &str, t: &ThreadSummary) -> bool {
-        self.snoozed.get(&(host.to_owned(), t.id.clone())).is_some_and(|&u| t.updated_at <= u)
-    }
-
-    /// `Status::of`, with a snoozed finished thread reported as `Snoozed`.
+    /// `Status::of`, with an idle thread whose sub-agents (or workflow runs) are still at
+    /// it reported as `Waiting`: their results will wake it.
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
         match Status::of(t) {
-            Status::Done if self.snoozed(host, t) => Status::Snoozed,
+            Status::Done if self.has_busy_children(host, &t.id) => Status::Waiting,
             s => s,
         }
+    }
+
+    /// A sub-agent (at any depth) is working, or a workflow run started by the thread is live.
+    fn has_busy_children(&self, host: &str, id: &str) -> bool {
+        let Some(h) = self.host(host) else { return false };
+        if self.runs.get(host).is_some_and(|runs| runs.iter().any(|r| r.running() && r.parent_id.as_deref() == Some(id))) {
+            return true;
+        }
+        h.threads.iter().filter(|t| t.parent_id.as_deref() == Some(id)).any(|t| t.running() || self.has_busy_children(host, &t.id))
     }
 
     pub fn pinned(&self, host: &str, thread_id: &str) -> bool {
@@ -572,8 +593,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Group rows by status (working, done, snoozed, archived) with the pinned ones first
-    /// in each group, keeping their order otherwise.
+    /// Group rows by status (working, waiting, asking, done, snoozed, archived) with the
+    /// pinned ones first in each group, keeping their order otherwise.
     fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
         rows.sort_by_key(|(h, t)| (self.status(h, t), !self.pinned(h, &t.id)));
     }
@@ -590,15 +611,14 @@ impl Dirigent {
     }
 
     /// Snooze hides a finished thread from the sidebar's inbox without archiving it; it
-    /// comes back by itself once it runs again, or when the user wakes it.
+    /// comes back by itself once it runs again, or when the user wakes it. The host keeps
+    /// it (agents can snooze too); the flag is set here ahead of its `Threads` push.
     pub fn set_snoozed(&mut self, host: &str, thread_id: &str, snoozed: bool, cx: &mut Context<Self>) {
-        let key = (host.to_owned(), thread_id.to_owned());
-        let updated_at = snoozed.then(|| self.summary(host, thread_id).map(|t| t.updated_at)).flatten();
-        match updated_at {
-            Some(u) => self.snoozed.insert(key, u),
-            None => self.snoozed.remove(&key),
-        };
-        let _ = self.cache.lock().unwrap().set_snoozed(host, thread_id, updated_at);
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::SnoozeThread { id, thread_id: thread_id.to_owned(), snoozed });
+        if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
+            t.snoozed = snoozed;
+        }
         cx.notify();
     }
 
@@ -606,13 +626,18 @@ impl Dirigent {
     /// Inbox page itself lists them all (`inbox_all`).
     pub fn inbox_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.inbox_all();
-        rows.retain(|(h, t)| !self.snoozed(h, t));
+        rows.retain(|(_, t)| !t.snoozed);
         rows
     }
 
     /// The Inbox: threads waiting on the user, the ones asking a question first.
     pub fn inbox_all(&self) -> Vec<(&str, &ThreadSummary)> {
         self.threads_where(|s| s.finished())
+    }
+
+    /// The Workpool: threads with an agent at it, directly or through sub-agents.
+    pub fn busy_threads(&self) -> Vec<(&str, &ThreadSummary)> {
+        self.threads_where(|s| s.busy())
     }
 
     /// The user is looking at this thread: whatever it has now is read.
@@ -622,23 +647,77 @@ impl Dirigent {
         let _ = self.cache.lock().unwrap().set_seen(host, id, updated_at);
     }
 
-    /// Every thread on every host, most recently updated first, with its host.
+    /// Every top-level thread on every host, most recently updated first, with its host.
+    /// Sub-agents stay out of the lists: their parent's orchestration panel is their place.
     pub fn all_threads(&self) -> Vec<(&str, &ThreadSummary)> {
-        let mut all: Vec<_> = self.hosts.iter().flat_map(|h| h.threads.iter().map(move |t| (h.name.as_str(), t))).collect();
+        let mut all: Vec<_> =
+            self.hosts.iter().flat_map(|h| h.threads.iter().filter(|t| t.top_level()).map(move |t| (h.name.as_str(), t))).collect();
         all.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
         all
     }
 
-    /// Threads with `status`, as the Inbox / Workpool list them (see `sort_as_queue`).
-    pub fn threads_with(&self, status: Status) -> Vec<(&str, &ThreadSummary)> {
-        self.threads_where(|s| s == status)
-    }
-
     fn threads_where(&self, keep: impl Fn(Status) -> bool) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.all_threads();
-        rows.retain(|(_, t)| keep(Status::of(t)));
+        rows.retain(|(h, t)| keep(self.status(h, t)));
         self.sort_as_queue(&mut rows);
         rows
+    }
+
+    /// The family of a thread, for the sidebar: from its topmost ancestor (through parents
+    /// and the runs that spawned it) down through every sub-agent, with the workflow runs a
+    /// thread started under it and the threads a run spawned under the run. Empty for a
+    /// thread with no relations.
+    pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
+        let Some(h) = self.host(host) else { return vec![] };
+        let runs = self.runs.get(host).map(Vec::as_slice).unwrap_or(&[]);
+        let known = |id: &str| h.threads.iter().any(|t| t.id == id);
+        // Up to the root: a thread's parent, or the parent of the run that spawned it.
+        let mut cur = id;
+        let mut seen = HashSet::new();
+        while seen.insert(cur) {
+            let Some(t) = h.threads.iter().find(|t| t.id == cur) else { break };
+            let up = t
+                .parent_id
+                .as_deref()
+                .or_else(|| runs.iter().find(|r| Some(r.id.as_str()) == t.run_id.as_deref()).and_then(|r| r.parent_id.as_deref()));
+            match up {
+                Some(p) if known(p) => cur = p,
+                _ => break,
+            }
+        }
+        let Some(root) = h.threads.iter().find(|t| t.id == cur) else { return vec![] };
+        let mut out = vec![];
+        // A root spawned by a run nobody started from a thread: the run is the root.
+        match runs.iter().find(|r| Some(r.id.as_str()) == root.run_id.as_deref()) {
+            Some(run) => self.lineage_run(host, run, 0, &mut out),
+            None => self.lineage_thread(host, root, 0, &mut out),
+        }
+        if out.len() == 1 { vec![] } else { out }
+    }
+
+    fn lineage_thread<'a>(&'a self, host: &str, t: &'a ThreadSummary, depth: usize, out: &mut Vec<LineageNode<'a>>) {
+        out.push(LineageNode::Thread { thread: t, depth });
+        let Some(h) = self.host(host) else { return };
+        let mut kids: Vec<_> = h.threads.iter().filter(|k| k.parent_id.as_deref() == Some(&t.id)).collect();
+        kids.sort_by_key(|k| k.created_at);
+        for kid in kids {
+            self.lineage_thread(host, kid, depth + 1, out);
+        }
+        let mut runs: Vec<_> = self.runs.get(host).into_iter().flatten().filter(|r| r.parent_id.as_deref() == Some(&t.id)).collect();
+        runs.sort_by_key(|r| r.started_at);
+        for run in runs {
+            self.lineage_run(host, run, depth + 1, out);
+        }
+    }
+
+    fn lineage_run<'a>(&'a self, host: &str, run: &'a WorkflowRun, depth: usize, out: &mut Vec<LineageNode<'a>>) {
+        out.push(LineageNode::Run { run, depth });
+        let Some(h) = self.host(host) else { return };
+        let mut kids: Vec<_> = h.threads.iter().filter(|k| k.run_id.as_deref() == Some(&run.id)).collect();
+        kids.sort_by_key(|k| k.created_at);
+        for kid in kids {
+            self.lineage_thread(host, kid, depth + 1, out);
+        }
     }
 
     /// Group key of a project, if the host still lists it.
@@ -717,6 +796,14 @@ impl Dirigent {
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Draft { .. }) {
                     self.refresh_draft_vcs();
                 }
+                if status == HostStatus::Connected {
+                    // Snoozes from before the hosts kept them: handed over once.
+                    let legacy = self.cache.lock().unwrap().take_legacy_snoozes(&host).unwrap_or_default();
+                    for thread_id in legacy {
+                        let id = self.next_id();
+                        self.net.send(&host, ClientMessage::SnoozeThread { id, thread_id, snoozed: true });
+                    }
+                }
             }
             Incoming::Message { host, msg } => self.on_server_message(host, *msg, cx),
         }
@@ -793,6 +880,26 @@ impl Dirigent {
             }
             ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
                 self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
+            }
+            // An agent asked for the user's attention on a thread.
+            ServerMessage::Focus { thread_id } => {
+                if self.summary(&host, &thread_id).is_some() {
+                    self.select_thread(&host, &thread_id, cx);
+                }
+            }
+            ServerMessage::Search { .. } | ServerMessage::Workflows { .. } | ServerMessage::RunStarted { .. } => {}
+            ServerMessage::Runs { runs, .. } => {
+                self.runs.insert(host, runs);
+                self.request_run_steps();
+            }
+            ServerMessage::Run { run, steps, .. } => {
+                self.run_steps.insert((host, run.id), steps);
+            }
+            ServerMessage::Step { run_id, step } => {
+                let steps = self.run_steps.entry((host, run_id)).or_default();
+                if !steps.iter().any(|s| s.seq == step.seq) {
+                    steps.push(step);
+                }
             }
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
                 let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
@@ -984,6 +1091,7 @@ impl Dirigent {
             stats_hover: false,
             center_on: None,
             asks: vec![],
+            orchestra: None,
         }));
         self.set_pane(pane, cx);
         self.menu = None;
@@ -993,6 +1101,7 @@ impl Dirigent {
         self.mark_seen(host, id);
         self.sync_asks(cx);
         self.fetch_blobs();
+        self.request_run_steps();
         let rid = self.next_id();
         self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
         self.request_thread_vcs(host, id);
@@ -1418,10 +1527,94 @@ impl Dirigent {
             |c| match name {
                 "async_bash" => c.tools.async_bash = !c.tools.async_bash,
                 "ask_user" => c.tools.ask_user = !c.tools.ask_user,
+                "dirigent" => c.tools.dirigent = !c.tools.dirigent,
                 _ => {}
             },
             cx,
         );
+    }
+
+    // ---- workflows ----
+
+    /// The runs that belong with a thread: the ones it started, and the one it was spawned
+    /// by. Newest first.
+    pub fn thread_runs(&self, host: &str, id: &str) -> Vec<&WorkflowRun> {
+        let own = self.summary(host, id).and_then(|t| t.run_id.clone());
+        let mut runs: Vec<_> = self
+            .runs
+            .get(host)
+            .into_iter()
+            .flatten()
+            .filter(|r| r.parent_id.as_deref() == Some(id) || own.as_deref() == Some(&r.id))
+            .collect();
+        runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+        runs
+    }
+
+    /// The reported steps of a run, as far as they are known here.
+    pub fn steps_of(&self, host: &str, run_id: &str) -> &[RunStep] {
+        self.run_steps.get(&(host.to_owned(), run_id.to_owned())).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Ask the host for the steps of the open thread's runs that aren't known yet.
+    fn request_run_steps(&mut self) {
+        let Some((host, id)) = self.open().map(|t| (t.host.clone(), t.id.clone())) else { return };
+        let missing: Vec<String> = self
+            .thread_runs(&host, &id)
+            .into_iter()
+            .filter(|r| !self.run_steps.contains_key(&(host.clone(), r.id.clone())))
+            .map(|r| r.id.clone())
+            .collect();
+        for run_id in missing {
+            let rid = self.next_id();
+            self.run_steps.insert((host.clone(), run_id.clone()), vec![]);
+            self.net.send(&host, ClientMessage::GetRun { id: rid, run_id });
+        }
+    }
+
+    /// Whether the orchestration panel is on the pane's right: the work log takes the
+    /// spot when it is open; else the user's choice, else whenever there is something to
+    /// show (a family or a run).
+    pub fn orchestra_open(&self) -> bool {
+        let Some(t) = self.open() else { return false };
+        if t.log.is_some() {
+            return false;
+        }
+        t.orchestra.unwrap_or_else(|| !self.lineage(&t.host, &t.id).is_empty() || !self.thread_runs(&t.host, &t.id).is_empty())
+    }
+
+    /// The panel's agents button: show the orchestration panel (closing the log), or hide
+    /// it if it is the one showing.
+    pub fn toggle_orchestra(&mut self, cx: &mut Context<Self>) {
+        let open = self.orchestra_open();
+        if let Pane::Thread(t) = &mut self.pane {
+            t.orchestra = Some(!open);
+            if !open {
+                t.log = None;
+            }
+            self.focus_composer(cx);
+            cx.notify();
+        }
+    }
+
+    /// The run header: fold / unfold its steps.
+    pub fn toggle_run(&mut self, run_id: &str, cx: &mut Context<Self>) {
+        if !self.run_toggles.remove(run_id) {
+            self.run_toggles.insert(run_id.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Whether a run's steps are shown: the newest and the live ones by default, the
+    /// others folded; a click on the header flips it.
+    pub fn run_expanded(&self, run: &WorkflowRun, newest: bool) -> bool {
+        (run.running() || newest) != self.run_toggles.contains(&run.id)
+    }
+
+    pub fn abort_run(&mut self, host: &str, run_id: &str, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::AbortRun { id, run_id: run_id.to_owned() });
+        cx.notify();
     }
 
     // ---- asks ----
@@ -1638,8 +1831,9 @@ impl Dirigent {
             self.hosts.retain(|h| h.name != name);
             self.links.retain(|(h, _), _| *h != name);
             self.seen.retain(|(h, _), _| *h != name);
-            self.snoozed.retain(|(h, _), _| *h != name);
             self.pinned.retain(|(h, _)| *h != name);
+            self.runs.remove(&name);
+            self.run_steps.retain(|(h, _), _| *h != name);
             // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
                 self.set_pane(Pane::Settings, cx);
@@ -2053,7 +2247,10 @@ impl Dirigent {
             let id = self.next_id();
             self.pending = Some((id, text, images));
             self.clear_composer(window, cx);
-            self.net.send(&target.host, ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base });
+            self.net.send(
+                &target.host,
+                ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base, parent: None, run: None },
+            );
             return;
         }
         if let Pane::Thread(t) = &self.pane {
@@ -2181,6 +2378,11 @@ impl Dirigent {
         if self.typed_bracket("]", window, cx) {
             return;
         }
+        self.toggle_last_log(cx);
+    }
+
+    /// The panel's log button: close the log, or open it on the run in progress, else the last work.
+    pub fn toggle_last_log(&mut self, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &self.pane else { return };
         let key = match t.log {
             Some(key) => key,

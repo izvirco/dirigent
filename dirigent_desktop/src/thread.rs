@@ -227,8 +227,101 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(px(12.)))
             .child(name)
     });
-    let crumb = div().flex().flex_row().items_center().min_w_0().child(breadcrumb(project, title, pinned, titling, cx)).children(branch);
-    pane.child(header(crumb, Some(actions))).child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
+    // A sub-agent's parent before its title, a click away (the sidebar has the whole family).
+    let parent = summary.as_ref().and_then(|s| s.parent_id.clone()).and_then(|pid| this.summary(&host, &pid)).map(|p| {
+        let (h, pid) = (host.clone(), p.id.clone());
+        div()
+            .id("crumb-parent")
+            .max_w(px(220.))
+            .truncate()
+            .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
+            .child(p.name.clone().unwrap_or_else(|| "Untitled".into()))
+    });
+    let crumb =
+        div().flex().flex_row().items_center().min_w_0().child(breadcrumb(project, parent, title, pinned, titling, cx)).children(branch);
+    pane.child(header(crumb, Some(actions))).child(
+        div()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_row()
+            .child(column)
+            .children(log_panel(this, cx))
+            .children(crate::orchestra::panel(this, cx))
+            .child(panel_switch(this, cx)),
+    )
+}
+
+/// A panel split off the pane's right by a hairline, `log_width` wide, with a drag handle
+/// on its left edge: the work log and the orchestration panel are both built on it. Its
+/// title row leaves room on the right for the switcher, which `render` draws over the
+/// same spot whether a panel is open or not (`panel_switch`).
+pub fn side_panel(title: &'static str, body: impl IntoElement, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let title = div()
+        .flex()
+        .items_center()
+        .h(px(SWITCH_ROW))
+        .pl_4()
+        .pr(px(SWITCH_W))
+        .flex_shrink_0()
+        .text_size(px(12.))
+        .text_color(rgba(theme::t().fg_2))
+        .child(title);
+    let handle = div()
+        .id("panel-resize")
+        .absolute()
+        .top_0()
+        .left(px(-3.))
+        .w(px(6.))
+        .h_full()
+        .cursor_col_resize()
+        .hover(|d| d.bg(rgba(theme::t().line)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
+    div()
+        .relative()
+        .w(px(this.log_width))
+        .flex_shrink_0()
+        .h_full()
+        .border_l_1()
+        .border_color(rgba(theme::t().line_soft))
+        .flex()
+        .flex_col()
+        .child(title)
+        .child(body)
+        .child(handle)
+}
+
+/// Height of the panels' title row, which the switcher sits in.
+const SWITCH_ROW: f32 = 32.;
+/// Width the switcher takes on that row's right: two 26px buttons, a gap, the padding.
+const SWITCH_W: f32 = 68.;
+
+/// The two panel buttons: work log, agents & workflows. The open one is lit and closes
+/// its panel when clicked; the other opens (swaps to) its own. Pinned to the pane's
+/// top-right corner under the header, i.e. where the panels' title row is, so it stays
+/// put whether a panel is open or not.
+pub fn panel_switch(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let t = theme::t();
+    let log_on = this.open().is_some_and(|o| o.log.is_some());
+    let agents_on = this.orchestra_open();
+    let lit = |on: bool| if on { t.accent_ink } else { t.fg_1 };
+    div()
+        .absolute()
+        .top(px((SWITCH_ROW - 26.) / 2.))
+        .right_2()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(
+            theme::tinted_icon_button("panel-log", "list", lit(log_on), cx, |this, cx| this.toggle_last_log(cx))
+                .when(log_on, |d| d.bg(rgba(t.hover))),
+        )
+        .child(
+            theme::tinted_icon_button("panel-agents", "git-fork", lit(agents_on), cx, |this, cx| this.toggle_orchestra(cx))
+                .when(agents_on, |d| d.bg(rgba(t.hover))),
+        )
 }
 
 /// A workspace's name is its directory's basename: the host names the directory, the git
@@ -1227,6 +1320,26 @@ fn render_timeline_item(
             .into_any(),
         Item::Compaction => notice_line(keys.plain("context compacted".to_owned())),
         Item::Notice(text) => notice_line(keys.plain(text.clone())),
+        // A sub-agent's end: the line opens the sub-agent's thread.
+        Item::Child { thread_id, text } => {
+            let (host, id) = (t.host.clone(), thread_id.clone());
+            div()
+                .id(ElementId::Name(format!("child/{ix}").into()))
+                .w_full()
+                .py_1()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .text_size(px(12.))
+                .text_color(rgba(theme::t().fg_2))
+                .cursor_pointer()
+                .hover(|d| d.text_color(rgba(theme::t().fg)))
+                .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&host, &id, cx)))
+                .child(icon("corner-down-right", theme::t().fg_2).size(px(12.)))
+                .child(text.clone())
+                .into_any()
+        }
     }
 }
 
@@ -1510,7 +1623,7 @@ pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
 /// (events, entries, a new prompt) is covered; those paths remeasure the items.
 fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let Pane::Thread(t) = &this.pane else { return None };
-    let key = t.log?;
+    t.log?;
     let (work, live) = shown_work(this)?;
     let n = work.steps.len().max(1);
     let state = &t.log_list;
@@ -1532,42 +1645,8 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                 .into_any()
         }),
     );
-    let title = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(32.))
-        .pl_4()
-        .pr_2()
-        .flex_shrink_0()
-        .text_size(px(12.))
-        .text_color(rgba(theme::t().fg_2))
-        .child(div().flex_1().child("Work log"))
-        .child(theme::icon_button("log-close", "x", cx, move |this, cx| this.toggle_log(key, cx)));
-    let handle = div()
-        .id("log-resize")
-        .absolute()
-        .top_0()
-        .left(px(-3.))
-        .w(px(6.))
-        .h_full()
-        .cursor_col_resize()
-        .hover(|d| d.bg(rgba(theme::t().line)))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
-    Some(
-        div()
-            .relative()
-            .w(px(this.log_width))
-            .flex_shrink_0()
-            .h_full()
-            .border_l_1()
-            .border_color(rgba(theme::t().line_soft))
-            .flex()
-            .flex_col()
-            .child(title)
-            .child(steps.flex_1().w_full().text_size(px(STEP_SIZE)).line_height(px(19.)))
-            .child(handle),
-    )
+    let body = steps.flex_1().w_full().text_size(px(STEP_SIZE)).line_height(px(19.));
+    Some(side_panel("Work log", body, this, cx))
 }
 
 /// One step of the shown work as a log list item; a placeholder while it has none.

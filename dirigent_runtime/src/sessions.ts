@@ -30,7 +30,9 @@ import {
   type Ask,
   createTools,
   deliverAnswers,
+  deliverNotice,
   killJobs,
+  type Notify,
   noticeDelivered,
   requeueNotices,
   TOOL_NAMES,
@@ -250,7 +252,10 @@ export class Sessions {
     }
     if (tools) applyTools(session, tools);
     if (title) {
-      this.generateTitle(title, text, session.model)
+      // A sub-agent's prompt ends with a note about who spawned it (`Dirigent.spawn`);
+      // the thread is named after the task alone.
+      const task = text.split("\n\n---\n")[0] ?? text;
+      this.generateTitle(title, task, session.model)
         .then((r) => session.setSessionName(r.title))
         .catch((e) =>
           this.send({
@@ -290,6 +295,20 @@ export class Sessions {
     for (const t of steering) await session.steer(t);
     for (const t of followUp) await session.followUp(t);
     await requeueNotices(live);
+  }
+
+  /** The service has a notice for the model (a sub-agent or workflow ended). */
+  async notify(
+    threadId: string,
+    customType: string,
+    content: string,
+    details: Record<string, unknown>,
+    notify: Notify,
+  ): Promise<void> {
+    const live = this.live.get(threadId);
+    if (!live) throw new Error(`thread not loaded: ${threadId}`);
+    await live.nixEnv;
+    await deliverNotice(live, customType, content, details, notify);
   }
 
   /** The user answered (or dismissed: `answers == null`) an `ask_user` call; tell the model. */

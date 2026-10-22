@@ -19,6 +19,7 @@
 //! [tools]
 //! async_bash = true
 //! ask_user = true
+//! dirigent = true
 //! ```
 
 use crate::theme::Fonts;
@@ -55,18 +56,20 @@ pub struct ToolsConfig {
     pub async_bash: bool,
     /// Put questions to the user as a form.
     pub ask_user: bool,
+    /// The orchestrator: spawn sub-agents, manage threads, run workflows.
+    pub dirigent: bool,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
-        Self { async_bash: true, ask_user: true }
+        Self { async_bash: true, ask_user: true, dirigent: true }
     }
 }
 
 impl ToolsConfig {
     /// The enabled tools by their runtime names, as `Prompt::tools` wants them.
     pub fn enabled(&self) -> Vec<String> {
-        [("async_bash", self.async_bash), ("ask_user", self.ask_user)]
+        [("async_bash", self.async_bash), ("ask_user", self.ask_user), ("dirigent", self.dirigent)]
             .into_iter()
             .filter(|(_, on)| *on)
             .map(|(name, _)| name.to_owned())
@@ -224,9 +227,9 @@ mod tests {
         assert_eq!(c.fonts.code, "Fira Code");
         assert_eq!(c.fonts.ui, "Lilex");
         assert_eq!(c.title.reasoning, "low");
-        assert_eq!(c.tools.enabled(), ["async_bash", "ask_user"]);
+        assert_eq!(c.tools.enabled(), ["async_bash", "ask_user", "dirigent"]);
         let c: Config = toml::from_str("[tools]\nask_user = false\n").unwrap();
-        assert_eq!(c.tools.enabled(), ["async_bash"]);
+        assert_eq!(c.tools.enabled(), ["async_bash", "dirigent"]);
         let round: Config = toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
         assert!(round == Config::default());
     }

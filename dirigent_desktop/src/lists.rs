@@ -22,7 +22,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             })
         }
         Pane::Workpool => {
-            let rows = this.threads_with(Status::Working);
+            let rows = this.busy_threads();
             pane.child(header(div().child("Workpool"), None)).child(if rows.is_empty() {
                 theme::empty("No agents working", "Start one with ctrl n.").into_any_element()
             } else {
@@ -190,15 +190,27 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .children(actions)
 }
 
-/// `project > title`, with the project clickable and an amber pin before the title while
-/// `pinned`. The title breathes while `titling` (its name is being generated).
+/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent, a
+/// run's `Workflows` page) an optional segment of its own, and an amber pin before the
+/// title while `pinned`. The title breathes while `titling` (its name is being generated).
 pub fn breadcrumb(
     project: Option<(String, String)>,
+    via: Option<Stateful<Div>>,
     title: impl Into<SharedString>,
     pinned: bool,
     titling: bool,
     cx: &mut Context<Dirigent>,
 ) -> Div {
+    let crumb = |d: Stateful<Div>| {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .child(d.text_color(rgba(theme::t().fg_1)).cursor_pointer().hover(|d| d.text_color(rgba(theme::t().fg))))
+            .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
+    };
     div()
         .flex()
         .flex_row()
@@ -206,22 +218,14 @@ pub fn breadcrumb(
         .gap_1()
         .min_w_0()
         .children(project.map(|(key, name)| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .id("crumb-project")
-                        .text_color(rgba(theme::t().fg_1))
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(rgba(theme::t().fg)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
-                        .child(name),
-                )
-                .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
+            crumb(
+                div()
+                    .id("crumb-project")
+                    .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
+                    .child(name),
+            )
         }))
+        .children(via.map(crumb))
         .children(pinned.then(theme::pin_mark))
         .child(theme::title_text("crumb-title", title, titling))
 }
@@ -252,7 +256,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
             .into_any_element()
     });
 
-    let title = breadcrumb(None, name, false, false, cx);
+    let title = breadcrumb(None, None, name, false, false, cx);
     let mut body = div().id("project-page").flex_1().overflow_y_scroll().flex().flex_col();
     if !paths.is_empty() {
         body = body.child(
@@ -279,7 +283,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
 
 /// A band between list sections (`Archived`): the canvas colour at 40% over the panel, a
 /// shade darker than the rows without going solid on a see-through theme.
-fn section_label(text: String) -> Div {
+pub fn section_label(text: String) -> Div {
     div()
         .h(px(32.))
         .px_4()
