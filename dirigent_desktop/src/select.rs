@@ -10,11 +10,14 @@
 //! again (no layout involved) and reads the texts back, so off-screen blocks copy too.
 //! Dragging is driven from the root view (`Dirigent::on_mouse_move`), which also scrolls
 //! the document the drag runs out of.
+//!
+//! A block may carry links (`Block::links`): a click on one that doesn't drag a selection
+//! opens it.
 
 use gpui::{
     App, Bounds, CursorStyle, ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, LayoutId, MouseButton,
-    MouseDownEvent, PathBuilder, Pixels, Point, SharedString, StyledText, TextLayout, Window, WrappedLineLayout, point, prelude::*, px,
-    rgba,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Pixels, Point, SharedString, StyledText, TextLayout, Window,
+    WrappedLineLayout, point, prelude::*, px, rgba,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -56,6 +59,8 @@ struct State {
     laid: Vec<(Key, TextLayout)>,
     /// Text of every block constructed since the last `collect`.
     texts: BTreeMap<Key, SharedString>,
+    /// The link a plain click went down on; the release opens it if it's still on it.
+    link: Option<SharedString>,
 }
 
 /// The one selection, shared by every block and the root view.
@@ -216,7 +221,7 @@ impl Keys {
         let key = self.next;
         self.next.seq += 1;
         self.sel.0.borrow_mut().texts.insert(key, plain.clone());
-        Block { sel: self.sel.clone(), key, text, plain }
+        Block { sel: self.sel.clone(), key, text, plain, links: vec![] }
     }
 
     pub fn plain(&mut self, text: impl Into<SharedString>) -> Block {
@@ -232,6 +237,21 @@ pub struct Block {
     key: Key,
     text: StyledText,
     plain: SharedString,
+    links: Vec<(Range<usize>, SharedString)>,
+}
+
+impl Block {
+    /// Clickable spans of the text and the URLs they open.
+    pub fn links(mut self, links: Vec<(Range<usize>, SharedString)>) -> Self {
+        self.links = links;
+        self
+    }
+}
+
+/// The URL of the link in `links` under the window point `p`, if any.
+fn link_at(links: &[(Range<usize>, SharedString)], layout: &TextLayout, p: Point<Pixels>) -> Option<SharedString> {
+    let ix = layout.index_for_position(p).ok()?;
+    links.iter().find(|(r, _)| r.contains(&ix)).map(|(_, url)| url.clone())
 }
 
 impl IntoElement for Block {
@@ -286,13 +306,41 @@ impl Element for Block {
         window: &mut Window,
         cx: &mut App,
     ) {
-        window.set_cursor_style(CursorStyle::IBeam, hitbox);
         let layout = self.text.layout().clone();
+        let links = Rc::new(std::mem::take(&mut self.links));
+        let hovered = link_at(&links, &layout, window.mouse_position());
+        window.set_cursor_style(if hovered.is_some() { CursorStyle::PointingHand } else { CursorStyle::IBeam }, hitbox);
+        if !links.is_empty() {
+            // Repaint when the mouse crosses a link's edge, so the cursor follows.
+            window.on_mouse_event({
+                let (links, layout) = (links.clone(), layout.clone());
+                move |ev: &MouseMoveEvent, phase, window, _| {
+                    if phase.bubble() && link_at(&links, &layout, ev.position) != hovered {
+                        window.refresh();
+                    }
+                }
+            });
+            window.on_mouse_event({
+                let (sel, links, layout, hitbox) = (self.sel.clone(), links.clone(), layout.clone(), hitbox.clone());
+                move |ev: &MouseUpEvent, phase, window, cx| {
+                    if phase.bubble() && ev.button == MouseButton::Left && hitbox.is_hovered(window) {
+                        let pressed = sel.0.borrow_mut().link.take();
+                        if let Some(url) = pressed.filter(|url| link_at(&links, &layout, ev.position).as_ref() == Some(url))
+                            && sel.range().is_none()
+                        {
+                            cx.open_url(&url);
+                        }
+                    }
+                }
+            });
+        }
         window.on_mouse_event({
             let (sel, key, plain, hitbox, layout) = (self.sel.clone(), self.key, self.plain.clone(), hitbox.clone(), layout.clone());
             move |ev: &MouseDownEvent, phase, window, _| {
                 if phase.bubble() && ev.button == MouseButton::Left && hitbox.is_hovered(window) {
                     sel.press(key, &plain, index_at(&layout, ev.position), ev.click_count, ev.modifiers.shift);
+                    let plain_click = ev.click_count == 1 && !ev.modifiers.shift;
+                    sel.0.borrow_mut().link = link_at(&links, &layout, ev.position).filter(|_| plain_click);
                     // Keeps the root from taking focus: whatever input was focused stays so.
                     window.prevent_default();
                     window.refresh();
