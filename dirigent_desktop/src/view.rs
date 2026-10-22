@@ -375,16 +375,20 @@ fn answer_text(details: Option<&Value>) -> Option<String> {
     Some(answer_markdown(questions, answers.as_ref().map(|a| a.iter().map(|v| v.as_slice()))))
 }
 
-/// The question in bold, the answer under it, per question; or the one-line dismissal.
+/// The question in bold, the answer under it (a list when there are several, so a typed
+/// "Kiwi, sliced" doesn't read as two picks), per question; or the one-line dismissal.
 /// Shared by the persisted entry and the echo sent ahead of it, so the two look alike.
 fn answer_markdown<'a>(questions: impl Iterator<Item = &'a str>, answers: Option<impl Iterator<Item = &'a [String]>>) -> String {
     let Some(mut answers) = answers else { return "Dismissed the questions.".into() };
     questions
         .map(|text| {
             let picked = answers.next().unwrap_or(&[]);
-            let answer = if picked.is_empty() { "_no answer_".to_owned() } else { picked.join(", ") };
-            // A backslash before the newline is markdown's hard break.
-            format!("**{text}**\\\n{answer}")
+            match picked {
+                [] => format!("**{text}**\\\n_no answer_"),
+                // A backslash before the newline is markdown's hard break.
+                [one] => format!("**{text}**\\\n{one}"),
+                many => format!("**{text}**\n{}", many.iter().map(|a| format!("- {a}")).collect::<Vec<_>>().join("\n")),
+            }
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -691,14 +695,21 @@ mod tests {
     #[test]
     fn custom_messages_are_answers_or_notices() {
         let answer = json!({"type":"custom_message","customType":"dirigent:answer","timestamp":"2026-01-02T03:04:05.500Z","content":"raw",
-            "details":{"ask_id":"a","questions":[{"text":"Db?"},{"text":"Tests?"}],"answers":[["pg"],[]]}});
+            "details":{"ask_id":"a","questions":[{"text":"Db?"},{"text":"Tests?"},{"text":"Fruit?"}],"answers":[["pg"],[],["Apple","Kiwi, sliced"]]}});
         let job = json!({"type":"custom_message","customType":"dirigent:job","timestamp":"2026-01-02T03:04:05.500Z","content":"raw",
             "details":{"job_id":"j","command":"cargo check\n","exit_code":1,"duration_ms":12000,"log":"/l"}});
         let assistant = json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":1767323046000i64,"stopReason":"toolUse","content":[{"type":"toolCall","id":"c","name":"ask_user","arguments":{"questions":[{"text":"Db?"}]}}]}});
         // Idle: the answer is a user turn whose time starts the next work; the job a notice.
         let t = Timeline::from_entries([&job, &answer, &assistant]);
         assert_eq!(t.items[0], Item::Notice("job cargo check · exit 1 · 12s".into()));
-        assert_eq!(t.items[1], Item::User { text: "**Db?**\\\npg\n\n**Tests?**\\\n_no answer_".into(), images: vec![], at: 1767323045500 });
+        assert_eq!(
+            t.items[1],
+            Item::User {
+                text: "**Db?**\\\npg\n\n**Tests?**\\\n_no answer_\n\n**Fruit?**\n- Apple\n- Kiwi, sliced".into(),
+                images: vec![],
+                at: 1767323045500
+            }
+        );
         let Item::Work(w) = &t.items[2] else { panic!() };
         assert_eq!(w.started, 1767323045500);
         let Step::Tool(c) = &w.steps[0] else { panic!() };

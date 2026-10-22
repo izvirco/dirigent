@@ -771,7 +771,8 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
     let above: Vec<_> = (0..qi).map(|i| collapsed(i, 0)).collect();
     let below: Vec<_> = (qi + 1..form.ask.questions.len()).enumerate().map(|(k, i)| collapsed(i, k)).collect();
 
-    // An option row: the mark (filled while picked), then the label or the text field.
+    // An option row: the mark (filled while picked), then the label or the text field. The
+    // label wraps, so the row grows past its one-line height for long options.
     let option_row = |id: ElementId, on: bool, multi: bool, body: AnyElement| {
         let mark = div()
             .size(px(11.))
@@ -784,8 +785,9 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
         div()
             .id(id)
             .w_full()
-            .h(px(26.))
+            .min_h(px(26.))
             .px_2()
+            .py_1()
             .flex()
             .flex_row()
             .items_center()
@@ -804,7 +806,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
             ElementId::Name(format!("ask/{}/{qi}/{oi}", form.ask.id).into()),
             form.picked[qi].contains(&oi),
             q.multi,
-            div().child(o.clone()).into_any_element(),
+            div().flex_1().min_w_0().child(o.clone()).into_any_element(),
         )
         .on_click(cx.listener(move |this, _, _, cx| this.pick_option(&ask_id, qi, oi, cx)))
     });
@@ -875,6 +877,9 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
     div()
         .w_full()
         .max_w(px(theme::COMPOSER * 0.9))
+        // It floats over the transcript: clicks must not reach what's under it (the wheel
+        // still scrolls the transcript).
+        .block_mouse_except_scroll()
         .flex()
         .flex_col()
         .gap_1()
