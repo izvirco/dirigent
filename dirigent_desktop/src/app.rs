@@ -554,9 +554,20 @@ impl Dirigent {
     }
 
     /// Group rows by status (working, done, snoozed, archived) with the pinned ones first
-    /// in each group, keeping their order otherwise. Applied by `threads_with` and the project page.
-    pub fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
+    /// in each group, keeping their order otherwise.
+    fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
         rows.sort_by_key(|(h, t)| (self.status(h, t), !self.pinned(h, &t.id)));
+    }
+
+    /// Order `rows` (most recently updated first on input) as a queue, newest on top.
+    /// Working threads are ordered by when their run started, finished ones by when they
+    /// finished (their last entry): neither key changes while the thread is on that list,
+    /// so the order is fixed and a thread only moves when it enters the list. On top of
+    /// that, `sort_by_status` lifts the pinned ones (and sinks snoozed finished ones).
+    /// Shared by the Inbox, the Workpool and the project page.
+    pub fn sort_as_queue(&self, rows: &mut [(&str, &ThreadSummary)]) {
+        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
+        self.sort_by_status(rows);
     }
 
     /// Snooze hides a finished thread from the sidebar's inbox without archiving it; it
@@ -599,11 +610,7 @@ impl Dirigent {
         all
     }
 
-    /// Threads with `status`, as the Inbox / Workpool list them: a queue, newest on top.
-    /// Working threads are ordered by when their run started, finished ones by when they
-    /// finished (their last entry): neither key changes while the thread is on that list,
-    /// so the order is fixed and a thread only moves when it enters the list. On top of
-    /// that, `sort_by_status` lifts the pinned ones (and sinks snoozed finished ones).
+    /// Threads with `status`, as the Inbox / Workpool list them (see `sort_as_queue`).
     pub fn threads_with(&self, status: Status) -> Vec<(&str, &ThreadSummary)> {
         self.threads_where(|s| s == status)
     }
@@ -611,8 +618,7 @@ impl Dirigent {
     fn threads_where(&self, keep: impl Fn(Status) -> bool) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.all_threads();
         rows.retain(|(_, t)| keep(Status::of(t)));
-        rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
-        self.sort_by_status(&mut rows);
+        self.sort_as_queue(&mut rows);
         rows
     }
 
