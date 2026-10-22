@@ -2,7 +2,8 @@
 //! inline styling becomes highlight runs on a `StyledText`, and every paragraph / code
 //! block is a selectable `select::Block`. Text size / colour / font are inherited from the
 //! caller, so the same renderer serves replies, user bubbles, and the mono work log.
-//! Links are coloured but not clickable; images show their alt text.
+//! Links open in the browser on click: markdown links with a scheme (`https:`, `mailto:`,
+//! ...) and bare `http(s)://` URLs in the text. Images show their alt text.
 
 use crate::select::{Block, Keys};
 use crate::theme;
@@ -10,7 +11,7 @@ use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*,
     px, rgba,
 };
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, TextMergeStream};
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -18,7 +19,8 @@ use std::ops::Range;
 /// text blocks in their document for selection.
 pub fn render(text: &str, mono: &SharedString, keys: &mut Keys) -> Div {
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut events = Parser::new_ext(text, opts).peekable();
+    // Merged so a bare URL the parser split into several text events is found whole.
+    let mut events = TextMergeStream::new(Parser::new_ext(text, opts)).peekable();
     let mut r = Renderer { mono, keys };
     div().flex().flex_col().gap_2().children(r.blocks(&mut events))
 }
@@ -29,7 +31,7 @@ pub fn committed(text: &str) -> &str {
     text.rfind('\n').map_or("", |i| &text[..=i])
 }
 
-type Events<'a> = Peekable<Parser<'a>>;
+type Events<'a> = Peekable<TextMergeStream<'a, Parser<'a>>>;
 
 struct Renderer<'m> {
     mono: &'m SharedString,
@@ -216,6 +218,11 @@ struct Inline {
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     code_ranges: Vec<(Range<usize>, SharedString)>,
+    /// Clickable spans and their URLs.
+    links: Vec<(Range<usize>, SharedString)>,
+    /// Markdown links / images currently open: where their text starts, and their URL if
+    /// it's one we can open.
+    open_links: Vec<(usize, Option<SharedString>)>,
     bold: u32,
     italic: u32,
     strike: u32,
@@ -225,6 +232,7 @@ struct Inline {
 impl Inline {
     fn event(&mut self, e: Event, mono: &SharedString) {
         match e {
+            Event::Text(t) if self.link == 0 => self.text_with_urls(&t),
             Event::Text(t) | Event::InlineHtml(t) | Event::Html(t) => self.push(&t, None),
             Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => self.push(&t, Some(mono)),
             Event::SoftBreak => self.push(" ", None),
@@ -237,13 +245,39 @@ impl Inline {
             Event::End(TagEnd::Emphasis) => self.italic -= 1,
             Event::Start(Tag::Strikethrough) => self.strike += 1,
             Event::End(TagEnd::Strikethrough) => self.strike -= 1,
-            Event::Start(Tag::Link { .. } | Tag::Image { .. }) => self.link += 1,
-            Event::End(TagEnd::Link | TagEnd::Image) => self.link -= 1,
+            Event::Start(Tag::Link { dest_url, .. } | Tag::Image { dest_url, .. }) => {
+                self.link += 1;
+                self.open_links.push((self.text.len(), has_scheme(&dest_url).then(|| dest_url.to_string().into())));
+            }
+            Event::End(TagEnd::Link | TagEnd::Image) => {
+                self.link -= 1;
+                if let Some((start, Some(url))) = self.open_links.pop() {
+                    self.links.push((start..self.text.len(), url));
+                }
+            }
             _ => {}
         }
     }
 
+    /// Plain text, with any bare URLs in it styled and clickable as links.
+    fn text_with_urls(&mut self, t: &str) {
+        let mut at = 0;
+        for url in bare_urls(t) {
+            self.push(&t[at..url.start], None);
+            let start = self.text.len();
+            self.link += 1;
+            self.push(&t[url.clone()], None);
+            self.link -= 1;
+            self.links.push((start..self.text.len(), t[url.clone()].to_owned().into()));
+            at = url.end;
+        }
+        self.push(&t[at..], None);
+    }
+
     fn push(&mut self, s: &str, code: Option<&SharedString>) {
+        if s.is_empty() {
+            return;
+        }
         let range = self.text.len()..self.text.len() + s.len();
         self.text.push_str(s);
         let mut h = HighlightStyle::default();
@@ -272,7 +306,53 @@ impl Inline {
     fn block(self, keys: &mut Keys) -> Block {
         let text = SharedString::from(self.text);
         keys.styled(StyledText::new(text.clone()).with_highlights(self.highlights).with_font_family_overrides(self.code_ranges), text)
+            .links(self.links)
     }
+}
+
+/// A link target we can hand to the OS: it starts with a URL scheme (`https:`, `mailto:`).
+/// Relative paths and `#anchors` have nothing to open against.
+fn has_scheme(url: &str) -> bool {
+    url.split_once(':').is_some_and(|(s, _)| {
+        s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    })
+}
+
+/// Byte ranges of the bare `http://` / `https://` URLs in `text`. A URL runs to the next
+/// space or one of `<>"`; trailing punctuation is the sentence's, not the URL's, and so is
+/// a closing bracket without an opening one in the URL (`(see https://x.dev/a)`).
+fn bare_urls(text: &str) -> Vec<Range<usize>> {
+    let mut out = vec![];
+    let mut i = 0;
+    while let Some(at) = text[i..].find("http").map(|a| a + i) {
+        i = at + 4;
+        let rest = &text[at..];
+        let Some(scheme) = ["https://", "http://"].into_iter().find(|s| rest.starts_with(s)) else { continue };
+        // Not glued to a preceding word (`xhttp://`).
+        if text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+            continue;
+        }
+        let mut end = at + rest.find(|c: char| c.is_whitespace() || "<>\"".contains(c)).unwrap_or(rest.len());
+        while let Some(c) = text[at..end].chars().next_back() {
+            let url = &text[at..end];
+            let unbalanced = |open: char| url.matches(open).count() < url.matches(c).count();
+            let trailing = match c {
+                '.' | ',' | ':' | ';' | '!' | '?' | '\'' => true,
+                ')' => unbalanced('('),
+                ']' => unbalanced('['),
+                _ => false,
+            };
+            if !trailing {
+                break;
+            }
+            end -= c.len_utf8();
+        }
+        if end > at + scheme.len() {
+            out.push(at..end);
+            i = end;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -298,5 +378,35 @@ mod tests {
         assert_eq!(p.highlights[0].0, 2..3);
         assert_eq!(p.highlights[0].1.font_weight, Some(FontWeight::SEMIBOLD));
         assert_eq!(p.code_ranges, vec![(4..5, mono)]);
+    }
+
+    /// The links of `md`'s first paragraph, as (link text, url).
+    fn links(md: &str) -> Vec<(String, String)> {
+        let mono = SharedString::from("Mono");
+        let mut p = Inline::default();
+        for e in TextMergeStream::new(Parser::new(md)) {
+            p.event(e, &mono);
+        }
+        p.links.iter().map(|(r, url)| (p.text[r.clone()].to_owned(), url.to_string())).collect()
+    }
+
+    #[test]
+    fn links_in_text() {
+        let issue = "https://forge.sebba.dev/izvir/dirigent/issues/11";
+        assert_eq!(links(&format!("I created issue #11: {issue}.")), [(issue.to_owned(), issue.to_owned())]);
+        // Markdown links open their target; ones without a scheme (file paths) don't.
+        assert_eq!(links("[docs](https://x.dev/a) and [main](src/main.rs)"), [("docs".into(), "https://x.dev/a".into())]);
+        assert_eq!(links("<https://x.dev>"), [("https://x.dev".into(), "https://x.dev".into())]);
+        // A URL the parser splits at `_` or `[` is still one link.
+        assert_eq!(links("see https://x.dev/a_b[1]"), [("https://x.dev/a_b[1]".into(), "https://x.dev/a_b[1]".into())]);
+    }
+
+    #[test]
+    fn bare_url_bounds() {
+        let found = |t: &str| bare_urls(t).into_iter().map(|r| t[r].to_owned()).collect::<Vec<_>>();
+        assert_eq!(found("(see https://x.dev/a), then"), ["https://x.dev/a"]);
+        assert_eq!(found("https://en.wikipedia.org/wiki/Rust_(language)!"), ["https://en.wikipedia.org/wiki/Rust_(language)"]);
+        assert_eq!(found("\"http://a.b/c?d=1&e\" and https://f.g"), ["http://a.b/c?d=1&e", "https://f.g"]);
+        assert!(found("xhttps://a.b https:// http").is_empty());
     }
 }
