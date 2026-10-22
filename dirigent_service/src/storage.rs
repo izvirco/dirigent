@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS asks (
 const COLUMNS: &[(&str, &str, &str)] = &[
     // The dirigent tools the thread's last prompt enabled, as JSON (`["async_bash", ...]`).
     ("threads", "tools", "TEXT"),
+    // The thread's isolated workspace directory (see `vcs`), while attached.
+    ("threads", "workspace", "TEXT"),
 ];
 
 /// A `usage` row extracted from an assistant message entry. Used both to backfill the table
@@ -147,6 +149,36 @@ impl Storage {
         Ok(self.conn.query_row("SELECT path FROM projects WHERE id = ?1 AND deleted_at IS NULL", [id], |r| r.get(0)).optional()?)
     }
 
+    /// The project directory a thread was created in, even if the project was removed since
+    /// (its workspace still belongs to that repo).
+    pub fn thread_project_path(&self, thread_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT p.path FROM threads t JOIN projects p ON p.id = t.project_id WHERE t.id = ?1", [thread_id], |r| r.get(0))
+            .optional()?)
+    }
+
+    /// Point the thread at `cwd`; `workspace` records the isolated directory it owns, if any.
+    pub fn set_cwd(&self, id: &str, cwd: &str, workspace: Option<&str>) -> Result<()> {
+        let n = self.conn.execute("UPDATE threads SET cwd = ?2, workspace = ?3 WHERE id = ?1", params![id, cwd, workspace])?;
+        anyhow::ensure!(n == 1, "no such thread");
+        Ok(())
+    }
+
+    pub fn thread_workspace(&self, id: &str) -> Result<Option<String>> {
+        let ws: Option<Option<String>> =
+            self.conn.query_row("SELECT workspace FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(ws.flatten())
+    }
+
+    /// Id of the thread's last entry (pi's leaf), for appending an entry of our own.
+    pub fn last_entry_id(&self, thread_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT id FROM entries WHERE thread_id = ?1 ORDER BY seq DESC LIMIT 1", [thread_id], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Threads ordered by most recently updated. `running_since` is always `None` here; the caller fills it in.
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
@@ -160,7 +192,7 @@ impl Storage {
         }
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
-                    (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms
+                    (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -179,6 +211,8 @@ impl Storage {
                 last_run_ms: r.get(10)?,
                 archived: r.get(9)?,
                 asks: vec![],
+                workspace: r.get(11)?,
+                workspace_missing: false,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -267,6 +301,8 @@ impl Storage {
             last_run_ms: None,
             archived: false,
             asks: vec![],
+            workspace: None,
+            workspace_missing: false,
         })
     }
 
@@ -506,10 +542,17 @@ mod tests {
         assert_eq!(threads[0].updated_at, 12);
         assert!(s.get_thread("nope").unwrap().is_none());
 
+        // A workspace moves the thread's cwd; the project path is still known afterwards.
+        s.set_cwd("t1", "/ws/t1", Some("/ws/t1")).unwrap();
+        assert_eq!(s.thread_workspace("t1").unwrap().as_deref(), Some("/ws/t1"));
+        assert_eq!(s.list_threads().unwrap()[0].cwd, "/ws/t1");
+        assert_eq!(s.last_entry_id("t1").unwrap().as_deref(), Some("c"));
+
         // Removing the project orphans the thread but keeps it.
         s.remove_project("p1", 13).unwrap();
         assert!(s.list_projects().unwrap().is_empty());
         assert_eq!(s.list_threads().unwrap()[0].project_id, None);
+        assert_eq!(s.thread_project_path("t1").unwrap().as_deref(), Some("/x"));
 
         s.set_archived("t1", true, 14).unwrap();
         assert!(s.list_threads().unwrap()[0].archived);

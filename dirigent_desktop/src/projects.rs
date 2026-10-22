@@ -130,6 +130,8 @@ mod tests {
             last_run_ms: None,
             asks: vec![],
             archived: false,
+            workspace: None,
+            workspace_missing: false,
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

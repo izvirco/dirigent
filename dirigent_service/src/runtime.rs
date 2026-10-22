@@ -388,3 +388,8 @@ impl Runtime {
 pub fn now() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
+
+/// Now as pi writes entry timestamps: `2026-01-02T03:04:05.678Z`.
+pub fn iso_now() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}

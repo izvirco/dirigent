@@ -12,7 +12,7 @@ use crate::view::{Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
-use dirigent_protocol::{Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen};
+use dirigent_protocol::{Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
@@ -27,9 +27,13 @@ actions!(dirigent, [NewThread, Abort, ToggleSidebar, ToggleLog, Quit]);
 
 pub const KEY_CONTEXT: &str = "Dirigent";
 const TOAST_TTL: Duration = Duration::from_secs(8);
+/// How often the draft page / an open workspace menu re-asks the host about the repo.
+const VCS_REFRESH_SECS: u64 = 2;
 const LAST_MODEL_KEY: &str = "last_model";
 const LAST_EFFORT_KEY: &str = "last_effort";
 const LAST_TARGET_KEY: &str = "last_target";
+/// Whether the last draft asked for an isolated workspace; the next one starts the same way.
+const LAST_ISOLATE_KEY: &str = "last_isolate";
 const PRESETS_KEY: &str = "presets";
 const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
 /// Where the user was when the app last closed (see `remember_pane`).
@@ -135,6 +139,25 @@ impl AskForm {
     }
 }
 
+/// A host's answer about a directory (`ServerMessage::VcsStatus`).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct VcsInfo {
+    /// `None`: not under git or jj (or gone).
+    pub vcs: Option<Vcs>,
+    pub dirty: bool,
+    pub branch: Option<String>,
+    /// Branches / tags / bookmarks a workspace can start from.
+    pub refs: Vec<String>,
+}
+
+/// What a workspace starts from when nothing is picked (mirrors the service's default).
+pub fn default_base(vcs: Vcs) -> &'static str {
+    match vcs {
+        Vcs::Git => "HEAD",
+        Vcs::Jj => "@-",
+    }
+}
+
 /// Where a new thread will run: a project on a host.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Target {
@@ -221,6 +244,13 @@ pub enum Menu {
     NewProjectHost,
     /// Thread header: confirm deletion.
     ConfirmDelete,
+    /// Thread header: archiving a thread that has a workspace asks what to do with it.
+    ConfirmArchive,
+    /// Composer chip on a thread: move into / out of a workspace.
+    Workspace,
+    /// The `New workspace from` popup (`base_search` over the repo's refs) behind the
+    /// composer's workspace chip.
+    Base,
     /// Usage page: what a series is (model / provider / everything).
     UsageGroup,
     /// Config page: theme, title model, title reasoning level.
@@ -262,6 +292,8 @@ pub struct Dirigent {
     pub host_url_input: Entity<TextInput>,
     /// Filter for the model picker's all-models page.
     pub model_search: Entity<TextInput>,
+    /// Filter (or free text) for the workspace base picker.
+    pub base_search: Entity<TextInput>,
     /// The usage page: window, grouping, hidden series and the hosts' buckets.
     pub usage: usage::State,
     /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
@@ -301,6 +333,13 @@ pub struct Dirigent {
     /// A draft was sent: the `CreateThread` request id and the message to prompt with once
     /// the host confirms the thread.
     pending: Option<(u64, String, Vec<Attachment>)>,
+    /// Draft: start the thread in its own workspace (the composer's `isolated` chip), and
+    /// from where (`None` = the vcs default; reset with every draft).
+    pub isolate: bool,
+    pub base: Option<String>,
+    /// Version control state by `(host, path)`, as last reported (`request_vcs`): the
+    /// draft's project directory, an open thread's project, a workspace before removal.
+    pub vcs: HashMap<(String, String), VcsInfo>,
     net: Net,
     cache: Arc<Mutex<Cache>>,
     next_id: u64,
@@ -327,6 +366,7 @@ impl Dirigent {
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
         let presets = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let isolate = cache.get(LAST_ISOLATE_KEY).as_deref() == Some("1");
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
         let cache = Arc::new(Mutex::new(cache));
@@ -354,6 +394,8 @@ impl Dirigent {
         }
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
         cx.subscribe(&model_search, |this, _, _: &Submitted, cx| this.pick_first_model(cx)).detach();
+        let base_search = cx.new(|cx| TextInput::new(cx, "Branch, commit or revset", true));
+        cx.subscribe(&base_search, |this, _, _: &Submitted, cx| this.pick_first_base(cx)).detach();
         let usage_from = cx.new(|cx| TextInput::new(cx, "2026-01-01", true));
         let usage_to = cx.new(|cx| TextInput::new(cx, "2026-01-31", true));
         for input in [&usage_from, &usage_to] {
@@ -388,6 +430,7 @@ impl Dirigent {
             host_name_input,
             host_url_input,
             model_search,
+            base_search,
             usage: usage::State::new(),
             usage_from,
             usage_to,
@@ -409,6 +452,9 @@ impl Dirigent {
             blobs: HashMap::new(),
             blob_requests: HashSet::new(),
             pending: None,
+            isolate,
+            base: None,
+            vcs: HashMap::new(),
             net,
             cache,
             next_id: 1,
@@ -576,6 +622,12 @@ impl Dirigent {
         Some(projects::group_key(host, project, &self.links))
     }
 
+    /// Directory of a thread's project, if the host still lists it.
+    pub fn project_path(&self, host: &str, t: &ThreadSummary) -> Option<String> {
+        let pid = t.project_id.as_deref()?;
+        self.host(host)?.projects.iter().find(|p| p.id == pid).map(|p| p.path.clone())
+    }
+
     /// Display name of a thread's project ("" for orphans).
     pub fn project_name(&self, host: &str, t: &ThreadSummary) -> String {
         t.project_id
@@ -637,6 +689,9 @@ impl Dirigent {
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Usage) {
                     self.request_usage(cx);
                 }
+                if status == HostStatus::Connected && matches!(self.pane, Pane::Draft { .. }) {
+                    self.refresh_draft_vcs();
+                }
             }
             Incoming::Message { host, msg } => self.on_server_message(host, *msg, cx),
         }
@@ -676,6 +731,8 @@ impl Dirigent {
                     if self.summary(&host, &id).is_some() {
                         self.mark_seen(&host, &id);
                         self.sync_asks(cx);
+                        // The run ended, or the thread moved: the repo state may have changed.
+                        self.request_thread_vcs(&host, &id);
                     } else {
                         // The open thread was deleted elsewhere.
                         self.show(Pane::Inbox, cx);
@@ -708,6 +765,9 @@ impl Dirigent {
                 if let Some(image) = decode_blob(&mime_type, &data) {
                     self.blobs.insert(blob_id, image);
                 }
+            }
+            ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
+                self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
             }
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
                 let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
@@ -882,6 +942,7 @@ impl Dirigent {
             asks: vec![],
         }));
         self.menu = None;
+        self.base = None;
         self.selection.clear();
         self.remember_pane();
         self.mark_seen(host, id);
@@ -889,8 +950,146 @@ impl Dirigent {
         self.fetch_blobs();
         let rid = self.next_id();
         self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
+        self.request_thread_vcs(host, id);
         self.focus_composer(cx);
         cx.notify();
+    }
+
+    // ---- version control ----
+
+    /// Ask `host` about a directory; the reply lands in `vcs`.
+    pub fn request_vcs(&mut self, host: &str, path: &str) {
+        if self.host(host).is_none_or(|h| h.status != HostStatus::Connected) {
+            return;
+        }
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::VcsStatus { id, path: path.to_owned() });
+    }
+
+    /// The repo state behind a thread: its project directory (is it a repo, is it clean,
+    /// so the workspace chip knows what it can offer) and its workspace (dirty before removal).
+    fn request_thread_vcs(&mut self, host: &str, id: &str) {
+        let Some(s) = self.summary(host, id) else { return };
+        let paths: Vec<String> = self.project_path(host, s).into_iter().chain(s.workspace.clone()).collect();
+        for p in paths {
+            self.request_vcs(host, &p);
+        }
+    }
+
+    pub fn vcs_of(&self, host: &str, path: &str) -> Option<&VcsInfo> {
+        self.vcs.get(&(host.to_owned(), path.to_owned()))
+    }
+
+    /// The draft's project directory and what the host knows about it.
+    pub fn draft_vcs(&self) -> Option<(&Target, &str, Option<&VcsInfo>)> {
+        let Pane::Draft { target: Some(t) } = &self.pane else { return None };
+        let path = self.host(&t.host)?.projects.iter().find(|p| p.id == t.project_id)?.path.as_str();
+        Some((t, path, self.vcs_of(&t.host, path)))
+    }
+
+    /// Threads working in `path` itself (not in a workspace of it) on `host`: a draft started
+    /// there now would share the checkout with them.
+    pub fn working_in(&self, host: &str, path: &str) -> Vec<&ThreadSummary> {
+        self.host(host)
+            .map(|h| h.threads.iter().filter(|t| t.running() && t.workspace.is_none() && t.cwd == path).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn set_isolate(&mut self, isolate: bool, cx: &mut Context<Self>) {
+        self.isolate = isolate;
+        let _ = self.cache.lock().unwrap().set(LAST_ISOLATE_KEY, if isolate { "1" } else { "0" });
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// Open the base picker with an empty, focused search.
+    pub fn open_base_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.base_search.update(cx, |input, cx| input.set_text("", window, cx));
+        self.menu = Some(Menu::Base);
+        self.focus(self.base_search.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The refs behind the open base picker: the draft's project, or the open thread's.
+    pub fn base_refs(&self) -> Vec<String> {
+        let info = match &self.pane {
+            Pane::Draft { .. } => self.draft_vcs().and_then(|(_, _, v)| v),
+            Pane::Thread(t) => {
+                let s = self.summary(&t.host, &t.id);
+                s.and_then(|s| self.project_path(&t.host, s)).and_then(|p| self.vcs_of(&t.host, &p))
+            }
+            _ => None,
+        };
+        info.map(|v| v.refs.clone()).unwrap_or_default()
+    }
+
+    /// Refs containing the typed text, in host order.
+    pub fn filtered_refs(&self, cx: &App) -> Vec<String> {
+        let query = self.base_search.read(cx).text().to_lowercase();
+        self.base_refs().into_iter().filter(|r| r.to_lowercase().contains(&query)).collect()
+    }
+
+    /// Enter in the base search: the top match, or the typed text as is (a commit, `main~3`,
+    /// a revset: anything the vcs resolves). Empty means the default.
+    fn pick_first_base(&mut self, cx: &mut Context<Self>) {
+        let typed = self.base_search.read(cx).text().trim().to_owned();
+        let base = match self.filtered_refs(cx).into_iter().next() {
+            Some(r) if !typed.is_empty() => Some(r),
+            _ if typed.is_empty() => None,
+            _ => Some(typed),
+        };
+        self.pick_base(base, cx);
+    }
+
+    /// A base was picked in the `New workspace from` popup (`None` = the vcs default): a
+    /// draft will start its thread in a workspace there; an open thread moves there now.
+    pub fn pick_base(&mut self, base: Option<String>, cx: &mut Context<Self>) {
+        match &self.pane {
+            Pane::Thread(t) => {
+                let (host, id) = (t.host.clone(), t.id.clone());
+                self.move_to_workspace(&host, &id, base, cx);
+            }
+            _ => {
+                self.base = base;
+                self.set_isolate(true, cx);
+            }
+        }
+        self.menu = None;
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// Move the thread into its own workspace at `base`, or recreate one that went missing.
+    pub fn move_to_workspace(&mut self, host: &str, thread_id: &str, base: Option<String>, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::MoveToWorkspace { id, thread_id: thread_id.to_owned(), base });
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// Back to the project directory; `detach` keeps the workspace on disk.
+    pub fn remove_workspace(&mut self, host: &str, thread_id: &str, detach: bool, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::RemoveWorkspace { id, thread_id: thread_id.to_owned(), detach });
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// The workspace menu's `Copy path`: the directory to the clipboard, with a toast.
+    pub fn copy_path(&mut self, path: String, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(path));
+        self.menu = None;
+        self.toast("Path copied", cx);
+    }
+
+    /// Archive a thread with a workspace, after `ConfirmArchive` decided its fate.
+    pub fn archive_with_workspace(&mut self, host: &str, thread_id: &str, detach: bool, cx: &mut Context<Self>) {
+        self.remove_workspace(host, thread_id, detach, cx);
+        // Optimistic, like the archive flag: without it `set_archived` would ask again.
+        if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
+            t.workspace = None;
+        }
+        self.set_archived(host, thread_id, true, cx);
     }
 
     /// Re-render once a second, for as long as the app lives, so every clock on screen
@@ -909,6 +1108,20 @@ impl Dirigent {
                         this.reload_config(cx);
                     }
                     this.titling.retain(|_, since| since.elapsed() < TITLING_TTL);
+                    // The repo changes under us (commits, rebases in a terminal): keep what the
+                    // draft page and the workspace menus show fresh while they are on screen.
+                    if this.ticks.is_multiple_of(VCS_REFRESH_SECS) {
+                        match &this.pane {
+                            Pane::Draft { .. } => this.refresh_draft_vcs(),
+                            // A thread's chips show whether the checkout is clean (dirty greys
+                            // `in project` out), so they are kept fresh too.
+                            Pane::Thread(t) => {
+                                let (host, id) = (t.host.clone(), t.id.clone());
+                                this.request_thread_vcs(&host, &id);
+                            }
+                            _ => {}
+                        }
+                    }
                     cx.notify()
                 });
                 if alive.is_err() {
@@ -938,7 +1151,9 @@ impl Dirigent {
         let target = target.or_else(|| self.context_target()).or_else(|| self.last_target()).filter(|t| self.target_valid(t));
         self.pane = Pane::Draft { target };
         self.menu = None;
+        self.base = None;
         self.selection.clear();
+        self.refresh_draft_vcs();
         self.focus_composer(cx);
         cx.notify();
     }
@@ -979,11 +1194,30 @@ impl Dirigent {
             *t = Some(target);
         }
         self.menu = None;
+        self.refresh_draft_vcs();
         self.focus_composer(cx);
         cx.notify();
     }
 
+    /// Ask the draft's host about its project directory (dirty? a repo at all?).
+    fn refresh_draft_vcs(&mut self) {
+        if let Some((t, path, _)) = self.draft_vcs() {
+            let (host, path) = (t.host.clone(), path.to_owned());
+            self.request_vcs(&host, &path);
+        }
+    }
+
     pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, cx: &mut Context<Self>) {
+        // Archiving a thread that owns a workspace asks what to do with it, from its header.
+        if archived && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) && self.menu != Some(Menu::ConfirmArchive) {
+            if !self.open().is_some_and(|t| t.host == host && t.id == thread_id) {
+                self.select_thread(host, thread_id, cx);
+            }
+            self.menu = Some(Menu::ConfirmArchive);
+            self.request_thread_vcs(host, thread_id);
+            cx.notify();
+            return;
+        }
         let id = self.next_id();
         self.net.send(host, ClientMessage::ArchiveThread { id, thread_id: thread_id.to_owned(), archived });
         // Optimistic: the host's `Threads` push confirms it.
@@ -1717,19 +1951,26 @@ impl Dirigent {
                 return;
             }
             let _ = self.cache.lock().unwrap().set(LAST_TARGET_KEY, &format!("{}\n{}", target.host, target.project_id));
+            // Isolation is only on offer for a repo (the chip hides otherwise).
+            let workspace = self.isolate && self.draft_vcs().is_some_and(|(_, _, v)| v.is_some_and(|v| v.vcs.is_some()));
+            let base = self.base.clone().filter(|_| workspace);
             let id = self.next_id();
             self.pending = Some((id, text, images));
             self.attachments.clear();
             self.composer.update(cx, |input, cx| {
                 input.take(window, cx);
             });
-            self.net.send(&target.host, ClientMessage::CreateThread { id, project_id: target.project_id });
+            self.net.send(&target.host, ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base });
             return;
         }
         if let Pane::Thread(t) = &self.pane {
             if self.model.is_none() {
                 self.toast("Pick a model first", cx);
                 self.menu = Some(Menu::Model);
+                return;
+            }
+            if self.summary(&t.host, &t.id).is_some_and(|s| s.workspace_missing) {
+                self.toast("The thread's workspace is gone; recreate it or move the thread back first", cx);
                 return;
             }
             let (host, thread_id) = (t.host.clone(), t.id.clone());
@@ -1859,6 +2100,7 @@ impl Dirigent {
             self.host_name_input.clone(),
             self.host_url_input.clone(),
             self.model_search.clone(),
+            self.base_search.clone(),
             self.usage_from.clone(),
             self.usage_to.clone(),
         ];
@@ -2083,13 +2325,19 @@ impl Dirigent {
             return;
         }
         self.menu = if self.menu.as_ref() == Some(&menu) { None } else { Some(menu) };
+        // The workspace menus say whether there is uncommitted work: ask again as they open.
+        if matches!(self.menu, Some(Menu::Workspace | Menu::Base | Menu::ConfirmArchive))
+            && let Some((host, id)) = self.open().map(|t| (t.host.clone(), t.id.clone()))
+        {
+            self.request_thread_vcs(&host, &id);
+        }
         cx.notify();
     }
 
     /// Close the open menu. Leaving the model search hands focus back to the composer.
     pub fn close_menu(&mut self, cx: &mut Context<Self>) {
         match self.menu.take() {
-            Some(Menu::AllModels) => self.focus_composer(cx),
+            Some(Menu::AllModels | Menu::Base) => self.focus_composer(cx),
             Some(_) => {}
             None => return,
         }

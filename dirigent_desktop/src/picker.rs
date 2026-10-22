@@ -78,7 +78,6 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .h(px(ROW_H))
         .flex_shrink_0()
         .child(back)
-        .child(icon("search", theme::t().fg_2).size(px(13.)))
         .child(div().flex_1().min_w_0().text_size(px(13.)).child(this.model_search.clone()));
 
     let models = this.filtered_models(cx);
