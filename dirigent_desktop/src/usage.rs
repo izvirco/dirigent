@@ -107,7 +107,9 @@ pub struct State {
     pub group: Group,
     /// Series keys the user clicked off in the legend.
     pub hidden: HashSet<String>,
-    /// Each host's answer to the request `request`; cleared when a new one goes out.
+    /// Each host's latest answer. Kept across the periodic refresh so the chart never
+    /// blanks: a reply to `request` swaps in that host's new buckets. Dropped only when
+    /// the window changes, since stale buckets would then be from a different window.
     pub buckets: HashMap<String, Vec<UsageBucket>>,
     pub request: Option<u64>,
     /// The mouse over the chart (window px) and the plot's bounds from its last paint.
@@ -131,6 +133,7 @@ impl State {
         self.range = range;
         self.until = align(now_ms(), bucket_for(span)) + bucket_for(span);
         self.since = self.until - span;
+        self.buckets.clear();
     }
 
     /// Shift the window by its own length; forward stops at now.
@@ -142,6 +145,7 @@ impl State {
         }
         self.since += dir * span;
         self.until += dir * span;
+        self.buckets.clear();
         if self.until > now {
             self.set_range(self.range);
         }
@@ -153,6 +157,7 @@ impl State {
         self.range = Range::Custom;
         self.since = midnight(from);
         self.until = midnight(to) + DAY;
+        self.buckets.clear();
     }
 
     pub fn bucket(&self) -> i64 {
