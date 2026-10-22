@@ -3,7 +3,7 @@
 //! buttons. Docked it has a drag handle on its right edge; hidden (`[` or the button) it
 //! slides in as a floating panel while the mouse rests on the left edge.
 
-use crate::app::{Dirigent, Menu, Pane, Resize, Section};
+use crate::app::{Dirigent, Menu, Pane, Resize, Section, Target};
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
@@ -88,8 +88,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .flex_col()
         .gap_1()
         .px_2()
-        .child(section("inbox", "Inbox", Section::Inbox, || Pane::Inbox, inbox, now, this, cx))
-        .child(section("workpool", "Workpool", Section::Workpool, || Pane::Workpool, working, now, this, cx));
+        .child(section("inbox", "Inbox", Section::Inbox, || Pane::Inbox, theme::t().warn, inbox, now, this, cx))
+        .child(section("workpool", "Workpool", Section::Workpool, || Pane::Workpool, theme::t().working, working, now, this, cx));
 
     let project_rows: Vec<AnyElement> = groups.iter().map(|g| project_row(g, &groups, this, cx)).collect();
     let orphan_row = (!orphans.is_empty()).then(|| {
@@ -98,7 +98,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         div().px_2().child(
             row("orphans", selected, cx, |this, cx| this.show(Pane::Project { group_key: projects::ORPHANS.into() }, cx))
                 .child(div().flex_1().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
-                .child(count(n)),
+                .child(count(n, theme::t().fg_2)),
         )
     });
 
@@ -216,15 +216,17 @@ fn row(
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
 }
 
-/// Inbox / Workpool: its nav row, then (unless collapsed) a card per thread (finished and
-/// not snoozed under Inbox, working under Workpool), each with how long its agent has run
-/// (live) or ran (last run).
+/// Inbox / Workpool: its nav row (label and count in the section's `color`: amber for the
+/// Inbox, the working blue for the Workpool), then (unless collapsed) a card per thread
+/// (finished and not snoozed under Inbox, working under Workpool), each with how long its
+/// agent has run (live) or ran (last run).
 #[allow(clippy::too_many_arguments)]
 fn section(
     id: &'static str,
     label: &'static str,
     section: Section,
     pane: fn() -> Pane,
+    color: u32,
     rows: Vec<(&str, &ThreadSummary)>,
     now: i64,
     this: &Dirigent,
@@ -252,7 +254,7 @@ fn section(
         .flex()
         .flex_col()
         .gap_1()
-        .child(nav_row(id, label, section, open, selected, n, cx, move |this, cx| this.show(pane(), cx)))
+        .child(nav_row(id, label, section, open, selected, color, n, cx, move |this, cx| this.show(pane(), cx)))
         .when(open, |d| d.children(cards))
 }
 
@@ -265,11 +267,11 @@ fn nav_row(
     section: Section,
     open: bool,
     selected: bool,
+    color: u32,
     n: usize,
     cx: &mut Context<Dirigent>,
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
 ) -> Stateful<Div> {
-    let fg = if selected { theme::t().fg } else { theme::t().fg_1 };
     // Count and chevron are stacked in one box so swapping them doesn't shift layout; the
     // count keeps the text inset, the chevron is centered like the title's `+`.
     let fill = || div().absolute().inset_0().flex().items_center();
@@ -278,7 +280,7 @@ fn nav_row(
             cx.stop_propagation();
             this.toggle_section(section, cx)
         }))
-        .child(fill().justify_end().group_hover("row", |d| d.opacity(0.)).child(count(n)))
+        .child(fill().justify_end().group_hover("row", |d| d.opacity(0.)).child(count(n, color)))
         .child(
             fill()
                 .justify_center()
@@ -287,7 +289,7 @@ fn nav_row(
                 .child(icon(if open { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(px(14.))),
         );
     row(id, selected, cx, on_click)
-        .child(div().flex_1().text_color(rgba(fg)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
+        .child(div().flex_1().text_color(rgba(color)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
         .child(fold)
 }
 
@@ -376,8 +378,8 @@ fn thread_card(
 
 /// Trailing count on a `row`; its margin is the row's right inset, so it ends where the
 /// cards' text does.
-fn count(n: usize) -> Div {
-    div().mr_2().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(if n > 0 { n.to_string() } else { String::new() })
+fn count(n: usize, color: u32) -> Div {
+    div().mr_2().text_size(px(11.)).text_color(rgba(color)).child(if n > 0 { n.to_string() } else { String::new() })
 }
 
 /// Trailing control box on a `row`: as wide as the title's `+` button and flush with the
@@ -396,7 +398,8 @@ fn trailing(id: SharedString) -> Stateful<Div> {
         .hover(|d| d.bg(rgba(theme::t().line)))
 }
 
-/// Project name, which hosts it spans, and a `⋯` menu that appears on hover.
+/// Project name, and on hover a `⋯` menu and a `+` (flush right, under the title's) that
+/// opens a draft for this project.
 fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let selected = matches!(&this.pane, Pane::Project { group_key } if *group_key == key);
@@ -452,6 +455,15 @@ fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirig
 
     let fg = if selected { theme::t().fg } else { theme::t().fg_1 };
     let k = key.clone();
+    let target: Target = g.member_for(None).into();
+    let new_thread = trailing(SharedString::from(format!("gp/{key}")))
+        .opacity(0.)
+        .group_hover("row", |d| d.opacity(1.))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.new_draft(Some(target.clone()), cx)
+        }))
+        .child(icon("plus", theme::t().fg_1));
     div()
         .px_2()
         .child(
@@ -470,7 +482,8 @@ fn project_row(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirig
                     }))
                     .child(icon("ellipsis", theme::t().fg_1))
                     .children((menu_open || link_open).then(|| menu::popup(Side::Below(20.), actions, cx))),
-            ),
+            )
+            .child(new_thread),
         )
         .into_any()
 }
