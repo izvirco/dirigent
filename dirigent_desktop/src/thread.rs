@@ -22,7 +22,6 @@ use crate::lists::{breadcrumb, header};
 use crate::markdown;
 use crate::menu::{self, Side};
 use crate::picker;
-use crate::projects;
 use crate::ruler;
 use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo};
@@ -283,7 +282,7 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
 /// the pane. Projects linked across hosts are one entry; `on <host>` then picks the host.
 /// Leaving the page (sidebar, a thread) keeps whatever was typed.
 fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let (groups, _) = projects::groups(&this.hosts, &this.links);
+    let (groups, _) = this.groups();
     let group = target.as_ref().and_then(|t| groups.iter().find(|g| g.has(&t.host, &t.project_id)));
     let project = group.map(|g| g.name.clone());
     let target_open = this.menu == Some(Menu::Target);
