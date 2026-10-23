@@ -281,7 +281,12 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                     .py_2()
                     .child(div().text_color(rgba(t.fg_1)).child("Prompt"))
                     .child(field(s.prompt.clone()))
-                    .child(div().text_size(px(11.5)).text_color(rgba(t.fg_2)).child("The system prompt; the message is the user turn.")),
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgba(t.fg_2))
+                            .child("The system prompt; the message is the user turn, between <message> tags."),
+                    ),
             )
             .child(div().flex().flex_row().pt_2().child(test_button))
             .children(test),

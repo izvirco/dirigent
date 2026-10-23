@@ -178,6 +178,8 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
 /// `project > via > title`, with the project clickable, `via` (a sub-agent's parent) an
 /// optional segment of its own, and before the title the thread's `status` glyph and an
 /// amber pin while `pinned`. The title breathes while `titling` (its name is being generated).
+/// Only the title gives way when space runs out (it truncates); everything before it keeps
+/// its width (`via` caps its own).
 pub fn breadcrumb(
     project: Option<(String, String)>,
     via: Option<Stateful<Div>>,
@@ -193,7 +195,7 @@ pub fn breadcrumb(
             .flex_row()
             .items_center()
             .gap_1()
-            .min_w_0()
+            .flex_shrink_0()
             .child(d.text_color(rgba(theme::t().fg_1)).cursor_pointer().hover(|d| d.text_color(rgba(theme::t().fg))))
             .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
     };
@@ -212,8 +214,8 @@ pub fn breadcrumb(
             )
         }))
         .children(via.map(crumb))
-        .children(status.map(Status::glyph))
-        .children(pinned.then(theme::pin_mark))
+        .children(status.map(|s| div().flex_shrink_0().child(s.glyph())))
+        .children(pinned.then(|| div().flex_shrink_0().child(theme::pin_mark())))
         .child(theme::title_text("crumb-title", title, titling))
 }
 
