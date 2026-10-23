@@ -208,6 +208,15 @@ pub struct Attachment {
     pub image: Arc<gpui::Image>,
 }
 
+/// An image an entry references by blob id (see `Dirigent::blobs`).
+pub struct Blob {
+    pub image: Arc<gpui::Image>,
+    /// Width and height in pixels, turned upright the way gpui draws it (EXIF orientation);
+    /// `None` if the header doesn't parse. Inline images size their box from it
+    /// (`thread::inline_image`).
+    pub size: Option<(f32, f32)>,
+}
+
 /// A saved model + effort combo, listed first in the model picker.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Preset {
@@ -335,7 +344,7 @@ pub struct Dirigent {
     pub selection: Selection,
     /// Images referenced from entries, by blob id: filled from the cache db, else fetched
     /// from the host once (`blob_requests`) when the thread shows them.
-    pub blobs: HashMap<String, Arc<gpui::Image>>,
+    pub blobs: HashMap<String, Blob>,
     blob_requests: HashSet<String>,
     /// A draft was sent: the `CreateThread` request id and the message to prompt with once
     /// the host confirms the thread.
@@ -778,8 +787,8 @@ impl Dirigent {
             }
             ServerMessage::Blob { blob_id, mime_type, data, .. } => {
                 self.blob_requests.remove(&blob_id);
-                if let Some(image) = decode_blob(&mime_type, &data) {
-                    self.blobs.insert(blob_id, image);
+                if let Some(blob) = decode_blob(&mime_type, &data) {
+                    self.blobs.insert(blob_id, blob);
                 }
             }
             ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
@@ -1994,9 +2003,9 @@ impl Dirigent {
             .collect();
         for id in ids {
             let cached = self.cache.lock().unwrap().blob(&id);
-            match cached.and_then(|(mime, bytes)| image_from(&mime, bytes)) {
-                Some(image) => {
-                    self.blobs.insert(id, image);
+            match cached.and_then(|(mime, bytes)| blob_from(&mime, bytes)) {
+                Some(blob) => {
+                    self.blobs.insert(id, blob);
                 }
                 None => {
                     let rid = self.next_id();
@@ -2522,8 +2531,27 @@ fn host_state(cache: &Cache, name: &str, url: &str) -> HostState {
     }
 }
 
-fn decode_blob(mime: &str, data: &str) -> Option<Arc<gpui::Image>> {
-    image_from(mime, base64::engine::general_purpose::STANDARD.decode(data).ok()?)
+/// A blob's image and its upright size; `None` for formats gpui can't decode.
+fn blob_from(mime: &str, bytes: Vec<u8>) -> Option<Blob> {
+    let size = upright_size(&bytes);
+    Some(Blob { image: image_from(mime, bytes)?, size })
+}
+
+/// Width and height of the image in `bytes`, from its header alone, turned the way gpui
+/// draws it (EXIF orientation).
+fn upright_size(bytes: &[u8]) -> Option<(f32, f32)> {
+    use image::{ImageDecoder, metadata::Orientation::*};
+    let mut decoder = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
+    let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let turned = matches!(decoder.orientation().ok()?, Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH);
+    Some(if turned { (h as f32, w as f32) } else { (w as f32, h as f32) })
+}
+
+fn decode_blob(mime: &str, data: &str) -> Option<Blob> {
+    blob_from(mime, base64::engine::general_purpose::STANDARD.decode(data).ok()?)
 }
 
 impl Render for Dirigent {

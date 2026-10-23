@@ -1223,6 +1223,7 @@ dependencies = [
  "futures",
  "gpui",
  "gpui_platform",
+ "image",
  "pulldown-cmark",
  "rusqlite",
  "serde",
