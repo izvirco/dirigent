@@ -16,7 +16,7 @@
 //! to an ask) are user bubbles: `steer · pending` below the work line while pi holds them,
 //! `steer` above it once the model has them.
 
-use crate::app::{AskForm, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
+use crate::app::{AskForm, Blob, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
 use crate::icons::icon;
 use crate::lists::{breadcrumb, header};
 use crate::markdown;
@@ -961,41 +961,45 @@ const THUMB: f32 = 64.;
 const INLINE_IMAGE_H: f32 = 420.;
 
 /// How markdown draws a `blob:` image (`markdown::ImageFn`): the bitmap scaled into the
-/// column, click for full size; a blank accent box while its bytes are on their way.
+/// column, click for full size; a blank accent box while its bytes are on their way (or
+/// if its header doesn't parse: gpui couldn't draw it either).
 /// `seed` (the item / step index) keeps the click ids apart across the document.
-fn inline_image<'a>(
-    blobs: &'a HashMap<String, Arc<gpui::Image>>,
-    seed: u64,
-    cx: &'a Context<Dirigent>,
-) -> impl FnMut(&str) -> AnyElement + 'a {
+fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context<Dirigent>) -> impl FnMut(&str) -> AnyElement + 'a {
     let mut n = 0u64;
     move |id| {
         n += 1;
         let eid = ElementId::NamedInteger("md-img".into(), seed.wrapping_shl(8) | n);
-        match blobs.get(id) {
-            Some(image) => div()
-                .id(eid)
-                .max_w_full()
-                .cursor_pointer()
-                .on_click(cx.listener({
-                    let image = image.clone();
-                    move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
-                }))
-                .child(img(image.clone()).max_w_full().max_h(px(INLINE_IMAGE_H)).rounded_md().object_fit(ObjectFit::Contain))
-                .into_any(),
-            None => div().w(px(THUMB * 3.)).h(px(THUMB * 2.)).rounded_md().bg(rgba(theme::t().accent)).into_any(),
-        }
+        let Some(Blob { image, size: Some((w, h)) }) = blobs.get(id) else {
+            return div().w(px(THUMB * 3.)).h(px(THUMB * 2.)).rounded_md().bg(rgba(theme::t().accent)).into_any();
+        };
+        // The box has the bitmap's shape: as wide as the column allows, up to the natural
+        // size and INLINE_IMAGE_H tall; the img fills it. (An `img` clamped by max sizes
+        // instead gets laid out taller than its parent counts it and overlaps what follows:
+        // gpui makes both its sizes definite. And the box needs its plain block parent: in a
+        // flex column, taffy takes an aspect-ratio item's height from its unclamped width.)
+        let box_ = div()
+            .id(eid)
+            .w_full()
+            .max_w(px(w.min(w * INLINE_IMAGE_H / h)))
+            .aspect_ratio(w / h)
+            .cursor_pointer()
+            .on_click(cx.listener({
+                let image = image.clone();
+                move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
+            }))
+            .child(img(image.clone()).size_full().rounded_md());
+        div().child(box_).into_any()
     }
 }
 
 /// Thumbnails of the images in a tool's result (`read` on an image file); click for full size.
-fn result_images(images: &[String], blobs: &HashMap<String, Arc<gpui::Image>>, seed: u64, cx: &mut Context<Dirigent>) -> Div {
+fn result_images(images: &[String], blobs: &HashMap<String, Blob>, seed: u64, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_row().flex_wrap().gap_3().children(images.iter().enumerate().map(|(i, id)| {
         let box_ = thumb_box()
             .id(ElementId::NamedInteger("result-img".into(), seed.wrapping_shl(8) | i as u64))
             .border_1()
             .border_color(rgba(theme::t().line));
-        match blobs.get(id) {
+        match blobs.get(id).map(|b| &b.image) {
             Some(image) => box_
                 .cursor_pointer()
                 .hover(|d| d.border_color(rgba(theme::t().accent_line)))
@@ -1199,7 +1203,7 @@ fn render_timeline_item(
     item: &Item,
     ix: usize,
     t: &OpenThread,
-    blobs: &HashMap<String, Arc<gpui::Image>>,
+    blobs: &HashMap<String, Blob>,
     now: i64,
     fonts: &Fonts,
     keys: &mut Keys,
@@ -1207,7 +1211,7 @@ fn render_timeline_item(
 ) -> AnyElement {
     match item {
         Item::User { text, images, .. } => {
-            let images: Vec<_> = images.iter().map(|id| blobs.get(id).cloned()).collect();
+            let images: Vec<_> = images.iter().map(|id| blobs.get(id).map(|b| b.image.clone())).collect();
             user_bubble(text, &images, ix, t, fonts, keys, cx).into_any()
         }
         Item::Work(w) => work_block(w, ix, false, t, now, fonts, keys, cx).into_any(),
@@ -1236,7 +1240,7 @@ fn reply_block(
     text: &str,
     ix: usize,
     t: &OpenThread,
-    blobs: &HashMap<String, Arc<gpui::Image>>,
+    blobs: &HashMap<String, Blob>,
     fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
@@ -1616,7 +1620,7 @@ fn render_tool(
     call: &ToolCall,
     key: (usize, usize),
     t: &OpenThread,
-    blobs: &HashMap<String, Arc<gpui::Image>>,
+    blobs: &HashMap<String, Blob>,
     now: i64,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,

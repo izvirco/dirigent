@@ -52,12 +52,15 @@ impl Renderer<'_, '_> {
         while let Some(e) = ev.next() {
             match e {
                 Event::End(_) => break,
-                Event::Start(tag) => out.push(self.block(tag, ev)),
+                Event::Start(tag) if !is_inline(&tag) => out.push(self.block(tag, ev)),
                 Event::Rule => out.push(div().h(px(1.)).w_full().my_1().bg(rgba(theme::t().line)).into_any()),
                 inline => {
                     let mut p = Inline::new(self.image.is_some());
+                    // The run may open with an inline tag (`- **Label:** text`), still open
+                    // when `inline_until_block` takes over.
+                    let depth = matches!(inline, Event::Start(_)) as usize;
                     p.event(inline, self.mono);
-                    self.inline_until_block(&mut p, ev);
+                    self.inline_until_block(&mut p, ev, depth);
                     out.push(self.finish(p));
                 }
             }
@@ -111,7 +114,7 @@ impl Renderer<'_, '_> {
                 .into_any(),
             Tag::List(start) => self.list(start, ev),
             Tag::Table(_) => self.table(ev),
-            // Anything else (footnotes, definition lists, math, stray inline tags): just its content.
+            // Anything else (footnotes, definition lists, metadata blocks): just its content.
             _ => div().flex().flex_col().gap_2().children(self.blocks(ev)).into_any(),
         }
     }
@@ -193,8 +196,8 @@ impl Renderer<'_, '_> {
     }
 
     /// Inline content of a tight list item: stops before the next block-level event.
-    fn inline_until_block(&mut self, p: &mut Inline, ev: &mut Events) {
-        let mut depth = 0usize;
+    /// `depth` counts the inline tags already open.
+    fn inline_until_block(&mut self, p: &mut Inline, ev: &mut Events, mut depth: usize) {
         while let Some(e) = ev.peek() {
             match e {
                 Event::Start(t) if is_inline(t) => depth += 1,
@@ -429,6 +432,14 @@ mod tests {
         assert_eq!(p.highlights[0].0, 2..3);
         assert_eq!(p.highlights[0].1.font_weight, Some(FontWeight::SEMIBOLD));
         assert_eq!(p.code_ranges, vec![(4..5, mono)]);
+    }
+
+    #[test]
+    fn list_item_opening_with_inline_tag_is_one_paragraph() {
+        let sel = crate::select::Selection::default();
+        let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
+        render("- **Label:** text\n- [a](https://x.dev) *b* c\n", &"Mono".into(), &mut keys, None);
+        assert_eq!(sel.texts(), ["Label: text", "a b c"]);
     }
 
     /// The links of `md`'s first paragraph, as (link text, url).

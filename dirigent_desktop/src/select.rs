@@ -157,6 +157,12 @@ impl Selection {
         (a < b).then_some(a..b)
     }
 
+    /// Text of every block constructed since the last `collect`, in document order.
+    #[cfg(test)]
+    pub fn texts(&self) -> Vec<String> {
+        self.0.borrow().texts.values().map(|t| t.to_string()).collect()
+    }
+
     /// Forget the collected texts; the caller constructs the selected items next.
     pub fn collect(&self) {
         self.0.borrow_mut().texts.clear();
