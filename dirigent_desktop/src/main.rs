@@ -3,7 +3,6 @@
 mod app;
 mod cache;
 mod config;
-mod hosts;
 mod icons;
 mod input;
 mod lists;
@@ -24,6 +23,7 @@ mod view;
 
 use app::{Abort, Dirigent, NewThread, Quit, ToggleLog, ToggleSidebar};
 use cache::Cache;
+use dirigent_service::hosts;
 use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 use std::path::PathBuf;

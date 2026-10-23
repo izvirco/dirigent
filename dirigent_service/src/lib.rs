@@ -6,13 +6,14 @@
 
 mod blobs;
 mod git;
+pub mod hosts;
 mod runtime;
 mod server;
 mod storage;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary, Vcs};
+use dirigent_protocol::{ClientMessage, HostInfo, PromptMode, Report, ServerMessage, ThreadSummary, Vcs};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -124,6 +125,7 @@ impl Service {
             | ClientMessage::SearchThreads { id, .. }
             | ClientMessage::DeleteThread { id, .. }
             | ClientMessage::ListModels { id }
+            | ClientMessage::ListHosts { id }
             | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
             | ClientMessage::ListUsage { id, .. } => *id,
@@ -161,7 +163,7 @@ impl Service {
                 let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
-            ClientMessage::CreateThread { id, project_id, workspace, base, parent, name } => {
+            ClientMessage::CreateThread { id, project_id, workspace, base, parent, name, report, notify } => {
                 let thread_id = uuid::Uuid::now_v7().to_string();
                 let mut thread = {
                     let storage = self.storage.lock().unwrap();
@@ -179,6 +181,7 @@ impl Service {
                     // the user's tool settings: it gets its parent's tools.
                     if let Some(p) = &parent {
                         storage.set_tools(&thread_id, &storage.thread_tools(p)?)?;
+                        storage.set_report(&thread_id, report, notify)?;
                     }
                     thread
                 };
@@ -266,6 +269,10 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListModels { id } => ServerMessage::Models { reply_to: id, models: self.runtime.list_models().await? },
+            // Read on every request, so edits to the file apply at once.
+            ClientMessage::ListHosts { id } => {
+                ServerMessage::Hosts { reply_to: id, hosts: hosts::load()?.into_iter().map(|(name, url)| HostInfo { name, url }).collect() }
+            }
             ClientMessage::GenerateTitle { id, title, text } => {
                 let r = self.runtime.generate_title(&title, &text).await?;
                 ServerMessage::Title {
@@ -352,17 +359,18 @@ impl Service {
         sent
     }
 
-    /// A sub-agent's run ended: tell its parent, with the child's final reply. A child
-    /// that stopped to ask the user is reported as waiting, not finished.
+    /// A sub-agent's run ended: tell its parent, with the child's final reply (or, if it was
+    /// spawned with `Report::Done`, only that it finished), as it was spawned to (`Notify`).
+    /// A child that stopped to ask the user is reported as waiting, not finished.
     async fn on_child_settled(&self, thread_id: &str) {
-        let (parent, name, asks, reply) = {
+        let (parent, name, asks, reply, (report, notify)) = {
             let storage = self.storage.lock().unwrap();
             let Ok(Some(parent)) = storage.thread_parent(thread_id) else { return };
             let summary = storage.list_threads().ok().and_then(|ts| ts.into_iter().find(|t| t.id == thread_id));
             let name = summary.as_ref().and_then(|t| t.name.clone());
             let asks: Vec<String> =
                 summary.map(|t| t.asks.iter().flat_map(|a| a.questions.iter().map(|q| q.text.clone())).collect()).unwrap_or_default();
-            (parent, name, asks, storage.last_reply(thread_id).ok().flatten())
+            (parent, name, asks, storage.last_reply(thread_id).ok().flatten(), storage.report(thread_id).unwrap_or_default())
         };
         let name = name.unwrap_or_else(|| "untitled".into());
         let who = format!("Sub-agent \"{name}\" (thread {thread_id})");
@@ -370,6 +378,7 @@ impl Service {
             format!("{who} is waiting on the user's answer to:\n{}", asks.iter().map(|q| format!("- {q}")).collect::<Vec<_>>().join("\n"))
         } else {
             match &reply {
+                Some(_) if report == Report::Done => format!("{who} finished. Use `read` for its reply."),
                 Some(r) => format!("{who} finished. Its reply:\n\n{}", truncate(r, NOTICE_CHARS)),
                 // No final reply after a run: it was aborted or failed.
                 None => format!("{who} stopped without a reply (aborted or failed)."),
@@ -379,7 +388,7 @@ impl Service {
             "thread_id": thread_id, "name": name, "reply": reply,
             "error": asks.is_empty() && reply.is_none(), "asking": !asks.is_empty(),
         });
-        if let Err(e) = self.notify_thread(&parent, "dirigent:child", &content, details, "asap").await {
+        if let Err(e) = self.notify_thread(&parent, "dirigent:child", &content, details, notify.as_str()).await {
             eprintln!("[service] notify parent {parent} of {thread_id}: {e:#}");
         }
     }
@@ -576,6 +585,16 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let cut = (0..=max).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
     format!("{}…", &s[..cut])
+}
+
+/// `$XDG_CONFIG_HOME/dirigent` (else `~/.config/dirigent`): the desktop's `config.toml` and
+/// the machine's `hosts.toml`.
+pub fn config_dir() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .expect("HOME not set")
+        .join("dirigent")
 }
 
 fn data_dir() -> PathBuf {

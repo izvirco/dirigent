@@ -13,7 +13,7 @@
 //! `workflow_steps` tables and `threads.run_id`, unused and harmless.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, Project, SearchHit, ThreadSummary, UsageBucket};
+use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, ThreadSummary, UsageBucket};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -87,6 +87,10 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "snoozed_at", "INTEGER"),
     // When the thread was last given a task (a `Prompt` that started a turn).
     ("threads", "prompted_at", "INTEGER"),
+    // A sub-agent's `Report` / `Notify` (snake_case names): what its parent hears when it
+    // ends, and when. NULL = the defaults.
+    ("threads", "report", "TEXT"),
+    ("threads", "notify", "TEXT"),
 ];
 
 /// The searchable text of a message entry: user and assistant text blocks. Used both to
@@ -324,6 +328,27 @@ impl Storage {
         let p: Option<Option<String>> =
             self.conn.query_row("SELECT parent_id FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         Ok(p.flatten())
+    }
+
+    /// How the sub-agent's parent is told it ended (see `report`).
+    pub fn set_report(&self, id: &str, report: Report, notify: Notify) -> Result<()> {
+        let name = |v: Value| v.as_str().map(str::to_owned);
+        self.conn.execute(
+            "UPDATE threads SET report = ?2, notify = ?3 WHERE id = ?1",
+            params![id, name(serde_json::to_value(report)?), name(serde_json::to_value(notify)?)],
+        )?;
+        Ok(())
+    }
+
+    /// What the sub-agent's parent hears when it ends, and when; the defaults for a thread
+    /// spawned before these existed.
+    pub fn report(&self, id: &str) -> Result<(Report, Notify)> {
+        let (report, notify): (Option<String>, Option<String>) =
+            self.conn.query_row("SELECT report, notify FROM threads WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        fn parse<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
+            s.and_then(|s| serde_json::from_value(Value::String(s)).ok()).unwrap_or_default()
+        }
+        Ok((parse(report), parse(notify)))
     }
 
     /// How many ancestors the thread has (0 for a root).
@@ -623,6 +648,9 @@ mod tests {
         assert!(s.thread_tools("t1").unwrap().is_empty());
         s.set_tools("t1", &["ask_user".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["ask_user"]);
+        assert_eq!(s.report("t1").unwrap(), (Report::Reply, Notify::Asap));
+        s.set_report("t1", Report::Done, Notify::WhenIdle).unwrap();
+        assert_eq!(s.report("t1").unwrap(), (Report::Done, Notify::WhenIdle));
         let ask =
             Ask { id: "a1".into(), questions: vec![Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false }] };
         s.add_ask("t1", &ask, 5).unwrap();
@@ -643,6 +671,7 @@ mod tests {
         )
         .unwrap();
         let s = Storage::init(conn).unwrap();
+        assert_eq!(s.report("t1").unwrap(), (Report::Reply, Notify::Asap));
         s.set_tools("t1", &["async_bash".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
         assert!(s.list_threads().unwrap()[0].asks.is_empty());

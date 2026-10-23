@@ -7,7 +7,7 @@ use crate::input::{self, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
-use crate::select::{Doc, Selection};
+use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
@@ -829,7 +829,7 @@ impl Dirigent {
                     self.select_thread(&host, &thread_id, cx);
                 }
             }
-            ServerMessage::Search { .. } => {}
+            ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
                 let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
                 if pending.is_some() {
@@ -990,6 +990,23 @@ impl Dirigent {
                 self.select_thread(&host, &id, cx);
             }
             _ => {}
+        }
+    }
+
+    /// A click on a `dirigent://` link (see `select.rs`). `dirigent://thread/<id>` opens the
+    /// thread wherever it lives: thread ids are unique across hosts, and sub-agents (not in
+    /// the sidebar) open like any other thread. Anything else, or an id no connected host
+    /// knows, gets a toast.
+    fn open_app_link(&mut self, link: &OpenAppLink, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = link.url.strip_prefix("dirigent://thread/") else {
+            return self.toast(format!("Can't open {}", link.url), cx);
+        };
+        match self.hosts.iter().find(|h| h.threads.iter().any(|t| t.id == id)) {
+            Some(h) => {
+                let host = h.name.clone();
+                self.select_thread(&host, id, cx);
+            }
+            None => self.toast("Thread not found: it was deleted, or lives on a host this desktop doesn't connect to", cx),
         }
     }
 
@@ -2139,7 +2156,16 @@ impl Dirigent {
             self.clear_composer(window, cx);
             self.net.send(
                 &target.host,
-                ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base, parent: None, name: None },
+                ClientMessage::CreateThread {
+                    id,
+                    project_id: target.project_id,
+                    workspace,
+                    base,
+                    parent: None,
+                    name: None,
+                    report: Default::default(),
+                    notify: Default::default(),
+                },
             );
             return;
         }
@@ -2683,6 +2709,7 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::toggle_log_key))
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::open_app_link))
             // Capture runs root-first, i.e. before the menu's `on_mouse_down_out`.
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.menu_dismissed = false))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -2718,7 +2745,8 @@ impl Render for Dirigent {
                         .border_color(rgba(theme::t().line))
                         .shadow_md()
                         .child(div().size(px(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
-                        .child(m)
+                        // Shrinkable, so a long message wraps inside `max_w`.
+                        .child(div().flex_1().min_w_0().child(m))
                 }))
             }))
     }

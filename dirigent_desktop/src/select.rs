@@ -12,7 +12,8 @@
 //! the document the drag runs out of.
 //!
 //! A block may carry links (`Block::links`): a click on one that doesn't drag a selection
-//! opens it.
+//! opens it. `dirigent://` links are the app's own and never reach the OS: the click
+//! dispatches `OpenAppLink`, which the root view handles (`Dirigent::open_app_link`).
 
 use gpui::{
     App, Bounds, CursorStyle, ElementId, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId, LayoutId, MouseButton,
@@ -24,6 +25,14 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
+
+/// A click on a `dirigent://` link (`dirigent://thread/<id>`). Dispatched to the focused
+/// element (the composer, normally) and bubbling up to the root view, which opens it.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = dirigent, no_json)]
+pub struct OpenAppLink {
+    pub url: SharedString,
+}
 
 /// A scroll region with its own blocks; a selection never spans two.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -334,7 +343,11 @@ impl Element for Block {
                         if let Some(url) = pressed.filter(|url| link_at(&links, &layout, ev.position).as_ref() == Some(url))
                             && sel.range().is_none()
                         {
-                            cx.open_url(&url);
+                            if url.starts_with("dirigent://") {
+                                window.dispatch_action(Box::new(OpenAppLink { url }), cx);
+                            } else {
+                                cx.open_url(&url);
+                            }
                         }
                     }
                 }

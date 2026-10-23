@@ -44,8 +44,9 @@ pub enum ClientMessage {
     /// project instead of its directory, checked out at `base` (anything git / jj resolve:
     /// a branch, bookmark, commit, revset; default `HEAD` / the parents of `@`).
     /// `parent` makes it a sub-agent of that thread: it starts in the parent's cwd (unless
-    /// `workspace`), and the parent is told when it finishes.
-    /// `name` names it from the start (a sub-agent, named by whoever spawns it); a thread
+    /// `workspace`), and the parent is told when it finishes: with what (`report`) and when
+    /// (`notify`); both are ignored without a parent.
+    /// `name` names it from the start (an agent names the threads it starts); a thread
     /// without one is titled from its first prompt.
     CreateThread {
         id: u64,
@@ -58,6 +59,10 @@ pub enum ClientMessage {
         parent: Option<String>,
         #[serde(default)]
         name: Option<String>,
+        #[serde(default)]
+        report: Report,
+        #[serde(default)]
+        notify: Notify,
     },
     /// Move a thread into its own workspace at `base` (or recreate one that went missing,
     /// where its branch is resumed and `base` is ignored). Refused while the thread runs
@@ -156,6 +161,10 @@ pub enum ClientMessage {
     },
     /// Models this host has credentials for.
     ListModels {
+        id: u64,
+    },
+    /// The other hosts this host's `hosts.toml` lists (what its agents can reach).
+    ListHosts {
         id: u64,
     },
     /// The bytes behind an image block's `blob` id (see `ServerMessage::Entry`).
@@ -268,6 +277,47 @@ pub enum ServerMessage {
         reply_to: u64,
         hits: Vec<SearchHit>,
     },
+    Hosts {
+        reply_to: u64,
+        hosts: Vec<HostInfo>,
+    },
+}
+
+/// A host in a `hosts.toml`: its name there and its normalized `ws://` url.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub name: String,
+    pub url: String,
+}
+
+/// What a parent is told when its sub-agent's run ends: the child's final reply, or only
+/// that it finished (the parent reads the reply if it wants it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Report {
+    #[default]
+    Reply,
+    Done,
+}
+
+/// When a notice reaches a model: after its current tool calls (a steer), or once its
+/// turn has ended (a follow-up). Either way an idle model gets a new turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Notify {
+    #[default]
+    Asap,
+    WhenIdle,
+}
+
+impl Notify {
+    /// The runtime's name for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Notify::Asap => "asap",
+            Notify::WhenIdle => "when_idle",
+        }
+    }
 }
 
 fn default_limit() -> u64 {
@@ -474,7 +524,10 @@ mod tests {
             base: Some("main~2".into()),
             parent: Some("t0".into()),
             name: Some("Review".into()),
+            report: Report::Done,
+            notify: Notify::WhenIdle,
         });
+        roundtrip(ClientMessage::ListHosts { id: 20 });
         roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
         roundtrip(ClientMessage::FocusThread { id: 18, thread_id: "t".into() });
         roundtrip(ClientMessage::SearchThreads { id: 19, query: "sqlite".into(), limit: 5 });
@@ -541,7 +594,16 @@ mod tests {
         let c: ClientMessage = serde_json::from_value(json!({"type":"create_thread","id":1,"project_id":"p"})).unwrap();
         assert_eq!(
             c,
-            ClientMessage::CreateThread { id: 1, project_id: "p".into(), workspace: false, base: None, parent: None, name: None }
+            ClientMessage::CreateThread {
+                id: 1,
+                project_id: "p".into(),
+                workspace: false,
+                base: None,
+                parent: None,
+                name: None,
+                report: Report::Reply,
+                notify: Notify::Asap
+            }
         );
         let s: ClientMessage = serde_json::from_value(json!({"type":"search_threads","id":1,"query":"x"})).unwrap();
         assert_eq!(s, ClientMessage::SearchThreads { id: 1, query: "x".into(), limit: 20 });
@@ -581,6 +643,8 @@ mod tests {
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
+        roundtrip(ServerMessage::Hosts { reply_to: 1, hosts: vec![HostInfo { name: "h".into(), url: "ws://h:7777/ws".into() }] });
+        assert_eq!(serde_json::to_value(Notify::WhenIdle).unwrap(), json!(Notify::WhenIdle.as_str()));
         roundtrip(ServerMessage::Search { reply_to: 1, hits: vec![SearchHit { thread_id: "t".into(), snippet: "…sqlite…".into() }] });
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
         let m =

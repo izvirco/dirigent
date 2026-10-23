@@ -2,10 +2,12 @@
 //! inline styling becomes highlight runs on a `StyledText`, and every paragraph / code
 //! block is a selectable `select::Block`. Text size / colour / font are inherited from the
 //! caller, so the same renderer serves replies, user bubbles, and the mono work log.
-//! Links open in the browser on click: markdown links with a scheme (`https:`, `mailto:`,
-//! ...) and bare `http(s)://` URLs in the text. An image whose target is `blob:<id>` (a
-//! reply showing a local file; the host rewrote the link, see `view::blob_links`) is drawn
-//! by the caller's `ImageFn` after its paragraph's text; any other image shows its alt text.
+//! Links are clickable: markdown links with a scheme (`https:`, `mailto:`, ...) and bare
+//! `http(s)://` / `dirigent://` URLs in the text. `dirigent://` links stay in the app
+//! (`dirigent://thread/<id>` opens that thread), the rest go to the OS (see `select::Block`).
+//! An image whose target is `blob:<id>` (a reply showing a local file; the host rewrote the
+//! link, see `view::blob_links`) is drawn by the caller's `ImageFn` after its paragraph's
+//! text; any other image shows its alt text.
 
 use crate::select::{Block, Keys};
 use crate::theme;
@@ -352,20 +354,24 @@ fn has_scheme(url: &str) -> bool {
     })
 }
 
-/// Byte ranges of the bare `http://` / `https://` URLs in `text`. A URL runs to the next
-/// space or one of `<>"`; trailing punctuation is the sentence's, not the URL's, and so is
-/// a closing bracket without an opening one in the URL (`(see https://x.dev/a)`).
+/// Schemes whose bare URLs in text are links: the web's, and links to threads
+/// (`dirigent://thread/<id>`, which agents write).
+const BARE_SCHEMES: [&str; 3] = ["http", "https", "dirigent"];
+
+/// Byte ranges of the bare `BARE_SCHEMES` URLs in `text`. A URL runs to the next space or
+/// one of `<>"`; trailing punctuation is the sentence's, not the URL's, and so is a
+/// closing bracket without an opening one in the URL (`(see https://x.dev/a)`).
 fn bare_urls(text: &str) -> Vec<Range<usize>> {
     let mut out = vec![];
     let mut i = 0;
-    while let Some(at) = text[i..].find("http").map(|a| a + i) {
-        i = at + 4;
-        let rest = &text[at..];
-        let Some(scheme) = ["https://", "http://"].into_iter().find(|s| rest.starts_with(s)) else { continue };
-        // Not glued to a preceding word (`xhttp://`).
-        if text[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric()) {
+    while let Some(sep) = text[i..].find("://").map(|a| a + i) {
+        i = sep + 3;
+        // The scheme is the whole word before `://`, so `xhttp://` is none of ours.
+        let at = text[..sep].trim_end_matches(char::is_alphanumeric).len();
+        if !BARE_SCHEMES.contains(&&text[at..sep]) {
             continue;
         }
+        let rest = &text[at..];
         let mut end = at + rest.find(|c: char| c.is_whitespace() || "<>\"".contains(c)).unwrap_or(rest.len());
         while let Some(c) = text[at..end].chars().next_back() {
             let url = &text[at..end];
@@ -381,7 +387,7 @@ fn bare_urls(text: &str) -> Vec<Range<usize>> {
             }
             end -= c.len_utf8();
         }
-        if end > at + scheme.len() {
+        if end > sep + 3 {
             out.push(at..end);
             i = end;
         }
@@ -461,6 +467,10 @@ mod tests {
         assert_eq!(links("<https://x.dev>"), [("https://x.dev".into(), "https://x.dev".into())]);
         // A URL the parser splits at `_` or `[` is still one link.
         assert_eq!(links("see https://x.dev/a_b[1]"), [("https://x.dev/a_b[1]".into(), "https://x.dev/a_b[1]".into())]);
+        // Thread links, as agents write them: a markdown link, and a bare URL whose uuid stays whole.
+        let thread = "dirigent://thread/01a168ea-f693-737d-b2a3-60cefe482df3";
+        assert_eq!(links(&format!("[fix the ruler]({thread})")), [("fix the ruler".into(), thread.into())]);
+        assert_eq!(links(&format!("Spawned ({thread}).")), [(thread.into(), thread.into())]);
     }
 
     #[test]
@@ -469,6 +479,6 @@ mod tests {
         assert_eq!(found("(see https://x.dev/a), then"), ["https://x.dev/a"]);
         assert_eq!(found("https://en.wikipedia.org/wiki/Rust_(language)!"), ["https://en.wikipedia.org/wiki/Rust_(language)"]);
         assert_eq!(found("\"http://a.b/c?d=1&e\" and https://f.g"), ["http://a.b/c?d=1&e", "https://f.g"]);
-        assert!(found("xhttps://a.b https:// http").is_empty());
+        assert!(found("xhttps://a.b https:// http ftp://a.b").is_empty());
     }
 }

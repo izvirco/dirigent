@@ -1,7 +1,8 @@
 // Dirigent's own tools: `async_bash` runs a command in the background and tells the model
 // when it ends; `ask_user` puts questions in front of the user as a form in the desktop;
-// `dirigent` is the orchestrator: spawn sub-agent threads, message / read / find / manage
-// threads on this host and open one for the user. All of them return at once. The outcome
+// `dirigent` is the orchestrator: spawn sub-agent threads, start top-level threads,
+// message / read / find / manage threads on every host this one reaches and open one for
+// the user. All of them return at once. The outcome
 // reaches the model later as a custom message through pi's steer / follow-up queues, which
 // also wakes an idle agent for a new turn. A job picks how it interrupts (`notify`); the
 // user's answers are user input and always steer; a sub-agent ending is delivered by the
@@ -17,7 +18,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Client, Dirigent, describeThread } from "./client";
+import { Dirigent, describeThread, threadLink } from "./client";
 
 export const TOOL_NAMES = ["async_bash", "ask_user", "dirigent"] as const;
 
@@ -127,10 +128,13 @@ const dirigentParams = Type.Object({
   action: Type.Union(
     [
       Type.Literal("spawn"),
+      Type.Literal("new"),
       Type.Literal("send"),
       Type.Literal("read"),
       Type.Literal("status"),
+      Type.Literal("list"),
       Type.Literal("search"),
+      Type.Literal("projects"),
       Type.Literal("archive"),
       Type.Literal("snooze"),
       Type.Literal("abort"),
@@ -138,16 +142,49 @@ const dirigentParams = Type.Object({
     ],
     {
       description:
-        "spawn: a sub-agent thread called `name` for `task` (you are told when it finishes, with its reply). " +
+        "spawn: a sub-agent thread called `name` for `task`, here (you are told when it finishes: its reply, or with `report: done` only that it did). " +
+        "new: a top-level thread called `name` for `task` in any project on any host (`host`, `project`): a normal thread in the user's sidebar, not a sub-agent; you are never told how it goes, and it doesn't know you started it. " +
         "send: message `thread_id` (`text`; a new turn if idle, else a steer or follow_up). " +
         "read: a thread's final reply (`full` for the whole conversation). " +
         "status: your sub-agents, or one `thread_id`. " +
-        "search: threads whose messages contain `query`. " +
+        "list: the most recent top-level threads on every host. " +
+        "search: threads on every host whose name or messages contain `query`. " +
+        "projects: every host's projects. " +
         "archive / snooze / abort / open (in the user's desktop): act on `thread_id`.",
     },
   ),
-  thread_id: Type.Optional(Type.String()),
-  task: Type.Optional(Type.String({ description: "spawn: the sub-agent's full prompt." })),
+  thread_id: Type.Optional(
+    Type.String({ description: "A thread id, or its dirigent://thread/<id> link." }),
+  ),
+  task: Type.Optional(
+    Type.String({
+      description:
+        "spawn / new: the thread's full prompt. A `new` thread knows nothing of you or this conversation: make it self-contained.",
+    }),
+  ),
+  host: Type.Optional(
+    Type.String({
+      description: 'new: a host name from `projects` (default "local", the host you run on).',
+    }),
+  ),
+  project: Type.Optional(
+    Type.String({
+      description:
+        "new: a project id or path on that host (default: your project; on another host, the one with the same git origin).",
+    }),
+  ),
+  report: Type.Optional(
+    Type.Union([Type.Literal("reply"), Type.Literal("done")], {
+      description:
+        'spawn: what you are told when it finishes: "reply" (default) its final reply, "done" only that it finished (use `read` for the replies you need; keeps many sub-agents\' replies out of your context).',
+    }),
+  ),
+  notify: Type.Optional(
+    Type.Union([Type.Literal("asap"), Type.Literal("when_idle")], {
+      description:
+        'spawn: when you are told: "asap" (default) after your current tool calls, "when_idle" once your turn has ended.',
+    }),
+  ),
   text: Type.Optional(Type.String({ description: "send: the message." })),
   mode: Type.Optional(
     Type.Union([Type.Literal("steer"), Type.Literal("follow_up")], {
@@ -156,13 +193,18 @@ const dirigentParams = Type.Object({
     }),
   ),
   model: Type.Optional(
-    Type.String({ description: "spawn: `provider/id`; default: your own model." }),
+    Type.String({
+      description:
+        "spawn / new: `provider/id`; default: your own model. Another host may not have it: the error lists the ones it has.",
+    }),
   ),
-  effort: Type.Optional(Type.String({ description: "spawn: thinking level; default: your own." })),
+  effort: Type.Optional(
+    Type.String({ description: "spawn / new: thinking level; default: your own." }),
+  ),
   workspace: Type.Optional(
     Type.Boolean({
       description:
-        "spawn: give it its own git worktree / jj workspace (from `base`, default HEAD) instead of your directory. Use it when sub-agents edit files in parallel.",
+        "spawn / new: give it its own git worktree / jj workspace (from `base`, default HEAD) instead of your directory (spawn) or the project's (new). Use it when it edits files while others work in the same checkout.",
     }),
   ),
   base: Type.Optional(Type.String()),
@@ -173,21 +215,10 @@ const dirigentParams = Type.Object({
   snoozed: Type.Optional(Type.Boolean({ description: "snooze: false to wake." })),
   name: Type.Optional(
     Type.String({
-      description: "spawn (required): the sub-agent's name, a few words on what it is for.",
+      description: "spawn / new (required): the thread's name, a few words on what it is for.",
     }),
   ),
 });
-
-/** One connection to the service for the whole runtime, made on first use and remade if it drops. */
-let shared: Promise<Client> | undefined;
-async function serviceClient(): Promise<Client> {
-  if (shared) {
-    const c = await shared.catch(() => undefined);
-    if (c?.alive) return c;
-  }
-  shared = Client.connect();
-  return shared;
-}
 
 /** The three tools, bound to `host`. All are registered on every session; `tools` picks the active ones. */
 export function createTools(host: ToolHost): ToolDefinition[] {
@@ -241,89 +272,147 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "dirigent",
     label: "Dirigent",
     description:
-      "Orchestrate threads on this host. Spawn sub-agents (each a thread of its own, started in your " +
-      "directory with your model unless told otherwise) and carry on; when one finishes you get a message " +
-      "with its reply, so end your turn to wait or keep working meanwhile. Message, read, find, archive, " +
-      "snooze or abort any thread, and open one for the user.",
-    promptSnippet: "Spawn and manage sub-agent threads, find threads",
+      "Orchestrate threads on this host and the hosts it reaches. Spawn sub-agents (each a thread of its own, " +
+      "started in your directory with your model unless told otherwise) and carry on; when one finishes you get " +
+      "a message, so end your turn to wait or keep working meanwhile. Start top-level threads (`new`) for work " +
+      "the user should see as a thread of its own; you won't hear back from them. Message, read, find, list, " +
+      "archive, snooze or abort any thread, and open one for the user. Threads are listed as " +
+      "[name](dirigent://thread/<id>) links: the user clicks one in your reply to open the thread, so link the " +
+      "threads you start, find or mention.",
+    promptSnippet:
+      "Spawn sub-agents, start top-level threads, find and manage threads on every host",
     parameters: dirigentParams,
     async execute(_id, p) {
-      const d = new Dirigent(await serviceClient(), { threadId: host.threadId });
+      const ours = new Set<string>(TOOL_NAMES);
+      const d = new Dirigent({
+        threadId: host.threadId,
+        tools: host.session.getActiveToolNames().filter((n) => ours.has(n)),
+      });
       const need = (v: string | undefined, what: string) => {
         if (!v) throw new Error(`\`${what}\` is required for ${p.action}`);
         return v;
       };
-      switch (p.action) {
-        case "spawn": {
-          const id = await d.spawn({
-            name: need(p.name, "name"),
-            task: need(p.task, "task"),
-            model: p.model,
-            effort: p.effort,
-            workspace: p.workspace,
-            base: p.base,
-          });
-          return text(
-            `Spawned sub-agent thread ${id}. You will get a message with its reply when it finishes; ` +
-              `use status / read to look in on it, send to steer it.`,
-          );
-        }
-        case "send": {
-          await d.send(need(p.thread_id, "thread_id"), need(p.text, "text"), p.mode);
-          return text(`Sent to ${p.thread_id}.`);
-        }
-        case "read": {
-          const r = await d.read(need(p.thread_id, "thread_id"), p.full);
-          const body = p.full ? (r.transcript ?? "(empty)") : (r.reply ?? "(no final reply yet)");
-          return text(`${describeThread(r.thread)}\n\n${body}`);
-        }
-        case "status": {
-          const threads = await d.threads();
-          if (p.thread_id) {
-            const t = threads.find((t) => t.id === p.thread_id);
-            if (!t) throw new Error(`no thread ${p.thread_id}`);
-            return text(describeThread(t));
-          }
-          // In the desktop panel's order: by when each was last given a task.
-          const kids = threads
-            .filter((t) => t.parent_id === host.threadId)
-            .sort(
-              (a, b) =>
-                (a.prompted_at ?? a.created_at) - (b.prompted_at ?? b.created_at) ||
-                a.created_at - b.created_at ||
-                a.id.localeCompare(b.id),
+      /** Found threads, one per line, then the hosts that didn't answer. */
+      const listing = (r: { found: Parameters<typeof describeThread>[0][]; failed: string[] }) =>
+        (r.found.length ? r.found.map((f) => describeThread(f)).join("\n") : "No threads.") +
+        (r.failed.length ? `\nNot reached: ${r.failed.join("; ")}` : "");
+      try {
+        switch (p.action) {
+          case "spawn": {
+            const id = await d.spawn({
+              name: need(p.name, "name"),
+              task: need(p.task, "task"),
+              model: p.model,
+              effort: p.effort,
+              workspace: p.workspace,
+              base: p.base,
+              report: p.report,
+              notify: p.notify,
+            });
+            const what = p.report === "done" ? "that it finished" : "its reply";
+            const when = p.notify === "when_idle" ? "once your turn has ended" : "";
+            return text(
+              `Spawned sub-agent thread ${id}. You will get a message with ${what} when it finishes${when ? ` (${when})` : ""}; ` +
+                `use status / read to look in on it, send to steer it.`,
             );
-          return text(
-            `You are thread ${host.threadId}.\n` +
-              (kids.length
-                ? `Sub-agents:\n${kids.map((t) => describeThread(t)).join("\n")}`
-                : "No sub-agents."),
-          );
+          }
+          case "new": {
+            const f = await d.create({
+              name: need(p.name, "name"),
+              task: need(p.task, "task"),
+              host: p.host,
+              project: p.project,
+              model: p.model,
+              effort: p.effort,
+              workspace: p.workspace,
+              base: p.base,
+            });
+            return text(
+              `Started ${threadLink(f.thread)} on ${f.host.name} in ${f.project?.path}. It is the user's now: ` +
+                `you won't hear from it. Put that link in your reply so the user can open it.`,
+            );
+          }
+          case "send": {
+            const f = await d.send(need(p.thread_id, "thread_id"), need(p.text, "text"), p.mode);
+            return text(`Sent to ${threadLink(f.thread)}.`);
+          }
+          case "read": {
+            const r = await d.read(need(p.thread_id, "thread_id"), p.full);
+            const body = p.full ? (r.transcript ?? "(empty)") : (r.reply ?? "(no final reply yet)");
+            return text(`${describeThread(r)}\n\n${body}`);
+          }
+          case "status": {
+            if (p.thread_id) return text(describeThread(await d.locate(p.thread_id)));
+            // In the desktop panel's order: by when each was last given a task.
+            const kids = (await d.threads())
+              .filter((t) => t.parent_id === host.threadId)
+              .sort(
+                (a, b) =>
+                  (a.prompted_at ?? a.created_at) - (b.prompted_at ?? b.created_at) ||
+                  a.created_at - b.created_at ||
+                  a.id.localeCompare(b.id),
+              );
+            const projects = await d.projects();
+            const line = (t: (typeof kids)[number]) =>
+              describeThread({
+                host: d.local,
+                thread: t,
+                project: projects.find((p) => p.id === t.project_id),
+              });
+            return text(
+              `You are thread ${host.threadId}.\n` +
+                (kids.length ? `Sub-agents:\n${kids.map(line).join("\n")}` : "No sub-agents."),
+            );
+          }
+          case "list":
+            return text(listing(await d.list(p.limit ?? 20)));
+          case "search": {
+            const r = await d.search(need(p.query, "query"), p.limit ?? 10);
+            return text(r.found.length || r.failed.length ? listing(r) : "No thread matches.");
+          }
+          case "projects": {
+            const each = await d.allProjects();
+            return text(
+              each
+                .map(({ host: h, value, error }) =>
+                  error
+                    ? `${h.name}: not reached (${error})`
+                    : `${h.name}:\n` +
+                      (value?.length
+                        ? value
+                            .map(
+                              (p) => `  - ${p.path}${p.origin ? ` (${p.origin})` : ""} id=${p.id}`,
+                            )
+                            .join("\n")
+                        : "  (no projects)"),
+                )
+                .join("\n"),
+            );
+          }
+          case "archive": {
+            const f = await d.archive(need(p.thread_id, "thread_id"), p.archived ?? true);
+            return text(
+              `${p.archived === false ? "Unarchived" : "Archived"} ${threadLink(f.thread)}.`,
+            );
+          }
+          case "snooze": {
+            const f = await d.snooze(need(p.thread_id, "thread_id"), p.snoozed ?? true);
+            return text(`${p.snoozed === false ? "Woke" : "Snoozed"} ${threadLink(f.thread)}.`);
+          }
+          case "abort": {
+            const f = await d.abort(need(p.thread_id, "thread_id"));
+            return text(`Aborted ${threadLink(f.thread)}.`);
+          }
+          case "open": {
+            const f = await d.open(need(p.thread_id, "thread_id"));
+            return text(
+              `Asked the desktops connected to ${f.host.name} to open ${threadLink(f.thread)} ` +
+                `(a desktop that doesn't connect to ${f.host.name} won't).`,
+            );
+          }
         }
-        case "search": {
-          const hits = await d.search(need(p.query, "query"), p.limit ?? 10);
-          if (hits.length === 0) return text("No thread matches.");
-          return text(
-            hits
-              .map(
-                (h) =>
-                  `${h.thread ? describeThread(h.thread) : `- ${h.thread_id}`}\n    \u2026${h.snippet}\u2026`,
-              )
-              .join("\n"),
-          );
-        }
-        case "archive":
-          await d.archive(need(p.thread_id, "thread_id"), p.archived ?? true);
-          return text(`${p.archived === false ? "Unarchived" : "Archived"} ${p.thread_id}.`);
-        case "snooze":
-          await d.snooze(need(p.thread_id, "thread_id"), p.snoozed ?? true);
-          return text(`${p.snoozed === false ? "Woke" : "Snoozed"} ${p.thread_id}.`);
-        case "abort":
-          await d.abort(need(p.thread_id, "thread_id"));
-          return text(`Aborted ${p.thread_id}.`);
-        case "open":
-          await d.open(need(p.thread_id, "thread_id"));
-          return text(`Opened ${p.thread_id} for the user.`);
+      } finally {
+        d.close();
       }
     },
   });

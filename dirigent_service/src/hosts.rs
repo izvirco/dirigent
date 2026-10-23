@@ -1,6 +1,8 @@
-//! Remote hosts live in `~/.config/dirigent/hosts.toml`, edited by hand or from the Hosts
-//! page. The file is the truth: the UI rewrites it and then `Dirigent::sync_hosts` diffs
-//! it against the running connections. `local` is implicit and never in the file.
+//! Remote hosts live in `~/.config/dirigent/hosts.toml`, edited by hand or from the
+//! desktop's Hosts page. The file is the truth: the desktop rewrites it and then
+//! `Dirigent::sync_hosts` diffs it against the running connections. `local` is implicit and
+//! never in the file. The service reads the same file on its machine for `ListHosts`: the
+//! hosts its agents can reach (the `dirigent` tool), so it lives here, in the lib both share.
 //!
 //! ```toml
 //! [hosts]
@@ -24,7 +26,7 @@ struct File {
 }
 
 pub fn path() -> PathBuf {
-    crate::config::dir().join("hosts.toml")
+    crate::config_dir().join("hosts.toml")
 }
 
 /// Name → url, normalized. A missing file is an empty list; a broken one is an error so
@@ -69,7 +71,7 @@ pub fn normalize(input: &str) -> Result<String> {
     }
     // A port is a non-empty tail after the last colon, outside any IPv6 brackets.
     let has_port = authority.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && !p.contains(']'));
-    let authority = if has_port { authority.to_owned() } else { format!("{authority}:{}", dirigent_service::DEFAULT_PORT) };
+    let authority = if has_port { authority.to_owned() } else { format!("{authority}:{}", crate::DEFAULT_PORT) };
     Ok(format!("{scheme}://{authority}{path}"))
 }
 
