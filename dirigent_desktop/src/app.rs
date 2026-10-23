@@ -301,6 +301,10 @@ pub struct Dirigent {
     pinned: HashSet<(String, String)>,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
+    /// The log section is on: it sticks across threads, every thread opened showing its
+    /// latest work (`latest_work`). Set by showing a log, cleared by dropping it or closing
+    /// the panel.
+    pub log_on: bool,
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
@@ -444,6 +448,7 @@ impl Dirigent {
             seen,
             pinned,
             log_width,
+            log_on: false,
             resizing: None,
             composer,
             path_input,
@@ -792,6 +797,10 @@ impl Dirigent {
                     t.timeline = Timeline::from_entries(entries.iter().map(|e| &e.json));
                     t.entries = entries;
                     t.list.reset(t.timeline.items.len() + 1);
+                    // The cache may have lagged: the log follows the latest work again.
+                    if self.log_on {
+                        self.show_latest_log();
+                    }
                     self.fetch_blobs();
                 }
             }
@@ -1014,6 +1023,9 @@ impl Dirigent {
             panel: None,
         }));
         self.set_pane(pane, cx);
+        if self.log_on {
+            self.show_latest_log();
+        }
         self.menu = None;
         self.base = None;
         self.selection.clear();
@@ -1468,19 +1480,33 @@ impl Dirigent {
     /// the run in progress (else the last work) when it had none.
     pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         let open = self.panel_open();
-        let Pane::Thread(t) = &self.pane else { return };
-        let fill = match t.log {
-            Some(_) => None,
-            None if self.is_running() => Some(t.timeline.open_work().unwrap_or(thread::TAIL)),
-            None => t.timeline.items.iter().rposition(|i| matches!(i, Item::Work(_))),
-        };
         let Pane::Thread(t) = &mut self.pane else { return };
         t.panel = Some(!open);
-        if let Some(key) = fill.filter(|_| !open) {
-            self.show_log(key);
+        if open {
+            self.log_on = false;
+        } else if t.log.is_none() {
+            self.show_latest_log();
         }
         self.focus_composer(cx);
         cx.notify();
+    }
+
+    /// The open thread's latest work: the run in progress (the tail while it has no
+    /// item yet), else the last work.
+    fn latest_work(&self) -> Option<usize> {
+        let t = self.open()?;
+        match t.timeline.open_work() {
+            Some(i) => Some(i),
+            None if self.is_running() => Some(thread::TAIL),
+            None => t.timeline.items.iter().rposition(|i| matches!(i, Item::Work(_))),
+        }
+    }
+
+    /// Point the log at the latest work, when there is one.
+    fn show_latest_log(&mut self) {
+        if let Some(key) = self.latest_work() {
+            self.show_log(key);
+        }
     }
 
     // ---- asks ----
@@ -2216,6 +2242,7 @@ impl Dirigent {
         } else if let Pane::Thread(t) = &mut self.pane
             && t.log.take().is_some()
         {
+            self.log_on = false;
             cx.notify();
         }
     }
@@ -2514,6 +2541,7 @@ impl Dirigent {
             t.panel = None;
             if open && t.log == Some(key) {
                 t.log = None;
+                self.log_on = false;
             } else {
                 self.show_log(key);
             }
@@ -2527,6 +2555,7 @@ impl Dirigent {
     fn show_log(&mut self, key: usize) {
         if let Pane::Thread(t) = &mut self.pane {
             let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
+            self.log_on = true;
             t.log = Some(key);
             t.log_list.reset(0);
             t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
