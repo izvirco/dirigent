@@ -34,6 +34,8 @@ icons!(
     "moon",
     "panel-left-close",
     "panel-left-open",
+    "panel-right-close",
+    "panel-right-open",
     "pin",
     "play",
     "plus",

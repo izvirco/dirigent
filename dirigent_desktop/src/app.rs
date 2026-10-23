@@ -73,8 +73,8 @@ pub struct OpenThread {
     /// (work item index, step index) of the tool calls whose details are open in the log
     /// panel. `thread::TAIL` as item index addresses the streaming tail.
     pub expanded: HashSet<(usize, usize)>,
-    /// The work whose full log the right panel shows (item index, `thread::TAIL` for a
-    /// live work that has no persisted item yet). `None` = panel closed.
+    /// The work whose full log the right panel's log section shows (item index,
+    /// `thread::TAIL` for a live work that has no persisted item yet); `None` = no log.
     pub log: Option<usize>,
     /// The log panel's steps, one item each; follows the tail while it shows a live work.
     pub log_list: ListState,
@@ -90,9 +90,10 @@ pub struct OpenThread {
     center_on: Option<(usize, u8)>,
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
-    /// The lineage panel (`orchestra.rs`): the user's choice, or `None` for the
-    /// default (open while the thread has a family; see `lineage_open`).
-    pub lineage: Option<bool>,
+    /// The right panel (lineage over the work log): the user's choice from the header
+    /// button, or `None` for the default (open while there is something to show; see
+    /// `panel_open`). Clicking a work line resets it to the default.
+    pub panel: Option<bool>,
 }
 
 /// The user's answers in progress to one `ask_user` call: the picked option indices and
@@ -1010,7 +1011,7 @@ impl Dirigent {
             stats_hover: false,
             center_on: None,
             asks: vec![],
-            lineage: None,
+            panel: None,
         }));
         self.set_pane(pane, cx);
         self.menu = None;
@@ -1454,31 +1455,32 @@ impl Dirigent {
         );
     }
 
-    // ---- lineage panel ----
+    // ---- right panel ----
 
-    /// Whether the lineage panel is on the pane's right: the work log takes the
-    /// spot when it is open; else the user's choice, else whenever there is something to
-    /// show (a family).
-    pub fn lineage_open(&self) -> bool {
+    /// Whether the right panel (lineage over the work log) is showing: the user's
+    /// choice, else whenever there is something to show (a log or a family).
+    pub fn panel_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
-        if t.log.is_some() {
-            return false;
-        }
-        t.lineage.unwrap_or_else(|| !self.lineage(&t.host, &t.id).is_empty())
+        t.panel.unwrap_or_else(|| t.log.is_some() || !self.lineage(&t.host, &t.id).is_empty())
     }
 
-    /// The header's `Lineage` tab: show the lineage panel (closing the log), or hide it
-    /// if it is the one showing.
-    pub fn toggle_lineage(&mut self, cx: &mut Context<Self>) {
-        let open = self.lineage_open();
-        if let Pane::Thread(t) = &mut self.pane {
-            t.lineage = Some(!open);
-            if !open {
-                t.log = None;
-            }
-            self.focus_composer(cx);
-            cx.notify();
+    /// The header's panel button and `]`: close the panel, or open it, with the log of
+    /// the run in progress (else the last work) when it had none.
+    pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        let open = self.panel_open();
+        let Pane::Thread(t) = &self.pane else { return };
+        let fill = match t.log {
+            Some(_) => None,
+            None if self.is_running() => Some(t.timeline.open_work().unwrap_or(thread::TAIL)),
+            None => t.timeline.items.iter().rposition(|i| matches!(i, Item::Work(_))),
+        };
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.panel = Some(!open);
+        if let Some(key) = fill.filter(|_| !open) {
+            self.show_log(key);
         }
+        self.focus_composer(cx);
+        cx.notify();
     }
 
     // ---- asks ----
@@ -2185,7 +2187,7 @@ impl Dirigent {
             t.streaming.echo.push((text, mode));
             let tail = t.timeline.items.len();
             t.list.remeasure_items(tail..tail + 1);
-            // An open log panel follows the new run.
+            // An open log follows the new run.
             if t.log.is_some() {
                 t.log = Some(t.timeline.open_work().unwrap_or(thread::TAIL));
                 t.log_list.set_follow_mode(FollowMode::Tail);
@@ -2235,26 +2237,12 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// `]`: close the work log panel, or open it on the run in progress, else the last work.
+    /// `]`: toggle the right panel (see `toggle_panel`).
     pub fn toggle_log_key(&mut self, _: &ToggleLog, window: &mut Window, cx: &mut Context<Self>) {
         if self.typed_bracket("]", window, cx) {
             return;
         }
-        self.toggle_last_log(cx);
-    }
-
-    /// The header's `Work log` tab: close the log, or open it on the run in progress, else the last work.
-    pub fn toggle_last_log(&mut self, cx: &mut Context<Self>) {
-        let Pane::Thread(t) = &self.pane else { return };
-        let key = match t.log {
-            Some(key) => key,
-            None if self.is_running() => t.timeline.open_work().unwrap_or(thread::TAIL),
-            None => match t.timeline.items.iter().rposition(|i| matches!(i, Item::Work(_))) {
-                Some(i) => i,
-                None => return,
-            },
-        };
-        self.toggle_log(key, cx);
+        self.toggle_panel(cx);
     }
 
     /// A bracket key with text in the focused input types the bracket instead of acting.
@@ -2518,17 +2506,30 @@ impl Dirigent {
         self.close_menu(cx);
     }
 
-    /// Open the log panel on a work (clicking its header), or close it if it's showing it.
+    /// Clicking a work line: show its log in the panel (opening it), or drop the log if
+    /// it is the one showing (the panel then stays for the family, else closes).
     pub fn toggle_log(&mut self, key: usize, cx: &mut Context<Self>) {
+        let open = self.panel_open();
         if let Pane::Thread(t) = &mut self.pane {
-            let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
-            t.log = (t.log != Some(key)).then_some(key);
-            // A finished work opens at the top, a live one follows its latest step.
-            // `log_panel` fills the list in at the next render.
-            t.log_list.reset(0);
-            t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
+            t.panel = None;
+            if open && t.log == Some(key) {
+                t.log = None;
+            } else {
+                self.show_log(key);
+            }
             self.focus_composer(cx);
             cx.notify();
+        }
+    }
+
+    /// Point the panel's log section at a work: a finished one opens at the top, a live
+    /// one follows its latest step. `log_panel` fills the list in at the next render.
+    fn show_log(&mut self, key: usize) {
+        if let Pane::Thread(t) = &mut self.pane {
+            let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
+            t.log = Some(key);
+            t.log_list.reset(0);
+            t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
         }
     }
 

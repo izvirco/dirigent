@@ -75,8 +75,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (h4, i4) = (host.clone(), id.clone());
     let snoozed = status == Status::Snoozed;
     let pinned = this.pinned(&host, &id);
-    let log_on = t.log.is_some();
-    let lineage_on = this.lineage_open();
+    let panel_open = this.panel_open();
     let workspace = summary.as_ref().and_then(|s| s.workspace.clone());
     let confirm_open = this.menu == Some(Menu::ConfirmDelete);
     let confirm = confirm_open.then(|| {
@@ -150,16 +149,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
                 .children(confirm),
         )
-        // The side panels' tabs, outermost: the open one closes its panel, the other swaps to it.
+        // The right panel's button, outermost (`]` does the same).
         .child(
-            div()
-                .ml_2()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(theme::tab("Work log", log_on, cx, |this, cx| this.toggle_last_log(cx)))
-                .child(theme::tab("Lineage", lineage_on, cx, |this, cx| this.toggle_lineage(cx))),
+            theme::icon_button("hdr-panel", if panel_open { "panel-right-close" } else { "panel-right-open" }, cx, |this, cx| {
+                this.toggle_panel(cx)
+            })
+            .ml_2(),
         )
         .into_any_element();
 
@@ -245,23 +240,43 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .min_w_0()
         .child(breadcrumb(project, parent, Some(status), title, pinned, titling, cx))
         .children(branch);
-    pane.child(header(crumb, Some(actions))).child(
-        div()
-            .relative()
-            .flex_1()
-            .min_h_0()
-            .flex()
-            .flex_row()
-            .child(column)
-            .children(log_panel(this, cx))
-            .children(crate::orchestra::panel(this, cx)),
-    )
+    pane.child(header(crumb, Some(actions)))
+        .child(div().relative().flex_1().min_h_0().flex().flex_row().child(column).children(side_panel(this, cx)))
 }
 
-/// A panel split off the pane's right by a hairline, `log_width` wide, with a drag handle
-/// on its left edge: the work log and the lineage panel are both built on it. Untitled:
-/// the header's tab for it is lit.
-pub fn side_panel(body: impl IntoElement, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+/// The right panel, split off the pane by a hairline, `log_width` wide, with a drag
+/// handle on its left edge: the thread's family (`orchestra::tree`, at most a third of
+/// the height, scrolling past that) over the work log (`log_body`), each only when there
+/// is one; a word about sub-agents when there is neither. Untitled: the header's button
+/// shows its state. `panel_open` decides whether it is on screen.
+fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
+    if !this.panel_open() {
+        return None;
+    }
+    let tree = crate::orchestra::tree(this, cx);
+    let log = log_body(this, cx);
+    let empty = (tree.is_none() && log.is_none()).then(|| {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px_6()
+            .text_size(px(12.))
+            .text_color(rgba(theme::t().fg_2))
+            .child("Sub-agents this thread spawns show up here.")
+    });
+    let tree = tree.map(|tree| {
+        div()
+            .id("orchestra")
+            .flex_shrink_0()
+            .max_h(relative(1. / 3.))
+            .overflow_y_scroll()
+            .px_2()
+            .pb_2()
+            .when(log.is_some(), |d| d.border_b_1().border_color(rgba(theme::t().line_soft)))
+            .child(tree)
+    });
     let handle = div()
         .id("panel-resize")
         .absolute()
@@ -272,7 +287,7 @@ pub fn side_panel(body: impl IntoElement, this: &Dirigent, cx: &mut Context<Diri
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
-    div()
+    let panel = div()
         .relative()
         .w(px(this.log_width))
         .flex_shrink_0()
@@ -281,8 +296,11 @@ pub fn side_panel(body: impl IntoElement, this: &Dirigent, cx: &mut Context<Diri
         .border_color(rgba(theme::t().line_soft))
         .flex()
         .flex_col()
-        .child(body)
-        .child(handle)
+        .children(tree)
+        .children(log)
+        .children(empty)
+        .child(handle);
+    Some(panel)
 }
 
 /// A workspace's name is its directory's basename: the host names the directory, the git
@@ -1588,13 +1606,13 @@ pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
     }
 }
 
-/// The panel on the pane's right with the full log of the work `t.log` points at, split
-/// off by a hairline with a drag handle: a lazy `list()` of its steps (`render_step`),
-/// one mono size; tool rows open to their arguments and output. Showing the run in
-/// progress it follows the latest step unless the user scrolled up (`FollowMode::Tail`).
-/// The list's item count is reconciled here, so every path that changes the steps
-/// (events, entries, a new prompt) is covered; those paths remeasure the items.
-fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
+/// The right panel's log section: the full log of the work `t.log` points at as a lazy
+/// `list()` of its steps (`render_step`), one mono size; tool rows open to their arguments
+/// and output. Showing the run in progress it follows the latest step unless the user
+/// scrolled up (`FollowMode::Tail`). The list's item count is reconciled here, so every
+/// path that changes the steps (events, entries, a new prompt) is covered; those paths
+/// remeasure the items.
+fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let Pane::Thread(t) = &this.pane else { return None };
     t.log?;
     let (work, live) = shown_work(this)?;
@@ -1618,8 +1636,7 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                 .into_any()
         }),
     );
-    let body = steps.flex_1().w_full().text_size(px(STEP_SIZE)).line_height(px(19.));
-    Some(side_panel(body, this, cx))
+    Some(steps.flex_1().min_h_0().w_full().text_size(px(STEP_SIZE)).line_height(px(19.)).into_any_element())
 }
 
 /// One step of the shown work as a log list item; a placeholder while it has none.

@@ -1,12 +1,10 @@
-//! The lineage panel: split off the pane's right like the work log (same hairline,
-//! handle and width; one of the two at a time), it shows the open thread's family tree
-//! (`lineage`: the topmost ancestor down through every sub-agent; the working ones bright,
-//! the rest dim; a click opens a thread). Open by default while there is something to
-//! show; the header's `Lineage` tab toggles it.
+//! The lineage tree at the top of the right panel (`thread::side_panel`, over the work
+//! log): the open thread's family (`lineage`: the topmost ancestor down through every
+//! sub-agent; the working ones bright, the rest dim; a click opens a thread).
 
 use crate::app::Dirigent;
 use crate::theme::{self, Status};
-use crate::thread::{duration, elapsed, side_panel};
+use crate::thread::{duration, elapsed};
 use dirigent_protocol::ThreadSummary;
 use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
 use std::collections::HashSet;
@@ -51,31 +49,11 @@ fn descend<'a>(threads: &'a [ThreadSummary], node: LineageNode<'a>, out: &mut Ve
     }
 }
 
-pub fn panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
-    if !this.lineage_open() {
-        return None;
-    }
+/// The open thread's family tree, when it has any relations.
+pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let open = this.open()?;
     let (host, id) = (open.host.clone(), open.id.clone());
-    let body = match agents(this, &host, &id, now_ms(), cx) {
-        Some(tree) => div().id("orchestra").flex_1().overflow_y_scroll().flex().flex_col().px_2().pb_4().child(tree).into_any_element(),
-        None => div()
-            .flex_1()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .px_6()
-            .text_size(px(12.))
-            .text_color(rgba(theme::t().fg_2))
-            .child("Sub-agents this thread spawns show up here.")
-            .into_any_element(),
-    };
-    Some(side_panel(body, this, cx))
-}
-
-/// The family tree, when the thread has any relations.
-fn agents(this: &Dirigent, host: &str, id: &str, now: i64, cx: &mut Context<Dirigent>) -> Option<Div> {
+    let (host, id, now) = (host.as_str(), id.as_str(), now_ms());
     let nodes = this.lineage(host, id);
     if nodes.is_empty() {
         return None;
