@@ -26,18 +26,15 @@ use cache::Cache;
 use dirigent_service::hosts;
 use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
-use std::path::PathBuf;
-
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .expect("HOME not set")
-        .join("dirigent")
-}
 
 fn main() {
-    let cache = Cache::open(&data_dir().join("desktop.db")).expect("open cache");
+    // `--data-dir` / `--config-dir`: shared with the embedded service, which keeps its db,
+    // workspaces and jobs next to `desktop.db`.
+    if let Err(e) = dirigent_service::init_dirs() {
+        eprintln!("{e:#}");
+        std::process::exit(2);
+    }
+    let cache = Cache::open(&dirigent_service::data_dir().join("desktop.db")).expect("open cache");
     // A broken config.toml still starts the app (on defaults); the watcher picks up the fix.
     let config = config::load().unwrap_or_else(|e| {
         eprintln!("[desktop] {e:#}");

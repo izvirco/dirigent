@@ -7,7 +7,7 @@ Read `plan.md` (architecture) and `testing.md` (how to drive the UI) first.
 - Seb dogfoods a `target/release/dirigent_desktop` with its service on :7777. Never kill or touch either. Test the UI only through `scripts/ui.sh`: it runs a debug build on its own invisible display, port and data dir, so you can't disturb Seb's desktop or data (see `testing.md`).
 - Never `pkill -f <string>` from a shell whose own command line contains `<string>` — you kill your shell. Anchor patterns with `^/abs/path`.
 - `dirigent_service` is a lib + bin. The desktop embeds the lib and runs the local service in-process; the binary is only for remote hosts.
-- Seb's data is live: an existing `service.db` / `desktop.db` must open with the new code. Schema changes are additive and self-applying (`CREATE TABLE IF NOT EXISTS`, `ensure_column` in `storage.rs`); new wire fields get `#[serde(default)]`. No version bumps. Test dbs can be wiped freely (`scripts/ui.sh reset`).
+- Seb's data is live: an existing `service.db` / `desktop.db` must open with the new code. Schema changes are additive and self-applying (`CREATE TABLE IF NOT EXISTS`, `ensure_column` in `storage.rs`); new wire fields get `#[serde(default)]`. No version bumps. Test dbs can be wiped freely (`scripts/ui.sh reset`). `--data-dir` / `--config-dir` (both binaries) point an instance away from the real dirs.
 - no component library, hand-rolled gpui.
 
 ## Gotchas that cost time
@@ -23,6 +23,7 @@ Read `plan.md` (architecture) and `testing.md` (how to drive the UI) first.
 - **oxfmt reformats TS to 2 spaces** — after `bun run fmt`, string-based patching of the runtime files silently misses; read the file first.
 - **Default pi model may be rate-limited**; use `anthropic/claude-opus-5-5` for tests. Pick it in the model chip, it's remembered.
 - **Clicking in tests**: `scripts/ui.sh click X Y` takes screenshot pixels (scale 1, window at 0,0). Hover-revealed controls need a `move` onto their row first.
+- **Screenshots in tests**: never `read` a shot in the same tool batch as the `ui.sh … shot` that takes it: the read runs first (an empty file, or the previous frame for a reused path). That is not render lag; read in the next call. Set state up with `ui.sh setup` / `rpc`, wait for agents with `ui.sh wait-idle`.
 - **The `dirigent` tool is a ws client of the service** (`dirigent_runtime/src/client.ts`, url from `DIRIGENT_URL`; other hosts, from `ListHosts`, the same way, directly): add a capability as a protocol message + service handler, then a `Dirigent` helper; don't add a runtime→service side channel. Notices to a parent thread (a sub-agent ended) come from the service (`notify_thread`), never from the runtime, which may be restarted meanwhile.
 - **`cargo test -p dirigent_service` needs FTS5**: the bundled sqlite has it; a system sqlite may not.
 

@@ -478,7 +478,8 @@ async function startJob(host: ToolHost, command: string, notify: Notify): Promis
   const fd = openSync(log, "w");
   const child = spawn("bash", ["-c", command], {
     cwd: host.cwd,
-    env: host.env ? { ...process.env, ...host.env } : process.env,
+    // PI_SESSION_ID as pi's bash tool sets it (scripts/ui.sh keys its default session on it).
+    env: { ...process.env, ...host.env, PI_SESSION_ID: host.threadId },
     detached: true,
     stdio: ["ignore", fd, fd],
   });
@@ -621,8 +622,9 @@ function duration(ms: number): string {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
 }
 
-/** `$XDG_DATA_HOME/dirigent` (else `~/.local/share/dirigent`), as the service computes it. */
+/** The service's data dir (`DIRIGENT_DATA_DIR`, which it sets for us); run by hand, the default. */
 function dataDir(): string {
+  if (process.env.DIRIGENT_DATA_DIR) return process.env.DIRIGENT_DATA_DIR;
   const base = process.env.XDG_DATA_HOME || join(process.env.HOME ?? "/tmp", ".local/share");
   return join(base, "dirigent");
 }

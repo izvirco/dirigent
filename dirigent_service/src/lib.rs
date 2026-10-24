@@ -393,7 +393,7 @@ impl Service {
         }
     }
 
-    /// `$XDG_DATA_HOME/dirigent/workspaces/<name>`: the directory is named like its branch.
+    /// `<data dir>/workspaces/<name>`: the directory is named like its branch.
     fn workspace_dir(&self, thread_id: &str) -> PathBuf {
         data_dir().join("workspaces").join(vcs::workspace_name(thread_id))
     }
@@ -587,9 +587,54 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", &s[..cut])
 }
 
-/// `$XDG_CONFIG_HOME/dirigent` (else `~/.config/dirigent`): the desktop's `config.toml` and
-/// the machine's `hosts.toml`.
+/// Directories given on the command line (`--data-dir`, `--config-dir`); see `init_dirs`.
+#[derive(Debug, Default, PartialEq)]
+struct Dirs {
+    data: Option<PathBuf>,
+    config: Option<PathBuf>,
+}
+
+static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
+
+pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs; default $XDG_DATA_HOME/dirigent) \
+                         --config-dir DIR (config.toml, hosts.toml, themes; default $XDG_CONFIG_HOME/dirigent)";
+
+/// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
+/// options. Call it first thing in `main`, before anything asks for a directory. A test
+/// instance points both elsewhere so it never touches the real dbs or config (and, unlike
+/// overriding `XDG_*`, nothing it spawns sees a changed environment).
+pub fn init_dirs() -> Result<()> {
+    let dirs = parse_dirs(std::env::args().skip(1))?;
+    let _ = DIRS.set(dirs);
+    Ok(())
+}
+
+fn parse_dirs(args: impl Iterator<Item = String>) -> Result<Dirs> {
+    let mut dirs = Dirs::default();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        let (flag, value) = match arg.split_once('=') {
+            Some((f, v)) => (f.to_owned(), Some(v.to_owned())),
+            None => (arg, None),
+        };
+        let slot = match flag.as_str() {
+            "--data-dir" => &mut dirs.data,
+            "--config-dir" => &mut dirs.config,
+            _ => return Err(anyhow!("unknown argument {flag}\n{USAGE}")),
+        };
+        let value = value.or_else(|| args.next()).ok_or_else(|| anyhow!("{flag} needs a directory\n{USAGE}"))?;
+        // Absolute, so it means the same to the runtime (`DIRIGENT_DATA_DIR`) whatever its cwd.
+        *slot = Some(std::path::absolute(&value)?);
+    }
+    Ok(dirs)
+}
+
+/// `--config-dir`, else `$XDG_CONFIG_HOME/dirigent` (else `~/.config/dirigent`): the
+/// desktop's `config.toml` and the machine's `hosts.toml`.
 pub fn config_dir() -> PathBuf {
+    if let Some(dir) = DIRS.get().and_then(|d| d.config.clone()) {
+        return dir;
+    }
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
@@ -597,7 +642,13 @@ pub fn config_dir() -> PathBuf {
         .join("dirigent")
 }
 
-fn data_dir() -> PathBuf {
+/// `--data-dir`, else `$XDG_DATA_HOME/dirigent` (else `~/.local/share/dirigent`): the
+/// service's and the desktop's dbs, workspaces, job logs. The runtime gets it as
+/// `DIRIGENT_DATA_DIR`.
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = DIRS.get().and_then(|d| d.data.clone()) {
+        return dir;
+    }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
@@ -683,4 +734,24 @@ pub async fn run(port: u16) -> Result<()> {
     });
 
     server::serve(svc, &bind_addrs(port)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Dirs> {
+        parse_dirs(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn dir_flags() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(parse(&[]).unwrap(), Dirs::default());
+        let d = parse(&["--data-dir", "/tmp/d", "--config-dir=rel/c"]).unwrap();
+        assert_eq!(d.data, Some("/tmp/d".into()));
+        assert_eq!(d.config, Some(cwd.join("rel/c")));
+        assert!(parse(&["--data-dir"]).is_err());
+        assert!(parse(&["--port", "1"]).is_err());
+    }
 }

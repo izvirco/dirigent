@@ -181,6 +181,7 @@ impl Runtime {
         let mut child = Command::new(&self.cmd[0])
             .args(&self.cmd[1..])
             .env("DIRIGENT_URL", &self.url)
+            .env("DIRIGENT_DATA_DIR", crate::data_dir())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
