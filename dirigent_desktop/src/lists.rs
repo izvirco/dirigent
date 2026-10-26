@@ -175,48 +175,74 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .children(actions)
 }
 
-/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent) an
-/// optional segment of its own, and before the title the thread's `status` glyph and an
-/// amber pin while `pinned`. The title breathes while `titling` (its name is being generated).
-/// Only the title gives way when space runs out (it truncates); everything before it keeps
-/// its width (`via` caps its own).
+/// A sub-agent's parent, a segment of its breadcrumb.
+pub struct Via {
+    pub host: String,
+    pub id: String,
+    pub name: SharedString,
+    pub status: Status,
+}
+
+/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent, its
+/// glyph and name opening it) an optional segment of its own, and before the title the
+/// thread's `status` glyph and an amber pin while `pinned`. The title breathes while
+/// `titling` (its name is being generated).
+/// Nothing truncates while it all fits. When space runs out the parent's name gives way
+/// first, down to nothing, then the title; the project, chevrons and glyphs keep their width.
 pub fn breadcrumb(
     project: Option<(String, String)>,
-    via: Option<Stateful<Div>>,
+    via: Option<Via>,
     status: Option<Status>,
     title: impl Into<SharedString>,
     pinned: bool,
     titling: bool,
     cx: &mut Context<Dirigent>,
 ) -> Div {
-    let crumb = |d: Stateful<Div>| {
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_1()
-            .flex_shrink_0()
-            .child(d.text_color(rgba(theme::t().fg_1)).cursor_pointer().hover(|d| d.text_color(rgba(theme::t().fg))))
-            .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
-    };
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .min_w_0()
-        .children(project.map(|(key, name)| {
-            crumb(
-                div()
-                    .id("crumb-project")
-                    .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
-                    .child(name),
+    let has_project = project.is_some();
+    let chevron = || icon("chevron-right", theme::t().fg_2).size(px(12.)).flex_shrink_0();
+    let row = || div().flex().flex_row().items_center().gap_1().min_w_0();
+    // The title has priority: the parent's name and the title's part (`tail`) share a row,
+    // and `tail` doesn't shrink but is capped at that row's width (its `min_w_0` matters:
+    // taffy lets min override max), so the parent's name takes the squeeze until it's
+    // gone, and only then does the title truncate.
+    let (via_glyph, via_name) = via
+        .map(|v| {
+            let open = |id: &'static str| {
+                let (h, pid) = (v.host.clone(), v.id.clone());
+                div().id(id).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
+            };
+            (
+                open("crumb-parent-glyph").flex_shrink_0().child(v.status.glyph()),
+                open("crumb-parent")
+                    .min_w_0()
+                    .truncate()
+                    .text_color(rgba(theme::t().fg_1))
+                    .hover(|d| d.text_color(rgba(theme::t().fg)))
+                    .child(v.name),
             )
-        }))
-        .children(via.map(crumb))
+        })
+        .unzip();
+    let tail = row()
+        .flex_shrink_0()
+        .max_w_full()
+        .when(via_name.is_some(), |d| d.child(chevron()))
         .children(status.map(|s| div().flex_shrink_0().child(s.glyph())))
         .children(pinned.then(|| div().flex_shrink_0().child(theme::pin_mark())))
-        .child(theme::title_text("crumb-title", title, titling))
+        .child(theme::title_text("crumb-title", title, titling));
+    row()
+        .children(project.map(|(key, name)| {
+            div()
+                .id("crumb-project")
+                .flex_shrink_0()
+                .text_color(rgba(theme::t().fg_1))
+                .cursor_pointer()
+                .hover(|d| d.text_color(rgba(theme::t().fg)))
+                .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
+                .child(name)
+        }))
+        .when(has_project, |d| d.child(chevron()))
+        .children(via_glyph)
+        .child(row().children(via_name).child(tail))
 }
 
 fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Dirigent>) -> Div {
