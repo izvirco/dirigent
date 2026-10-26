@@ -530,9 +530,10 @@ impl Dirigent {
         self.open().and_then(|t| self.summary(&t.host, &t.id)).is_some_and(|t| t.running())
     }
 
-    /// Finished since the user last opened it (never opened counts too).
+    /// Finished since the user last opened it (never opened counts too). A thread waiting
+    /// on jobs or sub-agents isn't finished yet, so it isn't unread either.
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
-        Status::of(t).finished() && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
+        self.status(host, t).finished() && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
     }
 
     /// A thread's title colour in the sidebar and lists: amber while the model waits on an

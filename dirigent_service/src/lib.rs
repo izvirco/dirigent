@@ -345,10 +345,10 @@ impl Service {
     // ---- sub-agents ----
 
     /// Hand a notice to a thread's model (loading the session if needed), as the user's
-    /// answers to an ask are: it starts a turn when the model is idle.
+    /// answers to an ask are: it starts a turn when the model is idle. The caller has
+    /// already counted the thread as running (`begin_run`) and pushed that; a notice that
+    /// can't be delivered settles it again.
     async fn notify_thread(&self, thread_id: &str, custom_type: &str, content: &str, details: Value, notify: &str) -> Result<()> {
-        self.runtime.begin_run(thread_id);
-        self.push_threads();
         let sent = match self.ensure_loaded(thread_id, None, None).await {
             Ok(()) => self.runtime.notify(thread_id, custom_type, content, &details, notify),
             Err(e) => Err(e),
@@ -361,16 +361,17 @@ impl Service {
 
     /// A sub-agent's run ended: tell its parent, with the child's final reply (or, if it was
     /// spawned with `Report::Done`, only that it finished), as it was spawned to (`Notify`).
-    /// A child that stopped to ask the user is reported as waiting, not finished.
-    async fn on_child_settled(&self, thread_id: &str) {
-        let (parent, name, asks, reply, (report, notify)) = {
+    /// A child that stopped to ask the user is reported as waiting, not finished. The
+    /// parent already counts as running (see `on_runtime`); `notify_thread` settles it
+    /// again if the notice can't be delivered.
+    async fn on_child_settled(&self, thread_id: &str, parent: &str) {
+        let (name, asks, reply, (report, notify)) = {
             let storage = self.storage.lock().unwrap();
-            let Ok(Some(parent)) = storage.thread_parent(thread_id) else { return };
             let summary = storage.list_threads().ok().and_then(|ts| ts.into_iter().find(|t| t.id == thread_id));
             let name = summary.as_ref().and_then(|t| t.name.clone());
             let asks: Vec<String> =
                 summary.map(|t| t.asks.iter().flat_map(|a| a.questions.iter().map(|q| q.text.clone())).collect()).unwrap_or_default();
-            (parent, name, asks, storage.last_reply(thread_id).ok().flatten(), storage.report(thread_id).unwrap_or_default())
+            (name, asks, storage.last_reply(thread_id).ok().flatten(), storage.report(thread_id).unwrap_or_default())
         };
         let name = name.unwrap_or_else(|| "untitled".into());
         let who = format!("Sub-agent \"{name}\" (thread {thread_id})");
@@ -388,7 +389,7 @@ impl Service {
             "thread_id": thread_id, "name": name, "reply": reply,
             "error": asks.is_empty() && reply.is_none(), "asking": !asks.is_empty(),
         });
-        if let Err(e) = self.notify_thread(&parent, "dirigent:child", &content, details, notify.as_str()).await {
+        if let Err(e) = self.notify_thread(parent, "dirigent:child", &content, details, notify.as_str()).await {
             eprintln!("[service] notify parent {parent} of {thread_id}: {e:#}");
         }
     }
@@ -536,9 +537,18 @@ impl Service {
                 {
                     eprintln!("[service] set last run: {e:#}");
                 }
-                if kind == "agent_settled" {
+                // A sub-agent settled: its parent is about to be woken (`on_child_settled`), so
+                // it counts as running from now, in the same `Threads` push that settles the
+                // child; otherwise clients would see it finished for a moment and move it to
+                // the inbox and back.
+                let parent = match kind {
+                    "agent_settled" => self.storage.lock().unwrap().thread_parent(&thread_id).ok().flatten(),
+                    _ => None,
+                };
+                if let Some(parent) = parent {
+                    self.runtime.begin_run(&parent);
                     let (this, id) = (self.clone(), thread_id.clone());
-                    tokio::spawn(async move { this.on_child_settled(&id).await });
+                    tokio::spawn(async move { this.on_child_settled(&id, &parent).await });
                 }
                 self.push(ServerMessage::Event { thread_id, event });
                 if lifecycle {
