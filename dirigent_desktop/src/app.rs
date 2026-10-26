@@ -92,7 +92,8 @@ pub struct OpenThread {
     pub asks: Vec<AskForm>,
     /// The right panel (lineage over the work log): the user's choice from the header
     /// button, or `None` for the default (open while there is something to show; see
-    /// `panel_open`). Clicking a work line resets it to the default.
+    /// `panel_open`). Clicking a work line resets it to the default; closing it from a
+    /// work line or Esc sets `Some(false)`.
     pub panel: Option<bool>,
 }
 
@@ -302,8 +303,8 @@ pub struct Dirigent {
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     /// The log section is on: it sticks across threads, every thread opened showing its
-    /// latest work (`latest_work`). Set by showing a log, cleared by dropping it or closing
-    /// the panel.
+    /// latest work (`latest_work`). Set by opening a log by hand (a work line, the panel
+    /// button), cleared by closing the panel.
     pub log_on: bool,
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
@@ -798,7 +799,7 @@ impl Dirigent {
                     t.entries = entries;
                     t.list.reset(t.timeline.items.len() + 1);
                     // The cache may have lagged: the log follows the latest work again.
-                    if self.log_on {
+                    if t.log.is_some() {
                         self.show_latest_log();
                     }
                     self.fetch_blobs();
@@ -1493,19 +1494,37 @@ impl Dirigent {
         t.panel.unwrap_or_else(|| t.log.is_some() || !self.lineage(&t.host, &t.id).is_empty())
     }
 
-    /// The header's panel button and `]`: close the panel, or open it, with the log of
-    /// the run in progress (else the last work) when it had none.
+    /// The header's panel button and `]`: close the panel, or open it on the log of the
+    /// run in progress (else the last work).
     pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
-        let open = self.panel_open();
-        let Pane::Thread(t) = &mut self.pane else { return };
-        t.panel = Some(!open);
-        if open {
-            self.log_on = false;
-        } else if t.log.is_none() {
+        if self.panel_open() {
+            self.close_panel();
+        } else if let Pane::Thread(t) = &mut self.pane {
+            t.panel = Some(true);
+            self.log_on = true;
             self.show_latest_log();
         }
         self.focus_composer(cx);
         cx.notify();
+    }
+
+    /// Close the right panel and drop its log, so no work line stays tinted and the next
+    /// open starts from the latest work.
+    fn close_panel(&mut self) {
+        if let Pane::Thread(t) = &mut self.pane {
+            t.panel = Some(false);
+            t.log = None;
+            self.log_on = false;
+        }
+    }
+
+    /// An open panel always shows a log: when it opened by itself (a family appeared) or
+    /// had no work to show yet (a run just started), point it at the latest work. Called
+    /// every frame, so every path into "open without a log" is covered.
+    fn settle_panel(&mut self) {
+        if self.panel_open() && self.open().is_some_and(|t| t.log.is_none()) {
+            self.show_latest_log();
+        }
     }
 
     /// The open thread's latest work: the run in progress (the tail while it has no
@@ -2265,10 +2284,8 @@ impl Dirigent {
         }
         if self.is_running() {
             self.stop(cx);
-        } else if let Pane::Thread(t) = &mut self.pane
-            && t.log.take().is_some()
-        {
-            self.log_on = false;
+        } else if self.panel_open() {
+            self.close_panel();
             cx.notify();
         }
     }
@@ -2559,21 +2576,20 @@ impl Dirigent {
         self.close_menu(cx);
     }
 
-    /// Clicking a work line: show its log in the panel (opening it), or drop the log if
-    /// it is the one showing (the panel then stays for the family, else closes).
+    /// Clicking a work line: show its log in the panel (opening it), or close the panel
+    /// if that log is the one showing.
     pub fn toggle_log(&mut self, key: usize, cx: &mut Context<Self>) {
-        let open = self.panel_open();
-        if let Pane::Thread(t) = &mut self.pane {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        // A log only ever shows in an open panel (`close_panel` drops it).
+        if t.log == Some(key) {
+            self.close_panel();
+        } else {
             t.panel = None;
-            if open && t.log == Some(key) {
-                t.log = None;
-                self.log_on = false;
-            } else {
-                self.show_log(key);
-            }
-            self.focus_composer(cx);
-            cx.notify();
+            self.log_on = true;
+            self.show_log(key);
         }
+        self.focus_composer(cx);
+        cx.notify();
     }
 
     /// Point the panel's log section at a work: a finished one opens at the top, a live
@@ -2581,7 +2597,6 @@ impl Dirigent {
     fn show_log(&mut self, key: usize) {
         if let Pane::Thread(t) = &mut self.pane {
             let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
-            self.log_on = true;
             t.log = Some(key);
             t.log_list.reset(0);
             t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
@@ -2678,6 +2693,7 @@ impl Render for Dirigent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.selection.begin_frame();
         self.settle_jump(window);
+        self.settle_panel();
         let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
         let main = match &self.pane {
             Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, cx),
