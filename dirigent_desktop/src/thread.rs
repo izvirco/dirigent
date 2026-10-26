@@ -18,7 +18,7 @@
 
 use crate::app::{AskForm, Blob, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
 use crate::icons::icon;
-use crate::lists::{breadcrumb, header};
+use crate::lists::{Via, breadcrumb, header};
 use crate::markdown;
 use crate::menu::{self, Side};
 use crate::picker;
@@ -223,15 +223,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(px(12.)))
             .child(name)
     });
-    // A sub-agent's parent before its title, a click away (the sidebar has the whole family).
-    let parent = summary.as_ref().and_then(|s| s.parent_id.clone()).and_then(|pid| this.summary(&host, &pid)).map(|p| {
-        let (h, pid) = (host.clone(), p.id.clone());
-        div()
-            .id("crumb-parent")
-            .max_w(px(220.))
-            .truncate()
-            .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
-            .child(p.name.clone().unwrap_or_else(|| "Untitled".into()))
+    // A sub-agent's parent before its title, a click away (the right panel's tree has the whole family).
+    let parent = summary.as_ref().and_then(|s| s.parent_id.clone()).and_then(|pid| this.summary(&host, &pid)).map(|p| Via {
+        host: host.clone(),
+        id: p.id.clone(),
+        name: p.name.clone().unwrap_or_else(|| "Untitled".into()).into(),
+        status: this.status(&host, p),
     });
     let crumb = div()
         .flex()
