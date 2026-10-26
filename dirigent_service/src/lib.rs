@@ -226,7 +226,7 @@ impl Service {
                 // the model it will use for all of it. A new turn is a new task, too
                 // (`prompted_at`: steers, follow-ups and answers don't count).
                 if mode == PromptMode::Prompt {
-                    self.storage.lock().unwrap().set_prompted(&thread_id, model.as_deref(), thinking_level.as_deref(), now())?;
+                    self.storage.lock().unwrap().set_prompted(&thread_id, &text, model.as_deref(), thinking_level.as_deref(), now())?;
                     self.runtime.begin_run(&thread_id);
                     self.push_threads();
                 }

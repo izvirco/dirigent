@@ -480,6 +480,15 @@ impl ThreadSummary {
     }
 }
 
+/// The name an unnamed thread gets from its first prompt: the first non-blank line, cut to
+/// 80 chars.
+/// Set by the service when the prompt arrives (and by the desktop, optimistically, for its
+/// own drafts); shown until the generated title lands, or if that fails.
+pub fn prompt_title(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.chars().take(80).collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Append order within the thread, starting at 0.
