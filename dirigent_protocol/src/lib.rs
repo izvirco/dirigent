@@ -142,6 +142,27 @@ pub enum ClientMessage {
         thread_id: String,
         snoozed: bool,
     },
+    /// Keep the thread on top of its status group in every client's lists.
+    PinThread {
+        id: u64,
+        thread_id: String,
+        pinned: bool,
+    },
+    /// Pin one of the thread's messages (by the pi entry id it came from; see
+    /// `ThreadSummary::pinned_entries`).
+    PinMessage {
+        id: u64,
+        thread_id: String,
+        entry_id: String,
+        pinned: bool,
+    },
+    /// The user looked at the thread as of `updated_at` (unread tracking, shared by every
+    /// client; see `ThreadSummary::seen_at`). Only moves `seen_at` forward.
+    MarkSeen {
+        id: u64,
+        thread_id: String,
+        updated_at: i64,
+    },
     /// Ask every client to open the thread (an agent calling the user's attention to it).
     FocusThread {
         id: u64,
@@ -453,6 +474,16 @@ pub struct ThreadSummary {
     /// Snoozed and not run since (see `ClientMessage::SnoozeThread`).
     #[serde(default)]
     pub snoozed: bool,
+    /// On top of its status group in the lists (`ClientMessage::PinThread`).
+    #[serde(default)]
+    pub pinned: bool,
+    /// `updated_at` as of the user's last look (`ClientMessage::MarkSeen`); a finished
+    /// thread updated since, or never looked at, is unread.
+    #[serde(default)]
+    pub seen_at: Option<i64>,
+    /// Pi entry ids of the pinned messages (`ClientMessage::PinMessage`).
+    #[serde(default)]
+    pub pinned_entries: Vec<String>,
     /// Unix millis of the last `Prompt` that started a turn (mode `prompt`): when the
     /// thread was last given a task. Orders a parent's children.
     #[serde(default)]
@@ -529,6 +560,9 @@ mod tests {
         });
         roundtrip(ClientMessage::ListHosts { id: 20 });
         roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
+        roundtrip(ClientMessage::PinThread { id: 21, thread_id: "t".into(), pinned: true });
+        roundtrip(ClientMessage::PinMessage { id: 22, thread_id: "t".into(), entry_id: "e".into(), pinned: false });
+        roundtrip(ClientMessage::MarkSeen { id: 23, thread_id: "t".into(), updated_at: 5 });
         roundtrip(ClientMessage::FocusThread { id: 18, thread_id: "t".into() });
         roundtrip(ClientMessage::SearchThreads { id: 19, query: "sqlite".into(), limit: 5 });
         roundtrip(ClientMessage::MoveToWorkspace { id: 14, thread_id: "t".into(), base: None });
@@ -611,6 +645,7 @@ mod tests {
         assert_eq!(t.parent_id, None);
         assert_eq!(t.prompted_at, None);
         assert_eq!(t.jobs, 0);
+        assert!(!t.pinned && t.seen_at.is_none() && t.pinned_entries.is_empty());
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
     }
@@ -638,6 +673,9 @@ mod tests {
             workspace_missing: false,
             parent_id: Some("t0".into()),
             snoozed: true,
+            pinned: true,
+            seen_at: Some(2),
+            pinned_entries: vec!["e1".into()],
             prompted_at: Some(4),
             jobs: 2,
         };

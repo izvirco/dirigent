@@ -1,11 +1,10 @@
 //! Local sqlite cache so the UI renders instantly before any host answers.
 //! Same shape as the service db plus a `host` column. Hosts are the source of truth;
 //! everything here is overwritten whenever fresh data arrives. The only desktop-owned
-//! data is `links` (manual project links), `seen` (unread tracking), `snoozed` (legacy:
-//! snoozes from before the hosts kept them, handed over once), `pinned` (threads kept on top of their
-//! list), `pins` (pinned messages), `drafts` / `draft_images` (what the composer holds per
-//! thread; the new-thread draft is the row with an empty host and thread id) and `kv`
-//! (last used cwd/model/...).
+//! data is `links` (manual project links), `drafts` / `draft_images` (what the composer
+//! holds per thread; the new-thread draft is the row with an empty host and thread id)
+//! and `kv` (last used cwd/model/...). `seen`, `snoozed` and `pinned` are legacy: per-thread
+//! state from before the hosts kept it, handed over once on connect (`take_legacy_*`).
 
 use crate::input::Content;
 use anyhow::Result;
@@ -35,7 +34,6 @@ CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes
 CREATE TABLE IF NOT EXISTS seen (host TEXT NOT NULL, thread_id TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host, thread_id));
 CREATE TABLE IF NOT EXISTS snoozed (host TEXT NOT NULL, thread_id TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host, thread_id));
 CREATE TABLE IF NOT EXISTS pinned (host TEXT NOT NULL, thread_id TEXT NOT NULL, PRIMARY KEY (host, thread_id));
-CREATE TABLE IF NOT EXISTS pins (host TEXT NOT NULL, thread_id TEXT NOT NULL, item INTEGER NOT NULL, PRIMARY KEY (host, thread_id, item));
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS drafts (
     host TEXT NOT NULL, thread_id TEXT NOT NULL, text TEXT NOT NULL,
@@ -52,7 +50,7 @@ CREATE TABLE IF NOT EXISTS draft_images (
 pub type DraftImage = (u32, String, Vec<u8>);
 
 /// Tables keyed by thread that go with it when it is deleted.
-const PER_THREAD: [&str; 4] = ["entries", "pins", "drafts", "draft_images"];
+const PER_THREAD: [&str; 3] = ["entries", "drafts", "draft_images"];
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
 const COLUMNS: &[(&str, &str, &str)] = &[
@@ -60,6 +58,10 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "parent_id", "TEXT"),
     ("threads", "snoozed", "INTEGER NOT NULL DEFAULT 0"),
     ("threads", "prompted_at", "INTEGER"),
+    ("threads", "pinned", "INTEGER NOT NULL DEFAULT 0"),
+    ("threads", "seen_at", "INTEGER"),
+    // JSON list of entry ids.
+    ("threads", "pinned_entries", "TEXT"),
 ];
 
 /// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
@@ -102,7 +104,7 @@ impl Cache {
 
     /// Forget everything cached for a host that was removed from `hosts.toml`.
     pub fn remove_host(&self, host: &str) -> Result<()> {
-        for table in ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "pins", "drafts", "draft_images"] {
+        for table in ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"] {
             self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
         }
         Ok(())
@@ -146,7 +148,7 @@ impl Cache {
     pub fn threads(&self, host: &str) -> Result<Vec<ThreadSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace,
-                    parent_id, snoozed, prompted_at
+                    parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries
              FROM threads WHERE host = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([host], |r| {
@@ -168,6 +170,9 @@ impl Cache {
                 workspace_missing: false,
                 parent_id: r.get(12)?,
                 snoozed: r.get(13)?,
+                pinned: r.get(15)?,
+                seen_at: r.get(16)?,
+                pinned_entries: r.get::<_, Option<String>>(17)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
                 prompted_at: r.get(14)?,
                 jobs: 0,
             })
@@ -175,16 +180,16 @@ impl Cache {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Replace the host's thread list with what it reported; entries, pins and drafts of
+    /// Replace the host's thread list with what it reported; entries and drafts of
     /// threads that no longer exist (deleted on the host) go with them.
     pub fn set_threads(&mut self, host: &str, threads: &[ThreadSummary]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
         for t in threads {
             tx.execute(
-                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, snoozed, prompted_at)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
-                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.snoozed, t.prompted_at],
+                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.snoozed, t.prompted_at, t.pinned, t.seen_at, serde_json::to_string(&t.pinned_entries)?],
             )?;
         }
         for table in PER_THREAD {
@@ -249,18 +254,17 @@ impl Cache {
         Ok(())
     }
 
-    /// The `updated_at` of every thread as of when the user last looked at it.
-    pub fn seen(&self) -> Result<Vec<(String, String, i64)>> {
-        let mut stmt = self.conn.prepare("SELECT host, thread_id, updated_at FROM seen")?;
-        Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn set_seen(&self, host: &str, thread_id: &str, updated_at: i64) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO seen (host, thread_id, updated_at) VALUES (?1, ?2, ?3)",
-            params![host, thread_id, updated_at],
+    /// Seen marks from before the hosts kept them: `(thread_id, updated_at)` of the host's
+    /// unarchived threads the user had looked at, handed over once and then forgotten.
+    /// Archived ones are left out to keep the handover short (each mark is a request).
+    pub fn take_legacy_seen(&self, host: &str) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT s.thread_id, s.updated_at FROM seen s JOIN threads t ON t.host = s.host AND t.id = s.thread_id
+             WHERE s.host = ?1 AND t.archived = 0",
         )?;
-        Ok(())
+        let marks = stmt.query_map([host], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        self.conn.execute("DELETE FROM seen WHERE host = ?1", [host])?;
+        Ok(marks)
     }
 
     /// Snoozes from before snooze moved to the hosts: the threads of `host` still snoozed by
@@ -275,39 +279,15 @@ impl Cache {
         Ok(ids)
     }
 
-    /// Every pinned thread.
-    pub fn pinned(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT host, thread_id FROM pinned")?;
-        Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
-    }
-
-    pub fn set_pinned(&self, host: &str, thread_id: &str, pinned: bool) -> Result<()> {
-        let sql = if pinned {
-            "INSERT OR IGNORE INTO pinned (host, thread_id) VALUES (?1, ?2)"
-        } else {
-            "DELETE FROM pinned WHERE host = ?1 AND thread_id = ?2"
-        };
-        self.conn.execute(sql, params![host, thread_id])?;
-        Ok(())
-    }
-
-    /// Timeline indices of a thread's pinned messages. Entries only ever append and fold
-    /// deterministically, so an index names the same message every time.
-    pub fn pins(&self, host: &str, thread_id: &str) -> Vec<usize> {
-        let Ok(mut stmt) = self.conn.prepare("SELECT item FROM pins WHERE host = ?1 AND thread_id = ?2") else { return vec![] };
-        stmt.query_map(params![host, thread_id], |r| r.get::<_, i64>(0))
-            .map(|rows| rows.filter_map(|r| r.ok()).map(|i| i as usize).collect())
-            .unwrap_or_default()
-    }
-
-    pub fn set_pin(&self, host: &str, thread_id: &str, item: usize, pinned: bool) -> Result<()> {
-        let sql = if pinned {
-            "INSERT OR IGNORE INTO pins (host, thread_id, item) VALUES (?1, ?2, ?3)"
-        } else {
-            "DELETE FROM pins WHERE host = ?1 AND thread_id = ?2 AND item = ?3"
-        };
-        self.conn.execute(sql, params![host, thread_id, item as i64])?;
-        Ok(())
+    /// Thread pins from before the hosts kept them: the host's threads still listed,
+    /// handed over once and then forgotten.
+    pub fn take_legacy_pins(&self, host: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT p.thread_id FROM pinned p JOIN threads t ON t.host = p.host AND t.id = p.thread_id WHERE p.host = ?1")?;
+        let ids = stmt.query_map([host], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        self.conn.execute("DELETE FROM pinned WHERE host = ?1", [host])?;
+        Ok(ids)
     }
 
     /// The composer's saved state for a thread: text with selection, and the pasted images.
@@ -401,6 +381,9 @@ mod tests {
             workspace_missing: false,
             parent_id: None,
             snoozed: false,
+            pinned: false,
+            seen_at: None,
+            pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
         }
@@ -418,6 +401,33 @@ mod tests {
         // `u` ran since it was snoozed, `gone` is no longer listed: only `t` is still snoozed.
         assert_eq!(cache.take_legacy_snoozes("h").unwrap(), vec!["t".to_owned()]);
         assert!(cache.take_legacy_snoozes("h").unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_pins_and_seen_marks_are_handed_over_once() {
+        let mut cache = Cache::in_memory().unwrap();
+        let mut old = thread("old");
+        old.archived = true;
+        cache.set_threads("h", &[thread("t"), old]).unwrap();
+        cache.conn.execute("INSERT INTO pinned VALUES ('h', 't'), ('h', 'gone')", []).unwrap();
+        cache.conn.execute("INSERT INTO seen VALUES ('h', 't', 5), ('h', 'old', 7), ('h', 'gone', 1)", []).unwrap();
+        assert_eq!(cache.take_legacy_pins("h").unwrap(), vec!["t".to_owned()]);
+        assert!(cache.take_legacy_pins("h").unwrap().is_empty());
+        // Archived and deleted threads are left out.
+        assert_eq!(cache.take_legacy_seen("h").unwrap(), vec![("t".to_owned(), 5)]);
+        assert!(cache.take_legacy_seen("h").unwrap().is_empty());
+    }
+
+    /// What the host reports about pins and seen marks survives the cache round trip.
+    #[test]
+    fn thread_state_round_trips() {
+        let mut cache = Cache::in_memory().unwrap();
+        let mut t = thread("t");
+        t.pinned = true;
+        t.seen_at = Some(3);
+        t.pinned_entries = vec!["e1".into(), "e2".into()];
+        cache.set_threads("h", std::slice::from_ref(&t)).unwrap();
+        assert_eq!(cache.threads("h").unwrap(), vec![t]);
     }
 
     #[test]

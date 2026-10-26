@@ -340,7 +340,7 @@ fn thread_row(
     let unread = this.unread(host, t);
     let (h2, id2, archived) = (h.clone(), id.clone(), t.archived);
     let (h3, id3, snoozed) = (h.clone(), id.clone(), status == Status::Snoozed);
-    let pinned = this.pinned(host, &t.id);
+    let pinned = t.pinned;
     let archive_icon = if archived { "archive-restore" } else { "archive" };
 
     div()

@@ -137,6 +137,7 @@ const dirigentParams = Type.Object({
       Type.Literal("projects"),
       Type.Literal("archive"),
       Type.Literal("snooze"),
+      Type.Literal("pin"),
       Type.Literal("abort"),
       Type.Literal("open"),
     ],
@@ -150,7 +151,7 @@ const dirigentParams = Type.Object({
         "list: the most recent top-level threads on every host. " +
         "search: threads on every host whose name or messages contain `query`. " +
         "projects: every host's projects. " +
-        "archive / snooze / abort / open (in the user's desktop): act on `thread_id`.",
+        "archive / snooze / pin / abort / open (in the user's desktop): act on `thread_id`.",
     },
   ),
   thread_id: Type.Optional(
@@ -213,6 +214,7 @@ const dirigentParams = Type.Object({
   full: Type.Optional(Type.Boolean()),
   archived: Type.Optional(Type.Boolean({ description: "archive: false to unarchive." })),
   snoozed: Type.Optional(Type.Boolean({ description: "snooze: false to wake." })),
+  pinned: Type.Optional(Type.Boolean({ description: "pin: false to unpin." })),
   name: Type.Optional(
     Type.String({
       description: "spawn / new (required): the thread's name, a few words on what it is for.",
@@ -276,7 +278,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       "started in your directory with your model unless told otherwise) and carry on; when one finishes you get " +
       "a message, so end your turn to wait or keep working meanwhile. Start top-level threads (`new`) for work " +
       "the user should see as a thread of its own; you won't hear back from them. Message, read, find, list, " +
-      "archive, snooze or abort any thread, and open one for the user. Threads are listed as " +
+      "archive, snooze, pin or abort any thread, and open one for the user. Threads are listed as " +
       "[name](dirigent://thread/<id>) links: the user clicks one in your reply to open the thread, so link the " +
       "threads you start, find or mention.",
     promptSnippet:
@@ -398,6 +400,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
           case "snooze": {
             const f = await d.snooze(need(p.thread_id, "thread_id"), p.snoozed ?? true);
             return text(`${p.snoozed === false ? "Woke" : "Snoozed"} ${threadLink(f.thread)}.`);
+          }
+          case "pin": {
+            const f = await d.pin(need(p.thread_id, "thread_id"), p.pinned ?? true);
+            return text(`${p.pinned === false ? "Unpinned" : "Pinned"} ${threadLink(f.thread)}.`);
           }
           case "abort": {
             const f = await d.abort(need(p.thread_id, "thread_id"));

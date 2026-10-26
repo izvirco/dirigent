@@ -80,8 +80,9 @@ pub struct OpenThread {
     pub log_list: ListState,
     /// The item whose copy button was just clicked (it shows a check for a moment).
     pub copied: Option<usize>,
-    /// Timeline indices of the pinned messages (amber in the ruler; persisted in the cache).
-    pub pins: HashSet<usize>,
+    /// Entry ids of the pinned messages (amber in the ruler; the host keeps them, see
+    /// `ThreadSummary::pinned_entries`), kept in step on every `Threads` push.
+    pub pins: HashSet<String>,
     /// The ruler's animation and hover state (see `ruler.rs`).
     pub ruler: ruler::State,
     /// The composer's context chip is hovered: show the thread's totals (`thread::stats_card`).
@@ -95,6 +96,13 @@ pub struct OpenThread {
     /// `panel_open`). Clicking a work line resets it to the default; closing it from a
     /// work line or Esc sets `Some(false)`.
     pub panel: Option<bool>,
+}
+
+impl OpenThread {
+    /// Timeline item `ix` is a pinned message.
+    pub fn is_pinned(&self, ix: usize) -> bool {
+        self.timeline.entry_id(ix).is_some_and(|id| self.pins.contains(id))
+    }
 }
 
 /// The user's answers in progress to one `ask_user` call: the picked option indices and
@@ -295,11 +303,6 @@ pub struct Dirigent {
     pub sidebar_hidden: bool,
     pub sidebar_peek: bool,
     pub collapsed: HashSet<Section>,
-    /// Per thread, its `updated_at` when the user last looked at it; a finished thread
-    /// updated since (or never looked at) is unread.
-    seen: HashMap<(String, String), i64>,
-    /// Threads kept on top of their status group in the inbox / project lists.
-    pinned: HashSet<(String, String)>,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     /// The log section is on: it sticks across threads, every thread opened showing its
@@ -384,8 +387,6 @@ impl Dirigent {
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let project_order = cache.get(PROJECT_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        let seen = cache.seen().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
-        let pinned = cache.pinned().unwrap_or_default().into_iter().collect();
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
         let presets = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -446,8 +447,6 @@ impl Dirigent {
             sidebar_hidden: false,
             sidebar_peek: false,
             collapsed: HashSet::new(),
-            seen,
-            pinned,
             log_width,
             log_on: false,
             resizing: None,
@@ -531,10 +530,10 @@ impl Dirigent {
         self.open().and_then(|t| self.summary(&t.host, &t.id)).is_some_and(|t| t.running())
     }
 
-    /// Finished since the user last opened it (never opened counts too). A thread waiting
-    /// on jobs or sub-agents isn't finished yet, so it isn't unread either.
+    /// Finished since the user last opened it, on any device (never opened counts too). A
+    /// thread waiting on jobs or sub-agents isn't finished yet, so it isn't unread either.
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
-        self.status(host, t).finished() && self.seen.get(&(host.to_owned(), t.id.clone())).is_none_or(|&u| t.updated_at > u)
+        self.status(host, t).finished() && t.seen_at.is_none_or(|s| t.updated_at > s)
     }
 
     /// A thread's title colour in the sidebar and lists: amber while the model waits on an
@@ -568,26 +567,29 @@ impl Dirigent {
     }
 
     pub fn pinned(&self, host: &str, thread_id: &str) -> bool {
-        self.pinned.contains(&(host.to_owned(), thread_id.to_owned()))
+        self.summary(host, thread_id).is_some_and(|t| t.pinned)
     }
 
     /// Pin keeps a thread on top of its status group (pinned done threads above the other
-    /// done ones, pinned snoozed above the snoozed pile).
+    /// done ones, pinned snoozed above the snoozed pile). The host keeps it (every device
+    /// and agents see it); the flag is set here ahead of its `Threads` push.
     pub fn set_pinned(&mut self, host: &str, thread_id: &str, pinned: bool, cx: &mut Context<Self>) {
-        let key = (host.to_owned(), thread_id.to_owned());
-        if pinned {
-            self.pinned.insert(key);
-        } else {
-            self.pinned.remove(&key);
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::PinThread { id, thread_id: thread_id.to_owned(), pinned });
+        if let Some(t) = self.summary_mut(host, thread_id) {
+            t.pinned = pinned;
         }
-        let _ = self.cache.lock().unwrap().set_pinned(host, thread_id, pinned);
         cx.notify();
+    }
+
+    fn summary_mut(&mut self, host: &str, thread_id: &str) -> Option<&mut ThreadSummary> {
+        self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id))
     }
 
     /// Group rows by status (working, waiting, asking, done, snoozed, archived) with the
     /// pinned ones first in each group, keeping their order otherwise.
     fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
-        rows.sort_by_key(|(h, t)| (self.status(h, t), !self.pinned(h, &t.id)));
+        rows.sort_by_key(|(h, t)| (self.status(h, t), !t.pinned));
     }
 
     /// Order `rows` (most recently updated first on input) as a queue, newest on top.
@@ -607,7 +609,7 @@ impl Dirigent {
     pub fn set_snoozed(&mut self, host: &str, thread_id: &str, snoozed: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::SnoozeThread { id, thread_id: thread_id.to_owned(), snoozed });
-        if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
+        if let Some(t) = self.summary_mut(host, thread_id) {
             t.snoozed = snoozed;
         }
         cx.notify();
@@ -631,11 +633,24 @@ impl Dirigent {
         self.threads_where(|s| s.busy())
     }
 
-    /// The user is looking at this thread: whatever it has now is read.
+    /// The user is looking at this thread: whatever it has now is read, on every device.
+    /// Called again on each `Threads` push while the thread is open, so a mark goes out
+    /// only once the thread is finished (a busy one can't be unread, see `unread`) and has
+    /// moved since the last one: the host's push of the mark must not trigger another. The
+    /// flag is set here ahead of that push.
     fn mark_seen(&mut self, host: &str, id: &str) {
-        let Some(updated_at) = self.summary(host, id).map(|t| t.updated_at) else { return };
-        self.seen.insert((host.to_owned(), id.to_owned()), updated_at);
-        let _ = self.cache.lock().unwrap().set_seen(host, id, updated_at);
+        let Some(updated_at) = self
+            .summary(host, id)
+            .filter(|t| self.status(host, t).finished() && t.seen_at.is_none_or(|s| s < t.updated_at))
+            .map(|t| t.updated_at)
+        else {
+            return;
+        };
+        let rid = self.next_id();
+        self.net.send(host, ClientMessage::MarkSeen { id: rid, thread_id: id.to_owned(), updated_at });
+        if let Some(t) = self.summary_mut(host, id) {
+            t.seen_at = Some(updated_at);
+        }
     }
 
     /// Every top-level thread on every host, most recently updated first, with its host.
@@ -737,11 +752,26 @@ impl Dirigent {
                     self.refresh_draft_vcs();
                 }
                 if status == HostStatus::Connected {
-                    // Snoozes from before the hosts kept them: handed over once.
-                    let legacy = self.cache.lock().unwrap().take_legacy_snoozes(&host).unwrap_or_default();
-                    for thread_id in legacy {
+                    // Snoozes, pins and seen marks from before the hosts kept them: handed over once.
+                    let (snoozes, pins, seen) = {
+                        let cache = self.cache.lock().unwrap();
+                        (
+                            cache.take_legacy_snoozes(&host).unwrap_or_default(),
+                            cache.take_legacy_pins(&host).unwrap_or_default(),
+                            cache.take_legacy_seen(&host).unwrap_or_default(),
+                        )
+                    };
+                    for thread_id in snoozes {
                         let id = self.next_id();
                         self.net.send(&host, ClientMessage::SnoozeThread { id, thread_id, snoozed: true });
+                    }
+                    for thread_id in pins {
+                        let id = self.next_id();
+                        self.net.send(&host, ClientMessage::PinThread { id, thread_id, pinned: true });
+                    }
+                    for (thread_id, updated_at) in seen {
+                        let id = self.next_id();
+                        self.net.send(&host, ClientMessage::MarkSeen { id, thread_id, updated_at });
                     }
                 }
             }
@@ -780,7 +810,10 @@ impl Dirigent {
                     && t.host == host
                 {
                     let id = t.id.clone();
-                    if self.summary(&host, &id).is_some() {
+                    if let Some(pins) = self.summary(&host, &id).map(|s| s.pinned_entries.iter().cloned().collect()) {
+                        if let Pane::Thread(t) = &mut self.pane {
+                            t.pins = pins;
+                        }
                         self.mark_seen(&host, &id);
                         self.sync_asks(cx);
                         // The run ended, or the thread moved: the repo state may have changed.
@@ -1034,7 +1067,7 @@ impl Dirigent {
             log: None,
             log_list: ListState::new(0, ListAlignment::Top, px(300.)),
             copied: None,
-            pins: self.cache.lock().unwrap().pins(host, id).into_iter().collect(),
+            pins: self.summary(host, id).map(|s| s.pinned_entries.iter().cloned().collect()).unwrap_or_default(),
             ruler: Default::default(),
             stats_hover: false,
             center_on: None,
@@ -1759,8 +1792,6 @@ impl Dirigent {
             self.net.remove(&name);
             self.hosts.retain(|h| h.name != name);
             self.links.retain(|(h, _), _| *h != name);
-            self.seen.retain(|(h, _), _| *h != name);
-            self.pinned.retain(|(h, _)| *h != name);
             // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
                 self.set_pane(Pane::Settings, cx);
@@ -2509,14 +2540,25 @@ impl Dirigent {
         }
     }
 
-    /// A message's pin button: toggle it (the ruler shows pinned marks in amber).
+    /// A message's pin button: toggle it (the ruler shows pinned marks in amber). The host
+    /// keeps the pin, by the entry id behind the item; the open thread's set and the
+    /// summary are updated ahead of its `Threads` push.
     pub fn toggle_pin(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let id = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
-        let pinned = !t.pins.remove(&ix);
+        let Some(entry_id) = t.timeline.entry_id(ix).filter(|e| !e.is_empty()).map(str::to_owned) else { return };
+        let pinned = !t.pins.remove(&entry_id);
         if pinned {
-            t.pins.insert(ix);
+            t.pins.insert(entry_id.clone());
         }
-        let _ = self.cache.lock().unwrap().set_pin(&t.host, &t.id, ix, pinned);
+        let (host, thread_id) = (t.host.clone(), t.id.clone());
+        if let Some(s) = self.summary_mut(&host, &thread_id) {
+            s.pinned_entries.retain(|e| *e != entry_id);
+            if pinned {
+                s.pinned_entries.push(entry_id.clone());
+            }
+        }
+        self.net.send(&host, ClientMessage::PinMessage { id, thread_id, entry_id, pinned });
         cx.notify();
     }
 
