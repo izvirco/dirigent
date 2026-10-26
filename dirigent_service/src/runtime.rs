@@ -41,6 +41,11 @@ pub enum RuntimeMessage {
         thread_id: String,
         ask: Ask,
     },
+    /// A thread's count of running `async_bash` jobs changed.
+    Jobs {
+        thread_id: String,
+        running: u32,
+    },
     Error {
         thread_id: Option<String>,
         message: String,
@@ -88,6 +93,15 @@ enum Command_<'a> {
         ask: &'a Ask,
         answers: Option<&'a [Vec<String>]>,
     },
+    /// A notice for the model (a sub-agent ending): a custom message queued as
+    /// a steer (`asap`) or follow-up (`when_idle`), starting a turn if the model is idle.
+    Notify {
+        thread_id: &'a str,
+        custom_type: &'a str,
+        content: &'a str,
+        details: &'a Value,
+        notify: &'a str,
+    },
     GenerateTitle {
         title: &'a TitleGen,
         text: &'a str,
@@ -115,6 +129,9 @@ pub struct TitleResult {
 
 pub struct Runtime {
     cmd: Vec<String>,
+    /// The service's own ws url, handed to the child as `DIRIGENT_URL` (the `dirigent`
+    /// tool is a client of the service it runs under).
+    url: String,
     inner: Mutex<Inner>,
 }
 
@@ -126,6 +143,8 @@ struct Inner {
     /// Threads with a run in progress, with the start time (unix ms): from the prompt being
     /// sent (`begin_run`) or pi's `agent_start`, until `agent_settled`.
     running: HashMap<String, i64>,
+    /// Running `async_bash` jobs per thread, as the runtime last reported (`jobs`); absent = none.
+    jobs: HashMap<String, u32>,
     /// Callers waiting on a `loaded` reply, per thread.
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
@@ -138,8 +157,8 @@ struct Inner {
 
 impl Runtime {
     /// Spawn the child (respawning forever) and return the supervisor plus the stream of its messages.
-    pub fn start(cmd: Vec<String>) -> (Arc<Self>, mpsc::UnboundedReceiver<RuntimeMessage>) {
-        let rt = Arc::new(Self { cmd, inner: Mutex::default() });
+    pub fn start(cmd: Vec<String>, url: String) -> (Arc<Self>, mpsc::UnboundedReceiver<RuntimeMessage>) {
+        let rt = Arc::new(Self { cmd, url, inner: Mutex::default() });
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(rt.clone().supervise(tx));
         (rt, rx)
@@ -161,6 +180,8 @@ impl Runtime {
     async fn run_child(&self, out: &mpsc::UnboundedSender<RuntimeMessage>) -> Result<std::process::ExitStatus> {
         let mut child = Command::new(&self.cmd[0])
             .args(&self.cmd[1..])
+            .env("DIRIGENT_URL", &self.url)
+            .env("DIRIGENT_DATA_DIR", crate::data_dir())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -231,6 +252,12 @@ impl Runtime {
                     inner.running.entry(thread_id.clone()).or_insert_with(now);
                 }
             }
+            RuntimeMessage::Jobs { thread_id, running: 0 } => {
+                inner.jobs.remove(thread_id);
+            }
+            RuntimeMessage::Jobs { thread_id, running } => {
+                inner.jobs.insert(thread_id.clone(), *running);
+            }
             _ => {}
         }
     }
@@ -240,6 +267,7 @@ impl Runtime {
         inner.stdin = None;
         inner.loaded.clear();
         inner.running.clear();
+        inner.jobs.clear();
         for (_, waiters) in inner.pending_loads.drain() {
             for w in waiters {
                 let _ = w.send(Err("runtime exited".into()));
@@ -263,6 +291,11 @@ impl Runtime {
 
     pub fn running_since(&self, thread_id: &str) -> Option<i64> {
         self.inner.lock().unwrap().running.get(thread_id).copied()
+    }
+
+    /// How many `async_bash` jobs the thread has running.
+    pub fn jobs(&self, thread_id: &str) -> u32 {
+        self.inner.lock().unwrap().jobs.get(thread_id).copied().unwrap_or(0)
     }
 
     /// A prompt is on its way: count the thread as running from now, so clients see it work
@@ -342,6 +375,11 @@ impl Runtime {
         self.send(&Command_::Answer { thread_id, ask, answers })
     }
 
+    pub fn notify(&self, thread_id: &str, custom_type: &str, content: &str, details: &Value, notify: &str) -> Result<()> {
+        self.inner.lock().unwrap().last_activity.insert(thread_id.to_owned(), Instant::now());
+        self.send(&Command_::Notify { thread_id, custom_type, content, details, notify })
+    }
+
     pub async fn generate_title(&self, title: &TitleGen, text: &str) -> Result<TitleResult> {
         let (tx, rx) = oneshot::channel();
         self.inner.lock().unwrap().pending_titles.push(tx);
@@ -371,13 +409,15 @@ impl Runtime {
         self.send(&Command_::CancelQueued { thread_id, text })
     }
 
-    /// Loaded, not running, and quiet for longer than `max_idle`.
+    /// Loaded, not running, no jobs running (unloading would kill them), and quiet for
+    /// longer than `max_idle`.
     pub fn idle_threads(&self, max_idle: Duration) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
         inner
             .loaded
             .iter()
             .filter(|id| !inner.running.contains_key(*id))
+            .filter(|id| !inner.jobs.contains_key(*id))
             .filter(|id| inner.last_activity.get(*id).is_none_or(|t| t.elapsed() > max_idle))
             .cloned()
             .collect()

@@ -140,7 +140,11 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                 status(HostStatus::Disconnected);
             }
             Err(e) => {
-                eprintln!("[net] {name}: connect {url}: {e}");
+                // `local` refusing before we ever started the service is the normal start-up,
+                // not worth a line in the log.
+                if !(name == LOCAL && embedded.is_none()) {
+                    eprintln!("[net] {name}: connect {url}: {e}");
+                }
                 // Nothing listening locally: run the service in-process. It lives and dies
                 // with the desktop. If it exits (e.g. bind failed), the next refusal retries.
                 if name == LOCAL && embedded.as_ref().is_none_or(|h| h.is_finished()) {

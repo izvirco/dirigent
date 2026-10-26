@@ -68,7 +68,10 @@ async fn connection(socket: WebSocket, svc: Arc<Service>) {
                 });
             }
             Err(e) => {
-                let _ = out.send(ServerMessage::Error { reply_to: None, message: format!("bad request: {e}") });
+                // Answer the request's id if it has one (a newer client asking for something
+                // this host doesn't know yet), so the client's request fails instead of hanging.
+                let reply_to = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("id")?.as_u64());
+                let _ = out.send(ServerMessage::Error { reply_to, message: format!("bad request: {e}") });
             }
         }
     }

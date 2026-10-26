@@ -105,7 +105,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let multi_host = this.hosts.len() > 1;
     let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
     let inbox = this.inbox_threads();
-    let working = this.threads_with(theme::Status::Working);
+    let working = this.busy_threads();
 
     let title_row = div()
         .flex()
@@ -296,7 +296,7 @@ fn section(
     // Count every thread the page lists (snoozed ones too), not just the cards.
     let n = match section {
         Section::Inbox => this.inbox_all().len(),
-        Section::Workpool => this.threads_with(theme::Status::Working).len(),
+        Section::Workpool => this.busy_threads().len(),
     };
     div()
         .flex()

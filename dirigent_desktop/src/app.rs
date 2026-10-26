@@ -5,8 +5,9 @@
 use crate::cache::Cache;
 use crate::input::{self, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
+use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
-use crate::select::{Doc, Selection};
+use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
@@ -72,8 +73,8 @@ pub struct OpenThread {
     /// (work item index, step index) of the tool calls whose details are open in the log
     /// panel. `thread::TAIL` as item index addresses the streaming tail.
     pub expanded: HashSet<(usize, usize)>,
-    /// The work whose full log the right panel shows (item index, `thread::TAIL` for a
-    /// live work that has no persisted item yet). `None` = panel closed.
+    /// The work whose full log the right panel's log section shows (item index,
+    /// `thread::TAIL` for a live work that has no persisted item yet); `None` = no log.
     pub log: Option<usize>,
     /// The log panel's steps, one item each; follows the tail while it shows a live work.
     pub log_list: ListState,
@@ -89,6 +90,10 @@ pub struct OpenThread {
     center_on: Option<(usize, u8)>,
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
+    /// The right panel (lineage over the work log): the user's choice from the header
+    /// button, or `None` for the default (open while there is something to show; see
+    /// `panel_open`). Clicking a work line resets it to the default.
+    pub panel: Option<bool>,
 }
 
 /// The user's answers in progress to one `ask_user` call: the picked option indices and
@@ -292,13 +297,14 @@ pub struct Dirigent {
     /// Per thread, its `updated_at` when the user last looked at it; a finished thread
     /// updated since (or never looked at) is unread.
     seen: HashMap<(String, String), i64>,
-    /// Per snoozed thread, its `updated_at` when the user snoozed it: hidden from the
-    /// inbox until its next run bumps `updated_at` past that.
-    snoozed: HashMap<(String, String), i64>,
     /// Threads kept on top of their status group in the inbox / project lists.
     pinned: HashSet<(String, String)>,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
+    /// The log section is on: it sticks across threads, every thread opened showing its
+    /// latest work (`latest_work`). Set by showing a log, cleared by dropping it or closing
+    /// the panel.
+    pub log_on: bool,
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
@@ -378,7 +384,6 @@ impl Dirigent {
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let project_order = cache.get(PROJECT_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let seen = cache.seen().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
-        let snoozed = cache.snoozed().unwrap_or_default().into_iter().map(|(h, t, u)| ((h, t), u)).collect();
         let pinned = cache.pinned().unwrap_or_default().into_iter().collect();
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
@@ -441,9 +446,9 @@ impl Dirigent {
             sidebar_peek: false,
             collapsed: HashSet::new(),
             seen,
-            snoozed,
             pinned,
             log_width,
+            log_on: false,
             resizing: None,
             composer,
             path_input,
@@ -542,17 +547,22 @@ impl Dirigent {
         }
     }
 
-    /// Snoozed and not run since: hidden from the inbox.
-    pub fn snoozed(&self, host: &str, t: &ThreadSummary) -> bool {
-        self.snoozed.get(&(host.to_owned(), t.id.clone())).is_some_and(|&u| t.updated_at <= u)
-    }
-
-    /// `Status::of`, with a snoozed finished thread reported as `Snoozed`.
+    /// `Status::of`, with an idle thread that has `async_bash` jobs running or sub-agents
+    /// still at it reported as `Waiting`: their results will wake it.
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
         match Status::of(t) {
-            Status::Done if self.snoozed(host, t) => Status::Snoozed,
+            Status::Done if t.jobs > 0 || self.has_busy_children(host, &t.id) => Status::Waiting,
             s => s,
         }
+    }
+
+    /// A sub-agent (at any depth) is working or has jobs running.
+    fn has_busy_children(&self, host: &str, id: &str) -> bool {
+        let Some(h) = self.host(host) else { return false };
+        h.threads
+            .iter()
+            .filter(|t| t.parent_id.as_deref() == Some(id))
+            .any(|t| t.running() || t.jobs > 0 || self.has_busy_children(host, &t.id))
     }
 
     pub fn pinned(&self, host: &str, thread_id: &str) -> bool {
@@ -572,8 +582,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Group rows by status (working, done, snoozed, archived) with the pinned ones first
-    /// in each group, keeping their order otherwise.
+    /// Group rows by status (working, waiting, asking, done, snoozed, archived) with the
+    /// pinned ones first in each group, keeping their order otherwise.
     fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
         rows.sort_by_key(|(h, t)| (self.status(h, t), !self.pinned(h, &t.id)));
     }
@@ -590,15 +600,14 @@ impl Dirigent {
     }
 
     /// Snooze hides a finished thread from the sidebar's inbox without archiving it; it
-    /// comes back by itself once it runs again, or when the user wakes it.
+    /// comes back by itself once it runs again, or when the user wakes it. The host keeps
+    /// it (agents can snooze too); the flag is set here ahead of its `Threads` push.
     pub fn set_snoozed(&mut self, host: &str, thread_id: &str, snoozed: bool, cx: &mut Context<Self>) {
-        let key = (host.to_owned(), thread_id.to_owned());
-        let updated_at = snoozed.then(|| self.summary(host, thread_id).map(|t| t.updated_at)).flatten();
-        match updated_at {
-            Some(u) => self.snoozed.insert(key, u),
-            None => self.snoozed.remove(&key),
-        };
-        let _ = self.cache.lock().unwrap().set_snoozed(host, thread_id, updated_at);
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::SnoozeThread { id, thread_id: thread_id.to_owned(), snoozed });
+        if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
+            t.snoozed = snoozed;
+        }
         cx.notify();
     }
 
@@ -606,13 +615,18 @@ impl Dirigent {
     /// Inbox page itself lists them all (`inbox_all`).
     pub fn inbox_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.inbox_all();
-        rows.retain(|(h, t)| !self.snoozed(h, t));
+        rows.retain(|(_, t)| !t.snoozed);
         rows
     }
 
     /// The Inbox: threads waiting on the user, the ones asking a question first.
     pub fn inbox_all(&self) -> Vec<(&str, &ThreadSummary)> {
         self.threads_where(|s| s.finished())
+    }
+
+    /// The Workpool: threads with an agent at it, directly or through sub-agents.
+    pub fn busy_threads(&self) -> Vec<(&str, &ThreadSummary)> {
+        self.threads_where(|s| s.busy())
     }
 
     /// The user is looking at this thread: whatever it has now is read.
@@ -622,23 +636,26 @@ impl Dirigent {
         let _ = self.cache.lock().unwrap().set_seen(host, id, updated_at);
     }
 
-    /// Every thread on every host, most recently updated first, with its host.
+    /// Every top-level thread on every host, most recently updated first, with its host.
+    /// Sub-agents stay out of the lists: their parent's orchestration panel is their place.
     pub fn all_threads(&self) -> Vec<(&str, &ThreadSummary)> {
-        let mut all: Vec<_> = self.hosts.iter().flat_map(|h| h.threads.iter().map(move |t| (h.name.as_str(), t))).collect();
+        let mut all: Vec<_> =
+            self.hosts.iter().flat_map(|h| h.threads.iter().filter(|t| t.top_level()).map(move |t| (h.name.as_str(), t))).collect();
         all.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
         all
     }
 
-    /// Threads with `status`, as the Inbox / Workpool list them (see `sort_as_queue`).
-    pub fn threads_with(&self, status: Status) -> Vec<(&str, &ThreadSummary)> {
-        self.threads_where(|s| s == status)
-    }
-
     fn threads_where(&self, keep: impl Fn(Status) -> bool) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.all_threads();
-        rows.retain(|(_, t)| keep(Status::of(t)));
+        rows.retain(|(h, t)| keep(self.status(h, t)));
         self.sort_as_queue(&mut rows);
         rows
+    }
+
+    /// The family of a thread on `host`, for the orchestra panel (`orchestra::lineage`).
+    pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
+        let Some(h) = self.host(host) else { return vec![] };
+        orchestra::lineage(&h.threads, id)
     }
 
     /// Group key of a project, if the host still lists it.
@@ -717,6 +734,14 @@ impl Dirigent {
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Draft { .. }) {
                     self.refresh_draft_vcs();
                 }
+                if status == HostStatus::Connected {
+                    // Snoozes from before the hosts kept them: handed over once.
+                    let legacy = self.cache.lock().unwrap().take_legacy_snoozes(&host).unwrap_or_default();
+                    for thread_id in legacy {
+                        let id = self.next_id();
+                        self.net.send(&host, ClientMessage::SnoozeThread { id, thread_id, snoozed: true });
+                    }
+                }
             }
             Incoming::Message { host, msg } => self.on_server_message(host, *msg, cx),
         }
@@ -772,6 +797,10 @@ impl Dirigent {
                     t.timeline = Timeline::from_entries(entries.iter().map(|e| &e.json));
                     t.entries = entries;
                     t.list.reset(t.timeline.items.len() + 1);
+                    // The cache may have lagged: the log follows the latest work again.
+                    if self.log_on {
+                        self.show_latest_log();
+                    }
                     self.fetch_blobs();
                 }
             }
@@ -794,6 +823,13 @@ impl Dirigent {
             ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
                 self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
             }
+            // An agent asked for the user's attention on a thread.
+            ServerMessage::Focus { thread_id } => {
+                if self.summary(&host, &thread_id).is_some() {
+                    self.select_thread(&host, &thread_id, cx);
+                }
+            }
+            ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
                 let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
                 if pending.is_some() {
@@ -957,6 +993,23 @@ impl Dirigent {
         }
     }
 
+    /// A click on a `dirigent://` link (see `select.rs`). `dirigent://thread/<id>` opens the
+    /// thread wherever it lives: thread ids are unique across hosts, and sub-agents (not in
+    /// the sidebar) open like any other thread. Anything else, or an id no connected host
+    /// knows, gets a toast.
+    fn open_app_link(&mut self, link: &OpenAppLink, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(id) = link.url.strip_prefix("dirigent://thread/") else {
+            return self.toast(format!("Can't open {}", link.url), cx);
+        };
+        match self.hosts.iter().find(|h| h.threads.iter().any(|t| t.id == id)) {
+            Some(h) => {
+                let host = h.name.clone();
+                self.select_thread(&host, id, cx);
+            }
+            None => self.toast("Thread not found: it was deleted, or lives on a host this desktop doesn't connect to", cx),
+        }
+    }
+
     /// Show cached entries immediately, then ask the host for the full thread.
     pub fn select_thread(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
         let entries = self.cache.lock().unwrap().entries(host, id).unwrap_or_default();
@@ -984,8 +1037,12 @@ impl Dirigent {
             stats_hover: false,
             center_on: None,
             asks: vec![],
+            panel: None,
         }));
         self.set_pane(pane, cx);
+        if self.log_on {
+            self.show_latest_log();
+        }
         self.menu = None;
         self.base = None;
         self.selection.clear();
@@ -1015,7 +1072,9 @@ impl Dirigent {
     /// so the workspace chip knows what it can offer) and its workspace (dirty before removal).
     fn request_thread_vcs(&mut self, host: &str, id: &str) {
         let Some(s) = self.summary(host, id) else { return };
-        let paths: Vec<String> = self.project_path(host, s).into_iter().chain(s.workspace.clone()).collect();
+        // A missing workspace has nothing to report until it is recreated.
+        let workspace = s.workspace.clone().filter(|_| !s.workspace_missing);
+        let paths: Vec<String> = self.project_path(host, s).into_iter().chain(workspace).collect();
         for p in paths {
             self.request_vcs(host, &p);
         }
@@ -1418,10 +1477,53 @@ impl Dirigent {
             |c| match name {
                 "async_bash" => c.tools.async_bash = !c.tools.async_bash,
                 "ask_user" => c.tools.ask_user = !c.tools.ask_user,
+                "dirigent" => c.tools.dirigent = !c.tools.dirigent,
                 _ => {}
             },
             cx,
         );
+    }
+
+    // ---- right panel ----
+
+    /// Whether the right panel (lineage over the work log) is showing: the user's
+    /// choice, else whenever there is something to show (a log or a family).
+    pub fn panel_open(&self) -> bool {
+        let Some(t) = self.open() else { return false };
+        t.panel.unwrap_or_else(|| t.log.is_some() || !self.lineage(&t.host, &t.id).is_empty())
+    }
+
+    /// The header's panel button and `]`: close the panel, or open it, with the log of
+    /// the run in progress (else the last work) when it had none.
+    pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
+        let open = self.panel_open();
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.panel = Some(!open);
+        if open {
+            self.log_on = false;
+        } else if t.log.is_none() {
+            self.show_latest_log();
+        }
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// The open thread's latest work: the run in progress (the tail while it has no
+    /// item yet), else the last work.
+    fn latest_work(&self) -> Option<usize> {
+        let t = self.open()?;
+        match t.timeline.open_work() {
+            Some(i) => Some(i),
+            None if self.is_running() => Some(thread::TAIL),
+            None => t.timeline.items.iter().rposition(|i| matches!(i, Item::Work(_))),
+        }
+    }
+
+    /// Point the log at the latest work, when there is one.
+    fn show_latest_log(&mut self) {
+        if let Some(key) = self.latest_work() {
+            self.show_log(key);
+        }
     }
 
     // ---- asks ----
@@ -1638,7 +1740,6 @@ impl Dirigent {
             self.hosts.retain(|h| h.name != name);
             self.links.retain(|(h, _), _| *h != name);
             self.seen.retain(|(h, _), _| *h != name);
-            self.snoozed.retain(|(h, _), _| *h != name);
             self.pinned.retain(|(h, _)| *h != name);
             // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
@@ -2053,7 +2154,19 @@ impl Dirigent {
             let id = self.next_id();
             self.pending = Some((id, text, images));
             self.clear_composer(window, cx);
-            self.net.send(&target.host, ClientMessage::CreateThread { id, project_id: target.project_id, workspace, base });
+            self.net.send(
+                &target.host,
+                ClientMessage::CreateThread {
+                    id,
+                    project_id: target.project_id,
+                    workspace,
+                    base,
+                    parent: None,
+                    name: None,
+                    report: Default::default(),
+                    notify: Default::default(),
+                },
+            );
             return;
         }
         if let Pane::Thread(t) = &self.pane {
@@ -2126,7 +2239,7 @@ impl Dirigent {
             t.streaming.echo.push((text, mode));
             let tail = t.timeline.items.len();
             t.list.remeasure_items(tail..tail + 1);
-            // An open log panel follows the new run.
+            // An open log follows the new run.
             if t.log.is_some() {
                 t.log = Some(t.timeline.open_work().unwrap_or(thread::TAIL));
                 t.log_list.set_follow_mode(FollowMode::Tail);
@@ -2155,6 +2268,7 @@ impl Dirigent {
         } else if let Pane::Thread(t) = &mut self.pane
             && t.log.take().is_some()
         {
+            self.log_on = false;
             cx.notify();
         }
     }
@@ -2176,21 +2290,12 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// `]`: close the work log panel, or open it on the run in progress, else the last work.
+    /// `]`: toggle the right panel (see `toggle_panel`).
     pub fn toggle_log_key(&mut self, _: &ToggleLog, window: &mut Window, cx: &mut Context<Self>) {
         if self.typed_bracket("]", window, cx) {
             return;
         }
-        let Pane::Thread(t) = &self.pane else { return };
-        let key = match t.log {
-            Some(key) => key,
-            None if self.is_running() => t.timeline.open_work().unwrap_or(thread::TAIL),
-            None => match t.timeline.items.iter().rposition(|i| matches!(i, Item::Work(_))) {
-                Some(i) => i,
-                None => return,
-            },
-        };
-        self.toggle_log(key, cx);
+        self.toggle_panel(cx);
     }
 
     /// A bracket key with text in the focused input types the bracket instead of acting.
@@ -2454,17 +2559,32 @@ impl Dirigent {
         self.close_menu(cx);
     }
 
-    /// Open the log panel on a work (clicking its header), or close it if it's showing it.
+    /// Clicking a work line: show its log in the panel (opening it), or drop the log if
+    /// it is the one showing (the panel then stays for the family, else closes).
     pub fn toggle_log(&mut self, key: usize, cx: &mut Context<Self>) {
+        let open = self.panel_open();
         if let Pane::Thread(t) = &mut self.pane {
-            let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
-            t.log = (t.log != Some(key)).then_some(key);
-            // A finished work opens at the top, a live one follows its latest step.
-            // `log_panel` fills the list in at the next render.
-            t.log_list.reset(0);
-            t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
+            t.panel = None;
+            if open && t.log == Some(key) {
+                t.log = None;
+                self.log_on = false;
+            } else {
+                self.show_log(key);
+            }
             self.focus_composer(cx);
             cx.notify();
+        }
+    }
+
+    /// Point the panel's log section at a work: a finished one opens at the top, a live
+    /// one follows its latest step. `log_panel` fills the list in at the next render.
+    fn show_log(&mut self, key: usize) {
+        if let Pane::Thread(t) = &mut self.pane {
+            let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
+            self.log_on = true;
+            t.log = Some(key);
+            t.log_list.reset(0);
+            t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
         }
     }
 
@@ -2589,6 +2709,7 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::toggle_log_key))
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(cx.listener(Self::copy_selection))
+            .on_action(cx.listener(Self::open_app_link))
             // Capture runs root-first, i.e. before the menu's `on_mouse_down_out`.
             .capture_any_mouse_down(cx.listener(|this, _, _, _| this.menu_dismissed = false))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
@@ -2624,7 +2745,8 @@ impl Render for Dirigent {
                         .border_color(rgba(theme::t().line))
                         .shadow_md()
                         .child(div().size(px(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
-                        .child(m)
+                        // Shrinkable, so a long message wraps inside `max_w`.
+                        .child(div().flex_1().min_w_0().child(m))
                 }))
             }))
     }

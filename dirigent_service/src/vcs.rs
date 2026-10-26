@@ -54,6 +54,18 @@ pub fn detect(path: &Path) -> Option<Vcs> {
     None
 }
 
+/// Whether `path` is a working copy its repo still knows. False when the directory is gone,
+/// or when it outlived its registration: a forgotten jj workspace (`jj workspace forget`
+/// keeps the files), a pruned git worktree (`.git` points nowhere). One `jj` / `git` call,
+/// ~15 ms; `--ignore-working-copy` so a stale workspace still counts and nothing is snapshotted.
+pub fn is_workspace(path: &Path) -> bool {
+    if path.join(".jj").is_dir() {
+        run_once("jj", path, &["log", "--ignore-working-copy", "-r", "@", "--no-graph", "-T", "''"]).is_ok()
+    } else {
+        path.join(".git").exists() && run_once("git", path, &["rev-parse", "--git-dir"]).is_ok()
+    }
+}
+
 /// Uncommitted changes in the working copy at `path`. For jj the working copy is always a
 /// commit, so "dirty" means `@` is not empty.
 pub fn dirty(vcs: Vcs, path: &Path) -> Result<bool> {
@@ -137,14 +149,13 @@ pub fn add_workspace(vcs: Vcs, repo: &Path, dest: &Path, thread_id: &str, base: 
 
 /// Remove the thread's workspace: unregister it from the repo and delete the directory
 /// (uncommitted changes in it are lost; the caller confirms that with the user). The git
-/// branch stays. Tolerates a directory that is already gone.
+/// branch stays. Tolerates a workspace the repo already forgot and a directory already gone:
+/// deleting the directory and pruning is all a worktree removal is.
 pub fn remove_workspace(vcs: Vcs, repo: &Path, dest: &Path, thread_id: &str) -> Result<()> {
     let name = workspace_name(thread_id);
     match vcs {
         Vcs::Git => {
-            if dest.is_dir() {
-                run("git", repo, &["worktree", "remove", "--force", &dest.to_string_lossy()])?;
-            }
+            let _ = run("git", repo, &["worktree", "remove", "--force", &dest.to_string_lossy()]);
         }
         Vcs::Jj => {
             let _ = run("jj", repo, &["workspace", "forget", &name]);
@@ -188,6 +199,7 @@ mod tests {
         add_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12", None).unwrap();
         assert_eq!(branch(Vcs::Git, &dest).as_deref(), Some("dirigent-abcdef12"));
         assert!(!dirty(Vcs::Git, &dest).unwrap());
+        assert!(is_workspace(&dest));
         assert_eq!(refs(Vcs::Git, repo.path()), ["dirigent-abcdef12", "main"]);
         // Deleted behind our back: recreating finds the branch again.
         std::fs::remove_dir_all(&dest).unwrap();
@@ -199,6 +211,13 @@ mod tests {
         assert!(run("git", repo.path(), &["rev-parse", "--verify", "refs/heads/dirigent-abcdef12"]).is_ok());
         // Removing again is fine.
         remove_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12").unwrap();
+        assert!(!is_workspace(&dest));
+        // A directory git no longer knows as a worktree is not one, and removes cleanly.
+        add_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12", None).unwrap();
+        std::fs::remove_file(dest.join(".git")).unwrap();
+        assert!(!is_workspace(&dest));
+        remove_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12").unwrap();
+        assert!(!dest.exists());
     }
 
     /// jj drives a colocated repo; its workspace is a change on top of `@`'s parents.
@@ -234,6 +253,11 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dest.join("README.md")).unwrap(), "moved");
         std::fs::remove_dir_all(&dest).unwrap();
         add_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12", None).unwrap();
+        assert!(is_workspace(&dest));
+        // Forgotten from the main checkout: the files stay, the workspace is gone.
+        run_once("jj", repo.path(), &["workspace", "forget", "dirigent-abcdef12"]).unwrap();
+        assert!(dest.is_dir());
+        assert!(!is_workspace(&dest));
         remove_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12").unwrap();
         assert!(!dest.exists());
         assert!(!run("jj", repo.path(), &["workspace", "list"]).unwrap().contains("dirigent-abcdef12"));
@@ -244,5 +268,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(detect(dir.path()), None);
         assert_eq!(detect(Path::new("/nonexistent/dir")), None);
+        assert!(!is_workspace(dir.path()));
+        assert!(!is_workspace(Path::new("/nonexistent/dir")));
     }
 }

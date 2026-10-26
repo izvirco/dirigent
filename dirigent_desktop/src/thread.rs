@@ -75,6 +75,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (h4, i4) = (host.clone(), id.clone());
     let snoozed = status == Status::Snoozed;
     let pinned = this.pinned(&host, &id);
+    let panel_open = this.panel_open();
     let workspace = summary.as_ref().and_then(|s| s.workspace.clone());
     let confirm_open = this.menu == Some(Menu::ConfirmDelete);
     let confirm = confirm_open.then(|| {
@@ -121,18 +122,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .items_center()
         .gap_1()
         .font_weight(FontWeight::NORMAL)
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .mr_2()
-                .text_size(px(12.))
-                .text_color(rgba(theme::t().fg_1))
-                .child(status.glyph())
-                .child(status.label()),
-        )
         .when(matches!(status, Status::Asking | Status::Done | Status::Snoozed), |d| {
             // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
             d.child(theme::tinted_icon_button(
@@ -159,6 +148,13 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             theme::icon_button("hdr-delete", "trash-2", cx, |this, cx| this.toggle_menu(Menu::ConfirmDelete, cx))
                 .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
                 .children(confirm),
+        )
+        // The right panel's button, outermost (`]` does the same).
+        .child(
+            theme::icon_button("hdr-panel", if panel_open { "panel-right-close" } else { "panel-right-open" }, cx, |this, cx| {
+                this.toggle_panel(cx)
+            })
+            .ml_2(),
         )
         .into_any_element();
 
@@ -227,8 +223,84 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(px(12.)))
             .child(name)
     });
-    let crumb = div().flex().flex_row().items_center().min_w_0().child(breadcrumb(project, title, pinned, titling, cx)).children(branch);
-    pane.child(header(crumb, Some(actions))).child(div().flex_1().min_h_0().flex().flex_row().child(column).children(log_panel(this, cx)))
+    // A sub-agent's parent before its title, a click away (the sidebar has the whole family).
+    let parent = summary.as_ref().and_then(|s| s.parent_id.clone()).and_then(|pid| this.summary(&host, &pid)).map(|p| {
+        let (h, pid) = (host.clone(), p.id.clone());
+        div()
+            .id("crumb-parent")
+            .max_w(px(220.))
+            .truncate()
+            .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
+            .child(p.name.clone().unwrap_or_else(|| "Untitled".into()))
+    });
+    let crumb = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .min_w_0()
+        .child(breadcrumb(project, parent, Some(status), title, pinned, titling, cx))
+        .children(branch);
+    pane.child(header(crumb, Some(actions)))
+        .child(div().relative().flex_1().min_h_0().flex().flex_row().child(column).children(side_panel(this, cx)))
+}
+
+/// The right panel, split off the pane by a hairline, `log_width` wide, with a drag
+/// handle on its left edge: the thread's family (`orchestra::tree`, at most a third of
+/// the height, scrolling past that) over the work log (`log_body`), each only when there
+/// is one; a word about sub-agents when there is neither. Untitled: the header's button
+/// shows its state. `panel_open` decides whether it is on screen.
+fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
+    if !this.panel_open() {
+        return None;
+    }
+    let tree = crate::orchestra::tree(this, cx);
+    let log = log_body(this, cx);
+    let empty = (tree.is_none() && log.is_none()).then(|| {
+        div()
+            .flex_1()
+            .flex()
+            .items_center()
+            .justify_center()
+            .px_6()
+            .text_size(px(12.))
+            .text_color(rgba(theme::t().fg_2))
+            .child("Sub-agents this thread spawns show up here.")
+    });
+    let tree = tree.map(|tree| {
+        div()
+            .id("orchestra")
+            .flex_shrink_0()
+            .max_h(relative(1. / 3.))
+            .overflow_y_scroll()
+            .px_2()
+            .pb_2()
+            .when(log.is_some(), |d| d.border_b_1().border_color(rgba(theme::t().line_soft)))
+            .child(tree)
+    });
+    let handle = div()
+        .id("panel-resize")
+        .absolute()
+        .top_0()
+        .left(px(-3.))
+        .w(px(6.))
+        .h_full()
+        .cursor_col_resize()
+        .hover(|d| d.bg(rgba(theme::t().line)))
+        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
+    let panel = div()
+        .relative()
+        .w(px(this.log_width))
+        .flex_shrink_0()
+        .h_full()
+        .border_l_1()
+        .border_color(rgba(theme::t().line_soft))
+        .flex()
+        .flex_col()
+        .children(tree)
+        .children(log)
+        .children(empty)
+        .child(handle);
+    Some(panel)
 }
 
 /// A workspace's name is its directory's basename: the host names the directory, the git
@@ -1227,7 +1299,29 @@ fn render_timeline_item(
             .into_any(),
         Item::Compaction => notice_line(keys.plain("context compacted".to_owned())),
         Item::Notice(text) => notice_line(keys.plain(text.clone())),
+        Item::Child { thread_id, text } => child_line(format!("child/{ix}"), &t.host, thread_id, text, cx),
     }
+}
+
+/// A sub-agent's start or end: `↳ sub-agent "…" started`; the line opens its thread.
+fn child_line(id: String, host: &str, thread_id: &str, text: &str, cx: &mut Context<Dirigent>) -> AnyElement {
+    let (host, thread_id) = (host.to_owned(), thread_id.to_owned());
+    div()
+        .id(ElementId::Name(id.into()))
+        .w_full()
+        .py_1()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .text_size(px(12.))
+        .text_color(rgba(theme::t().fg_2))
+        .cursor_pointer()
+        .hover(|d| d.text_color(rgba(theme::t().fg)))
+        .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&host, &thread_id, cx)))
+        .child(icon("corner-down-right", theme::t().fg_2).size(px(12.)))
+        .child(text.to_owned())
+        .into_any()
 }
 
 /// A quiet one-liner between messages (compaction, warnings, unknown entries).
@@ -1352,7 +1446,8 @@ fn user_bubble(
 }
 
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,
-/// kept after the run) and then the work line. Pending steers are rendered by the tail.
+/// kept after the run), the work line, then the sub-agents it started or that finished
+/// meanwhile (`Step::Child`). Pending steers are rendered by the tail.
 #[allow(clippy::too_many_arguments)]
 fn work_block(
     w: &Work,
@@ -1366,7 +1461,16 @@ fn work_block(
 ) -> Div {
     let taken: Vec<_> =
         w.steers().filter(|(_, _, queued)| !queued).map(|(_, text, _)| steer_bubble(text, false, t, fonts, keys, cx)).collect();
-    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, t, now, cx))
+    let children: Vec<_> = w
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Step::Child { thread_id, text } => Some(child_line(format!("child/{key}/{i}"), &t.host, thread_id, text, cx)),
+            _ => None,
+        })
+        .collect();
+    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, t, now, cx)).children(children)
 }
 
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
@@ -1502,15 +1606,15 @@ pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
     }
 }
 
-/// The panel on the pane's right with the full log of the work `t.log` points at, split
-/// off by a hairline with a drag handle: a lazy `list()` of its steps (`render_step`),
-/// one mono size; tool rows open to their arguments and output. Showing the run in
-/// progress it follows the latest step unless the user scrolled up (`FollowMode::Tail`).
-/// The list's item count is reconciled here, so every path that changes the steps
-/// (events, entries, a new prompt) is covered; those paths remeasure the items.
-fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
+/// The right panel's log section: the full log of the work `t.log` points at as a lazy
+/// `list()` of its steps (`render_step`), one mono size; tool rows open to their arguments
+/// and output. Showing the run in progress it follows the latest step unless the user
+/// scrolled up (`FollowMode::Tail`). The list's item count is reconciled here, so every
+/// path that changes the steps (events, entries, a new prompt) is covered; those paths
+/// remeasure the items.
+fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let Pane::Thread(t) = &this.pane else { return None };
-    let key = t.log?;
+    t.log?;
     let (work, live) = shown_work(this)?;
     let n = work.steps.len().max(1);
     let state = &t.log_list;
@@ -1532,42 +1636,7 @@ fn log_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                 .into_any()
         }),
     );
-    let title = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(px(32.))
-        .pl_4()
-        .pr_2()
-        .flex_shrink_0()
-        .text_size(px(12.))
-        .text_color(rgba(theme::t().fg_2))
-        .child(div().flex_1().child("Work log"))
-        .child(theme::icon_button("log-close", "x", cx, move |this, cx| this.toggle_log(key, cx)));
-    let handle = div()
-        .id("log-resize")
-        .absolute()
-        .top_0()
-        .left(px(-3.))
-        .w(px(6.))
-        .h_full()
-        .cursor_col_resize()
-        .hover(|d| d.bg(rgba(theme::t().line)))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
-    Some(
-        div()
-            .relative()
-            .w(px(this.log_width))
-            .flex_shrink_0()
-            .h_full()
-            .border_l_1()
-            .border_color(rgba(theme::t().line_soft))
-            .flex()
-            .flex_col()
-            .child(title)
-            .child(steps.flex_1().w_full().text_size(px(STEP_SIZE)).line_height(px(19.)))
-            .child(handle),
-    )
+    Some(steps.flex_1().min_h_0().w_full().text_size(px(STEP_SIZE)).line_height(px(19.)).into_any_element())
 }
 
 /// One step of the shown work as a log list item; a placeholder while it has none.
@@ -1590,6 +1659,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         }
         Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),
         Step::Steer { text, queued } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
+        Step::Child { thread_id, text } => child_line(format!("log-child/{key}/{six}"), &t.host, thread_id, text, cx),
         // A job notice in the row voice: `job` where a tool's name goes, red when it failed.
         Step::Notice(text) => {
             let failed = text.contains("exit ") && !text.contains("exit 0");

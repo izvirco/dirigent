@@ -3,13 +3,17 @@
 //! Images are kept out of the entry JSON in a content-addressed `blobs` table (see `blobs`).
 //! `usage` is derived from the assistant messages (one row each) so spend over time is
 //! one indexed query rather than a scan of every entry's JSON. `asks` holds the model's
-//! open questions to the user (`ask_user`) until they are answered.
+//! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
+//! full-text index of every message's text (derived like `usage`, backfilled once), for
+//! `SearchThreads`.
 //!
 //! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
-//! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open.
+//! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open. Nothing
+//! is dropped: older dbs still carry the removed workflow feature's `workflow_runs` /
+//! `workflow_steps` tables and `threads.run_id`, unused and harmless.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, Project, ThreadSummary, UsageBucket};
+use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, ThreadSummary, UsageBucket};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -68,6 +72,7 @@ CREATE TABLE IF NOT EXISTS asks (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (thread_id, id)
 );
+CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5 (thread_id UNINDEXED, text);
 ";
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
@@ -76,7 +81,28 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "tools", "TEXT"),
     // The thread's isolated workspace directory (see `vcs`), while attached.
     ("threads", "workspace", "TEXT"),
+    // The thread that spawned this one as a sub-agent (`dirigent` tool), if any.
+    ("threads", "parent_id", "TEXT"),
+    // `updated_at` as of when the thread was snoozed; snoozed while `updated_at` hasn't moved past it.
+    ("threads", "snoozed_at", "INTEGER"),
+    // When the thread was last given a task (a `Prompt` that started a turn).
+    ("threads", "prompted_at", "INTEGER"),
+    // A sub-agent's `Report` / `Notify` (snake_case names): what its parent hears when it
+    // ends, and when. NULL = the defaults.
+    ("threads", "report", "TEXT"),
+    ("threads", "notify", "TEXT"),
 ];
+
+/// The searchable text of a message entry: user and assistant text blocks. Used both to
+/// backfill `entries_fts` once and to index each new entry, so the two can't disagree.
+const FTS_FROM_ENTRIES: &str = "
+    SELECT thread_id,
+           COALESCE(json_extract(json, '$.message.content'),
+                    (SELECT group_concat(json_extract(b.value, '$.text'), ' ')
+                     FROM json_each(json_extract(json, '$.message.content')) b
+                     WHERE json_extract(b.value, '$.type') = 'text'))
+    FROM entries
+    WHERE kind = 'message' AND json_extract(json, '$.message.role') IN ('user', 'assistant')";
 
 /// A `usage` row extracted from an assistant message entry. Used both to backfill the table
 /// from existing entries (once, when it is empty) and to add each new entry's row, so the
@@ -124,6 +150,10 @@ impl Storage {
         let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM usage)", [], |r| r.get(0))?;
         if empty {
             conn.execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES}"), [])?;
+        }
+        let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM entries_fts)", [], |r| r.get(0))?;
+        if empty {
+            conn.execute(&format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES}"), [])?;
         }
         Ok(Self { conn })
     }
@@ -179,7 +209,7 @@ impl Storage {
             .optional()?)
     }
 
-    /// Threads ordered by most recently updated. `running_since` is always `None` here; the caller fills it in.
+    /// Threads ordered by most recently updated. `running_since` and `jobs` (runtime state) are always unset here; the caller fills them in.
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
@@ -192,7 +222,8 @@ impl Storage {
         }
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
-                    (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace
+                    (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
+                    t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -213,6 +244,10 @@ impl Storage {
                 asks: vec![],
                 workspace: r.get(11)?,
                 workspace_missing: false,
+                parent_id: r.get(12)?,
+                snoozed: r.get(13)?,
+                prompted_at: r.get(14)?,
+                jobs: 0,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -252,8 +287,10 @@ impl Storage {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    /// What the next run will use, ahead of pi's `model_change` / `thinking_level_change` entries.
-    pub fn set_model(&self, id: &str, model: Option<&str>, thinking_level: Option<&str>) -> Result<()> {
+    /// A `Prompt` started a turn at `now`; `model` / `thinking_level` are what the run will
+    /// use, ahead of pi's `model_change` / `thinking_level_change` entries.
+    pub fn set_prompted(&self, id: &str, model: Option<&str>, thinking_level: Option<&str>, now: i64) -> Result<()> {
+        self.conn.execute("UPDATE threads SET prompted_at = ?2 WHERE id = ?1", params![id, now])?;
         if let Some(m) = model {
             self.conn.execute("UPDATE threads SET model = ?2 WHERE id = ?1", params![id, m])?;
         }
@@ -274,24 +311,142 @@ impl Storage {
         Ok(())
     }
 
+    /// Snooze as of the thread's current `updated_at` (its next run wakes it), or wake it.
+    pub fn set_snoozed(&self, id: &str, snoozed: bool) -> Result<()> {
+        let sql = if snoozed {
+            "UPDATE threads SET snoozed_at = updated_at WHERE id = ?1"
+        } else {
+            "UPDATE threads SET snoozed_at = NULL WHERE id = ?1"
+        };
+        let n = self.conn.execute(sql, [id])?;
+        anyhow::ensure!(n == 1, "no such thread");
+        Ok(())
+    }
+
+    /// The thread that spawned this one, if any.
+    pub fn thread_parent(&self, id: &str) -> Result<Option<String>> {
+        let p: Option<Option<String>> =
+            self.conn.query_row("SELECT parent_id FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
+        Ok(p.flatten())
+    }
+
+    /// How the sub-agent's parent is told it ended (see `report`).
+    pub fn set_report(&self, id: &str, report: Report, notify: Notify) -> Result<()> {
+        let name = |v: Value| v.as_str().map(str::to_owned);
+        self.conn.execute(
+            "UPDATE threads SET report = ?2, notify = ?3 WHERE id = ?1",
+            params![id, name(serde_json::to_value(report)?), name(serde_json::to_value(notify)?)],
+        )?;
+        Ok(())
+    }
+
+    /// What the sub-agent's parent hears when it ends, and when; the defaults for a thread
+    /// spawned before these existed.
+    pub fn report(&self, id: &str) -> Result<(Report, Notify)> {
+        let (report, notify): (Option<String>, Option<String>) =
+            self.conn.query_row("SELECT report, notify FROM threads WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        fn parse<T: serde::de::DeserializeOwned + Default>(s: Option<String>) -> T {
+            s.and_then(|s| serde_json::from_value(Value::String(s)).ok()).unwrap_or_default()
+        }
+        Ok((parse(report), parse(notify)))
+    }
+
+    /// How many ancestors the thread has (0 for a root).
+    pub fn depth(&self, id: &str) -> Result<usize> {
+        let mut depth = 0;
+        let mut cur = self.thread_parent(id)?;
+        while let Some(p) = cur {
+            depth += 1;
+            if depth > 64 {
+                break;
+            }
+            cur = self.thread_parent(&p)?;
+        }
+        Ok(depth)
+    }
+
+    /// The text of the thread's last final assistant message (the reply that ended a turn),
+    /// if it came after the latest user message: an aborted run has no reply.
+    pub fn last_reply(&self, thread_id: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
+               AND json_extract(json, '$.message.role') = 'assistant'
+               AND json_extract(json, '$.message.stopReason') IN ('stop', 'length')
+               AND seq > (SELECT COALESCE(MAX(seq), -1) FROM entries
+                          WHERE thread_id = ?1 AND kind = 'message' AND json_extract(json, '$.message.role') = 'user')
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        let json: Option<String> = stmt.query_row([thread_id], |r| r.get(0)).optional()?;
+        let Some(json) = json else { return Ok(None) };
+        let v: Value = serde_json::from_str(&json)?;
+        let text = v.pointer("/message/content").and_then(Value::as_array).map(|blocks| {
+            blocks
+                .iter()
+                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|b| b.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        Ok(text.filter(|t| !t.trim().is_empty()))
+    }
+
+    /// Full-text search: the best-matching passage per thread, best thread first. Every
+    /// word of `query` must match (as a prefix), in any message of the thread.
+    pub fn search(&self, query: &str, limit: u64) -> Result<Vec<SearchHit>> {
+        // Quote each word so punctuation in the query can't break FTS5's syntax.
+        let terms: Vec<String> = query.split_whitespace().map(|w| format!("\"{}\"*", w.replace('"', "\"\""))).collect();
+        if terms.is_empty() {
+            return Ok(vec![]);
+        }
+        // `snippet` can't be aggregated, so the best rows come out message by message and
+        // the first one per thread wins.
+        let mut stmt = self.conn.prepare(
+            "SELECT thread_id, snippet(entries_fts, 1, '', '', '\u{2026}', 16)
+             FROM entries_fts WHERE entries_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![terms.join(" "), (limit * 20) as i64], |r| {
+            Ok(SearchHit { thread_id: r.get(0)?, snippet: r.get::<_, String>(1)?.split_whitespace().collect::<Vec<_>>().join(" ") })
+        })?;
+        let mut hits: Vec<SearchHit> = vec![];
+        for hit in rows {
+            let hit = hit?;
+            if !hits.iter().any(|h| h.thread_id == hit.thread_id) {
+                hits.push(hit);
+            }
+            if hits.len() as u64 >= limit {
+                break;
+            }
+        }
+        Ok(hits)
+    }
+
     pub fn delete_thread(&self, id: &str) -> Result<()> {
         self.conn.execute("DELETE FROM entries WHERE thread_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM entries_fts WHERE thread_id = ?1", [id])?;
         self.conn.execute("DELETE FROM asks WHERE thread_id = ?1", [id])?;
         let n = self.conn.execute("DELETE FROM threads WHERE id = ?1", [id])?;
         anyhow::ensure!(n == 1, "no such thread");
         Ok(())
     }
 
-    pub fn create_thread(&self, id: &str, project_id: &str, cwd: &str, now: i64) -> Result<ThreadSummary> {
+    pub fn create_thread(
+        &self,
+        id: &str,
+        project_id: &str,
+        cwd: &str,
+        parent: Option<&str>,
+        name: Option<&str>,
+        now: i64,
+    ) -> Result<ThreadSummary> {
         self.conn.execute(
-            "INSERT INTO threads (id, project_id, cwd, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
-            params![id, project_id, cwd, now],
+            "INSERT INTO threads (id, project_id, cwd, parent_id, name, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+            params![id, project_id, cwd, parent, name, now],
         )?;
         Ok(ThreadSummary {
             id: id.into(),
             project_id: Some(project_id.into()),
             cwd: cwd.into(),
-            name: None,
+            name: name.map(str::to_owned),
             model: None,
             thinking_level: None,
             created_at: now,
@@ -303,6 +458,10 @@ impl Storage {
             asks: vec![],
             workspace: None,
             workspace_missing: false,
+            parent_id: parent.map(str::to_owned),
+            snoozed: false,
+            prompted_at: None,
+            jobs: 0,
         })
     }
 
@@ -367,6 +526,10 @@ impl Storage {
         if entry.kind == "message" {
             self.conn
                 .execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
+            self.conn.execute(
+                &format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"),
+                params![thread_id, seq],
+            )?;
         }
 
         let j = &entry.json;
@@ -442,7 +605,8 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
     Ok(())
 }
 
-/// Explicit session name, or the first line of a user message as a fallback title.
+/// Explicit session name, or the first line of a user message as a fallback title for a
+/// thread created without a name (shown until its generated title lands, or if that fails).
 fn derived_name(entry: &Value) -> Option<String> {
     match entry.get("type")?.as_str()? {
         "session_info" => entry.get("name")?.as_str().map(str::to_owned),
@@ -480,10 +644,13 @@ mod tests {
     #[test]
     fn asks_and_tools_live_with_the_thread() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", 0).unwrap();
+        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
         assert!(s.thread_tools("t1").unwrap().is_empty());
         s.set_tools("t1", &["ask_user".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["ask_user"]);
+        assert_eq!(s.report("t1").unwrap(), (Report::Reply, Notify::Asap));
+        s.set_report("t1", Report::Done, Notify::WhenIdle).unwrap();
+        assert_eq!(s.report("t1").unwrap(), (Report::Done, Notify::WhenIdle));
         let ask =
             Ask { id: "a1".into(), questions: vec![Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false }] };
         s.add_ask("t1", &ask, 5).unwrap();
@@ -504,6 +671,7 @@ mod tests {
         )
         .unwrap();
         let s = Storage::init(conn).unwrap();
+        assert_eq!(s.report("t1").unwrap(), (Report::Reply, Notify::Asap));
         s.set_tools("t1", &["async_bash".into()]).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
         assert!(s.list_threads().unwrap()[0].asks.is_empty());
@@ -516,7 +684,7 @@ mod tests {
     fn roundtrip_thread_and_entries() {
         let s = Storage::in_memory().unwrap();
         s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
-        s.create_thread("t1", "p1", "/x", 10).unwrap();
+        s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
         s.set_header("t1", &json!({"type":"session","id":"t1"})).unwrap();
         s.append_entry("t1", json!({"type":"model_change","id":"a","parentId":null,"provider":"anthropic","modelId":"m"}), 11).unwrap();
         let e = s
@@ -570,9 +738,63 @@ mod tests {
     }
 
     #[test]
+    fn lineage_snooze_and_search() {
+        let s = Storage::in_memory().unwrap();
+        s.create_thread("root", "p", "/x", None, None, 1).unwrap();
+        s.create_thread("kid", "p", "/x", Some("root"), Some("Review"), 2).unwrap();
+        s.create_thread("grandkid", "p", "/x", Some("kid"), None, 3).unwrap();
+        assert_eq!(s.depth("root").unwrap(), 0);
+        assert_eq!(s.depth("grandkid").unwrap(), 2);
+        assert_eq!(s.thread_parent("kid").unwrap().as_deref(), Some("root"));
+        let by_id = |s: &Storage, id: &str| s.list_threads().unwrap().into_iter().find(|t| t.id == id).unwrap();
+
+        // Snoozed until the thread's next entry moves `updated_at`.
+        s.set_snoozed("root", true).unwrap();
+        assert!(by_id(&s, "root").snoozed);
+        s.append_entry("root", json!({"type":"message","id":"u","message":{"role":"user","content":"find the sqlite bug"}}), 50).unwrap();
+        assert!(!by_id(&s, "root").snoozed);
+        s.set_snoozed("root", true).unwrap();
+        s.set_snoozed("root", false).unwrap();
+        assert!(!by_id(&s, "root").snoozed);
+
+        // Search covers user and assistant text; the last final reply is what a parent reads.
+        let assistant = |id: &str, stop: &str, text: &str| json!({"type":"message","id":id,"message":{"role":"assistant","stopReason":stop,"content":[{"type":"text","text":text}]}});
+        s.append_entry("root", assistant("a1", "toolUse", "looking at storage.rs"), 51).unwrap();
+        s.append_entry("root", assistant("a2", "stop", "The bug is a missing index on usage.at"), 52).unwrap();
+        s.append_entry(
+            "kid",
+            json!({"type":"message","id":"k","message":{"role":"user","content":[{"type":"text","text":"write docs"}]}}),
+            53,
+        )
+        .unwrap();
+        assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
+        assert_eq!(s.last_reply("kid").unwrap(), None);
+        // Named by its spawner: its first message doesn't rename it.
+        assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
+        s.set_prompted("kid", None, None, 60).unwrap();
+        assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
+        // A new prompt without a reply yet (or aborted): no reply to report.
+        s.append_entry("root", json!({"type":"message","id":"u2","message":{"role":"user","content":"and again"}}), 54).unwrap();
+        assert_eq!(s.last_reply("root").unwrap(), None);
+        let hits = s.search("sqlite", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].thread_id, "root");
+        assert!(hits[0].snippet.contains("sqlite"));
+        assert_eq!(s.search("docs", 10).unwrap()[0].thread_id, "kid");
+        assert!(s.search("\"weird) syntax", 10).unwrap().is_empty());
+        assert_eq!(s.search("", 10).unwrap().len(), 0);
+        // The index is rebuilt from the entries when it is empty (a db from before it existed).
+        s.conn.execute("DELETE FROM entries_fts", []).unwrap();
+        let s = Storage::init(s.conn).unwrap();
+        assert_eq!(s.search("index", 10).unwrap()[0].thread_id, "root");
+        s.delete_thread("root").unwrap();
+        assert!(s.search("index", 10).unwrap().is_empty());
+    }
+
+    #[test]
     fn usage_is_bucketed_per_model() {
         let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", 0).unwrap();
+        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
         let assistant = |at: i64, model: &str, input: u64, cost: f64| {
             json!({"type":"message","id":"x","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,
                 "usage":{"input":input,"output":10,"cacheRead":100,"cacheWrite":5,"totalTokens":0,"cost":{"total":cost}}}})

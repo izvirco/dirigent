@@ -6,13 +6,14 @@
 
 mod blobs;
 mod git;
+pub mod hosts;
 mod runtime;
 mod server;
 mod storage;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, PromptMode, ServerMessage, ThreadSummary, Vcs};
+use dirigent_protocol::{ClientMessage, HostInfo, PromptMode, Report, ServerMessage, ThreadSummary, Vcs};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -24,6 +25,10 @@ use tokio::sync::broadcast;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_PORT: u16 = 7777;
+/// Sub-agents can't nest deeper than this (a root thread is depth 0).
+const MAX_DEPTH: usize = 3;
+/// How much of a sub-agent's reply a parent's notice carries.
+const NOTICE_CHARS: usize = 6000;
 
 /// The local service's port: `DIRIGENT_PORT` or 7777. The desktop uses it both to reach and
 /// to embed the local service, so a test instance with its own port never touches the real one.
@@ -34,7 +39,8 @@ pub fn port() -> u16 {
 pub struct Service {
     storage: Mutex<Storage>,
     runtime: Arc<Runtime>,
-    /// Threads whose workspace directory was gone at the last `sweep_workspaces`.
+    /// Threads whose workspace was gone (or no longer known to the vcs) at the last
+    /// `sweep_workspaces`: what `workspace_missing` reports between sweeps.
     missing: Mutex<std::collections::HashSet<String>>,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
@@ -48,10 +54,12 @@ impl Service {
 
     fn threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut threads = self.storage.lock().unwrap().list_threads()?;
+        let missing = self.missing.lock().unwrap();
         for t in &mut threads {
             t.running_since = self.runtime.running_since(&t.id);
+            t.jobs = self.runtime.jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
-            t.workspace_missing = t.workspace.as_deref().is_some_and(|w| !Path::new(w).is_dir());
+            t.workspace_missing = missing.contains(&t.id);
         }
         Ok(threads)
     }
@@ -63,13 +71,20 @@ impl Service {
         }
     }
 
-    /// Notice workspaces removed outside dirigent: push the thread list when the set of
-    /// missing ones changed since the last look. Runs periodically and on `GetThread`.
+    /// Notice workspaces removed outside dirigent (the directory deleted, or the vcs made to
+    /// forget it: `jj workspace forget`, a pruned worktree): push the thread list when the
+    /// set of missing ones changed since the last look. Runs periodically and on `GetThread`;
+    /// the vcs probe is too slow for every `threads()`.
     fn sweep_workspaces(&self) {
-        let now: std::collections::HashSet<String> = match self.threads() {
-            Ok(threads) => threads.into_iter().filter(|t| t.workspace_missing).map(|t| t.id).collect(),
+        let threads = match self.storage.lock().unwrap().list_threads() {
+            Ok(threads) => threads,
             Err(_) => return,
         };
+        let now: std::collections::HashSet<String> = threads
+            .into_iter()
+            .filter(|t| t.workspace.as_deref().is_some_and(|w| !vcs::is_workspace(Path::new(w))))
+            .map(|t| t.id)
+            .collect();
         let changed = {
             let mut missing = self.missing.lock().unwrap();
             let changed = *missing != now;
@@ -89,7 +104,7 @@ impl Service {
     }
 
     /// Handle one client request; the reply is sent back on the requesting connection.
-    pub async fn handle(&self, req: ClientMessage) -> ServerMessage {
+    pub async fn handle(self: &Arc<Self>, req: ClientMessage) -> ServerMessage {
         let id = match &req {
             ClientMessage::ListProjects { id }
             | ClientMessage::AddProject { id, .. }
@@ -105,8 +120,12 @@ impl Service {
             | ClientMessage::Abort { id, .. }
             | ClientMessage::CancelQueued { id, .. }
             | ClientMessage::ArchiveThread { id, .. }
+            | ClientMessage::SnoozeThread { id, .. }
+            | ClientMessage::FocusThread { id, .. }
+            | ClientMessage::SearchThreads { id, .. }
             | ClientMessage::DeleteThread { id, .. }
             | ClientMessage::ListModels { id }
+            | ClientMessage::ListHosts { id }
             | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
             | ClientMessage::ListUsage { id, .. } => *id,
@@ -117,7 +136,7 @@ impl Service {
         }
     }
 
-    async fn try_handle(&self, req: ClientMessage) -> Result<ServerMessage> {
+    async fn try_handle(self: &Arc<Self>, req: ClientMessage) -> Result<ServerMessage> {
         Ok(match req {
             ClientMessage::ListProjects { id } => {
                 ServerMessage::Projects { reply_to: Some(id), projects: self.storage.lock().unwrap().list_projects()? }
@@ -144,12 +163,27 @@ impl Service {
                 let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
-            ClientMessage::CreateThread { id, project_id, workspace, base } => {
+            ClientMessage::CreateThread { id, project_id, workspace, base, parent, name, report, notify } => {
                 let thread_id = uuid::Uuid::now_v7().to_string();
                 let mut thread = {
                     let storage = self.storage.lock().unwrap();
-                    let cwd = storage.project_path(&project_id)?.ok_or_else(|| anyhow!("no such project"))?;
-                    storage.create_thread(&thread_id, &project_id, &cwd, now())?
+                    let mut cwd = storage.project_path(&project_id)?.ok_or_else(|| anyhow!("no such project"))?;
+                    // A sub-agent works where its parent works, unless it gets its own workspace.
+                    if let Some(p) = &parent {
+                        let parent_cwd = storage.thread_cwd(p)?.ok_or_else(|| anyhow!("no such parent thread"))?;
+                        anyhow::ensure!(storage.depth(p)? + 1 < MAX_DEPTH, "sub-agents can't nest deeper than {MAX_DEPTH} levels");
+                        if !workspace {
+                            cwd = parent_cwd;
+                        }
+                    }
+                    let thread = storage.create_thread(&thread_id, &project_id, &cwd, parent.as_deref(), name.as_deref(), now())?;
+                    // A sub-agent's prompts come from the `dirigent` tool, which knows nothing of
+                    // the user's tool settings: it gets its parent's tools.
+                    if let Some(p) = &parent {
+                        storage.set_tools(&thread_id, &storage.thread_tools(p)?)?;
+                        storage.set_report(&thread_id, report, notify)?;
+                    }
+                    thread
                 };
                 if workspace {
                     // A thread that can't get its workspace is never created: the draft stays.
@@ -176,8 +210,12 @@ impl Service {
             }
             ClientMessage::VcsStatus { id, path } => {
                 let dir = Path::new(&path);
-                let vcs = vcs::detect(dir);
-                let dirty = vcs.map(|v| vcs::dirty(v, dir)).transpose()?.unwrap_or(false);
+                // A background probe, so a working copy the vcs can't answer for (a forgotten
+                // workspace) reads as no repo rather than an error.
+                let (vcs, dirty) = match vcs::detect(dir).map(|v| (v, vcs::dirty(v, dir))) {
+                    Some((v, Ok(dirty))) => (Some(v), dirty),
+                    _ => (None, false),
+                };
                 let branch = vcs.and_then(|v| vcs::branch(v, dir));
                 let refs = vcs.map(|v| vcs::refs(v, dir)).unwrap_or_default();
                 ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
@@ -185,9 +223,10 @@ impl Service {
             ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
                 // The run starts now, not at pi's `agent_start`: loading the session (and a nix
                 // dev shell) can take seconds, and clients should see the thread working with
-                // the model it will use for all of it.
+                // the model it will use for all of it. A new turn is a new task, too
+                // (`prompted_at`: steers, follow-ups and answers don't count).
                 if mode == PromptMode::Prompt {
-                    self.storage.lock().unwrap().set_model(&thread_id, model.as_deref(), thinking_level.as_deref())?;
+                    self.storage.lock().unwrap().set_prompted(&thread_id, model.as_deref(), thinking_level.as_deref(), now())?;
                     self.runtime.begin_run(&thread_id);
                     self.push_threads();
                 }
@@ -230,6 +269,10 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListModels { id } => ServerMessage::Models { reply_to: id, models: self.runtime.list_models().await? },
+            // Read on every request, so edits to the file apply at once.
+            ClientMessage::ListHosts { id } => {
+                ServerMessage::Hosts { reply_to: id, hosts: hosts::load()?.into_iter().map(|(name, url)| HostInfo { name, url }).collect() }
+            }
             ClientMessage::GenerateTitle { id, title, text } => {
                 let r = self.runtime.generate_title(&title, &text).await?;
                 ServerMessage::Title {
@@ -267,6 +310,19 @@ impl Service {
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
             }
+            ClientMessage::SnoozeThread { id, thread_id, snoozed } => {
+                self.storage.lock().unwrap().set_snoozed(&thread_id, snoozed)?;
+                self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::FocusThread { id, thread_id } => {
+                anyhow::ensure!(self.storage.lock().unwrap().thread_cwd(&thread_id)?.is_some(), "no such thread");
+                self.push(ServerMessage::Focus { thread_id });
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::SearchThreads { id, query, limit } => {
+                ServerMessage::Search { reply_to: id, hits: self.storage.lock().unwrap().search(&query, limit.clamp(1, 100))? }
+            }
             ClientMessage::DeleteThread { id, thread_id } => {
                 if self.runtime.is_loaded(&thread_id) {
                     let _ = self.runtime.unload(&thread_id);
@@ -286,7 +342,58 @@ impl Service {
         })
     }
 
-    /// `$XDG_DATA_HOME/dirigent/workspaces/<name>`: the directory is named like its branch.
+    // ---- sub-agents ----
+
+    /// Hand a notice to a thread's model (loading the session if needed), as the user's
+    /// answers to an ask are: it starts a turn when the model is idle.
+    async fn notify_thread(&self, thread_id: &str, custom_type: &str, content: &str, details: Value, notify: &str) -> Result<()> {
+        self.runtime.begin_run(thread_id);
+        self.push_threads();
+        let sent = match self.ensure_loaded(thread_id, None, None).await {
+            Ok(()) => self.runtime.notify(thread_id, custom_type, content, &details, notify),
+            Err(e) => Err(e),
+        };
+        if sent.is_err() && self.runtime.settle(thread_id).is_some() {
+            self.push_threads();
+        }
+        sent
+    }
+
+    /// A sub-agent's run ended: tell its parent, with the child's final reply (or, if it was
+    /// spawned with `Report::Done`, only that it finished), as it was spawned to (`Notify`).
+    /// A child that stopped to ask the user is reported as waiting, not finished.
+    async fn on_child_settled(&self, thread_id: &str) {
+        let (parent, name, asks, reply, (report, notify)) = {
+            let storage = self.storage.lock().unwrap();
+            let Ok(Some(parent)) = storage.thread_parent(thread_id) else { return };
+            let summary = storage.list_threads().ok().and_then(|ts| ts.into_iter().find(|t| t.id == thread_id));
+            let name = summary.as_ref().and_then(|t| t.name.clone());
+            let asks: Vec<String> =
+                summary.map(|t| t.asks.iter().flat_map(|a| a.questions.iter().map(|q| q.text.clone())).collect()).unwrap_or_default();
+            (parent, name, asks, storage.last_reply(thread_id).ok().flatten(), storage.report(thread_id).unwrap_or_default())
+        };
+        let name = name.unwrap_or_else(|| "untitled".into());
+        let who = format!("Sub-agent \"{name}\" (thread {thread_id})");
+        let content = if !asks.is_empty() {
+            format!("{who} is waiting on the user's answer to:\n{}", asks.iter().map(|q| format!("- {q}")).collect::<Vec<_>>().join("\n"))
+        } else {
+            match &reply {
+                Some(_) if report == Report::Done => format!("{who} finished. Use `read` for its reply."),
+                Some(r) => format!("{who} finished. Its reply:\n\n{}", truncate(r, NOTICE_CHARS)),
+                // No final reply after a run: it was aborted or failed.
+                None => format!("{who} stopped without a reply (aborted or failed)."),
+            }
+        };
+        let details = json!({
+            "thread_id": thread_id, "name": name, "reply": reply,
+            "error": asks.is_empty() && reply.is_none(), "asking": !asks.is_empty(),
+        });
+        if let Err(e) = self.notify_thread(&parent, "dirigent:child", &content, details, notify.as_str()).await {
+            eprintln!("[service] notify parent {parent} of {thread_id}: {e:#}");
+        }
+    }
+
+    /// `<data dir>/workspaces/<name>`: the directory is named like its branch.
     fn workspace_dir(&self, thread_id: &str) -> PathBuf {
         data_dir().join("workspaces").join(vcs::workspace_name(thread_id))
     }
@@ -314,6 +421,11 @@ impl Service {
             "the working copy has uncommitted changes; commit them first"
         );
         let dest = self.workspace_dir(thread_id);
+        // Recreating one the vcs forgot (`jj workspace forget` keeps the files): its leftover
+        // directory makes way. The user picked `Recreate` over `Back to project`.
+        if recreating && dest.exists() && !vcs::is_workspace(&dest) {
+            std::fs::remove_dir_all(&dest)?;
+        }
         vcs::add_workspace(vcs, &repo, &dest, thread_id, base)?;
         let dest = dest.to_string_lossy().into_owned();
         let kind = match vcs {
@@ -363,6 +475,8 @@ impl Service {
             self.push(ServerMessage::Entry { thread_id: thread_id.to_owned(), entry });
         }
         drop(storage);
+        // Its workspace is fresh, or it has none: nothing is missing until a sweep says so.
+        self.missing.lock().unwrap().remove(thread_id);
         if self.runtime.is_loaded(thread_id) {
             let _ = self.runtime.unload(thread_id);
         }
@@ -398,7 +512,7 @@ impl Service {
     }
 
     /// Persist and fan out what the runtime reports.
-    fn on_runtime(&self, msg: RuntimeMessage) {
+    fn on_runtime(self: &Arc<Self>, msg: RuntimeMessage) {
         match msg {
             RuntimeMessage::Loaded { thread_id, model, header, .. } => {
                 eprintln!("[service] loaded {thread_id} model={}", model.as_deref().unwrap_or("?"));
@@ -422,6 +536,10 @@ impl Service {
                 {
                     eprintln!("[service] set last run: {e:#}");
                 }
+                if kind == "agent_settled" {
+                    let (this, id) = (self.clone(), thread_id.clone());
+                    tokio::spawn(async move { this.on_child_settled(&id).await });
+                }
                 self.push(ServerMessage::Event { thread_id, event });
                 if lifecycle {
                     self.push_threads();
@@ -437,6 +555,7 @@ impl Service {
                 }
                 self.push_threads();
             }
+            RuntimeMessage::Jobs { .. } => self.push_threads(),
             RuntimeMessage::Error { thread_id, message } => {
                 eprintln!("[service] runtime error {thread_id:?}: {message}");
                 // A prompt that failed before pi started (unknown model, nix shell) never settles.
@@ -460,7 +579,76 @@ impl Service {
     }
 }
 
-fn data_dir() -> PathBuf {
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_owned();
+    }
+    let cut = (0..=max).rev().find(|i| s.is_char_boundary(*i)).unwrap_or(0);
+    format!("{}…", &s[..cut])
+}
+
+/// Directories given on the command line (`--data-dir`, `--config-dir`); see `init_dirs`.
+#[derive(Debug, Default, PartialEq)]
+struct Dirs {
+    data: Option<PathBuf>,
+    config: Option<PathBuf>,
+}
+
+static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
+
+pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs; default $XDG_DATA_HOME/dirigent) \
+                         --config-dir DIR (config.toml, hosts.toml, themes; default $XDG_CONFIG_HOME/dirigent)";
+
+/// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
+/// options. Call it first thing in `main`, before anything asks for a directory. A test
+/// instance points both elsewhere so it never touches the real dbs or config (and, unlike
+/// overriding `XDG_*`, nothing it spawns sees a changed environment).
+pub fn init_dirs() -> Result<()> {
+    let dirs = parse_dirs(std::env::args().skip(1))?;
+    let _ = DIRS.set(dirs);
+    Ok(())
+}
+
+fn parse_dirs(args: impl Iterator<Item = String>) -> Result<Dirs> {
+    let mut dirs = Dirs::default();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        let (flag, value) = match arg.split_once('=') {
+            Some((f, v)) => (f.to_owned(), Some(v.to_owned())),
+            None => (arg, None),
+        };
+        let slot = match flag.as_str() {
+            "--data-dir" => &mut dirs.data,
+            "--config-dir" => &mut dirs.config,
+            _ => return Err(anyhow!("unknown argument {flag}\n{USAGE}")),
+        };
+        let value = value.or_else(|| args.next()).ok_or_else(|| anyhow!("{flag} needs a directory\n{USAGE}"))?;
+        // Absolute, so it means the same to the runtime (`DIRIGENT_DATA_DIR`) whatever its cwd.
+        *slot = Some(std::path::absolute(&value)?);
+    }
+    Ok(dirs)
+}
+
+/// `--config-dir`, else `$XDG_CONFIG_HOME/dirigent` (else `~/.config/dirigent`): the
+/// desktop's `config.toml` and the machine's `hosts.toml`.
+pub fn config_dir() -> PathBuf {
+    if let Some(dir) = DIRS.get().and_then(|d| d.config.clone()) {
+        return dir;
+    }
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .expect("HOME not set")
+        .join("dirigent")
+}
+
+/// `--data-dir`, else `$XDG_DATA_HOME/dirigent` (else `~/.local/share/dirigent`): the
+/// service's and the desktop's dbs, workspaces, job logs. The runtime gets it as
+/// `DIRIGENT_DATA_DIR`.
+pub fn data_dir() -> PathBuf {
+    if let Some(dir) = DIRS.get().and_then(|d| d.data.clone()) {
+        return dir;
+    }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
@@ -507,7 +695,8 @@ fn tailscale_ips() -> Vec<IpAddr> {
 /// already owns this host.
 pub async fn run(port: u16) -> Result<()> {
     let storage = Storage::open(&data_dir().join("service.db"))?;
-    let (runtime, mut runtime_rx) = Runtime::start(runtime_cmd()?);
+    let cmd = runtime_cmd()?;
+    let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));
     let host_name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "local".into());
     let svc = Arc::new(Service {
         storage: Mutex::new(storage),
@@ -529,8 +718,8 @@ pub async fn run(port: u16) -> Result<()> {
         let svc = svc.clone();
         async move {
             let mut n = 0u64;
+            // The first sweep at once: `workspace_missing` knows nothing before it.
             loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
                 svc.sweep_workspaces();
                 n += 1;
                 if n.is_multiple_of(6) {
@@ -539,9 +728,30 @@ pub async fn run(port: u16) -> Result<()> {
                         let _ = svc.runtime.unload(&id);
                     }
                 }
+                tokio::time::sleep(Duration::from_secs(10)).await;
             }
         }
     });
 
     server::serve(svc, &bind_addrs(port)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Dirs> {
+        parse_dirs(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn dir_flags() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(parse(&[]).unwrap(), Dirs::default());
+        let d = parse(&["--data-dir", "/tmp/d", "--config-dir=rel/c"]).unwrap();
+        assert_eq!(d.data, Some("/tmp/d".into()));
+        assert_eq!(d.config, Some(cwd.join("rel/c")));
+        assert!(parse(&["--data-dir"]).is_err());
+        assert!(parse(&["--port", "1"]).is_err());
+    }
 }

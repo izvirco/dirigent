@@ -24,6 +24,12 @@ pub enum Item {
     Compaction,
     /// Informational line (warnings, unknown entries, ...).
     Notice(String),
+    /// A sub-agent of this thread finished (`dirigent:child`) between turns: `text` is the
+    /// notice line, the thread is a click away.
+    Child {
+        thread_id: String,
+        text: String,
+    },
 }
 
 /// One model run: from the prompt to the final reply. Open (`ended == None`) while the
@@ -52,6 +58,12 @@ pub enum Step {
     },
     /// Something that reached the model mid-run on its own: an `async_bash` job ending.
     Notice(String),
+    /// A sub-agent started (the model's `dirigent` spawn) or finished (`dirigent:child`)
+    /// during the run. Shown under the work line like `Item::Child`, and in the log.
+    Child {
+        thread_id: String,
+        text: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -64,6 +76,9 @@ pub struct ToolCall {
     pub args: String,
     /// The call's own `timeout` argument, in seconds (bash).
     pub timeout: Option<f64>,
+    /// A `dirigent` spawn: the sub-agent's name. Its thread id comes with the result,
+    /// which then adds a `Step::Child` to the work.
+    pub spawned: Option<String>,
     /// Unix ms. Set from the live `tool_execution_start` event or derived from the result.
     pub started: Option<i64>,
     pub ended: Option<i64>,
@@ -223,6 +238,22 @@ impl Timeline {
                     None => self.add(Item::Notice(text)),
                 })
             }
+            Some("dirigent:child") => {
+                let text = child_text(details).unwrap_or_else(|| text_of(entry.get("content")));
+                let thread_id = details.and_then(|d| d.get("thread_id")).and_then(Value::as_str).map(str::to_owned);
+                Some(match (self.open_work(), thread_id) {
+                    (Some(ix), Some(thread_id)) => {
+                        self.work_mut(ix).steps.push(Step::Child { thread_id, text });
+                        ix
+                    }
+                    (Some(ix), None) => {
+                        self.work_mut(ix).steps.push(Step::Notice(text));
+                        ix
+                    }
+                    (None, Some(thread_id)) => self.add(Item::Child { thread_id, text }),
+                    (None, None) => self.add(Item::Notice(text)),
+                })
+            }
             _ => Some(self.add(Item::Notice(text_of(entry.get("content"))))),
         }
     }
@@ -257,7 +288,13 @@ impl Timeline {
                 })?;
                 tool.ended = Some(at);
                 tool.started = tool.started.or(duration.map(|d| at - d));
+                let spawned = tool
+                    .spawned
+                    .clone()
+                    .zip(spawned_id(&result))
+                    .map(|(name, thread_id)| Step::Child { thread_id, text: format!("sub-agent \"{name}\" started") });
                 tool.result = Some(result);
+                w.steps.extend(spawned);
                 Some(ix)
             }
             "system" => None,
@@ -354,12 +391,14 @@ fn step_of(b: &Value) -> Option<Step> {
                 "ask_user" => args_primary(args.and_then(|a| a.pointer("/questions/0"))),
                 _ => args_primary(args),
             };
+            let arg = |k: &str| args.and_then(|a| a.get(k)).and_then(Value::as_str);
             Step::Tool(ToolCall {
                 id: b.get("id").and_then(Value::as_str).unwrap_or("").to_owned(),
                 name: name.to_owned(),
                 primary,
                 args: args_multiline(args),
                 timeout: args.and_then(|a| a.get("timeout")).and_then(Value::as_f64),
+                spawned: (name == "dirigent" && arg("action") == Some("spawn")).then(|| arg("name").unwrap_or("untitled").to_owned()),
                 ..Default::default()
             })
         }
@@ -405,6 +444,31 @@ fn job_text(details: Option<&Value>) -> Option<String> {
     let ms = d.get("duration_ms").and_then(Value::as_i64).unwrap_or(0);
     let first = command.lines().next().unwrap_or("");
     Some(format!("job {first} · exit {exit} · {}", crate::thread::duration(ms)))
+}
+
+/// The new thread's id in a successful `dirigent` spawn's result (`Spawned sub-agent thread <id>. …`).
+fn spawned_id(result: &ToolResult) -> Option<String> {
+    if result.is_error {
+        return None;
+    }
+    let rest = result.text.strip_prefix("Spawned sub-agent thread ")?;
+    Some(rest.split('.').next()?.to_owned())
+}
+
+/// One line for a sub-agent that settled: `sub-agent "Review the diff" finished` (or
+/// `stopped without a reply`, or `is asking the user`).
+fn child_text(details: Option<&Value>) -> Option<String> {
+    let d = details?;
+    let name = d.get("name").and_then(Value::as_str).unwrap_or("untitled");
+    let flag = |k: &str| d.get(k).and_then(Value::as_bool).unwrap_or(false);
+    let what = if flag("asking") {
+        "is asking the user"
+    } else if flag("error") {
+        "stopped without a reply"
+    } else {
+        "finished"
+    };
+    Some(format!("sub-agent \"{name}\" {what}"))
 }
 
 /// Unix millis of an ISO 8601 timestamp (`2026-01-02T03:04:05.678Z`), as pi writes them.
@@ -628,7 +692,7 @@ impl Streaming {
         match self.steps.last()? {
             Step::Thinking(_) => Some("thinking".into()),
             Step::Text(_) => Some("writing".into()),
-            Step::Tool(_) | Step::Steer { .. } | Step::Notice(_) => None,
+            Step::Tool(_) | Step::Steer { .. } | Step::Notice(_) | Step::Child { .. } => None,
         }
     }
 
@@ -679,6 +743,28 @@ mod tests {
         assert_eq!((c.primary.as_str(), c.timeout, c.started, c.ended), ("ls -la…", Some(60.), Some(1700), Some(2000)));
         assert_eq!(c.result.as_ref().map(|r| r.text.as_str()), Some("a\nb"));
         assert_eq!(t.items[2], Item::Assistant("done".into()));
+    }
+
+    /// A `dirigent` spawn's result adds a `started` child step after the call; a failed
+    /// spawn doesn't.
+    #[test]
+    fn spawn_adds_a_child_step() {
+        let spawn = |id: &str| {
+            json!({"type":"message","message":{"role":"assistant","timestamp":1,"stopReason":"toolUse","content":[
+            {"type":"toolCall","id":id,"name":"dirigent","arguments":{"action":"spawn","name":"Review","task":"look"}}]}})
+        };
+        let result = |id: &str, text: &str, err: bool| json!({"type":"message","message":{"role":"toolResult","toolCallId":id,"timestamp":2,"content":text,"isError":err}});
+        let entries = [
+            spawn("c1"),
+            result("c1", "Spawned sub-agent thread kid. You will get a message when it finishes.", false),
+            spawn("c2"),
+            result("c2", "Error: no project to spawn in", true),
+        ];
+        let t = Timeline::from_entries(entries.iter());
+        let Item::Work(w) = &t.items[0] else { panic!() };
+        assert_eq!(w.steps.len(), 3);
+        assert_eq!(w.steps[1], Step::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" started".into() });
+        assert!(matches!(&w.steps[2], Step::Tool(c) if c.spawned.as_deref() == Some("Review")));
     }
 
     #[test]
@@ -755,6 +841,14 @@ mod tests {
         let Item::Work(w) = &t.items[0] else { panic!() };
         assert_eq!(w.steps[1], Step::Notice("job cargo check · exit 1 · 12s".into()));
         assert!(matches!(&w.steps[2], Step::Steer { queued: false, .. }));
+        // A sub-agent's end is a link to it when idle, a child step of the work mid-run.
+        let child = json!({"type":"custom_message","customType":"dirigent:child","content":"raw",
+            "details":{"thread_id":"kid","name":"Review","reply":"ok","error":false}});
+        let t = Timeline::from_entries([&child]);
+        assert_eq!(t.items[0], Item::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" finished".into() });
+        let t = Timeline::from_entries([&assistant, &child]);
+        let Item::Work(w) = &t.items[0] else { panic!() };
+        assert_eq!(w.steps[1], Step::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" finished".into() });
         let dismissed = json!({"type":"custom_message","customType":"dirigent:answer","content":"raw","details":{"ask_id":"a","questions":[],"answers":null}});
         assert_eq!(
             Timeline::from_entries([&dismissed]).items[0],

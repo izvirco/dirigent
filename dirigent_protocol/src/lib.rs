@@ -43,6 +43,11 @@ pub enum ClientMessage {
     /// `workspace` starts the thread in an isolated git worktree / jj workspace of the
     /// project instead of its directory, checked out at `base` (anything git / jj resolve:
     /// a branch, bookmark, commit, revset; default `HEAD` / the parents of `@`).
+    /// `parent` makes it a sub-agent of that thread: it starts in the parent's cwd (unless
+    /// `workspace`), and the parent is told when it finishes: with what (`report`) and when
+    /// (`notify`); both are ignored without a parent.
+    /// `name` names it from the start (an agent names the threads it starts); a thread
+    /// without one is titled from its first prompt.
     CreateThread {
         id: u64,
         project_id: String,
@@ -50,6 +55,14 @@ pub enum ClientMessage {
         workspace: bool,
         #[serde(default)]
         base: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        report: Report,
+        #[serde(default)]
+        notify: Notify,
     },
     /// Move a thread into its own workspace at `base` (or recreate one that went missing,
     /// where its branch is resumed and `base` is ignored). Refused while the thread runs
@@ -123,6 +136,24 @@ pub enum ClientMessage {
         thread_id: String,
         archived: bool,
     },
+    /// Snooze: out of the sidebar until the thread's next run (or until woken by hand).
+    SnoozeThread {
+        id: u64,
+        thread_id: String,
+        snoozed: bool,
+    },
+    /// Ask every client to open the thread (an agent calling the user's attention to it).
+    FocusThread {
+        id: u64,
+        thread_id: String,
+    },
+    /// Full-text search over every thread's messages; best hit per thread, best first.
+    SearchThreads {
+        id: u64,
+        query: String,
+        #[serde(default = "default_limit")]
+        limit: u64,
+    },
     /// Permanently remove a thread and its entries.
     DeleteThread {
         id: u64,
@@ -130,6 +161,10 @@ pub enum ClientMessage {
     },
     /// Models this host has credentials for.
     ListModels {
+        id: u64,
+    },
+    /// The other hosts this host's `hosts.toml` lists (what its agents can reach).
+    ListHosts {
         id: u64,
     },
     /// The bytes behind an image block's `blob` id (see `ServerMessage::Entry`).
@@ -234,6 +269,66 @@ pub enum ServerMessage {
         cost: f64,
         duration_ms: i64,
     },
+    /// Pushed on `FocusThread`: open this thread.
+    Focus {
+        thread_id: String,
+    },
+    Search {
+        reply_to: u64,
+        hits: Vec<SearchHit>,
+    },
+    Hosts {
+        reply_to: u64,
+        hosts: Vec<HostInfo>,
+    },
+}
+
+/// A host in a `hosts.toml`: its name there and its normalized `ws://` url.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HostInfo {
+    pub name: String,
+    pub url: String,
+}
+
+/// What a parent is told when its sub-agent's run ends: the child's final reply, or only
+/// that it finished (the parent reads the reply if it wants it).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Report {
+    #[default]
+    Reply,
+    Done,
+}
+
+/// When a notice reaches a model: after its current tool calls (a steer), or once its
+/// turn has ended (a follow-up). Either way an idle model gets a new turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Notify {
+    #[default]
+    Asap,
+    WhenIdle,
+}
+
+impl Notify {
+    /// The runtime's name for it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Notify::Asap => "asap",
+            Notify::WhenIdle => "when_idle",
+        }
+    }
+}
+
+fn default_limit() -> u64 {
+    20
+}
+
+/// One thread matching a `SearchThreads` query, with the best matching passage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchHit {
+    pub thread_id: String,
+    pub snippet: String,
 }
 
 /// A version control system a directory is under. Jj wins over git in a colocated repo.
@@ -352,6 +447,20 @@ pub struct ThreadSummary {
     /// The workspace directory is gone (removed outside dirigent); prompts would fail.
     #[serde(default)]
     pub workspace_missing: bool,
+    /// The thread that spawned this one as a sub-agent.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// Snoozed and not run since (see `ClientMessage::SnoozeThread`).
+    #[serde(default)]
+    pub snoozed: bool,
+    /// Unix millis of the last `Prompt` that started a turn (mode `prompt`): when the
+    /// thread was last given a task. Orders a parent's children.
+    #[serde(default)]
+    pub prompted_at: Option<i64>,
+    /// `async_bash` jobs running in its live session. Runtime state, never stored: a thread
+    /// whose turn ended with jobs running is waiting on them (they wake it when they end).
+    #[serde(default)]
+    pub jobs: u32,
 }
 
 impl ThreadSummary {
@@ -362,6 +471,12 @@ impl ThreadSummary {
     /// The model is waiting on the user.
     pub fn asking(&self) -> bool {
         !self.asks.is_empty()
+    }
+
+    /// Not spawned by another thread: what the desktop's lists show.
+    /// Sub-agents are reached through their parent's orchestration panel.
+    pub fn top_level(&self) -> bool {
+        self.parent_id.is_none()
     }
 }
 
@@ -402,7 +517,20 @@ mod tests {
         roundtrip(ClientMessage::RemoveProject { id: 1, project_id: "p".into() });
         roundtrip(ClientMessage::ListThreads { id: 1 });
         roundtrip(ClientMessage::GetThread { id: 2, thread_id: "t".into() });
-        roundtrip(ClientMessage::CreateThread { id: 3, project_id: "p".into(), workspace: true, base: Some("main~2".into()) });
+        roundtrip(ClientMessage::CreateThread {
+            id: 3,
+            project_id: "p".into(),
+            workspace: true,
+            base: Some("main~2".into()),
+            parent: Some("t0".into()),
+            name: Some("Review".into()),
+            report: Report::Done,
+            notify: Notify::WhenIdle,
+        });
+        roundtrip(ClientMessage::ListHosts { id: 20 });
+        roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
+        roundtrip(ClientMessage::FocusThread { id: 18, thread_id: "t".into() });
+        roundtrip(ClientMessage::SearchThreads { id: 19, query: "sqlite".into(), limit: 5 });
         roundtrip(ClientMessage::MoveToWorkspace { id: 14, thread_id: "t".into(), base: None });
         roundtrip(ClientMessage::RemoveWorkspace { id: 15, thread_id: "t".into(), detach: true });
         roundtrip(ClientMessage::VcsStatus { id: 16, path: "/x".into() });
@@ -464,7 +592,25 @@ mod tests {
         assert!(!t.asking());
         assert_eq!(t.workspace, None);
         let c: ClientMessage = serde_json::from_value(json!({"type":"create_thread","id":1,"project_id":"p"})).unwrap();
-        assert_eq!(c, ClientMessage::CreateThread { id: 1, project_id: "p".into(), workspace: false, base: None });
+        assert_eq!(
+            c,
+            ClientMessage::CreateThread {
+                id: 1,
+                project_id: "p".into(),
+                workspace: false,
+                base: None,
+                parent: None,
+                name: None,
+                report: Report::Reply,
+                notify: Notify::Asap
+            }
+        );
+        let s: ClientMessage = serde_json::from_value(json!({"type":"search_threads","id":1,"query":"x"})).unwrap();
+        assert_eq!(s, ClientMessage::SearchThreads { id: 1, query: "x".into(), limit: 20 });
+        assert!(!t.snoozed);
+        assert_eq!(t.parent_id, None);
+        assert_eq!(t.prompted_at, None);
+        assert_eq!(t.jobs, 0);
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
     }
@@ -490,8 +636,16 @@ mod tests {
             }],
             workspace: Some("/ws/t".into()),
             workspace_missing: false,
+            parent_id: Some("t0".into()),
+            snoozed: true,
+            prompted_at: Some(4),
+            jobs: 2,
         };
         assert!(t.asking());
+        roundtrip(ServerMessage::Focus { thread_id: "t".into() });
+        roundtrip(ServerMessage::Hosts { reply_to: 1, hosts: vec![HostInfo { name: "h".into(), url: "ws://h:7777/ws".into() }] });
+        assert_eq!(serde_json::to_value(Notify::WhenIdle).unwrap(), json!(Notify::WhenIdle.as_str()));
+        roundtrip(ServerMessage::Search { reply_to: 1, hits: vec![SearchHit { thread_id: "t".into(), snippet: "…sqlite…".into() }] });
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
         let m =
             ModelInfo { provider: "a".into(), id: "b".into(), name: "B".into(), context_window: 1, thinking_levels: vec!["low".into()] };

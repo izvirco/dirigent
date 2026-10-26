@@ -22,7 +22,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             })
         }
         Pane::Workpool => {
-            let rows = this.threads_with(Status::Working);
+            let rows = this.busy_threads();
             pane.child(header(div().child("Workpool"), None)).child(if rows.is_empty() {
                 theme::empty("No agents working", "Start one with ctrl n.").into_any_element()
             } else {
@@ -142,30 +142,15 @@ fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
 
 /// The settings pages' header: `Settings` and the tabs (Config, Hosts, Usage), the open one bright.
 pub fn settings_header(active: Pane, cx: &mut Context<Dirigent>) -> Div {
-    let tab = |label: &'static str, on: bool, cx: &mut Context<Dirigent>, go: fn(&mut Dirigent, &mut Context<Dirigent>)| {
-        div()
-            .id(label)
-            .h(px(24.))
-            .px_2()
-            .flex()
-            .items_center()
-            .rounded_md()
-            .cursor_pointer()
-            .text_color(rgba(if on { theme::t().fg } else { theme::t().fg_1 }))
-            .when(on, |d| d.bg(rgba(theme::t().hover)))
-            .hover(|d| d.text_color(rgba(theme::t().fg)))
-            .on_click(cx.listener(move |this, _, _, cx| go(this, cx)))
-            .child(label)
-    };
     let title = div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
         .child(div().mr_3().child("Settings"))
-        .child(tab("Config", matches!(active, Pane::Config), cx, |this, cx| this.show_config(cx)))
-        .child(tab("Hosts", matches!(active, Pane::Settings), cx, |this, cx| this.show_settings(cx)))
-        .child(tab("Usage", matches!(active, Pane::Usage), cx, |this, cx| this.show_usage(cx)));
+        .child(theme::tab("Config", matches!(active, Pane::Config), cx, |this, cx| this.show_config(cx)))
+        .child(theme::tab("Hosts", matches!(active, Pane::Settings), cx, |this, cx| this.show_settings(cx)))
+        .child(theme::tab("Usage", matches!(active, Pane::Usage), cx, |this, cx| this.show_usage(cx)));
     header(title, None)
 }
 
@@ -190,15 +175,30 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .children(actions)
 }
 
-/// `project > title`, with the project clickable and an amber pin before the title while
-/// `pinned`. The title breathes while `titling` (its name is being generated).
+/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent) an
+/// optional segment of its own, and before the title the thread's `status` glyph and an
+/// amber pin while `pinned`. The title breathes while `titling` (its name is being generated).
+/// Only the title gives way when space runs out (it truncates); everything before it keeps
+/// its width (`via` caps its own).
 pub fn breadcrumb(
     project: Option<(String, String)>,
+    via: Option<Stateful<Div>>,
+    status: Option<Status>,
     title: impl Into<SharedString>,
     pinned: bool,
     titling: bool,
     cx: &mut Context<Dirigent>,
 ) -> Div {
+    let crumb = |d: Stateful<Div>| {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .flex_shrink_0()
+            .child(d.text_color(rgba(theme::t().fg_1)).cursor_pointer().hover(|d| d.text_color(rgba(theme::t().fg))))
+            .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
+    };
     div()
         .flex()
         .flex_row()
@@ -206,23 +206,16 @@ pub fn breadcrumb(
         .gap_1()
         .min_w_0()
         .children(project.map(|(key, name)| {
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .id("crumb-project")
-                        .text_color(rgba(theme::t().fg_1))
-                        .cursor_pointer()
-                        .hover(|d| d.text_color(rgba(theme::t().fg)))
-                        .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
-                        .child(name),
-                )
-                .child(icon("chevron-right", theme::t().fg_2).size(px(12.)))
+            crumb(
+                div()
+                    .id("crumb-project")
+                    .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
+                    .child(name),
+            )
         }))
-        .children(pinned.then(theme::pin_mark))
+        .children(via.map(crumb))
+        .children(status.map(|s| div().flex_shrink_0().child(s.glyph())))
+        .children(pinned.then(|| div().flex_shrink_0().child(theme::pin_mark())))
         .child(theme::title_text("crumb-title", title, titling))
 }
 
@@ -252,7 +245,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
             .into_any_element()
     });
 
-    let title = breadcrumb(None, name, false, false, cx);
+    let title = breadcrumb(None, None, None, name, false, false, cx);
     let mut body = div().id("project-page").flex_1().overflow_y_scroll().flex().flex_col();
     if !paths.is_empty() {
         body = body.child(
@@ -279,7 +272,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
 
 /// A band between list sections (`Archived`): the canvas colour at 40% over the panel, a
 /// shade darker than the rows without going solid on a see-through theme.
-fn section_label(text: String) -> Div {
+pub fn section_label(text: String) -> Div {
     div()
         .h(px(32.))
         .px_4()

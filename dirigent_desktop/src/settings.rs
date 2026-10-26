@@ -281,7 +281,12 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                     .py_2()
                     .child(div().text_color(rgba(t.fg_1)).child("Prompt"))
                     .child(field(s.prompt.clone()))
-                    .child(div().text_size(px(11.5)).text_color(rgba(t.fg_2)).child("The system prompt; the message is the user turn.")),
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgba(t.fg_2))
+                            .child("The system prompt; the message is the user turn, between <message> tags."),
+                    ),
             )
             .child(div().flex().flex_row().pt_2().child(test_button))
             .children(test),
@@ -360,6 +365,11 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 "ask_user",
                 switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx)),
                 Some("Lets the agent put questions to you as a form; the thread shows as Asking until you answer."),
+            ))
+            .child(row(
+                "dirigent",
+                switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx)),
+                Some("The orchestrator: spawn sub-agent threads, message and read threads, find and open them."),
             )),
     )
 }

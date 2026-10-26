@@ -30,7 +30,9 @@ import {
   type Ask,
   createTools,
   deliverAnswers,
+  deliverNotice,
   killJobs,
+  type Notify,
   noticeDelivered,
   requeueNotices,
   TOOL_NAMES,
@@ -80,6 +82,7 @@ export type Outbound =
   | { type: "entry"; thread_id: string; entry: unknown }
   | { type: "event"; thread_id: string; event: unknown }
   | { type: "ask"; thread_id: string; ask: Ask }
+  | { type: "jobs"; thread_id: string; running: number }
   | { type: "warning"; thread_id: string; message: string }
   | { type: "error"; thread_id?: string; message: string };
 
@@ -128,6 +131,7 @@ export class Sessions {
       jobs: new Map(),
       notices: new Map(),
       onAsk: (ask: Ask) => this.send({ type: "ask", thread_id: threadId, ask }),
+      onJobs: (running: number) => this.send({ type: "jobs", thread_id: threadId, running }),
     } as Live;
     // Bash runs through our spawnHook so a captured nix dev-shell env can be injected.
     const bash = createBashToolDefinition(cwd, {
@@ -223,10 +227,11 @@ export class Sessions {
    * Send a prompt, first switching the session to `model` ("provider/id") and
    * `thinkingLevel` if they differ from its current ones. Pi persists the switch
    * as entries, so it survives reloads. `attachments` are base64 images; pi resizes
-   * them to the model's limits before persisting. `title` (a thread's first prompt)
-   * names the thread from `text` alongside the run: pi persists the name as a
-   * `session_info` entry, which is how the service and clients learn it. `tools`, when
-   * given, is the dirigent tool set from now on (see `load`).
+   * them to the model's limits before persisting. `title` (a desktop thread's first
+   * prompt; sub-agents are named by their spawner) names the thread from `text`
+   * alongside the run: pi persists the name as a `session_info` entry, which is how
+   * the service and clients learn it. `tools`, when given, is the dirigent tool set
+   * from now on (see `load`).
    */
   async prompt(
     threadId: string,
@@ -292,6 +297,20 @@ export class Sessions {
     await requeueNotices(live);
   }
 
+  /** The service has a notice for the model (a sub-agent ended). */
+  async notify(
+    threadId: string,
+    customType: string,
+    content: string,
+    details: Record<string, unknown>,
+    notify: Notify,
+  ): Promise<void> {
+    const live = this.live.get(threadId);
+    if (!live) throw new Error(`thread not loaded: ${threadId}`);
+    await live.nixEnv;
+    await deliverNotice(live, customType, content, details, notify);
+  }
+
   /** The user answered (or dismissed: `answers == null`) an `ask_user` call; tell the model. */
   async answer(threadId: string, ask: Ask, answers: string[][] | null): Promise<void> {
     const live = this.live.get(threadId);
@@ -301,9 +320,11 @@ export class Sessions {
   }
 
   /**
-   * One completion: `gen.prompt` as the system prompt, `text` as the user message. Uses
-   * `gen.model` if this host has credentials for it, else the first available fallback,
-   * else `fallback` (the thread's own model). The title is the reply's first line, unquoted.
+   * One completion: `gen.prompt` as the system prompt, `text` between `<message>` tags as
+   * the user turn (so it reads as data to name, not as a request; the default prompt says
+   * so). Uses `gen.model` if this host has credentials for it, else the first available
+   * fallback, else `fallback` (the thread's own model). The title is the reply's first line
+   * (`cleanTitle`); a reply that is no title throws, so the thread keeps its placeholder.
    */
   async generateTitle(gen: TitleGen, text: string, fallback?: Model<Api>): Promise<TitleResult> {
     const rt = await this.modelRuntime;
@@ -314,7 +335,10 @@ export class Sessions {
     const started = Date.now();
     const reply = await rt.completeSimple(
       model,
-      { systemPrompt: gen.prompt, messages: [{ role: "user", content: text, timestamp: started }] },
+      {
+        systemPrompt: gen.prompt,
+        messages: [{ role: "user", content: `<message>\n${text}\n</message>`, timestamp: started }],
+      },
       { reasoning: gen.reasoning as ThinkingLevel },
     );
     if (reply.stopReason === "error" || reply.stopReason === "aborted") {
@@ -324,8 +348,9 @@ export class Sessions {
       .filter((c): c is { type: "text"; text: string } => c.type === "text")
       .map((c) => c.text)
       .join("\n");
-    const title = (raw.trim().split("\n")[0] ?? "").replace(/^["'“”`]+|["'“”`.]+$/g, "").trim();
-    if (!title) throw new Error("model returned an empty title");
+    const title = cleanTitle(raw);
+    if (!title)
+      throw new Error(`model replied with no title: ${JSON.stringify(raw.trim().slice(0, 200))}`);
     return {
       title,
       model: `${model.provider}/${model.id}`,
@@ -339,6 +364,25 @@ export class Sessions {
   disposeAll(): void {
     for (const id of Array.from(this.live.keys())) this.unload(id);
   }
+}
+
+/** Longer than this, a reply is the model talking (commentary on its instructions), not a title. */
+const TITLE_MAX_WORDS = 10;
+
+/**
+ * The title in a title model's reply: its first line without a `Title:` label, quotes or a
+ * trailing period. Null when that is no title: empty, too long, the model speaking in the
+ * first person (`I can't…`, `I'll treat…`) or leading in to something else (`Here it is:`).
+ */
+function cleanTitle(raw: string): string | null {
+  const title = (raw.trim().split("\n")[0] ?? "")
+    .replace(/^(thread )?title:\s*/i, "")
+    .replace(/^["'“”`]+|["'“”`.]+$/g, "")
+    .trim();
+  const words = title.split(/\s+/).length;
+  if (!title || words > TITLE_MAX_WORDS || /^I[\s'’]/.test(title) || title.endsWith(":"))
+    return null;
+  return title;
 }
 
 /** Activate the dirigent tools in `tools` (and no other dirigent tool), leaving pi's own tools as they are. */
