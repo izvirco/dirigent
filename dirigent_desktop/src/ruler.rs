@@ -161,7 +161,7 @@ fn marks(t: &OpenThread) -> Vec<Mark> {
                 Item::Compaction => Kind::Compaction,
                 _ => return None,
             };
-            Some(Mark { item, kind, pinned: t.pins.contains(&item) })
+            Some(Mark { item, kind, pinned: t.is_pinned(item) })
         })
         .collect()
 }

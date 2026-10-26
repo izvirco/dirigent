@@ -121,6 +121,9 @@ impl Service {
             | ClientMessage::CancelQueued { id, .. }
             | ClientMessage::ArchiveThread { id, .. }
             | ClientMessage::SnoozeThread { id, .. }
+            | ClientMessage::PinThread { id, .. }
+            | ClientMessage::PinMessage { id, .. }
+            | ClientMessage::MarkSeen { id, .. }
             | ClientMessage::FocusThread { id, .. }
             | ClientMessage::SearchThreads { id, .. }
             | ClientMessage::DeleteThread { id, .. }
@@ -313,6 +316,24 @@ impl Service {
             ClientMessage::SnoozeThread { id, thread_id, snoozed } => {
                 self.storage.lock().unwrap().set_snoozed(&thread_id, snoozed)?;
                 self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::PinThread { id, thread_id, pinned } => {
+                self.storage.lock().unwrap().set_pinned(&thread_id, pinned)?;
+                self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::PinMessage { id, thread_id, entry_id, pinned } => {
+                self.storage.lock().unwrap().set_message_pin(&thread_id, &entry_id, pinned)?;
+                self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::MarkSeen { id, thread_id, updated_at } => {
+                // No push when nothing moved: the desktop re-marks on every `Threads` push
+                // while a thread is open, which would otherwise ping-pong.
+                if self.storage.lock().unwrap().set_seen(&thread_id, updated_at)? {
+                    self.push_threads();
+                }
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::FocusThread { id, thread_id } => {

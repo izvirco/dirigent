@@ -1360,7 +1360,7 @@ const PIN_GAP: f32 = 6.;
 /// A pinned message's amber bar in the left margin, `left` px before the block's edge
 /// (so bubbles and replies line up despite the bubble's overhang).
 fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
-    t.pins.contains(&ix).then(|| div().absolute().left(px(-left)).top_1().bottom_1().w(px(2.)).rounded_full().bg(rgba(theme::t().warn)))
+    t.is_pinned(ix).then(|| div().absolute().left(px(-left)).top_1().bottom_1().w(px(2.)).rounded_full().bg(rgba(theme::t().warn)))
 }
 
 /// `pin` and `copy` in a message's top right corner, revealed on hover. Copy puts the
@@ -1371,7 +1371,7 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirige
     if ix == TAIL {
         return None;
     }
-    let (copied, pinned) = (t.copied == Some(ix), t.pins.contains(&ix));
+    let (copied, pinned) = (t.copied == Some(ix), t.is_pinned(ix));
     let text = text.to_owned();
     let button = |b: Stateful<Div>| b.bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line));
     let tint = if pinned { theme::t().warn } else { theme::t().fg_1 };

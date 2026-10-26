@@ -177,6 +177,11 @@ impl Stats {
 #[derive(Debug, Default)]
 pub struct Timeline {
     pub items: Vec<Item>,
+    /// Per item, the id of the pi entry that created it: what a message pin names
+    /// (`ThreadSummary::pinned_entries`), stable across clients unlike an index.
+    ids: Vec<String>,
+    /// Id of the entry being folded in (`push`), for `add`.
+    current: String,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -193,6 +198,7 @@ impl Timeline {
     /// Fold one persisted entry in. Returns the index of the first item it changed or
     /// created, so the list can remeasure from there.
     pub fn push(&mut self, entry: &Value) -> Option<usize> {
+        self.current = entry.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
         let kind = entry.get("type").and_then(Value::as_str).unwrap_or("?");
         match kind {
             "message" => self.push_message(entry.get("message")?),
@@ -336,6 +342,7 @@ impl Timeline {
         self.work_mut(ix).ended = Some(at + msg.get("durationMs").and_then(Value::as_i64).unwrap_or(0));
         if self.work_mut(ix).steps.is_empty() {
             self.items.remove(ix);
+            self.ids.remove(ix);
         }
         if !reply.is_empty() {
             self.add(Item::Assistant(reply.join("\n")));
@@ -348,7 +355,13 @@ impl Timeline {
 
     fn add(&mut self, item: Item) -> usize {
         self.items.push(item);
+        self.ids.push(self.current.clone());
         self.items.len() - 1
+    }
+
+    /// The pi entry id item `ix` came from (`""` for an item built from an entry without one).
+    pub fn entry_id(&self, ix: usize) -> Option<&str> {
+        self.ids.get(ix).map(String::as_str)
     }
 
     /// Index of the last item if it is a `Work` still in progress.
@@ -914,6 +927,20 @@ mod tests {
         assert_eq!(t.items[1], Item::Assistant("yo".into()));
         assert_eq!(t.items[2], Item::Compaction);
         assert_eq!(t.items[3], Item::Notice("unknown entry: wat".into()));
+    }
+
+    /// Items keep the id of the entry they came from, through a work dropped for being
+    /// empty (an assistant message that only replied).
+    #[test]
+    fn items_carry_their_entry_id() {
+        let entries = [
+            json!({"type":"message","id":"u1","message":{"role":"user","content":"hi","timestamp":1}}),
+            json!({"type":"message","id":"a1","message":{"role":"assistant","timestamp":2,"stopReason":"stop","content":[{"type":"text","text":"hello"}]}}),
+            json!({"type":"compaction"}),
+        ];
+        let t = Timeline::from_entries(entries.iter());
+        assert_eq!(t.items.len(), 3);
+        assert_eq!((t.entry_id(0), t.entry_id(1), t.entry_id(2), t.entry_id(3)), (Some("u1"), Some("a1"), Some(""), None));
     }
 
     #[test]

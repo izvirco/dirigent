@@ -147,6 +147,9 @@ mod tests {
             workspace_missing: false,
             parent_id: parent.map(str::to_owned),
             snoozed: false,
+            pinned: false,
+            seen_at: None,
+            pinned_entries: vec![],
             prompted_at: Some(prompted_at),
             jobs: 0,
         }

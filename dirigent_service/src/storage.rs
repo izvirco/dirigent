@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS asks (
     PRIMARY KEY (thread_id, id)
 );
 CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5 (thread_id UNINDEXED, text);
+CREATE TABLE IF NOT EXISTS message_pins (
+    thread_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    PRIMARY KEY (thread_id, entry_id)
+);
 ";
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
@@ -91,6 +96,10 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // ends, and when. NULL = the defaults.
     ("threads", "report", "TEXT"),
     ("threads", "notify", "TEXT"),
+    // On top of its status group in the clients' lists.
+    ("threads", "pinned", "INTEGER NOT NULL DEFAULT 0"),
+    // `updated_at` as of the user's last look (unread tracking, shared by every client).
+    ("threads", "seen_at", "INTEGER"),
 ];
 
 /// The searchable text of a message entry: user and assistant text blocks. Used both to
@@ -220,10 +229,16 @@ impl Storage {
                 asks.entry(thread_id).or_default().push(ask);
             }
         }
+        let mut pins: HashMap<String, Vec<String>> = HashMap::new();
+        let mut stmt = self.conn.prepare("SELECT thread_id, entry_id FROM message_pins ORDER BY rowid")?;
+        for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (thread_id, entry_id) = row?;
+            pins.entry(thread_id).or_default().push(entry_id);
+        }
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
                     (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
-                    t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at
+                    t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at, t.pinned, t.seen_at
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -246,6 +261,9 @@ impl Storage {
                 workspace_missing: false,
                 parent_id: r.get(12)?,
                 snoozed: r.get(13)?,
+                pinned: r.get(15)?,
+                seen_at: r.get(16)?,
+                pinned_entries: vec![],
                 prompted_at: r.get(14)?,
                 jobs: 0,
             })
@@ -253,6 +271,7 @@ impl Storage {
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         for t in &mut threads {
             t.asks = asks.remove(&t.id).unwrap_or_default();
+            t.pinned_entries = pins.remove(&t.id).unwrap_or_default();
         }
         Ok(threads)
     }
@@ -325,6 +344,32 @@ impl Storage {
         let n = self.conn.execute(sql, [id])?;
         anyhow::ensure!(n == 1, "no such thread");
         Ok(())
+    }
+
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        let n = self.conn.execute("UPDATE threads SET pinned = ?2 WHERE id = ?1", params![id, pinned])?;
+        anyhow::ensure!(n == 1, "no such thread");
+        Ok(())
+    }
+
+    pub fn set_message_pin(&self, thread_id: &str, entry_id: &str, pinned: bool) -> Result<()> {
+        anyhow::ensure!(self.thread_cwd(thread_id)?.is_some(), "no such thread");
+        let sql = if pinned {
+            "INSERT OR IGNORE INTO message_pins (thread_id, entry_id) VALUES (?1, ?2)"
+        } else {
+            "DELETE FROM message_pins WHERE thread_id = ?1 AND entry_id = ?2"
+        };
+        self.conn.execute(sql, params![thread_id, entry_id])?;
+        Ok(())
+    }
+
+    /// Move the thread's `seen_at` forward to `updated_at`; false when it was already there
+    /// (or further), so a client re-marking what it already saw causes no push.
+    pub fn set_seen(&self, id: &str, updated_at: i64) -> Result<bool> {
+        let n = self
+            .conn
+            .execute("UPDATE threads SET seen_at = ?2 WHERE id = ?1 AND (seen_at IS NULL OR seen_at < ?2)", params![id, updated_at])?;
+        Ok(n == 1)
     }
 
     /// The thread that spawned this one, if any.
@@ -428,6 +473,7 @@ impl Storage {
         self.conn.execute("DELETE FROM entries WHERE thread_id = ?1", [id])?;
         self.conn.execute("DELETE FROM entries_fts WHERE thread_id = ?1", [id])?;
         self.conn.execute("DELETE FROM asks WHERE thread_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM message_pins WHERE thread_id = ?1", [id])?;
         let n = self.conn.execute("DELETE FROM threads WHERE id = ?1", [id])?;
         anyhow::ensure!(n == 1, "no such thread");
         Ok(())
@@ -464,6 +510,9 @@ impl Storage {
             workspace_missing: false,
             parent_id: parent.map(str::to_owned),
             snoozed: false,
+            pinned: false,
+            seen_at: None,
+            pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
         })
@@ -735,6 +784,19 @@ mod tests {
         s.set_snoozed("root", true).unwrap();
         s.set_snoozed("root", false).unwrap();
         assert!(!by_id(&s, "root").snoozed);
+
+        // Pins and seen marks live with the thread; `seen_at` only moves forward.
+        s.set_pinned("root", true).unwrap();
+        s.set_message_pin("root", "u", true).unwrap();
+        s.set_message_pin("root", "u", true).unwrap();
+        assert!(s.set_message_pin("nope", "u", true).is_err());
+        assert!(s.set_seen("root", 50).unwrap());
+        assert!(!s.set_seen("root", 50).unwrap());
+        assert!(!s.set_seen("root", 40).unwrap());
+        let t = by_id(&s, "root");
+        assert!(t.pinned && t.seen_at == Some(50) && t.pinned_entries == ["u"]);
+        s.set_message_pin("root", "u", false).unwrap();
+        assert!(by_id(&s, "root").pinned_entries.is_empty());
 
         // Search covers user and assistant text; the last final reply is what a parent reads.
         let assistant = |id: &str, stop: &str, text: &str| json!({"type":"message","id":id,"message":{"role":"assistant","stopReason":stop,"content":[{"type":"text","text":text}]}});

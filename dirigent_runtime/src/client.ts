@@ -553,6 +553,13 @@ export class Dirigent {
     return f;
   }
 
+  /** Keep the thread on top of its status group in the user's lists (`pinned: false` unpins). */
+  async pin(id: string, pinned = true): Promise<Found> {
+    const f = await this.locate(id);
+    await this.req(f.host, { type: "pin_thread", thread_id: f.thread.id, pinned });
+    return f;
+  }
+
   async abort(id: string): Promise<Found> {
     const f = await this.locate(id);
     await this.req(f.host, { type: "abort", thread_id: f.thread.id });

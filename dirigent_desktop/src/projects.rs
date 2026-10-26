@@ -142,6 +142,9 @@ mod tests {
             workspace_missing: false,
             parent_id: None,
             snoozed: false,
+            pinned: false,
+            seen_at: None,
+            pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
         }

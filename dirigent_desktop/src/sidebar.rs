@@ -355,7 +355,7 @@ fn thread_card(
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
     let unread = this.unread(host, t);
-    let pinned = this.pinned(host, &t.id);
+    let pinned = t.pinned;
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
     let titling = this.titling(host, &t.id);
     let title_id = SharedString::from(format!("title/{h}/{id}"));
