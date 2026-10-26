@@ -366,7 +366,7 @@ fn thread_card(
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
     // Run time and snooze button are stacked so swapping them on hover doesn't shift layout.
-    let snooze = theme::Status::of(t).finished().then(|| {
+    let snooze = this.status(host, t).finished().then(|| {
         let (h, id) = (h.clone(), id.clone());
         div()
             .id(SharedString::from(format!("snooze/{h}/{id}")))

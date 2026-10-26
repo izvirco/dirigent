@@ -214,7 +214,9 @@ child in the parent's cwd and copies the parent's tools (a spawned thread's prom
 and stores the `name` its spawner gave it and its `report` / `notify`. On `agent_settled` of a thread with a parent,
 `on_child_settled` sends the parent a `dirigent:child` notice (the child's last final reply after its latest prompt, or with
 `Report::Done` only that it finished, or that it stopped without one, or that it is waiting on the user's answer) through
-`notify_thread`, the same load-and-queue path as an `Answer`, as a steer or (`Notify::WhenIdle`) a follow-up. A thread created
+`notify_thread`, the same load-and-queue path as an `Answer`, as a steer or (`Notify::WhenIdle`) a follow-up. The parent counts as
+running (`begin_run`) from the child's `agent_settled` on, in the same `Threads` push that settles the child, so clients don't see it
+idle in between (it would leave the Workpool and come straight back); a notice that can't be delivered settles it again. A thread created
 without a parent (the tool's `new`) is a top-level thread like any other; nobody hears about it.
 
 `ListHosts` reads the machine's `hosts.toml` (`hosts.rs`, shared with the desktop through the lib) on every request: the hosts
@@ -359,7 +361,7 @@ asking, done, snoozed, archived), _pinned_ threads first in each group (the head
 before the name marks them everywhere), newest first otherwise. Inbox and Workpool are fixed queues, newest on top: the Workpool is
 ordered by `running_since`, the Inbox by `updated_at` (= when the run finished, since only entries bump it),
 so a thread moves only when it enters the list. Every on-screen clock is driven by one permanent 1s
-`tick`; running spans show whole seconds (`elapsed`), finished ones `34ms` / `0.34s` / `12s` (`duration`). A Done thread is _unread_ (accent title) until the user opens it:
+`tick`; running spans show whole seconds (`elapsed`), finished ones `34ms` / `0.34s` / `12s` (`duration`). A Done thread is _unread_ (accent title) until the user opens it (a Waiting one isn't: it isn't done yet):
 `seen` remembers each thread's `updated_at` as of the last look, and the open thread is marked seen on
 every `Threads` push, so a run that finishes while you watch is not unread. The sidebar lists the whole
 Inbox so threads are a click apart; _snooze_ (the moon on a card, a list row or the thread header) takes a
