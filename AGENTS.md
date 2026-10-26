@@ -19,6 +19,7 @@ Read `plan.md` (architecture) and `testing.md` (how to drive the UI) first.
 - **gpui `flex_1()` inside an `overflow_y_scroll()` container** stretches to fill it and pushes later siblings to the bottom. Lists that share a scroll container must not grow (see `lists::scroll`).
 - **Hover-revealed controls**: `group("row")` on the row + `opacity(0.).group_hover("row", |d| d.opacity(1.))` on the control; `cx.stop_propagation()` in its click handler so the row doesn't also fire.
 - **Hover-revealed overlays** (sidebar peek): make the hot zone and the panel _one_ element whose width depends on the hover state, so a single `on_hover` covers both. Two elements flicker as the mouse crosses from one to the other.
+- **gpui `Animation::with_max_fps`** never redraws (its throttled notify doesn't reach the window): leave it off and let `with_animation` request frames.
 - **gpui `Context::spawn` / listeners** often lack a `Window`; focus via `Dirigent::focus()` (deferred through the stored `AnyWindowHandle`).
 - **oxfmt reformats TS to 2 spaces** — after `bun run fmt`, string-based patching of the runtime files silently misses; read the file first.
 - **Default pi model may be rate-limited**; use `anthropic/claude-opus-5-5` for tests. Pick it in the model chip, it's remembered.
