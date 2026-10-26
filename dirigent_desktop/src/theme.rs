@@ -14,8 +14,8 @@ use crate::icons::icon;
 use anyhow::{Context as _, Result, bail};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Render, SharedString, Stateful, Svg, Window,
-    WindowBackgroundAppearance, div, prelude::*, pulsating_between, px, rgba,
+    Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Hsla, Render, Rgba, SharedString, Stateful,
+    Svg, Window, WindowBackgroundAppearance, div, prelude::*, pulsating_between, px, rgba,
 };
 use std::path::PathBuf;
 use std::sync::RwLock;
@@ -287,6 +287,13 @@ pub fn title_text(id: impl Into<ElementId>, title: impl Into<SharedString>, gene
         d.opacity(v)
     })
     .into_any_element()
+}
+
+/// `k` of the way from colour `a` to `b` (0 = `a`, 1 = `b`), mixed in sRGB.
+pub fn mix(a: u32, b: u32, k: f32) -> Hsla {
+    let (a, b) = (rgba(a), rgba(b));
+    let l = |x: f32, y: f32| x + (y - x) * k;
+    Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }.into()
 }
 
 /// A 7px status dot.
