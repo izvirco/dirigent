@@ -551,8 +551,10 @@ impl Storage {
 
     /// Append a pi entry; returns it with its assigned `seq` and its images moved to
     /// `blobs` (inline ones, and the local files a reply links to; see `blobs.rs`). Bumps
-    /// `updated_at`, tracks the current model / thinking level, and takes the thread's name
-    /// from a `session_info` entry (the generated title).
+    /// `updated_at` for what the transcript shows (so a cache warm or a title doesn't
+    /// mark the thread unread or move it up the inbox), tracks the current model /
+    /// thinking level, and takes the thread's name from a `session_info` entry (the
+    /// generated title).
     pub fn append_entry(&self, thread_id: &str, mut json: Value, now: i64) -> Result<Entry> {
         let mut failed = None;
         let mut store = |id: &str, mime: &str, bytes: &[u8]| {
@@ -575,7 +577,9 @@ impl Storage {
             "INSERT INTO entries (thread_id, seq, id, parent_id, kind, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![thread_id, seq, entry.id, entry.parent_id, entry.kind, entry.json.to_string()],
         )?;
-        self.conn.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
+        if matches!(entry.kind.as_str(), "message" | "custom_message" | "compaction") {
+            self.conn.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
+        }
         if entry.kind == "message" {
             self.conn
                 .execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
@@ -740,14 +744,17 @@ mod tests {
         assert_eq!(threads[0].updated_at, 12);
         assert!(s.get_thread("nope").unwrap().is_none());
         // The generated title replaces it.
-        s.append_entry("t1", json!({"type":"session_info","id":"n","parentId":"c","name":"Greeting"}), 12).unwrap();
+        s.append_entry("t1", json!({"type":"session_info","id":"n","parentId":"c","name":"Greeting"}), 20).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("Greeting"));
+        // Neither it nor a cache warm is news: `updated_at` stays put.
+        s.append_entry("t1", json!({"type":"usage","id":"w","parentId":"n","kind":"cache_warm"}), 21).unwrap();
+        assert_eq!(s.list_threads().unwrap()[0].updated_at, 12);
 
         // A workspace moves the thread's cwd; the project path is still known afterwards.
         s.set_cwd("t1", "/ws/t1", Some("/ws/t1")).unwrap();
         assert_eq!(s.thread_workspace("t1").unwrap().as_deref(), Some("/ws/t1"));
         assert_eq!(s.list_threads().unwrap()[0].cwd, "/ws/t1");
-        assert_eq!(s.last_entry_id("t1").unwrap().as_deref(), Some("n"));
+        assert_eq!(s.last_entry_id("t1").unwrap().as_deref(), Some("w"));
 
         // Removing the project orphans the thread but keeps it.
         s.remove_project("p1", 13).unwrap();

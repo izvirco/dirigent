@@ -24,6 +24,8 @@ pub enum Item {
     Compaction,
     /// Informational line (warnings, unknown entries, ...).
     Notice(String),
+    /// The turn's last request re-billed what the cache should have held (`CacheBaseline`).
+    CacheMiss(String),
     /// A sub-agent of this thread finished (`dirigent:child`) between turns: `text` is the
     /// notice line, the thread is a click away.
     Child {
@@ -58,6 +60,9 @@ pub enum Step {
     },
     /// Something that reached the model mid-run on its own: an `async_bash` job ending.
     Notice(String),
+    /// A request of the run re-billed what the cache should have held (`CacheBaseline`).
+    /// Shown under the work line like `Child`, and in the log.
+    CacheMiss(String),
     /// A sub-agent started (the model's `dirigent` spawn) or finished (`dirigent:child`)
     /// during the run. Shown under the work line like `Item::Child`, and in the log.
     Child {
@@ -172,6 +177,140 @@ impl Stats {
     }
 }
 
+/// pi's noise floor: a miss this small is cache breakpoint granularity.
+const MISS_FLOOR: i64 = 1024;
+/// Idle gaps longer than this (Anthropic's default cache TTL) are named as the likely cause.
+const CACHE_TTL_MS: i64 = 5 * 60 * 1000;
+
+/// Spots prompt-cache misses the way pi's TUI does with `showCacheMissNotices` (its
+/// `core/cache-stats.js`, which the SDK doesn't export or emit): every entry goes through
+/// `observe`, which compares each assistant message's prompt with the previous request's.
+/// Dirigent never branches, so the entries in order are pi's `getEntries()`.
+#[derive(Debug, Default)]
+struct CacheBaseline {
+    prev: Option<Request>,
+    /// $ per cache-read token per `provider/model`, from the last message that read the
+    /// cache: what a full miss should have paid (pi asks its model registry; we have no prices).
+    read_rate: std::collections::HashMap<String, f64>,
+}
+
+/// The request a miss is measured against.
+#[derive(Debug)]
+struct Request {
+    /// Prompt tokens: fresh input + cache read + cache write.
+    tokens: u64,
+    /// `provider/model`.
+    model: String,
+    /// When it started (ms).
+    at: i64,
+    /// The session reported cache activity by then (a zero-cache turn only counts after that,
+    /// so providers without caching never show a miss).
+    reported: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CacheMiss {
+    /// Prompt tokens the previous request had cached but this one didn't read from cache.
+    tokens: u64,
+    /// Extra $ paid against a full hit.
+    cost: f64,
+    idle_ms: i64,
+    model_changed: bool,
+}
+
+impl CacheBaseline {
+    fn observe(&mut self, entry: &Value) -> Option<CacheMiss> {
+        match entry.get("type")?.as_str()? {
+            // The context legitimately changed: the next prompt is new content, not re-billed.
+            "compaction" | "branch_summary" => self.prev = None,
+            "usage" if entry.get("kind").and_then(Value::as_str) == Some("cache_warm") => {
+                let usage = entry.get("usage")?;
+                let tokens = prompt_tokens(usage);
+                if tokens > 0 {
+                    let at = entry.get("timestamp").and_then(Value::as_str).and_then(iso_ms).unwrap_or(0);
+                    self.note_read_rate(&model_key(entry), usage);
+                    self.prev = Some(Request { tokens, model: model_key(entry), at, reported: true });
+                }
+            }
+            "message" => {
+                let msg = entry.get("message")?;
+                return if msg.get("role")?.as_str()? == "assistant" { self.assistant(msg) } else { None };
+            }
+            _ => {}
+        }
+        None
+    }
+
+    fn assistant(&mut self, msg: &Value) -> Option<CacheMiss> {
+        let u = msg.get("usage")?;
+        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+        let cost = |k: &str| u.get("cost").and_then(|c| c.get(k)).and_then(Value::as_f64).unwrap_or(0.);
+        let (input, read, write) = (n("input"), n("cacheRead"), n("cacheWrite"));
+        let tokens = input + read + write;
+        let model = model_key(msg);
+        let at = msg.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+        self.note_read_rate(&model, u);
+        let miss = self.prev.as_ref().filter(|p| tokens > 0 && (read + write > 0 || p.reported)).and_then(|p| {
+            let missed = p.tokens.min(tokens) as i64 - read as i64;
+            (missed > MISS_FLOOR).then(|| {
+                // Missed tokens land in input or cache write: the paid rate is theirs.
+                let paid = input + write;
+                let paid_rate = if paid > 0 { (cost("input") + cost("cacheWrite")) / paid as f64 } else { 0. };
+                let read_rate = self.read_rate.get(&model).copied().unwrap_or(0.);
+                CacheMiss {
+                    tokens: missed as u64,
+                    cost: missed as f64 * (paid_rate - read_rate).max(0.),
+                    idle_ms: (at - p.at).max(0),
+                    model_changed: model != p.model,
+                }
+            })
+        });
+        // A request with no prompt (an error before the call) leaves the baseline alone.
+        if tokens > 0 {
+            let reported = read + write > 0 || self.prev.as_ref().is_some_and(|p| p.reported);
+            self.prev = Some(Request { tokens, model, at, reported });
+        }
+        miss
+    }
+
+    /// Remember what `model` pays per cache-read token, if `usage` read any.
+    fn note_read_rate(&mut self, model: &str, usage: &Value) {
+        let read = usage.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
+        if read > 0 {
+            let cost = usage.pointer("/cost/cacheRead").and_then(Value::as_f64).unwrap_or(0.);
+            self.read_rate.insert(model.to_owned(), cost / read as f64);
+        }
+    }
+}
+
+impl CacheMiss {
+    /// The transcript line, pi's wording; `None` under pi's bar for showing one.
+    fn notice(&self) -> Option<String> {
+        if self.tokens < 20_000 && self.cost < 0.1 {
+            return None;
+        }
+        let label = if self.model_changed {
+            "cache miss after model switch".to_owned()
+        } else if self.idle_ms >= CACHE_TTL_MS {
+            format!("cache miss after {}m idle", (self.idle_ms as f64 / 60_000.).round())
+        } else {
+            "cache miss".to_owned()
+        };
+        let cost = if self.cost >= 0.01 { format!(" (~${:.2})", self.cost) } else { String::new() };
+        Some(format!("{label}: {} tokens re-billed{cost}", crate::theme::kilo(self.tokens)))
+    }
+}
+
+fn prompt_tokens(usage: &Value) -> u64 {
+    ["input", "cacheRead", "cacheWrite"].iter().map(|k| usage.get(*k).and_then(Value::as_u64).unwrap_or(0)).sum()
+}
+
+/// `provider/model` of an assistant message or usage entry.
+fn model_key(v: &Value) -> String {
+    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
+    format!("{}/{}", s("provider"), s("model"))
+}
+
 /// Builds the timeline entry by entry. Tracks the session's model / thinking level so a
 /// `Work` can be labelled even before its first assistant message says which model ran.
 #[derive(Debug, Default)]
@@ -184,6 +323,7 @@ pub struct Timeline {
     current: String,
     model: Option<String>,
     effort: Option<String>,
+    cache: CacheBaseline,
 }
 
 impl Timeline {
@@ -199,9 +339,10 @@ impl Timeline {
     /// created, so the list can remeasure from there.
     pub fn push(&mut self, entry: &Value) -> Option<usize> {
         self.current = entry.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+        let miss = self.cache.observe(entry).and_then(|m| m.notice());
         let kind = entry.get("type").and_then(Value::as_str).unwrap_or("?");
         match kind {
-            "message" => self.push_message(entry.get("message")?),
+            "message" => self.push_message(entry.get("message")?, miss),
             "thinking_level_change" => {
                 self.effort = entry.get("thinkingLevel").and_then(Value::as_str).map(str::to_owned);
                 None
@@ -264,7 +405,8 @@ impl Timeline {
         }
     }
 
-    fn push_message(&mut self, msg: &Value) -> Option<usize> {
+    /// `miss`: the cache-miss notice an assistant message comes with.
+    fn push_message(&mut self, msg: &Value, miss: Option<String>) -> Option<usize> {
         let role = msg.get("role").and_then(Value::as_str).unwrap_or("?");
         let at = msg.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
         match role {
@@ -277,7 +419,7 @@ impl Timeline {
                 }
                 None => self.add(Item::User { text: text_of(msg.get("content")), images: images_of(msg.get("content")), at }),
             }),
-            "assistant" => self.push_assistant(msg, at),
+            "assistant" => self.push_assistant(msg, at, miss),
             "toolResult" => {
                 let id = msg.get("toolCallId").and_then(Value::as_str).unwrap_or("");
                 let result = ToolResult {
@@ -310,7 +452,7 @@ impl Timeline {
         }
     }
 
-    fn push_assistant(&mut self, msg: &Value, at: i64) -> Option<usize> {
+    fn push_assistant(&mut self, msg: &Value, at: i64, miss: Option<String>) -> Option<usize> {
         if let Some(m) = msg.get("model").and_then(Value::as_str) {
             self.model = Some(m.to_owned());
         }
@@ -335,7 +477,10 @@ impl Timeline {
         let stop = msg.get("stopReason").and_then(Value::as_str);
         let error =
             msg.get("errorMessage").and_then(Value::as_str).map(str::to_owned).or((stop == Some("aborted")).then(|| "aborted".into()));
+        // A failed request's miss isn't shown (pi doesn't either); it still moved the baseline.
+        let miss = miss.filter(|_| error.is_none());
         if calls_tools && error.is_none() {
+            self.work_mut(ix).steps.extend(miss.map(Step::CacheMiss));
             return Some(ix);
         }
         // The turn is over: close the work (drop it if nothing happened) and add the reply.
@@ -349,6 +494,10 @@ impl Timeline {
         }
         if let Some(e) = error {
             self.add(Item::Error(e));
+        }
+        // After the reply, as pi has it; an item, since the work may have been dropped.
+        if let Some(m) = miss {
+            self.add(Item::CacheMiss(m));
         }
         Some(ix.min(self.items.len().saturating_sub(1)))
     }
@@ -705,7 +854,7 @@ impl Streaming {
         match self.steps.last()? {
             Step::Thinking(_) => Some("thinking".into()),
             Step::Text(_) => Some("writing".into()),
-            Step::Tool(_) | Step::Steer { .. } | Step::Notice(_) | Step::Child { .. } => None,
+            Step::Tool(_) | Step::Steer { .. } | Step::Notice(_) | Step::CacheMiss(_) | Step::Child { .. } => None,
         }
     }
 
@@ -886,6 +1035,71 @@ mod tests {
         assert_eq!((s.input, s.output, s.cached, s.cost), (200, 30, 185, 0.75));
         assert_eq!((s.user_messages, s.assistant_messages, s.compactions), (2, 2, 1));
         assert_eq!(s.cached_pct(), 93);
+    }
+
+    /// Misses as pi counts them: against the previous request, reset by a compaction,
+    /// re-based by a cache warm, hidden on failed requests, priced at the model's last
+    /// read rate; mid-run they go in the work, at a turn's end after the reply.
+    #[test]
+    fn cache_misses() {
+        // Anthropic-ish rates per token: input 5e-6, cache read 0.5e-6, cache write 6.25e-6.
+        let msg = |at: i64, model: &str, input: u64, read: u64, write: u64, stop: &str| {
+            let content = if stop == "toolUse" {
+                json!([{"type":"toolCall","id":"c","name":"bash","arguments":{}}])
+            } else {
+                json!([{"type":"text","text":"ok"}])
+            };
+            json!({"type":"message","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,"stopReason":stop,"content":content,
+                "usage":{"input":input,"cacheRead":read,"cacheWrite":write,"output":10,"cost":{"input":input as f64 * 5e-6,"cacheRead":read as f64 * 0.5e-6,"cacheWrite":write as f64 * 6.25e-6}}}})
+        };
+        let result = json!({"type":"message","message":{"role":"toolResult","toolCallId":"c","timestamp":0,"content":""}});
+        let user = json!({"type":"message","message":{"role":"user","content":"go","timestamp":0}});
+        let min = 60_000;
+        let entries = [
+            user.clone(),
+            msg(0, "m", 100, 0, 50_000, "toolUse"),
+            result.clone(),
+            // Mid-run: 40k of the 50k cached came back as fresh input.
+            msg(min, "m", 40_000, 10_000, 0, "toolUse"),
+            result.clone(),
+            // Full miss after 7 minutes, at the read rate the model last paid.
+            msg(8 * min, "m", 0, 0, 60_000, "stop"),
+            user.clone(),
+            // Small (under 20k and $0.10): counted, not shown.
+            msg(9 * min, "m", 0, 50_000, 12_000, "stop"),
+            user.clone(),
+            // A model switch, but aborted: not shown.
+            msg(10 * min, "other", 62_000, 0, 0, "aborted"),
+            json!({"type":"compaction","summary":".."}),
+            user.clone(),
+            // Nothing to compare with after the compaction.
+            msg(11 * min, "m", 0, 0, 30_000, "stop"),
+            json!({"type":"usage","kind":"cache_warm","provider":"anthropic","model":"m","timestamp":"1970-01-01T00:16:00Z","usage":{"input":0,"cacheRead":30_000,"cacheWrite":0,"cost":{"cacheRead":0.015}}}),
+            user,
+            msg(17 * min, "m", 0, 0, 30_000, "stop"),
+        ];
+        let t = Timeline::from_entries(entries.iter());
+        let misses: Vec<_> = t
+            .items
+            .iter()
+            .flat_map(|i| match i {
+                Item::Work(w) => w.steps.iter().filter_map(|s| if let Step::CacheMiss(m) = s { Some(m.as_str()) } else { None }).collect(),
+                Item::CacheMiss(m) => vec![m.as_str()],
+                _ => vec![],
+            })
+            .collect();
+        assert_eq!(
+            misses,
+            [
+                "cache miss: 40k tokens re-billed (~$0.18)",
+                "cache miss after 7m idle: 50k tokens re-billed (~$0.29)",
+                // 1m after the warm, not 6m after the request before.
+                "cache miss: 30k tokens re-billed (~$0.17)",
+            ]
+        );
+        // The turn-ending miss comes after the reply.
+        let ix = t.items.iter().position(|i| matches!(i, Item::CacheMiss(_))).unwrap();
+        assert_eq!(t.items[ix - 1], Item::Assistant("ok".into()));
     }
 
     #[test]
