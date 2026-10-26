@@ -1194,30 +1194,33 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     let fonts = this.fonts.clone();
     let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Thread, ix);
+    // User bubbles go gray in an archived thread, so it reads as one at a glance.
+    let archived = this.summary(&t.host, &t.id).is_some_and(|s| s.archived);
+    let bubble = if archived { theme::t().hover } else { theme::t().bubble };
     let mut col = div().w_full().max_w(px(theme::COLUMN)).flex().flex_col();
     if ix < t.timeline.items.len() {
         if live.as_ref().is_none_or(|(k, _)| *k != ix) {
-            col = col.child(render_timeline_item(&t.timeline.items[ix], ix, t, blobs, now, &fonts, keys, cx));
+            col = col.child(render_timeline_item(&t.timeline.items[ix], ix, t, bubble, blobs, now, &fonts, keys, cx));
         }
     } else {
         // Echoes show their text only; the thumbnails come with the persisted entry.
         let echo = |mode| t.streaming.echo.iter().filter(move |(_, m)| *m == mode).map(|(text, _)| text.as_str()).collect::<Vec<_>>();
         for text in echo(PromptMode::Prompt) {
-            col = col.child(user_bubble(text, &[], TAIL, t, &fonts, keys, cx));
+            col = col.child(user_bubble(text, &[], TAIL, t, bubble, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
-            col = col.child(work_block(&work, key, true, t, now, &fonts, keys, cx));
+            col = col.child(work_block(&work, key, true, t, bubble, now, &fonts, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
             }
             // Pending steers last: the newest user input, closest to the composer.
             for (_, text, _) in work.steers().filter(|(_, _, queued)| *queued) {
-                col = col.child(steer_bubble(text, true, t, &fonts, keys, cx));
+                col = col.child(steer_bubble(text, true, t, bubble, &fonts, keys, cx));
             }
         }
         for text in echo(PromptMode::FollowUp) {
-            col = col.child(user_bubble(text, &[], TAIL, t, &fonts, keys, cx));
+            col = col.child(user_bubble(text, &[], TAIL, t, bubble, &fonts, keys, cx));
         }
         col = col.pb_6();
     }
@@ -1272,6 +1275,7 @@ fn render_timeline_item(
     item: &Item,
     ix: usize,
     t: &OpenThread,
+    bubble: u32,
     blobs: &HashMap<String, Blob>,
     now: i64,
     fonts: &Fonts,
@@ -1281,9 +1285,9 @@ fn render_timeline_item(
     match item {
         Item::User { text, images, .. } => {
             let images: Vec<_> = images.iter().map(|id| blobs.get(id).map(|b| b.image.clone())).collect();
-            user_bubble(text, &images, ix, t, fonts, keys, cx).into_any()
+            user_bubble(text, &images, ix, t, bubble, fonts, keys, cx).into_any()
         }
-        Item::Work(w) => work_block(w, ix, false, t, now, fonts, keys, cx).into_any(),
+        Item::Work(w) => work_block(w, ix, false, t, bubble, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
@@ -1401,6 +1405,7 @@ fn user_bubble(
     images: &[Option<Arc<gpui::Image>>],
     ix: usize,
     t: &OpenThread,
+    bubble: u32,
     fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
@@ -1431,8 +1436,9 @@ fn user_bubble(
         .px(px(BUBBLE_PAD))
         .py_3()
         .rounded_lg()
-        // A shade under the send button's accent, so bubbles sit back from the chrome.
-        .bg(rgba(theme::t().bubble))
+        // A shade under the send button's accent, so bubbles sit back from the chrome
+        // (`hover` gray in an archived thread; see `render_item`).
+        .bg(rgba(bubble))
         .font_family(fonts.prose.clone())
         .text_size(px(14.))
         .line_height(px(22.))
@@ -1451,13 +1457,14 @@ fn work_block(
     key: usize,
     live: bool,
     t: &OpenThread,
+    bubble: u32,
     now: i64,
     fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let taken: Vec<_> =
-        w.steers().filter(|(_, _, queued)| !queued).map(|(_, text, _)| steer_bubble(text, false, t, fonts, keys, cx)).collect();
+        w.steers().filter(|(_, _, queued)| !queued).map(|(_, text, _)| steer_bubble(text, false, t, bubble, fonts, keys, cx)).collect();
     let children: Vec<_> = w
         .steps
         .iter()
@@ -1473,7 +1480,7 @@ fn work_block(
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
 /// typed steer pi still holds) at the right until the model has it. Answers to an ask are
 /// steers too, but can't be cancelled: the host already has them.
-fn steer_bubble(text: &str, pending: bool, t: &OpenThread, fonts: &Fonts, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
+fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &Fonts, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
     let cancelable = pending && t.streaming.queued_steers().any(|s| s == text);
     let cancel = cancelable.then(|| {
         let text = text.to_owned();
@@ -1510,7 +1517,7 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, fonts: &Fonts, keys: 
         .px(px(BUBBLE_PAD))
         .py_2p5()
         .rounded_lg()
-        .bg(rgba(theme::t().bubble))
+        .bg(rgba(bubble))
         .when(pending, |d| d.opacity(0.7))
         .font_family(fonts.prose.clone())
         .text_size(px(14.))

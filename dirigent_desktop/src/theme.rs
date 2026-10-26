@@ -77,7 +77,8 @@ pub struct Theme {
     /// Selected text, in the composer and the transcript (with alpha).
     #[serde(with = "hex")]
     pub selection: u32,
-    /// The user's messages in the transcript: a shade under the send button's accent.
+    /// The user's messages in the transcript: a shade under the send button's accent
+    /// (`hover` instead in an archived thread).
     #[serde(with = "hex")]
     pub bubble: u32,
     // The stop button: a deep fill, its hover, and a light icon (the same pairing as send).
