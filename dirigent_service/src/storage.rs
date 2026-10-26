@@ -13,7 +13,7 @@
 //! `workflow_steps` tables and `threads.run_id`, unused and harmless.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, ThreadSummary, UsageBucket};
+use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, ThreadSummary, UsageBucket, prompt_title};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -287,10 +287,14 @@ impl Storage {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    /// A `Prompt` started a turn at `now`; `model` / `thinking_level` are what the run will
-    /// use, ahead of pi's `model_change` / `thinking_level_change` entries.
-    pub fn set_prompted(&self, id: &str, model: Option<&str>, thinking_level: Option<&str>, now: i64) -> Result<()> {
-        self.conn.execute("UPDATE threads SET prompted_at = ?2 WHERE id = ?1", params![id, now])?;
+    /// A `Prompt` with `text` started a turn at `now`; `model` / `thinking_level` are what the
+    /// run will use, ahead of pi's `model_change` / `thinking_level_change` entries. A thread
+    /// with no name yet is named after the prompt (`prompt_title`) until its title lands.
+    pub fn set_prompted(&self, id: &str, text: &str, model: Option<&str>, thinking_level: Option<&str>, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE threads SET prompted_at = ?2, name = COALESCE(name, ?3) WHERE id = ?1",
+            params![id, now, prompt_title(text)],
+        )?;
         if let Some(m) = model {
             self.conn.execute("UPDATE threads SET model = ?2 WHERE id = ?1", params![id, m])?;
         }
@@ -498,8 +502,8 @@ impl Storage {
 
     /// Append a pi entry; returns it with its assigned `seq` and its images moved to
     /// `blobs` (inline ones, and the local files a reply links to; see `blobs.rs`). Bumps
-    /// `updated_at`, tracks the current model / thinking level, and derives a thread name
-    /// from a `session_info` entry or, failing that, the first user message.
+    /// `updated_at`, tracks the current model / thinking level, and takes the thread's name
+    /// from a `session_info` entry (the generated title).
     pub fn append_entry(&self, thread_id: &str, mut json: Value, now: i64) -> Result<Entry> {
         let mut failed = None;
         let mut store = |id: &str, mime: &str, bytes: &[u8]| {
@@ -544,15 +548,13 @@ impl Storage {
                     self.conn.execute("UPDATE threads SET thinking_level = ?2 WHERE id = ?1", params![thread_id, l])?;
                 }
             }
+            // An explicit name: how the runtime's generated title arrives.
+            "session_info" => {
+                if let Some(name) = j.get("name").and_then(Value::as_str) {
+                    self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1", params![thread_id, name])?;
+                }
+            }
             _ => {}
-        }
-
-        if let Some(name) = derived_name(&entry.json) {
-            let sql = match entry.kind.as_str() {
-                "session_info" => "UPDATE threads SET name = ?2 WHERE id = ?1",
-                _ => "UPDATE threads SET name = ?2 WHERE id = ?1 AND name IS NULL",
-            };
-            self.conn.execute(sql, params![thread_id, name])?;
         }
         Ok(entry)
     }
@@ -603,36 +605,6 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Re
         conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
     }
     Ok(())
-}
-
-/// Explicit session name, or the first line of a user message as a fallback title for a
-/// thread created without a name (shown until its generated title lands, or if that fails).
-fn derived_name(entry: &Value) -> Option<String> {
-    match entry.get("type")?.as_str()? {
-        "session_info" => entry.get("name")?.as_str().map(str::to_owned),
-        "message" => {
-            let msg = entry.get("message")?;
-            if msg.get("role")?.as_str()? != "user" {
-                return None;
-            }
-            let text = match msg.get("content")? {
-                Value::String(s) => s.clone(),
-                Value::Array(blocks) => blocks
-                    .iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                    .filter_map(|b| b.get("text").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                _ => return None,
-            };
-            let line = text.lines().next()?.trim();
-            if line.is_empty() {
-                return None;
-            }
-            Some(line.chars().take(80).collect())
-        }
-        _ => None,
-    }
 }
 
 #[cfg(test)]
@@ -686,6 +658,10 @@ mod tests {
         s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
         s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
         s.set_header("t1", &json!({"type":"session","id":"t1"})).unwrap();
+        // Named after its first prompt until a title arrives.
+        s.set_prompted("t1", "  hello  \nworld", None, None, 10).unwrap();
+        assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("hello"));
+        s.set_prompted("t1", "later", None, None, 10).unwrap();
         s.append_entry("t1", json!({"type":"model_change","id":"a","parentId":null,"provider":"anthropic","modelId":"m"}), 11).unwrap();
         let e = s
             .append_entry("t1", json!({"type":"message","id":"b","parentId":"a","message":{"role":"user","content":"hello\nworld"}}), 12)
@@ -714,12 +690,15 @@ mod tests {
         assert_eq!(threads[0].entry_count, 3);
         assert_eq!(threads[0].updated_at, 12);
         assert!(s.get_thread("nope").unwrap().is_none());
+        // The generated title replaces it.
+        s.append_entry("t1", json!({"type":"session_info","id":"n","parentId":"c","name":"Greeting"}), 12).unwrap();
+        assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("Greeting"));
 
         // A workspace moves the thread's cwd; the project path is still known afterwards.
         s.set_cwd("t1", "/ws/t1", Some("/ws/t1")).unwrap();
         assert_eq!(s.thread_workspace("t1").unwrap().as_deref(), Some("/ws/t1"));
         assert_eq!(s.list_threads().unwrap()[0].cwd, "/ws/t1");
-        assert_eq!(s.last_entry_id("t1").unwrap().as_deref(), Some("c"));
+        assert_eq!(s.last_entry_id("t1").unwrap().as_deref(), Some("n"));
 
         // Removing the project orphans the thread but keeps it.
         s.remove_project("p1", 13).unwrap();
@@ -769,9 +748,9 @@ mod tests {
         .unwrap();
         assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
         assert_eq!(s.last_reply("kid").unwrap(), None);
-        // Named by its spawner: its first message doesn't rename it.
+        // Named by its spawner: its first prompt doesn't rename it.
+        s.set_prompted("kid", "write docs", None, None, 60).unwrap();
         assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
-        s.set_prompted("kid", None, None, 60).unwrap();
         assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
         // A new prompt without a reply yet (or aborted): no reply to report.
         s.append_entry("root", json!({"type":"message","id":"u2","message":{"role":"user","content":"and again"}}), 54).unwrap();

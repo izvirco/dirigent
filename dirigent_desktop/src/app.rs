@@ -13,7 +13,9 @@ use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
-use dirigent_protocol::{Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs};
+use dirigent_protocol::{
+    Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs, prompt_title,
+};
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
@@ -833,9 +835,11 @@ impl Dirigent {
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
                 let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
-                if pending.is_some() {
+                if let Some((_, text, _)) = &pending {
                     // Our draft: it goes straight to work, so list it that way before the
-                    // host's push confirms it (no flash through the inbox with no model).
+                    // host's push confirms it (no flash through the inbox with no model,
+                    // nor through "Untitled": the host names it the same way on `Prompt`).
+                    thread.name = thread.name.or_else(|| prompt_title(text));
                     thread.running_since = Some(now_ms());
                     thread.model = self.model.clone();
                     thread.thinking_level = self.effort.clone();
