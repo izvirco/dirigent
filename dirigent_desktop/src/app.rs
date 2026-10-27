@@ -293,6 +293,8 @@ pub struct Dirigent {
     project_order: Vec<String>,
     /// The project group being dragged in the sidebar; its row is a gap meanwhile.
     pub dragging: Option<String>,
+    /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
+    pub hovered_card: Option<(String, String)>,
     pub pane: Pane,
     pub menu: Option<Menu>,
     /// The current mouse press closed a menu (clicked outside it). Suppresses `toggle_menu`
@@ -442,6 +444,7 @@ impl Dirigent {
             links,
             project_order,
             dragging: None,
+            hovered_card: None,
             pane: Pane::Inbox,
             menu: None,
             menu_dismissed: false,
@@ -806,9 +809,12 @@ impl Dirigent {
             }
             ServerMessage::Threads { threads, .. } => {
                 let was_running = self.is_running();
+                let ran: HashSet<String> =
+                    self.host(&host).map(|h| h.threads.iter().filter(|t| t.running()).map(|t| t.id.clone()).collect()).unwrap_or_default();
                 if let Some(h) = self.host_mut(&host) {
                     h.threads = threads;
                 }
+                self.request_sidebar_vcs(&host, &ran);
                 if let Pane::Thread(t) = &self.pane
                     && t.host == host
                 {
@@ -1126,6 +1132,26 @@ impl Dirigent {
         // A missing workspace has nothing to report until it is recreated.
         let workspace = s.workspace.clone().filter(|_| !s.workspace_missing);
         let paths: Vec<String> = self.project_path(host, s).into_iter().chain(workspace).collect();
+        for p in paths {
+            self.request_vcs(host, &p);
+        }
+    }
+
+    /// What the sidebar cards show for threads in their project directory (workspace
+    /// threads have a known name, see `sidebar::vcs_label`): the directory's branch, asked
+    /// once per directory when first listed and again when a run there ends (`ran`: the
+    /// threads running before this push), since the agent may have committed or switched.
+    fn request_sidebar_vcs(&mut self, host: &str, ran: &HashSet<String>) {
+        let mut paths: Vec<String> = vec![];
+        for (h, t) in self.inbox_threads().into_iter().chain(self.busy_threads()) {
+            if h != host || t.workspace.is_some() {
+                continue;
+            }
+            let ended = ran.contains(&t.id) && !t.running();
+            if (ended || self.vcs_of(host, &t.cwd).is_none()) && !paths.contains(&t.cwd) {
+                paths.push(t.cwd.clone());
+            }
+        }
         for p in paths {
             self.request_vcs(host, &p);
         }

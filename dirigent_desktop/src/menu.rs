@@ -25,14 +25,18 @@ pub enum Side {
     Below(f32),
     /// Drops down below, right edge aligned with the trigger's right edge (header buttons).
     BelowRight(f32),
+    /// Floats to the right of the trigger, top-aligned (sidebar card specs).
+    Right,
 }
 
 /// Wrap a popup so it floats over everything else. Put it as a child of a `relative()` trigger.
 pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> AnyElement {
-    let (anchor, dy, right) = match side {
-        Side::Above => (Anchor::BottomLeft, -GAP, false),
-        Side::Below(h) => (Anchor::TopLeft, h + GAP, false),
-        Side::BelowRight(h) => (Anchor::TopRight, h + GAP, true),
+    // `right`: the canvas is pinned to the trigger's top-right corner instead of top-left.
+    let (anchor, dx, dy, right) = match side {
+        Side::Above => (Anchor::BottomLeft, 0., -GAP, false),
+        Side::Below(h) => (Anchor::TopLeft, 0., h + GAP, false),
+        Side::BelowRight(h) => (Anchor::TopRight, 0., h + GAP, true),
+        Side::Right => (Anchor::TopLeft, GAP, 0., true),
     };
     let dismiss = cx.listener(|this, _, _, cx| this.dismiss_menu(cx));
     // A zero-size canvas pinned to a corner of the trigger (without the absolute pin it would
@@ -46,7 +50,7 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
             let room = if dy < 0. { y } else { window.viewport_size().height - y } - px(MARGIN);
             let mut popup = anchored()
                 .anchor(anchor)
-                .offset(point(px(0.), px(dy)))
+                .offset(point(px(dx), px(dy)))
                 .snap_to_window_with_margin(px(MARGIN))
                 .child(
                     div()
