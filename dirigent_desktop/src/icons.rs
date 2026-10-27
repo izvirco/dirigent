@@ -27,6 +27,7 @@ icons!(
     "copy",
     "corner-down-right",
     "ellipsis",
+    "folder",
     "git-branch",
     "git-fork",
     "hourglass",

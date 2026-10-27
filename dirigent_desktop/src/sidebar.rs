@@ -1,12 +1,13 @@
-//! Left pane on the window canvas, top to bottom: the Inbox (threads waiting on the user,
-//! not snoozed) with its cards hanging below it; the Workpool's cards (working threads)
-//! stacked up on its row; the project list; the hide/show and settings buttons. Inbox,
-//! Workpool and Projects fold (the Workpool starts folded: out of sight, out of mind);
-//! Inbox / Workpool leave the sidebar while they have no thread at all.
+//! Left pane on the window canvas, top to bottom: the title row (Projects page folder, new
+//! thread `+`); the pinned projects; the Inbox (threads waiting on the user, not snoozed)
+//! with its cards hanging below it; the Workpool's cards (working threads) stacked up on
+//! its row; the hide/show and settings buttons. Inbox and Workpool fold (the Workpool
+//! starts folded: out of sight, out of mind) and leave the sidebar while they have no
+//! thread at all.
 //! Docked it has a drag handle on its right edge; hidden (`[` or the button) it slides in
 //! as a floating panel while the mouse rests on the left edge.
 
-use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Resize, Section, Target};
+use crate::app::{ArchiveAt, Dirigent, Pane, Resize, Section, Target, is_settings};
 use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -119,8 +120,7 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 }
 
 fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
-    let (groups, orphans) = this.groups();
-    let multi_host = this.hosts.len() > 1;
+    let (groups, _) = this.groups();
     let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
     let inbox = this.inbox_threads();
     let working = this.busy_threads();
@@ -133,11 +133,36 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .pl_4()
         .pr_2()
         .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
+        // The folder opens the Projects page (lit while it's open); `+` a new thread.
+        .child(
+            theme::icon_button("projects", "folder", cx, |this, cx| this.show_projects(cx))
+                .when(matches!(this.pane, Pane::Projects), |d| d.bg(rgba(theme::t().hover)))
+                .tooltip(theme::tooltip("Projects")),
+        )
         .child(theme::icon_button("new-thread", "plus", cx, |this, cx| this.new_draft(None, cx)));
 
+    // The pinned projects, right under the title. They reorder by drag: the dragged row
+    // leaves a gap that follows the cursor row by row (`move_project`), so the others
+    // shuffle around it as it goes. A wider gap parts them from the Inbox.
+    let dragging = this.dragging.clone().filter(|_| cx.has_active_drag());
+    let pinned: Vec<AnyElement> = projects::pinned(&groups, &this.pinned_projects)
+        .into_iter()
+        .map(|g| project_row(g, dragging.as_deref() == Some(&g.key), this, cx))
+        .collect();
+    let pinned = (!pinned.is_empty()).then(|| {
+        div().flex_shrink_0().flex().flex_col().gap(px(GAP)).pb_2().children(pinned).on_drag_move(cx.listener(
+            |this, ev: &DragMoveEvent<DragProject>, _, cx| {
+                let n = this.pinned_keys().len();
+                let slot = (f32::from(ev.event.position.y - ev.bounds.top()) / (ROW + GAP)).floor().max(0.) as usize;
+                let key = ev.drag(cx).0.clone();
+                this.move_project(&key, slot.min(n.saturating_sub(1)), cx);
+            },
+        ))
+    });
+
     // Inbox and Workpool rows are fixed; the Inbox's cards hang below its row, the
-    // Workpool's stack up on its row. The two card lists and the project list share the
-    // room left (`share`); what none of them needs goes above the Workpool's cards. A row
+    // Workpool's stack up on its row. The two card lists share the room left (`share`);
+    // what neither needs goes above the Workpool's cards. A row
     // with nothing at all behind it (no thread, snoozed ones included) is left out.
     let (n_inbox, n_working) = (inbox.len(), working.len());
     let show_inbox = !this.inbox_all().is_empty();
@@ -157,108 +182,6 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, now, this, cx);
     let working_cards = cards("workpool-cards", Section::Workpool, working, false, now, this, cx).mt_auto();
 
-    // Projects reorder by drag: the dragged row leaves a gap that follows the cursor row
-    // by row (`move_project`), so the others shuffle around it as it goes.
-    let dragging = this.dragging.clone().filter(|_| cx.has_active_drag());
-    let project_rows: Vec<AnyElement> =
-        groups.iter().map(|g| project_row(g, &groups, dragging.as_deref() == Some(&g.key), this, cx)).collect();
-    let project_list = div().flex().flex_col().gap(px(GAP)).children(project_rows).on_drag_move(cx.listener(
-        |this, ev: &DragMoveEvent<DragProject>, _, cx| {
-            let n = this.groups().0.len();
-            let slot = (f32::from(ev.event.position.y - ev.bounds.top()) / (ROW + GAP)).floor().max(0.) as usize;
-            let key = ev.drag(cx).0.clone();
-            this.move_project(&key, slot.min(n.saturating_sub(1)), cx);
-        },
-    ));
-    let orphan_row = (!orphans.is_empty()).then(|| {
-        let selected = matches!(&this.pane, Pane::Project { group_key } if group_key == projects::ORPHANS);
-        let n = orphans.len();
-        div().px_2().child(
-            row("orphans", selected, cx, |this, cx| this.show(Pane::Project { group_key: projects::ORPHANS.into() }, cx))
-                .child(div().flex_1().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
-                .child(count(n, theme::t().fg_2)),
-        )
-    });
-
-    // Section label with a `+` that appears on hover (or stays while its host menu is open).
-    let add_open = this.menu == Some(Menu::NewProjectHost);
-    let add = div()
-        .id("new-project")
-        .relative()
-        .size(px(20.))
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_sm()
-        .cursor_pointer()
-        .opacity(if add_open { 1. } else { 0. })
-        .group_hover("section", |d| d.opacity(1.))
-        .when(add_open, |d| d.bg(rgba(theme::t().hover)))
-        .hover(|d| d.bg(rgba(theme::t().hover)))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            cx.stop_propagation(); // not a fold of the header
-            if multi_host { this.toggle_menu(Menu::NewProjectHost, cx) } else { this.start_new_project(None, cx) }
-        }))
-        .child(icon("plus", theme::t().fg_1))
-        .children(add_open.then(|| {
-            let mut items = vec![menu::header("New project on")];
-            items.extend(this.hosts.iter().map(|h| {
-                let name = h.name.clone();
-                let status = format!("{:?}", h.status).to_lowercase();
-                menu::item(
-                    format!("nph/{name}"),
-                    name.clone(),
-                    status,
-                    false,
-                    move |this, cx| this.start_new_project(Some(name.clone()), cx),
-                    cx,
-                )
-            }));
-            menu::popup(Side::Below(20.), items, cx)
-        }));
-    // The Projects label folds the list (a chevron shows on hover).
-    let projects_open = !this.collapsed.contains(&Section::Projects);
-    let projects_header = div().flex_shrink_0().pt_1().child(
-        div()
-            .id("projects-fold")
-            .group("section")
-            .h(px(26.))
-            .pl_4()
-            .pr_3()
-            .flex()
-            .flex_row()
-            .items_center()
-            .cursor_pointer()
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_section(Section::Projects, cx)))
-            .child(div().flex_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Projects"))
-            .child(
-                div()
-                    .size(px(20.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .opacity(0.)
-                    .group_hover("section", |d| d.opacity(1.))
-                    .child(icon(if projects_open { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(px(14.))),
-            )
-            .child(add),
-    );
-    // Every entry is `ROW` tall (the hint too), so the list knows its natural height.
-    let hint = groups.is_empty().then(|| {
-        div().h(px(ROW)).px_4().flex().items_center().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Add a project with +")
-    });
-    let entries = groups.len() + orphan_row.is_some() as usize + hint.is_some() as usize;
-    let project_entries = projects_open.then(|| {
-        share("projects", entries as f32 * (ROW + GAP))
-            .flex()
-            .flex_col()
-            .gap(px(GAP))
-            .pt(px(GAP))
-            .when(!groups.is_empty(), |d| d.child(project_list))
-            .children(orphan_row)
-            .children(hint)
-    });
-
     // Bottom bar: hide / show the sidebar on the left, settings on the right.
     let hidden = this.sidebar_hidden;
     let panel_icon = if hidden { "panel-left-open" } else { "panel-left-close" };
@@ -274,7 +197,10 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .pl(px(10.))
         .pr_2()
         .child(theme::icon_button("sidebar-toggle", panel_icon, cx, move |this, cx| this.set_sidebar_hidden(!hidden, cx)))
-        .child(theme::icon_button("settings", "settings", cx, |this, cx| this.show_config(cx)));
+        .child(
+            theme::icon_button("settings", "settings", cx, |this, cx| this.show_config(cx))
+                .when(is_settings(&this.pane), |d| d.bg(rgba(theme::t().hover))),
+        );
 
     div()
         .id("sidebar")
@@ -282,12 +208,11 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .flex()
         .flex_col()
         .child(title_row.flex_shrink_0())
+        .children(pinned)
         .when(show_inbox, |d| d.child(inbox_header))
         .child(inbox_cards)
         .child(working_cards)
         .when(n_working > 0, |d| d.child(working_header))
-        .child(projects_header)
-        .children(project_entries)
         .child(bottom.flex_shrink_0())
 }
 
@@ -605,62 +530,12 @@ fn trailing(id: SharedString) -> Stateful<Div> {
         .hover(|d| d.bg(rgba(theme::t().line)))
 }
 
-/// Project name, and on hover a `⋯` menu and a `+` (flush right, under the title's) that
-/// opens a draft for this project. Grab it to reorder: a `Ghost` follows the cursor and
-/// the row itself is a gap (`dragged`).
-fn project_row(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+/// A pinned project: its name, and on hover a `+` (flush right, under the title's) that
+/// opens a draft for it. Grab it to reorder: a `Ghost` follows the cursor and the row
+/// itself is a gap (`dragged`). Pinning, linking and removing are on the Projects page.
+fn project_row(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let selected = matches!(&this.pane, Pane::Project { group_key } if *group_key == key);
-    let menu_open = this.menu == Some(Menu::Project { group_key: key.clone() });
-    let link_open = this.menu == Some(Menu::Link { group_key: key.clone() });
-
-    let mut actions: Vec<AnyElement> = vec![];
-    if menu_open {
-        let k = key.clone();
-        actions.push(menu::item(
-            "link",
-            "Link to another project",
-            "",
-            false,
-            move |this, cx| this.toggle_menu(Menu::Link { group_key: k.clone() }, cx),
-            cx,
-        ));
-        if g.manual {
-            let k = key.clone();
-            actions.push(menu::item("unlink", "Unlink", "", false, move |this, cx| this.link_group(&k, None, cx), cx));
-        }
-        for m in &g.members {
-            let (h, pid) = (m.host.clone(), m.project.id.clone());
-            let label = if g.members.len() > 1 { format!("Remove from {h}") } else { "Remove project".to_owned() };
-            actions.push(menu::item(
-                format!("rm/{h}/{pid}"),
-                label,
-                "threads are kept",
-                false,
-                move |this, cx| this.remove_project(&h, &pid, cx),
-                cx,
-            ));
-        }
-    }
-    if link_open {
-        actions.push(menu::header("Link into"));
-        for other in all.iter().filter(|o| o.key != key) {
-            let (k, target) = (key.clone(), other.key.clone());
-            let hosts = other.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ");
-            actions.push(menu::item(
-                format!("lnk/{}", other.key),
-                other.name.clone(),
-                hosts,
-                false,
-                move |this, cx| this.link_group(&k, Some(&target), cx),
-                cx,
-            ));
-        }
-        if all.len() < 2 {
-            actions.push(menu::header("No other projects"));
-        }
-    }
-
     let fg = if selected { theme::t().fg } else { theme::t().fg_1 };
     let k = key.clone();
     let target: Target = g.member_for(None).into();
@@ -691,18 +566,6 @@ fn project_row(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &mu
                 cx.new(|_| Ghost { name: name.clone(), width, font: font.clone() })
             })
             .child(div().flex_1().min_w_0().truncate().text_color(rgba(fg)).child(g.name.clone()))
-            .child(
-                trailing(SharedString::from(format!("gm/{key}")))
-                    .opacity(if menu_open || link_open { 1. } else { 0. })
-                    .group_hover("row", |d| d.opacity(1.))
-                    .when(menu_open || link_open, |d| d.bg(rgba(theme::t().line)))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.toggle_menu(Menu::Project { group_key: key.clone() }, cx)
-                    }))
-                    .child(icon("ellipsis", theme::t().fg_1))
-                    .children((menu_open || link_open).then(|| menu::popup(Side::Below(20.), actions, cx))),
-            )
             .child(new_thread),
         )
         .into_any()

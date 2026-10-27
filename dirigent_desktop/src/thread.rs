@@ -381,7 +381,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             ));
         }
         if items.is_empty() {
-            items.push(menu::header("No projects yet. Add one with + in the sidebar."));
+            items.push(menu::header("No projects yet. Add one with the folder in the sidebar."));
         }
         menu::popup(Side::Below(26.), items, cx)
     });
