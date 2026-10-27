@@ -17,7 +17,8 @@ use gpui::{
 /// Default width; the user can drag it between `app::SIDEBAR_MIN` and `SIDEBAR_MAX`.
 pub const WIDTH: f32 = 240.;
 /// Width of the invisible strip along the window's left edge that reveals a hidden sidebar.
-const PEEK_ZONE: f32 = 10.;
+/// Narrower than the ruler's inset (`ruler::INSET`), so it never covers the ruler's marks.
+const PEEK_ZONE: f32 = 6.;
 /// A sidebar row's height and the gap between rows: the pitch a dragged project snaps to.
 const ROW: f32 = 28.;
 const GAP: f32 = 4.;
@@ -65,11 +66,16 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Sidebar, cx)));
-    // Inset by the main panel's gutter + border so the title row lines up with the panel's
-    // header and the sidebar text sits at the same x as the panel's; same on the right so
-    // selected rows have equal margins, and at the bottom so the bottom bar mirrors the title.
-    let inset = px(theme::GUTTER + 1.);
-    div().relative().w(px(this.sidebar_width)).h_full().flex_shrink_0().py(inset).px(inset).child(content(this, cx)).child(handle)
+    // A hairline on its right edge parts it from the main pane.
+    div()
+        .relative()
+        .w(px(this.sidebar_width))
+        .h_full()
+        .flex_shrink_0()
+        .border_r_1()
+        .border_color(rgba(theme::t().line_soft))
+        .child(content(this, cx))
+        .child(handle)
 }
 
 /// Hidden sidebar: a hot zone on the left edge that, while hovered, grows into a floating
@@ -513,8 +519,8 @@ fn project_row(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &mu
             this.new_draft(Some(target.clone()), cx)
         }))
         .child(icon("plus", theme::t().fg_1));
-    // The ghost is as wide as the row: the sidebar minus its insets and the list's padding.
-    let (name, width, font) = (g.name.clone(), this.sidebar_width - 2. * (theme::GUTTER + 1.) - 16., this.fonts.ui.clone());
+    // The ghost is as wide as the row: the sidebar minus its border and the list's padding.
+    let (name, width, font) = (g.name.clone(), this.sidebar_width - 1. - 16., this.fonts.ui.clone());
     let entity = cx.weak_entity();
     div()
         .px_2()

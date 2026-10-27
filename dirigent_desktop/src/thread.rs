@@ -448,9 +448,9 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
         div().relative().w_full().max_w(px(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx)).child(
             div().absolute().bottom_0().left_0().right_0().h_0().flex().flex_col().items_center().children(draft_warnings(this, cx)),
         );
-    // Sits a little above true center so it reads as the page's subject, not its footer.
-    pane.child(header(div().child("New thread"), None))
-        .child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(px(80.)).child(card))
+    // No header: the page is just the composer, a little above true center so it reads as
+    // the page's subject, not its footer.
+    pane.child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(px(40.)).child(card))
 }
 
 /// What a thread started in the project directory would walk into: another thread already
