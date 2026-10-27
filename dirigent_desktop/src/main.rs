@@ -1,4 +1,4 @@
-//! Dirigent desktop: gpui client for dirigent_service hosts. See plan.md §4.
+//! Dirigent desktop: gpui client for dirigent_service hosts.
 
 mod app;
 mod cache;
