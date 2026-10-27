@@ -1,7 +1,7 @@
 //! Palette, type, and the handful of shared widgets every pane uses.
 //!
 //! Linear-style chrome: the window canvas is the darkest surface and carries the sidebar;
-//! the main pane floats on it as a rounded, bordered panel. One accent is spent only on
+//! a hairline parts it from the main pane, which fills the rest of the window. One accent is spent only on
 //! live things (running agents, send, focus). Status has a fixed vocabulary, one glyph
 //! per state, reused in the sidebar counts, list rows, and thread header.
 //!
@@ -193,7 +193,7 @@ pub fn load(name: &str) -> Result<Theme> {
     }
 }
 
-/// Gap between the window edge / sidebar and the main panel.
+/// Gap between the window edge and the floating sidebar (`sidebar::peek`).
 pub const GUTTER: f32 = 8.;
 
 /// Width of the reading column in the thread view: a comfortable line length at 14px.

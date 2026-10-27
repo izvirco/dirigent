@@ -2414,8 +2414,8 @@ impl Dirigent {
         match self.resizing {
             Some(Resize::Sidebar) => self.sidebar_width = f32::from(ev.position.x).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             Some(Resize::Log) => {
-                // The panel's right edge is the main panel's: the window edge minus the gutter and border.
-                let right = f32::from(window.viewport_size().width) - theme::GUTTER - 1.;
+                // The panel's right edge is the window's.
+                let right = f32::from(window.viewport_size().width);
                 self.log_width = (right - f32::from(ev.position.x)).clamp(LOG_MIN, LOG_MAX);
             }
             None => return,
@@ -2759,22 +2759,8 @@ impl Render for Dirigent {
             _ => lists::render(self, cx),
         };
         let docked = !self.sidebar_hidden;
-        // The main pane is a rounded panel inset from the canvas on every side but the
-        // sidebar's (Linear). When the sidebar is hidden the panel is inset on the left too.
-        let panel = div()
-            .flex_1()
-            .min_w_0()
-            .my(px(theme::GUTTER))
-            .mr(px(theme::GUTTER))
-            .when(!docked, |d| d.ml(px(theme::GUTTER)))
-            .rounded_lg()
-            .bg(rgba(theme::t().panel))
-            .border_1()
-            .border_color(rgba(theme::t().line_soft))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .child(main);
+        // The main pane fills the window right of the sidebar, edge to edge.
+        let panel = div().flex_1().min_w_0().bg(rgba(theme::t().panel)).overflow_hidden().flex().flex_col().child(main);
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
