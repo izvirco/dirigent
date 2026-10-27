@@ -4,9 +4,10 @@
 
 use crate::app::{Dirigent, Pane, Target};
 use crate::icons::icon;
+use crate::menu::Side;
 use crate::net::HostStatus;
 use crate::theme::{self, Status};
-use crate::{hosts, projects};
+use crate::{hosts, projects, thread};
 use dirigent_protocol::ThreadSummary;
 use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
 
@@ -342,6 +343,7 @@ fn thread_row(
     let (h3, id3, snoozed) = (h.clone(), id.clone(), status == Status::Snoozed);
     let pinned = t.pinned;
     let archive_icon = if archived { "archive-restore" } else { "archive" };
+    let archive_confirm = thread::archive_confirm(host, &t.id, Side::BelowRight(24.), this, cx);
 
     div()
         .id(SharedString::from(format!("row/{h}/{id}")))
@@ -378,9 +380,13 @@ fn thread_row(
                 this.set_snoozed(&h3, &id3, !snoozed, cx)
             }))
         })
-        .child(row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, false, cx, move |this, cx| {
-            this.set_archived(&h2, &id2, !archived, cx)
-        }))
+        .child(
+            row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, archive_confirm.is_some(), cx, move |this, cx| {
+                this.set_archived(&h2, &id2, !archived, cx)
+            })
+            .relative()
+            .children(archive_confirm),
+        )
 }
 
 /// A thread row's trailing action: hidden until the row is hovered (or always shown while

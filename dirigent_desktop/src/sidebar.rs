@@ -9,7 +9,7 @@ use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
 use crate::theme;
-use crate::thread::{duration, elapsed};
+use crate::thread::{self, duration, elapsed};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
     AnyElement, Context, Div, DragMoveEvent, FontWeight, MouseButton, Render, SharedString, Stateful, Window, div, prelude::*, px, rgba,
@@ -354,11 +354,12 @@ fn nav_row(
 /// workspace name or branch (`vcs_label`) and the logo of the model's lab, preceded by a
 /// server icon when the thread lives on another host. Hovering a finished thread swaps
 /// its run time for snooze (drops it from the sidebar until its next run) and archive
-/// buttons; hovering any card opens `specs` to its right.
+/// buttons (archiving a workspace thread asks under the button, `thread::archive_confirm`);
+/// hovering any card opens `specs` to its right, unless a menu is open.
 fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
-    let hovered = this.hovered_card.as_ref().is_some_and(|(hh, i)| hh == host && *i == t.id);
+    let hovered = this.menu.is_none() && this.hovered_card.as_ref().is_some_and(|(hh, i)| hh == host && *i == t.id);
     let unread = this.unread(host, t);
     let pinned = t.pinned;
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
@@ -367,6 +368,7 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
     let place = this.project_name(host, t);
     let vcs = vcs_label(host, t, this);
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
+    let archive_confirm = thread::archive_confirm(host, &t.id, Side::Below(20.), this, cx);
     type Action = Box<dyn Fn(&mut Dirigent, &mut Context<Dirigent>)>;
     let button = |id: String, name: &'static str, on_click: Action| {
         div()
@@ -386,6 +388,7 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
     // Run time and the buttons are stacked so swapping them on hover doesn't shift layout.
     let actions = this.status(host, t).finished().then(|| {
         let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
+        let asking = archive_confirm.is_some();
         div()
             .absolute()
             .top(px(-4.))
@@ -393,10 +396,15 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
             .flex()
             .flex_row()
             .gap_0p5()
-            .opacity(0.)
+            .opacity(if asking { 1. } else { 0. })
             .group_hover("card", |d| d.opacity(1.))
             .child(button(format!("snooze/{h}/{id}"), "moon", Box::new(move |this, cx| this.set_snoozed(&h1, &id1, true, cx))))
-            .child(button(format!("archive/{h}/{id}"), "archive", Box::new(move |this, cx| this.set_archived(&h2, &id2, true, cx))))
+            .child(
+                button(format!("archive/{h}/{id}"), "archive", Box::new(move |this, cx| this.set_archived(&h2, &id2, true, cx)))
+                    .relative()
+                    .when(asking, |d| d.bg(rgba(theme::t().line)))
+                    .children(archive_confirm),
+            )
     });
     let (h1, id1) = (h.clone(), id.clone());
     div()
