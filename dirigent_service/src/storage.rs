@@ -2,7 +2,8 @@
 //! `entries.seq` is append order; replaying a thread is `SELECT json ORDER BY seq`.
 //! Images are kept out of the entry JSON in a content-addressed `blobs` table (see `blobs`).
 //! `usage` is derived from the assistant messages (one row each) so spend over time is
-//! one indexed query rather than a scan of every entry's JSON. `asks` holds the model's
+//! one indexed query rather than a scan of every entry's JSON; each thread's totals are
+//! kept on its row the same way (`spend_*`, `ADD_SPEND`). `asks` holds the model's
 //! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
 //! full-text index of every message's text (derived like `usage`, backfilled once), for
 //! `SearchThreads`.
@@ -13,7 +14,7 @@
 //! `workflow_steps` tables and `threads.run_id`, unused and harmless.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, ThreadSummary, UsageBucket, prompt_title};
+use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -100,6 +101,12 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "pinned", "INTEGER NOT NULL DEFAULT 0"),
     // `updated_at` as of the user's last look (unread tracking, shared by every client).
     ("threads", "seen_at", "INTEGER"),
+    // What the thread's agent has consumed (`ThreadSummary::spend`), kept up by
+    // `ADD_SPEND`. Filled in from the entries when the columns are added.
+    ("threads", "spend_cost", "REAL NOT NULL DEFAULT 0"),
+    ("threads", "spend_input", "INTEGER NOT NULL DEFAULT 0"),
+    ("threads", "spend_output", "INTEGER NOT NULL DEFAULT 0"),
+    ("threads", "spend_cached", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// The searchable text of a message entry: user and assistant text blocks. Used both to
@@ -131,6 +138,27 @@ const USAGE_FROM_ENTRIES: &str = "
       AND json_extract(json, '$.message.usage') IS NOT NULL
       AND json_extract(json, '$.message.timestamp') IS NOT NULL";
 
+/// Adds the usage of assistant message entries to their threads' `spend_*` columns. Used
+/// both to recount them (when one of the columns is new) and to add each new entry's, so
+/// the two can't disagree. Narrowed with `AND thread_id = ?1 AND seq = ?2` before the
+/// `GROUP BY` placeholder `{filter}`.
+const ADD_SPEND: &str = "
+    UPDATE threads SET spend_cost = spend_cost + s.cost, spend_input = spend_input + s.input, spend_output = spend_output + s.output,
+                       spend_cached = spend_cached + s.cached
+    FROM (SELECT thread_id,
+                 SUM(COALESCE(json_extract(json, '$.message.usage.cost.total'), 0)) AS cost,
+                 SUM(COALESCE(json_extract(json, '$.message.usage.input'), 0)
+                     + COALESCE(json_extract(json, '$.message.usage.cacheRead'), 0)
+                     + COALESCE(json_extract(json, '$.message.usage.cacheWrite'), 0)) AS input,
+                 SUM(COALESCE(json_extract(json, '$.message.usage.output'), 0)) AS output,
+                 SUM(COALESCE(json_extract(json, '$.message.usage.cacheRead'), 0)) AS cached
+          FROM entries
+          WHERE kind = 'message'
+            AND json_extract(json, '$.message.role') = 'assistant'
+            AND json_extract(json, '$.message.usage') IS NOT NULL {filter}
+          GROUP BY thread_id) s
+    WHERE threads.id = s.thread_id";
+
 pub struct Storage {
     conn: Connection,
 }
@@ -152,9 +180,23 @@ impl Storage {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
+        // New columns and their backfill land together or not at all: a backfill cut short
+        // after the columns were added would never run again. (An error drops `conn`,
+        // which rolls back.)
+        conn.execute_batch("BEGIN")?;
+        let mut added = vec![];
         for (table, column, decl) in COLUMNS {
-            ensure_column(&conn, table, column, decl)?;
+            if ensure_column(&conn, table, column, decl)? {
+                added.push(*column);
+            }
         }
+        // `spend_*` is derived data too: a new one means totals for the history from before
+        // it, recounted from scratch so the older ones aren't counted twice.
+        if added.iter().any(|c| c.starts_with("spend_")) {
+            conn.execute("UPDATE threads SET spend_cost = 0, spend_input = 0, spend_output = 0, spend_cached = 0", [])?;
+            conn.execute(&ADD_SPEND.replace("{filter}", ""), [])?;
+        }
+        conn.execute_batch("COMMIT")?;
         // `usage` is derived data: an empty table on a db with history gets filled in once.
         let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM usage)", [], |r| r.get(0))?;
         if empty {
@@ -238,7 +280,8 @@ impl Storage {
         let mut stmt = self.conn.prepare(
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
                     (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
-                    t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at, t.pinned, t.seen_at
+                    t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at, t.pinned, t.seen_at,
+                    t.spend_cost, t.spend_input, t.spend_output, t.spend_cached
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -266,6 +309,12 @@ impl Storage {
                 pinned_entries: vec![],
                 prompted_at: r.get(14)?,
                 jobs: 0,
+                spend: Spend {
+                    cost: r.get(17)?,
+                    input: r.get::<_, i64>(18)? as u64,
+                    output: r.get::<_, i64>(19)? as u64,
+                    cached: r.get::<_, i64>(20)? as u64,
+                },
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -515,6 +564,7 @@ impl Storage {
             pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
+            spend: Spend::default(),
         })
     }
 
@@ -583,6 +633,7 @@ impl Storage {
         if entry.kind == "message" {
             self.conn
                 .execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
+            self.conn.execute(&ADD_SPEND.replace("{filter}", "AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
             self.conn.execute(
                 &format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"),
                 params![thread_id, seq],
@@ -650,14 +701,14 @@ impl Storage {
     }
 }
 
-/// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
-fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+/// `ALTER TABLE ... ADD COLUMN` unless the column is already there; true if it was added.
+fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<bool> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let exists = stmt.query_map([], |r| r.get::<_, String>(1))?.any(|c| c.is_ok_and(|c| c == column));
     if !exists {
         conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
     }
-    Ok(())
+    Ok(!exists)
 }
 
 #[cfg(test)]
@@ -856,6 +907,20 @@ mod tests {
         assert_eq!(b.len(), 2);
         assert_eq!((b[0].start, b[0].model.as_str(), b[0].input, b[0].cost, b[0].messages), (1000, "a", 3, 0.75, 2));
         assert_eq!((b[1].start, b[1].model.as_str(), b[1].input, b[1].cache_read), (2000, "b", 4, 100));
+        // The thread's totals: every prompt token (fresh + cache), output, dollars.
+        let spend = |s: &Storage| s.list_threads().unwrap()[0].spend;
+        let want = Spend { input: 15 + 4 * 105, output: 40, cached: 400, cost: 2.75 };
+        assert_eq!(spend(&s), want);
+        // Totals start from the entries when the columns are new (a db from before them),
+        // and a single new one recounts them all rather than adding on top.
+        for c in ["spend_cost", "spend_input", "spend_output", "spend_cached"] {
+            s.conn.execute(&format!("ALTER TABLE threads DROP COLUMN {c}"), []).unwrap();
+        }
+        let s = Storage::init(s.conn).unwrap();
+        assert_eq!(spend(&s), want);
+        s.conn.execute("ALTER TABLE threads DROP COLUMN spend_cached", []).unwrap();
+        let s = Storage::init(s.conn).unwrap();
+        assert_eq!(spend(&s), want);
         // An empty `usage` table (a db from before it existed) is rebuilt from the entries on open.
         s.conn.execute("DELETE FROM usage", []).unwrap();
         let s = Storage::init(s.conn).unwrap();

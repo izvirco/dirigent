@@ -147,6 +147,7 @@ mod tests {
             pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
+            spend: Default::default(),
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

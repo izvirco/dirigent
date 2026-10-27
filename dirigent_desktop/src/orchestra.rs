@@ -1,11 +1,12 @@
 //! The lineage tree at the top of the right panel (`thread::side_panel`, over the work
 //! log): the open thread's family (`lineage`: the topmost ancestor down through every
-//! sub-agent; the working ones bright, the rest dim; a click opens a thread).
+//! sub-agent; the working ones bright, the rest dim; a click opens a thread). A quiet
+//! line under the tree says what the whole family consumed.
 
 use crate::app::Dirigent;
 use crate::theme::{self, Status};
 use crate::thread::{duration, elapsed};
-use dirigent_protocol::ThreadSummary;
+use dirigent_protocol::{Spend, ThreadSummary};
 use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
 use std::collections::HashSet;
 
@@ -58,6 +59,7 @@ pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     if nodes.is_empty() {
         return None;
     }
+    let mut total = Spend::default();
     let rows: Vec<AnyElement> = nodes
         .iter()
         .map(|&LineageNode { thread, depth }| {
@@ -72,6 +74,7 @@ pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                 (None, Some(ms)) => duration(ms),
                 (None, None) => String::new(),
             };
+            total += thread.spend;
             tree_row(format!("agent/{h}/{tid}"), depth, selected, cx, move |this, cx| this.select_thread(&h, &tid, cx))
                 .child(status.glyph())
                 .child(
@@ -89,7 +92,16 @@ pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                 .into_any_element()
         })
         .collect();
-    Some(div().flex().flex_col().gap(px(2.)).pt_2().children(rows))
+    Some(div().flex().flex_col().gap(px(2.)).pt_2().children(rows).when(total != Spend::default(), |d| d.child(spend_line(total))))
+}
+
+/// The family's totals, right-aligned under the tree (once anything was spent), worded
+/// like the context chip's card.
+fn spend_line(s: Spend) -> Div {
+    let cached = if s.input == 0 { 0 } else { (s.cached as f64 / s.input as f64 * 100.).round() as u64 };
+    let (input, output, cost) = (theme::kilo(s.input), theme::kilo(s.output), theme::dollars(s.cost));
+    let text = format!("{input} in ({cached}% cached) / {output} out · {cost}");
+    div().flex().justify_end().pr_2().pt_1().child(small(text))
 }
 
 fn tree_row(
@@ -152,6 +164,7 @@ mod tests {
             pinned_entries: vec![],
             prompted_at: Some(prompted_at),
             jobs: 0,
+            spend: Default::default(),
         }
     }
 

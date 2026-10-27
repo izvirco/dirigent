@@ -492,6 +492,31 @@ pub struct ThreadSummary {
     /// whose turn ended with jobs running is waiting on them (they wake it when they end).
     #[serde(default)]
     pub jobs: u32,
+    /// What the thread's own agent has consumed so far (its sub-agents not included).
+    #[serde(default)]
+    pub spend: Spend,
+}
+
+/// Tokens and dollars summed over a thread's assistant messages, as pi reports them.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Spend {
+    /// Every prompt token: fresh, cache read and cache write.
+    pub input: u64,
+    pub output: u64,
+    /// The part of `input` read from cache.
+    pub cached: u64,
+    /// Dollars, as pi prices them.
+    pub cost: f64,
+}
+
+impl std::ops::AddAssign for Spend {
+    fn add_assign(&mut self, o: Self) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cached += o.cached;
+        self.cost += o.cost;
+    }
 }
 
 impl ThreadSummary {
@@ -654,6 +679,7 @@ mod tests {
         assert_eq!(t.parent_id, None);
         assert_eq!(t.prompted_at, None);
         assert_eq!(t.jobs, 0);
+        assert_eq!(t.spend, Spend::default());
         assert!(!t.pinned && t.seen_at.is_none() && t.pinned_entries.is_empty());
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
@@ -687,6 +713,7 @@ mod tests {
             pinned_entries: vec!["e1".into()],
             prompted_at: Some(4),
             jobs: 2,
+            spend: Spend { input: 10, output: 2, cached: 8, cost: 0.5 },
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
