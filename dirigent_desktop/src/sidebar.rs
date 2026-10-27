@@ -136,8 +136,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         // The folder opens the Projects page (lit while it's open); `+` a new thread.
         .child(
             theme::icon_button("projects", "folder", cx, |this, cx| this.show_projects(cx))
-                .when(matches!(this.pane, Pane::Projects), |d| d.bg(rgba(theme::t().hover)))
-                .tooltip(theme::tooltip("Projects")),
+                .when(matches!(this.pane, Pane::Projects), |d| d.bg(rgba(theme::t().hover))),
         )
         .child(theme::icon_button("new-thread", "plus", cx, |this, cx| this.new_draft(None, cx)));
 
@@ -166,15 +165,25 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     // with nothing at all behind it (no thread, snoozed ones included) is left out.
     let (n_inbox, n_working) = (inbox.len(), working.len());
     let show_inbox = !this.inbox_all().is_empty();
-    let inbox_header =
-        header("inbox", "Inbox", Section::Inbox, || Pane::Inbox, theme::t().warn, n_inbox, ["chevron-right", "chevron-down"], this, cx);
+    let n_snoozed = this.inbox_all().len() - n_inbox;
+    let inbox_header = header(
+        "inbox",
+        "Inbox",
+        Section::Inbox,
+        || Pane::Inbox,
+        theme::t().warn,
+        (n_inbox, n_snoozed),
+        ["chevron-right", "chevron-down"],
+        this,
+        cx,
+    );
     let working_header = header(
         "workpool",
         "Workpool",
         Section::Workpool,
         || Pane::Workpool,
         theme::t().working,
-        n_working,
+        (n_working, 0),
         ["chevron-up", "chevron-down"],
         this,
         cx,
@@ -217,8 +226,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 }
 
 /// A selectable sidebar row (`ROW` tall). `selected` lifts the background. It has no right
-/// padding: the trailing child supplies it (`count` with its margin, or a `trailing` box
-/// that is flush with the nav padding like the title's `+`, so icons line up with it).
+/// padding: the trailing child supplies it (a `trailing` box flush with the nav padding
+/// like the title's `+`, so icons line up with it; text in it keeps an inset).
 fn row(
     id: impl Into<SharedString>,
     selected: bool,
@@ -243,8 +252,11 @@ fn row(
 
 /// Inbox / Workpool row: opens the page. Label and count are in the section's `color`
 /// (amber for the Inbox, the working blue for the Workpool); the count is the section's
-/// cards. While the row is hovered a chevron replaces the count; clicking it folds the
-/// cards. `chevrons` is its icon while folded / open: they point to where the cards go.
+/// cards. `counts` is (cards, snoozed): the snoozed threads (Inbox only), not among the
+/// cards, get a faint moon and their own number just before it, so a row always shows a
+/// number. While the row is hovered a chevron replaces the numbers; clicking it folds the
+/// cards.
+/// `chevrons` is its icon while folded / open: they point to where the cards go.
 #[allow(clippy::too_many_arguments)]
 fn header(
     id: &'static str,
@@ -252,22 +264,33 @@ fn header(
     section: Section,
     pane: fn() -> Pane,
     color: u32,
-    n: usize,
+    (n, snoozed): (usize, usize),
     chevrons: [&'static str; 2],
     this: &Dirigent,
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let open = !this.collapsed.contains(&section);
     let selected = std::mem::discriminant(&this.pane) == std::mem::discriminant(&pane());
-    // Count and chevron are stacked in one box so swapping them doesn't shift layout; the
-    // count keeps the text inset, the chevron is centered like the title's `+`.
+    // The numbers and the chevron are stacked in one box so swapping them doesn't shift
+    // layout; the numbers keep the text inset (and spill out of the box to the left), the
+    // chevron is centered like the title's `+`.
     let fill = || div().absolute().inset_0().flex().items_center();
+    let small = |color: u32| div().flex().flex_row().items_center().gap_0p5().text_size(px(11.)).text_color(rgba(color));
+    let numbers = fill()
+        .justify_end()
+        .gap_1p5()
+        .pr_2()
+        .group_hover("row", |d| d.opacity(0.))
+        .when(snoozed > 0, |d| {
+            d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(px(11.))).child(snoozed.to_string()))
+        })
+        .when(n > 0, |d| d.child(small(color).child(n.to_string())));
     let fold = trailing(SharedString::from(format!("fold/{id}")))
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_section(section, cx)
         }))
-        .child(fill().justify_end().group_hover("row", |d| d.opacity(0.)).child(count(n, color)))
+        .child(numbers)
         .child(
             fill()
                 .justify_center()
@@ -506,12 +529,6 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
     ];
     rows.extend([model, vcs, run].into_iter().filter(|s| !s.is_empty()).map(line));
     rows
-}
-
-/// Trailing count on a `row`; its margin is the row's right inset, so it ends where the
-/// cards' text does.
-fn count(n: usize, color: u32) -> Div {
-    div().mr_2().text_size(px(11.)).text_color(rgba(color)).child(if n > 0 { n.to_string() } else { String::new() })
 }
 
 /// Trailing control box on a `row`: as wide as the title's `+` button and flush with the

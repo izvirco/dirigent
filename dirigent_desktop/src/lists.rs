@@ -211,7 +211,6 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
     let k = key.clone();
     let pin = small_button(format!("pin/{key}"))
         .when(!pinned, |d| d.opacity(0.5).group_hover("row", |d| d.opacity(1.)))
-        .tooltip(theme::tooltip(if pinned { "Unpin from the sidebar" } else { "Pin to the sidebar" }))
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.set_project_pinned(&k, !pinned, cx)
