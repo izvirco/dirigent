@@ -1,7 +1,10 @@
-//! Left pane on the window canvas: Inbox / Workpool, each listing its threads (finished
-//! and not snoozed / working) as small cards, the project list, and at the bottom the hide/show and settings
-//! buttons. Docked it has a drag handle on its right edge; hidden (`[` or the button) it
-//! slides in as a floating panel while the mouse rests on the left edge.
+//! Left pane on the window canvas, top to bottom: the Inbox (threads waiting on the user,
+//! not snoozed) with its cards hanging below it; the Workpool's cards (working threads)
+//! stacked up on its row; the project list; the hide/show and settings buttons. Inbox,
+//! Workpool and Projects fold (the Workpool starts folded: out of sight, out of mind);
+//! Inbox / Workpool leave the sidebar while they have no thread at all.
+//! Docked it has a drag handle on its right edge; hidden (`[` or the button) it slides in
+//! as a floating panel while the mouse rests on the left edge.
 
 use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Resize, Section, Target};
 use crate::hosts;
@@ -23,6 +26,14 @@ const PEEK_ZONE: f32 = 6.;
 /// A sidebar row's height and the gap between rows: the pitch a dragged project snaps to.
 const ROW: f32 = 28.;
 const GAP: f32 = 4.;
+/// A thread card's height (`thread_card`): its lines (11 / 13 / 11px text at gpui's default
+/// line height, φ × size rounded), `gap_0p5` between them and `py_1p5`. The branch line
+/// only shows when there is a `vcs` label. Computed, not measured, so `cards` knows a
+/// list's natural height; keep it in sync with `thread_card`.
+fn card_height(vcs: &str) -> f32 {
+    let two_lines = 18. + 21. + 2. + 2. * 6.;
+    if vcs.is_empty() { two_lines } else { two_lines + 2. + 18. }
+}
 
 /// A project row being dragged (gpui drag payload): its group key.
 struct DragProject(String);
@@ -124,15 +135,27 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
         .child(theme::icon_button("new-thread", "plus", cx, |this, cx| this.new_draft(None, cx)));
 
-    // Every row and card in the sidebar can be highlighted (selected / hovered), so each
-    // list keeps a 4px gap between neighbors so their backgrounds never touch.
-    let nav = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .px_2()
-        .child(section("inbox", "Inbox", Section::Inbox, || Pane::Inbox, theme::t().warn, inbox, now, this, cx))
-        .child(section("workpool", "Workpool", Section::Workpool, || Pane::Workpool, theme::t().working, working, now, this, cx));
+    // Inbox and Workpool rows are fixed; the Inbox's cards hang below its row, the
+    // Workpool's stack up on its row. The two card lists and the project list share the
+    // room left (`share`); what none of them needs goes above the Workpool's cards. A row
+    // with nothing at all behind it (no thread, snoozed ones included) is left out.
+    let (n_inbox, n_working) = (inbox.len(), working.len());
+    let show_inbox = !this.inbox_all().is_empty();
+    let inbox_header =
+        header("inbox", "Inbox", Section::Inbox, || Pane::Inbox, theme::t().warn, n_inbox, ["chevron-right", "chevron-down"], this, cx);
+    let working_header = header(
+        "workpool",
+        "Workpool",
+        Section::Workpool,
+        || Pane::Workpool,
+        theme::t().working,
+        n_working,
+        ["chevron-up", "chevron-down"],
+        this,
+        cx,
+    );
+    let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, now, this, cx);
+    let working_cards = cards("workpool-cards", Section::Workpool, working, false, now, this, cx).mt_auto();
 
     // Projects reorder by drag: the dragged row leaves a gap that follows the cursor row
     // by row (`move_project`), so the others shuffle around it as it goes.
@@ -172,11 +195,10 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .group_hover("section", |d| d.opacity(1.))
         .when(add_open, |d| d.bg(rgba(theme::t().hover)))
         .hover(|d| d.bg(rgba(theme::t().hover)))
-        .on_click(cx.listener(
-            move |this, _, _, cx| {
-                if multi_host { this.toggle_menu(Menu::NewProjectHost, cx) } else { this.start_new_project(None, cx) }
-            },
-        ))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation(); // not a fold of the header
+            if multi_host { this.toggle_menu(Menu::NewProjectHost, cx) } else { this.start_new_project(None, cx) }
+        }))
         .child(icon("plus", theme::t().fg_1))
         .children(add_open.then(|| {
             let mut items = vec![menu::header("New project on")];
@@ -194,30 +216,48 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
             }));
             menu::popup(Side::Below(20.), items, cx)
         }));
-    let projects_section = div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .pt_5()
-        .child(
-            div()
-                .group("section")
-                .h(px(26.))
-                .pl_4()
-                .pr_3()
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(div().flex_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Projects"))
-                .child(add),
-        )
-        .child(project_list)
-        .children(orphan_row)
-        .children(
-            groups
-                .is_empty()
-                .then(|| div().px_4().py_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Add a project with +")),
-        );
+    // The Projects label folds the list (a chevron shows on hover).
+    let projects_open = !this.collapsed.contains(&Section::Projects);
+    let projects_header = div().flex_shrink_0().pt_1().child(
+        div()
+            .id("projects-fold")
+            .group("section")
+            .h(px(26.))
+            .pl_4()
+            .pr_3()
+            .flex()
+            .flex_row()
+            .items_center()
+            .cursor_pointer()
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_section(Section::Projects, cx)))
+            .child(div().flex_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Projects"))
+            .child(
+                div()
+                    .size(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .opacity(0.)
+                    .group_hover("section", |d| d.opacity(1.))
+                    .child(icon(if projects_open { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(px(14.))),
+            )
+            .child(add),
+    );
+    // Every entry is `ROW` tall (the hint too), so the list knows its natural height.
+    let hint = groups.is_empty().then(|| {
+        div().h(px(ROW)).px_4().flex().items_center().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child("Add a project with +")
+    });
+    let entries = groups.len() + orphan_row.is_some() as usize + hint.is_some() as usize;
+    let project_entries = projects_open.then(|| {
+        share("projects", entries as f32 * (ROW + GAP))
+            .flex()
+            .flex_col()
+            .gap(px(GAP))
+            .pt(px(GAP))
+            .when(!groups.is_empty(), |d| d.child(project_list))
+            .children(orphan_row)
+            .children(hint)
+    });
 
     // Bottom bar: hide / show the sidebar on the left, settings on the right.
     let hidden = this.sidebar_hidden;
@@ -241,9 +281,14 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .size_full()
         .flex()
         .flex_col()
-        .child(title_row)
-        .child(div().id("nav").flex_1().overflow_y_scroll().child(nav).child(projects_section))
-        .child(bottom)
+        .child(title_row.flex_shrink_0())
+        .when(show_inbox, |d| d.child(inbox_header))
+        .child(inbox_cards)
+        .child(working_cards)
+        .when(n_working > 0, |d| d.child(working_header))
+        .child(projects_header)
+        .children(project_entries)
+        .child(bottom.flex_shrink_0())
 }
 
 /// A selectable sidebar row (`ROW` tall). `selected` lifts the background. It has no right
@@ -271,62 +316,24 @@ fn row(
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
 }
 
-/// Inbox / Workpool: its nav row (label and count in the section's `color`: amber for the
-/// Inbox, the working blue for the Workpool), then (unless collapsed) a card per thread
-/// (finished and not snoozed under Inbox, working under Workpool), each with how long its
-/// agent has run (live) or ran (last run).
+/// Inbox / Workpool row: opens the page. Label and count are in the section's `color`
+/// (amber for the Inbox, the working blue for the Workpool); the count is the section's
+/// cards. While the row is hovered a chevron replaces the count; clicking it folds the
+/// cards. `chevrons` is its icon while folded / open: they point to where the cards go.
 #[allow(clippy::too_many_arguments)]
-fn section(
+fn header(
     id: &'static str,
     label: &'static str,
     section: Section,
     pane: fn() -> Pane,
     color: u32,
-    rows: Vec<(&str, &ThreadSummary)>,
-    now: i64,
+    n: usize,
+    chevrons: [&'static str; 2],
     this: &Dirigent,
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let open = !this.collapsed.contains(&section);
     let selected = std::mem::discriminant(&this.pane) == std::mem::discriminant(&pane());
-    let cards: Vec<_> = rows
-        .into_iter()
-        .map(|(host, t)| {
-            let elapsed = match (t.running_since, t.last_run_ms) {
-                (Some(since), _) => elapsed(now - since),
-                (None, Some(ms)) => duration(ms),
-                (None, None) => String::new(),
-            };
-            thread_card(host, t, elapsed, this, cx)
-        })
-        .collect();
-    // Count every thread the page lists (snoozed ones too), not just the cards.
-    let n = match section {
-        Section::Inbox => this.inbox_all().len(),
-        Section::Workpool => this.busy_threads().len(),
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(nav_row(id, label, section, open, selected, color, n, cx, move |this, cx| this.show(pane(), cx)))
-        .when(open, |d| d.children(cards))
-}
-
-/// Inbox / Workpool row: opens the page. On its right sits the thread count, replaced by
-/// a chevron while the row is hovered; clicking it folds the thread cards under the row.
-#[allow(clippy::too_many_arguments)]
-fn nav_row(
-    id: &'static str,
-    label: &'static str,
-    section: Section,
-    open: bool,
-    selected: bool,
-    color: u32,
-    n: usize,
-    cx: &mut Context<Dirigent>,
-    on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
-) -> Stateful<Div> {
     // Count and chevron are stacked in one box so swapping them doesn't shift layout; the
     // count keeps the text inset, the chevron is centered like the title's `+`.
     let fill = || div().absolute().inset_0().flex().items_center();
@@ -341,22 +348,73 @@ fn nav_row(
                 .justify_center()
                 .opacity(0.)
                 .group_hover("row", |d| d.opacity(1.))
-                .child(icon(if open { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(px(14.))),
+                .child(icon(chevrons[open as usize], theme::t().fg_2).size(px(14.))),
         );
-    row(id, selected, cx, on_click)
-        .child(div().flex_1().text_color(rgba(color)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
-        .child(fold)
+    div().flex_shrink_0().px_2().child(
+        row(id, selected, cx, move |this, cx| this.show(pane(), cx))
+            .child(div().flex_1().text_color(rgba(color)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
+            .child(fold),
+    )
 }
 
-/// A thread under Inbox / Workpool: `project … elapsed` / title / `branch … [server] logo`.
-/// The title is amber while the model waits on an answer, accent while the thread is
-/// unread, and led by an amber pin while pinned. The last line has the thread's
-/// workspace name or branch (`vcs_label`) and the logo of the model's lab, preceded by a
-/// server icon when the thread lives on another host. Hovering a finished thread swaps
+/// A list that shares the sidebar's free height with the other lists: it grows (`flex_1`)
+/// up to its `natural` height and scrolls past it. Lists in one column so split the room
+/// fairly (all long: equal parts; a short one keeps its height, the others share the
+/// rest) with nothing measured: `natural` comes from known row heights.
+fn share(id: &'static str, natural: f32) -> Stateful<Div> {
+    div().id(id).flex_1().min_h_0().max_h(px(natural)).overflow_y_scroll()
+}
+
+/// A section's thread cards (none while folded, `card_height` tall), each with how long its agent
+/// has run (live) or ran (last run). `below` says the cards hang below their header
+/// (Inbox) rather than stack up on it (Workpool), which side the gap to the header goes.
+/// Stacked cards get a hairline on top, so they don't run into the Inbox's last (clipped)
+/// card.
+fn cards(
+    id: &'static str,
+    section: Section,
+    rows: Vec<(&str, &ThreadSummary)>,
+    below: bool,
+    now: i64,
+    this: &Dirigent,
+    cx: &mut Context<Dirigent>,
+) -> Stateful<Div> {
+    let rows = if this.collapsed.contains(&section) { vec![] } else { rows };
+    let n = rows.len();
+    let mut natural = if !below && n > 0 { 1. + GAP } else { 0. };
+    let cards: Vec<_> = rows
+        .into_iter()
+        .map(|(host, t)| {
+            let elapsed = match (t.running_since, t.last_run_ms) {
+                (Some(since), _) => elapsed(now - since),
+                (None, Some(ms)) => duration(ms),
+                (None, None) => String::new(),
+            };
+            let vcs = vcs_label(host, t, this);
+            natural += card_height(&vcs) + GAP;
+            thread_card(host, t, vcs, elapsed, this, cx)
+        })
+        .collect();
+    share(id, natural)
+        .flex()
+        .flex_col()
+        .gap(px(GAP))
+        .px_2()
+        .when(n > 0, |d| if below { d.pt(px(GAP)) } else { d.py(px(GAP)).border_t_1().border_color(rgba(theme::t().line_soft)) })
+        .children(cards)
+}
+
+/// A thread under Inbox / Workpool: `project ... elapsed` / title / `branch ... [server]
+/// logo`, the last line being its workspace name or branch (`vcs`, from `vcs_label`).
+/// Outside version control there is no branch, so the card drops that line and the server
+/// icon and logo end the title line instead (`card_height`). The title is amber while the
+/// model waits on an answer, accent while the thread is unread, and led by an amber pin
+/// while pinned. The server icon shows when the thread lives on another host, the logo is
+/// the model's lab. Hovering a `snoozable` thread swaps
 /// its run time for snooze (drops it from the sidebar until its next run) and archive
 /// buttons (archiving a workspace thread asks under the button, `thread::archive_confirm`);
 /// hovering any card opens `specs` to its right, unless a menu is open.
-fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
+fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
     let hovered = this.menu.is_none() && this.hovered_card.as_ref().is_some_and(|(hh, i)| hh == host && *i == t.id);
@@ -366,7 +424,10 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
     let titling = this.titling(host, &t.id);
     let title_id = SharedString::from(format!("title/{h}/{id}"));
     let place = this.project_name(host, t);
-    let vcs = vcs_label(host, t, this);
+    let marks = || {
+        let server = (host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(px(12.)));
+        server.into_iter().chain(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(px(12.))))
+    };
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
     let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Sidebar, Side::Below(20.), this, cx);
     // The buttons stay (and the run time stays hidden) while the archive popup is open.
@@ -388,7 +449,7 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
             .child(icon(name, theme::t().fg_1))
     };
     // Run time and the buttons are stacked so swapping them on hover doesn't shift layout.
-    let actions = this.status(host, t).finished().then(|| {
+    let actions = this.snoozable(host, t).then(|| {
         let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
         div()
             .absolute()
@@ -416,6 +477,8 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
         .id(SharedString::from(format!("card/{h}/{id}")))
         .group("card")
         .relative()
+        .h(px(card_height(&vcs)))
+        .flex_shrink_0()
         .flex()
         .flex_col()
         .gap_0p5()
@@ -458,19 +521,13 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
                 .text_color(rgba(this.title_color(host, t)))
                 .when(unread || t.asking(), |d| d.font_weight(FontWeight::MEDIUM))
                 .children(pinned.then(theme::pin_mark))
-                .child(theme::title_text(title_id, title, titling)),
+                .child(div().flex_1().min_w_0().child(theme::title_text(title_id, title, titling)))
+                .when(vcs.is_empty(), |d| d.children(marks().map(|m| m.ml_0p5()))),
         )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_1p5()
-                .child(small(vcs, theme::t().fg_2).flex_1())
-                .children((host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(px(12.))))
-                .children(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(px(12.)))),
-        )
-        .children(hovered.then(|| menu::popup(Side::Right, specs(host, t, elapsed, this), cx)))
+        .when(!vcs.is_empty(), |d| {
+            d.child(div().flex().flex_row().items_center().gap_1p5().child(small(vcs.clone(), theme::t().fg_2).flex_1()).children(marks()))
+        })
+        .children(hovered.then(|| menu::popup(Side::Right, specs(host, t, vcs, elapsed, this), cx)))
 }
 
 /// The thread's place in version control: its workspace name (also its git branch / jj
@@ -499,13 +556,12 @@ fn lab_logo(model: &str) -> &'static str {
 
 /// The hovered card's popup: the title, then one line each for what the card abbreviates:
 /// `project, host` / model (effort) / workspace name or branch / run time.
-fn specs(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent) -> Vec<AnyElement> {
+fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent) -> Vec<AnyElement> {
     let model = match (&t.model, &t.thinking_level) {
         (Some(m), Some(e)) => format!("{m} ({e})"),
         (Some(m), None) => m.clone(),
         (None, _) => String::new(),
     };
-    let vcs = vcs_label(host, t, this);
     let run = match (elapsed.is_empty(), t.running()) {
         (true, _) => String::new(),
         (false, true) => format!("running for {elapsed}"),

@@ -39,6 +39,8 @@ const LAST_TARGET_KEY: &str = "last_target";
 const LAST_ISOLATE_KEY: &str = "last_isolate";
 const PRESETS_KEY: &str = "presets";
 const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
+/// The folded sidebar sections (`Section::parse_folded`).
+const COLLAPSED_KEY: &str = "collapsed";
 /// The sidebar's project order as the user dragged it: a JSON list of group keys.
 const PROJECT_ORDER_KEY: &str = "project_order";
 /// Where the user was when the app last closed (see `remember_pane`).
@@ -240,11 +242,35 @@ pub struct Preset {
     pub effort: Option<String>,
 }
 
-/// Sidebar sections that list threads under their nav row; each can be collapsed.
+/// Sidebar sections that fold: Inbox / Workpool (their thread cards) and Projects (its
+/// rows). Which are folded is saved under `COLLAPSED_KEY`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     Inbox,
     Workpool,
+    Projects,
+}
+
+impl Section {
+    const ALL: [Section; 3] = [Section::Inbox, Section::Workpool, Section::Projects];
+
+    /// Its name in the saved fold state.
+    fn key(self) -> &'static str {
+        match self {
+            Section::Inbox => "inbox",
+            Section::Workpool => "workpool",
+            Section::Projects => "projects",
+        }
+    }
+
+    /// The folded sections saved as space-separated keys; unknown words are ignored. With
+    /// nothing saved yet only the Workpool is folded: running threads stay out of sight.
+    fn parse_folded(saved: Option<&str>) -> HashSet<Section> {
+        match saved {
+            Some(s) => Self::ALL.into_iter().filter(|x| s.split_whitespace().any(|w| w == x.key())).collect(),
+            None => HashSet::from([Section::Workpool]),
+        }
+    }
 }
 
 /// The one popup that can be open.
@@ -410,6 +436,7 @@ impl Dirigent {
         let isolate = cache.get(LAST_ISOLATE_KEY).as_deref() == Some("1");
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
+        let collapsed = Section::parse_folded(cache.get(COLLAPSED_KEY).as_deref());
         let cache = Arc::new(Mutex::new(cache));
 
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -464,7 +491,7 @@ impl Dirigent {
             sidebar_width,
             sidebar_hidden: false,
             sidebar_peek: false,
-            collapsed: HashSet::new(),
+            collapsed,
             log_width,
             log_on: false,
             resizing: None,
@@ -549,9 +576,16 @@ impl Dirigent {
     }
 
     /// Finished since the user last opened it, on any device (never opened counts too). A
-    /// thread waiting on jobs or sub-agents isn't finished yet, so it isn't unread either.
+    /// thread waiting on jobs or sub-agents isn't finished yet, and one still running (asking
+    /// while it works) isn't done moving, so neither is unread.
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
-        self.status(host, t).finished() && t.seen_at.is_none_or(|s| t.updated_at > s)
+        self.snoozable(host, t) && t.seen_at.is_none_or(|s| t.updated_at > s)
+    }
+
+    /// Finished and at rest. Snoozing a running thread (asking while it works) would undo
+    /// itself on its next entry, so it only goes to these.
+    pub fn snoozable(&self, host: &str, t: &ThreadSummary) -> bool {
+        self.status(host, t).finished() && !t.running()
     }
 
     /// A thread's title colour in the sidebar and lists: amber while the model waits on an
@@ -653,15 +687,11 @@ impl Dirigent {
 
     /// The user is looking at this thread: whatever it has now is read, on every device.
     /// Called again on each `Threads` push while the thread is open, so a mark goes out
-    /// only once the thread is finished (a busy one can't be unread, see `unread`) and has
-    /// moved since the last one: the host's push of the mark must not trigger another. The
-    /// flag is set here ahead of that push.
+    /// only while the thread is `unread`: finished, at rest, and moved since the last mark
+    /// (the host's push of the mark must not trigger another). The flag is set here ahead
+    /// of that push.
     fn mark_seen(&mut self, host: &str, id: &str) {
-        let Some(updated_at) = self
-            .summary(host, id)
-            .filter(|t| self.status(host, t).finished() && t.seen_at.is_none_or(|s| s < t.updated_at))
-            .map(|t| t.updated_at)
-        else {
+        let Some(updated_at) = self.summary(host, id).filter(|t| self.unread(host, t)).map(|t| t.updated_at) else {
             return;
         };
         let rid = self.next_id();
@@ -2444,6 +2474,8 @@ impl Dirigent {
         if !self.collapsed.remove(&section) {
             self.collapsed.insert(section);
         }
+        let saved: Vec<_> = Section::ALL.into_iter().filter(|s| self.collapsed.contains(s)).map(Section::key).collect();
+        let _ = self.cache.lock().unwrap().set(COLLAPSED_KEY, &saved.join(" "));
         cx.notify();
     }
 

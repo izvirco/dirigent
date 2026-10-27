@@ -399,7 +399,7 @@ fn thread_row(
         .child(column(150.).text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
         .child(column(32.).text_right().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
         // Rows that can't be snoozed keep an empty slot, so the columns stay aligned.
-        .child(if matches!(status, Status::Asking | Status::Done | Status::Snoozed) {
+        .child(if this.snoozable(host, t) {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| this.set_snoozed(&h3, &id3, !snoozed, cx))
                 .into_any_element()
