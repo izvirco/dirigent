@@ -16,7 +16,7 @@
 //! to an ask) are user bubbles: `steer · pending` below the work line while pi holds them,
 //! `steer` above it once the model has them.
 
-use crate::app::{AskForm, Blob, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
+use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
 use crate::icons::icon;
 use crate::lists::{Via, breadcrumb, header};
 use crate::markdown;
@@ -92,7 +92,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             cx,
         )
     });
-    let archive_confirm = archive_confirm(&host, &id, Side::BelowRight(26.), this, cx);
+    let archive_confirm = archive_confirm(&host, &id, ArchiveAt::Header, Side::BelowRight(26.), this, cx);
     let archive_open = archive_confirm.is_some();
     let actions = div()
         .flex()
@@ -117,7 +117,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         }))
         .child(
             theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
-                this.set_archived(&h1, &i1, !archived, cx)
+                this.set_archived(&h1, &i1, !archived, ArchiveAt::Header, cx)
             })
             .when(archive_open, |d| d.bg(rgba(theme::t().hover)))
             .children(archive_confirm),
@@ -280,9 +280,9 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
 
 /// The `ConfirmArchive` popup for this thread, if it is the one asking: archive it and
 /// remove its workspace (uncommitted changes go with it), or leave the workspace on disk
-/// for the user and just let the thread go. Goes under the archive button that was clicked.
-pub fn archive_confirm(host: &str, id: &str, side: Side, this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
-    if this.menu.as_ref() != Some(&Menu::ConfirmArchive { host: host.to_owned(), id: id.to_owned() }) {
+/// for the user and just let the thread go. Goes under the archive button that was clicked (`at`).
+pub fn archive_confirm(host: &str, id: &str, at: ArchiveAt, side: Side, this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+    if this.menu.as_ref() != Some(&Menu::ConfirmArchive { host: host.to_owned(), id: id.to_owned(), at }) {
         return None;
     }
     let workspace = this.summary(host, id)?.workspace.clone();
