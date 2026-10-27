@@ -17,6 +17,7 @@ Read `testing.md` (how to drive the UI) first.
 - **gpui `svg()`** ignores inherited text color; pass it explicitly (`icons::icon(name, color)`).
 - **gpui `img()` with `max_w` / `max_h`** can overflow its parent: gpui makes both its sizes definite and taffy lays it out taller than the parent counts. Size a box from the bitmap's pixel size and let the img fill it (`thread::inline_image`); an aspect-ratio box goes in a plain block div, not straight into a flex column.
 - **gpui `flex_1()` inside an `overflow_y_scroll()` container** stretches to fill it and pushes later siblings to the bottom. Lists that share a scroll container must not grow (see `lists::scroll`).
+- **gpui `uniform_list`** sizes every item from item 0 and lays items out at their content width: make them all the same height and `w_full()` (see `lists::thread_list`).
 - **Hover-revealed controls**: `group("row")` on the row + `opacity(0.).group_hover("row", |d| d.opacity(1.))` on the control; `cx.stop_propagation()` in its click handler so the row doesn't also fire.
 - **Hover-revealed overlays** (sidebar peek): make the hot zone and the panel _one_ element whose width depends on the hover state, so a single `on_hover` covers both. Two elements flicker as the mouse crosses from one to the other.
 - **gpui `Animation::with_max_fps`** never redraws (its throttled notify doesn't reach the window): leave it off and let `with_animation` request frames.
