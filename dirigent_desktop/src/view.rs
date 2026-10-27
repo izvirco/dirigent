@@ -123,11 +123,13 @@ impl Work {
     }
 
     /// Duration in ms of a finished work: to `ended`, else (a run that never got its final
-    /// message) to the last tool's end, else to `now`. The run in progress uses `now -
-    /// started` directly, so its clock keeps moving between tool calls.
-    pub fn duration(&self, now: i64) -> i64 {
-        let end = self.ended.or_else(|| self.steps.iter().rev().find_map(|s| if let Step::Tool(t) = s { t.ended } else { None }));
-        (end.unwrap_or(now) - self.started).max(0)
+    /// message: the runtime died under it) to the last thing that happened in it, a tool's
+    /// end or start, else nothing. The run in progress uses `now - started` directly, so
+    /// its clock keeps moving between tool calls.
+    pub fn duration(&self) -> i64 {
+        let end =
+            self.ended.or_else(|| self.steps.iter().rev().find_map(|s| if let Step::Tool(t) = s { t.ended.or(t.started) } else { None }));
+        (end.unwrap_or(self.started) - self.started).max(0)
     }
 }
 
@@ -435,7 +437,7 @@ impl Timeline {
                     _ => None,
                 })?;
                 tool.ended = Some(at);
-                tool.started = tool.started.or(duration.map(|d| at - d));
+                tool.started = duration.map(|d| at - d).or(tool.started);
                 let spawned = tool
                     .spawned
                     .clone()
@@ -466,10 +468,13 @@ impl Timeline {
         }
         let blocks = msg.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
         let calls_tools = blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("toolCall"));
+        // The message's end: when its tool calls start (their result may refine that).
+        let done = at + msg.get("durationMs").and_then(Value::as_i64).unwrap_or(0);
         let mut reply = vec![];
         for b in &blocks {
             match step_of(b) {
                 Some(Step::Text(t)) if !calls_tools => reply.push(t),
+                Some(Step::Tool(t)) => self.work_mut(ix).steps.push(Step::Tool(ToolCall { started: Some(done), ..t })),
                 Some(step) => self.work_mut(ix).steps.push(step),
                 None => {}
             }
@@ -484,7 +489,7 @@ impl Timeline {
             return Some(ix);
         }
         // The turn is over: close the work (drop it if nothing happened) and add the reply.
-        self.work_mut(ix).ended = Some(at + msg.get("durationMs").and_then(Value::as_i64).unwrap_or(0));
+        self.work_mut(ix).ended = Some(done);
         if self.work_mut(ix).steps.is_empty() {
             self.items.remove(ix);
             self.ids.remove(ix);
@@ -826,14 +831,20 @@ impl Streaming {
             }
             // The run is over; an abort strands whatever pi still had queued.
             "agent_settled" => {
-                self.steps.clear();
-                self.running_tools.clear();
-                self.echo.clear();
-                self.answers.clear();
+                self.settle();
                 true
             }
             _ => false,
         }
+    }
+
+    /// The run is over (pi settled, or the runtime died under it and the host reports the
+    /// thread idle): nothing is streaming, running or queued any more.
+    pub fn settle(&mut self) {
+        self.steps.clear();
+        self.running_tools.clear();
+        self.echo.clear();
+        self.answers.clear();
     }
 
     pub fn running_since(&self, id: &str) -> Option<i64> {
@@ -862,6 +873,17 @@ impl Streaming {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A run that never got its final message stops its clock at its last tool, not at now.
+    #[test]
+    fn dead_run_duration_stops_at_its_last_tool() {
+        let tool = |started, ended| Step::Tool(ToolCall { started, ended, ..Default::default() });
+        let w =
+            Work { started: 1000, ended: None, steps: vec![tool(Some(1500), Some(2000)), tool(Some(4000), None)], ..Default::default() };
+        assert_eq!(w.duration(), 3000);
+        assert_eq!(Work { started: 1000, ..Default::default() }.duration(), 0);
+        assert_eq!(Work { started: 1000, ended: Some(9000), steps: w.steps.clone(), ..Default::default() }.duration(), 8000);
+    }
 
     #[test]
     fn turn_becomes_user_work_reply() {

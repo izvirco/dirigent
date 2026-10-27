@@ -1580,7 +1580,7 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
         n => format!("{n} tool calls"),
     };
     let model = w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned();
-    let time = if live { format!("Working for {}", elapsed(now - w.started)) } else { duration(w.duration(now)) };
+    let time = if live { format!("Working for {}", elapsed(now - w.started)) } else { duration(w.duration()) };
     let parts: Vec<String> =
         [Some(model), w.effort.clone(), Some("·".into()), Some(time), Some("·".into()), Some(tools)].into_iter().flatten().collect();
     let row = row(step_id(key, usize::MAX))

@@ -805,6 +805,7 @@ impl Dirigent {
                 }
             }
             ServerMessage::Threads { threads, .. } => {
+                let was_running = self.is_running();
                 if let Some(h) = self.host_mut(&host) {
                     h.threads = threads;
                 }
@@ -813,8 +814,19 @@ impl Dirigent {
                 {
                     let id = t.id.clone();
                     if let Some(pins) = self.summary(&host, &id).map(|s| s.pinned_entries.iter().cloned().collect()) {
+                        // The run ended without pi settling it (the runtime died under it):
+                        // the host reports the thread idle, so nothing streams or runs any more.
+                        let died = was_running && !self.is_running();
                         if let Pane::Thread(t) = &mut self.pane {
                             t.pins = pins;
+                            if died {
+                                t.streaming.settle();
+                                let tail = t.timeline.items.len();
+                                t.list.remeasure_items(tail..tail + 1);
+                                if t.log.is_some() {
+                                    t.log_list.remeasure();
+                                }
+                            }
                         }
                         self.mark_seen(&host, &id);
                         self.sync_asks(cx);
