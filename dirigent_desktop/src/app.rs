@@ -1196,12 +1196,14 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Open the base picker with an empty, focused search.
-    pub fn open_base_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.base_search.update(cx, |input, cx| input.set_text("", window, cx));
-        self.menu = Some(Menu::Base);
-        self.focus(self.base_search.focus_handle(cx), cx);
-        cx.notify();
+    /// Open the base picker with an empty, focused search; or close it if it's open.
+    pub fn toggle_base_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu == Some(Menu::Base) {
+            self.close_menu(cx);
+        } else if self.open_menu(Menu::Base, cx) {
+            self.base_search.update(cx, |input, cx| input.set_text("", window, cx));
+            self.focus(self.base_search.focus_handle(cx), cx);
+        }
     }
 
     /// The refs behind the open base picker: the draft's project, or the open thread's.
@@ -1407,9 +1409,9 @@ impl Dirigent {
     pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, at: ArchiveAt, cx: &mut Context<Self>) {
         let asking = matches!(&self.menu, Some(Menu::ConfirmArchive { host: h, id, .. }) if h == host && id == thread_id);
         if archived && !asking && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) {
-            self.menu = Some(Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned(), at });
-            self.request_thread_vcs(host, thread_id);
-            cx.notify();
+            if self.open_menu(Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned(), at }, cx) {
+                self.request_thread_vcs(host, thread_id);
+            }
             return;
         }
         let id = self.next_id();
@@ -2644,18 +2646,31 @@ impl Dirigent {
         }
     }
 
+    /// A trigger click: open `menu`, or close it if it's the one open.
     pub fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
-        if self.menu_dismissed {
-            return;
+        if self.menu.as_ref() == Some(&menu) {
+            self.close_menu(cx);
+        } else {
+            self.open_menu(menu, cx);
         }
-        self.menu = if self.menu.as_ref() == Some(&menu) { None } else { Some(menu) };
+    }
+
+    /// Open `menu` from a trigger click. Every menu opens through here: a click that just
+    /// dismissed a menu (`menu_dismissed`, which includes a press on that menu's own
+    /// trigger) opens nothing and returns false.
+    pub fn open_menu(&mut self, menu: Menu, cx: &mut Context<Self>) -> bool {
+        if self.menu_dismissed {
+            return false;
+        }
         // The workspace menus say whether there is uncommitted work: ask again as they open.
-        if matches!(self.menu, Some(Menu::Workspace | Menu::Base))
+        if matches!(menu, Menu::Workspace | Menu::Base)
             && let Some((host, id)) = self.open().map(|t| (t.host.clone(), t.id.clone()))
         {
             self.request_thread_vcs(&host, &id);
         }
+        self.menu = Some(menu);
         cx.notify();
+        true
     }
 
     /// Close the open menu. Leaving the model search hands focus back to the composer.
