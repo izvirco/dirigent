@@ -1,4 +1,5 @@
-//! Per-host state and the cross-host project grouping the sidebar shows.
+//! Per-host state and the cross-host project grouping the Projects page lists (and the
+//! sidebar, for the pinned ones).
 //!
 //! A project lives on one host. Projects on different hosts are shown as one group when
 //! they share a normalized git origin (automatic) or the user linked them (manual, stored
@@ -65,9 +66,8 @@ pub fn basename(path: &str) -> &str {
     path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
 }
 
-/// Groups in the user's order (`order`: group keys, as dragged in the sidebar), then the
-/// rest by most recent activity; plus orphan threads (most recent first).
-pub fn groups(hosts: &[HostState], links: &Links, order: &[String]) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
+/// Groups by most recent activity (then name); plus orphan threads (most recent first).
+pub fn groups(hosts: &[HostState], links: &Links) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
     let mut by_key: HashMap<String, Group> = HashMap::new();
     let mut seen: Vec<String> = vec![];
     for host in hosts {
@@ -105,15 +105,31 @@ pub fn groups(hosts: &[HostState], links: &Links, order: &[String]) -> (Vec<Grou
         g.threads.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     }
     let latest = |g: &Group| g.threads.first().map(|(_, t)| t.updated_at).unwrap_or(0);
-    let pos = |g: &Group| order.iter().position(|k| *k == g.key);
-    groups.sort_by(|a, b| match (pos(a), pos(b)) {
-        (Some(a), Some(b)) => a.cmp(&b),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => latest(b).cmp(&latest(a)).then_with(|| a.name.cmp(&b.name)),
-    });
+    groups.sort_by(|a, b| latest(b).cmp(&latest(a)).then_with(|| a.name.cmp(&b.name)));
     orphans.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     (groups, orphans)
+}
+
+/// The pinned groups, in pin order (`pins`: group keys); keys of groups that are gone
+/// are skipped.
+pub fn pinned<'a>(groups: &'a [Group], pins: &[String]) -> Vec<&'a Group> {
+    pins.iter().filter_map(|k| groups.iter().find(|g| g.key == *k)).collect()
+}
+
+/// `pins` after a pinned group's key changed (it was linked into another group, or
+/// unlinked into its members' own keys): `new` takes `old`'s place, minus keys already
+/// pinned. Unpinned `old`: unchanged.
+pub fn repin(pins: &[String], old: &str, new: &[String]) -> Vec<String> {
+    let Some(at) = pins.iter().position(|k| k == old) else { return pins.to_vec() };
+    let mut out: Vec<String> = pins.iter().filter(|k| *k != old).cloned().collect();
+    let mut fresh: Vec<String> = vec![];
+    for k in new {
+        if !out.contains(k) && !fresh.contains(k) {
+            fresh.push(k.clone());
+        }
+    }
+    out.splice(at..at, fresh);
+    out
 }
 
 #[cfg(test)]
@@ -171,7 +187,7 @@ mod tests {
         let mut links = Links::new();
         links.insert(("box".into(), "m".into()), "local/n".into());
 
-        let (groups, orphans) = groups(&hosts, &links, &[]);
+        let (groups, orphans) = groups(&hosts, &links);
         assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["app", "notes"]);
         let app = &groups[0];
         assert_eq!(app.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>(), ["box", "local"]);
@@ -190,15 +206,28 @@ mod tests {
     }
 
     #[test]
-    fn stored_order_wins_over_activity() {
+    fn pinned_in_pin_order() {
         let hosts = vec![host(
             "local",
             vec![project("a", "/a", None), project("b", "/b", None), project("c", "/c", None)],
             vec![thread("t1", Some("a"), 1), thread("t2", Some("b"), 2), thread("t3", Some("c"), 3)],
         )];
-        let names = |order: &[String]| groups(&hosts, &Links::new(), order).0.into_iter().map(|g| g.name).collect::<Vec<_>>();
-        assert_eq!(names(&[]), ["c", "b", "a"]);
-        // Ordered keys first, as stored (a stale key is ignored); the rest by activity.
-        assert_eq!(names(&["local/a".into(), "gone".into(), "local/c".into()]), ["a", "c", "b"]);
+        let (groups, _) = groups(&hosts, &Links::new());
+        assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["c", "b", "a"]); // by activity
+        // Pin order, a stale key skipped.
+        let pins = ["local/a".into(), "gone".into(), "local/c".into()];
+        assert_eq!(pinned(&groups, &pins).iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["a", "c"]);
+    }
+
+    #[test]
+    fn repin_keeps_the_place() {
+        let pins: Vec<String> = ["x", "old", "y"].map(String::from).to_vec();
+        // Linked into a group: its key takes the place.
+        assert_eq!(repin(&pins, "old", &["new".into()]), ["x", "new", "y"]);
+        // Linked into a pinned group, or unlinked into several keys (deduped).
+        assert_eq!(repin(&pins, "old", &["y".into()]), ["x", "y"]);
+        assert_eq!(repin(&pins, "old", &["a".into(), "b".into(), "a".into()]), ["x", "a", "b", "y"]);
+        // Not pinned: nothing changes.
+        assert_eq!(repin(&pins, "z", &["new".into()]), pins);
     }
 }

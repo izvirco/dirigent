@@ -39,8 +39,11 @@ const LAST_TARGET_KEY: &str = "last_target";
 const LAST_ISOLATE_KEY: &str = "last_isolate";
 const PRESETS_KEY: &str = "presets";
 const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
-/// The sidebar's project order as the user dragged it: a JSON list of group keys.
-const PROJECT_ORDER_KEY: &str = "project_order";
+/// The folded sidebar sections (`Section::parse_folded`).
+const COLLAPSED_KEY: &str = "collapsed";
+/// The project groups pinned to the sidebar, in its order: a JSON list of group keys.
+/// Missing (an older install): nothing pinned. (The old `project_order` key is unused.)
+const PINNED_PROJECTS_KEY: &str = "pinned_projects";
 /// Where the user was when the app last closed (see `remember_pane`).
 const PANE_KEY: &str = "pane";
 const SIDEBAR_MIN: f32 = 180.;
@@ -198,10 +201,8 @@ pub enum Pane {
     Project {
         group_key: String,
     },
-    /// Path input for a new project on `host`.
-    NewProject {
-        host: String,
-    },
+    /// Every project group: pin, link, remove, and the form to add one (`lists::projects_page`).
+    Projects,
     /// Settings › Config: `config.toml` (fonts, theme, thread titles, telemetry; `settings.rs`).
     Config,
     /// Settings › Hosts: remote hosts (`hosts.toml`) with their status, and the form to add one.
@@ -240,11 +241,33 @@ pub struct Preset {
     pub effort: Option<String>,
 }
 
-/// Sidebar sections that list threads under their nav row; each can be collapsed.
+/// Sidebar sections that fold their thread cards: Inbox / Workpool. Which are folded is
+/// saved under `COLLAPSED_KEY`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     Inbox,
     Workpool,
+}
+
+impl Section {
+    const ALL: [Section; 2] = [Section::Inbox, Section::Workpool];
+
+    /// Its name in the saved fold state.
+    fn key(self) -> &'static str {
+        match self {
+            Section::Inbox => "inbox",
+            Section::Workpool => "workpool",
+        }
+    }
+
+    /// The folded sections saved as space-separated keys; unknown words are ignored. With
+    /// nothing saved yet only the Workpool is folded: running threads stay out of sight.
+    fn parse_folded(saved: Option<&str>) -> HashSet<Section> {
+        match saved {
+            Some(s) => Self::ALL.into_iter().filter(|x| s.split_whitespace().any(|w| w == x.key())).collect(),
+            None => HashSet::from([Section::Workpool]),
+        }
+    }
 }
 
 /// The one popup that can be open.
@@ -259,7 +282,7 @@ pub enum Menu {
     Target,
     /// Draft: which of the group's hosts.
     TargetHost,
-    /// Sidebar actions for a project group (link / remove).
+    /// Projects page: actions for a project group (link / remove).
     Project {
         group_key: String,
     },
@@ -267,7 +290,7 @@ pub enum Menu {
     Link {
         group_key: String,
     },
-    /// Pick the host for a new project.
+    /// Projects page: the host a new project is added on.
     NewProjectHost,
     /// Thread header: confirm deletion.
     ConfirmDelete,
@@ -302,9 +325,11 @@ pub enum ArchiveAt {
 pub struct Dirigent {
     pub hosts: Vec<HostState>,
     pub links: Links,
-    /// Project group keys in the order the user dragged them (see `projects::groups`).
-    project_order: Vec<String>,
-    /// The project group being dragged in the sidebar; its row is a gap meanwhile.
+    /// The project group keys pinned to the sidebar, in its order (`projects::pinned`).
+    pub pinned_projects: Vec<String>,
+    /// The host the Projects page adds a project on; `None`: the first connected one.
+    pub new_project_host: Option<String>,
+    /// The pinned project being dragged in the sidebar; its row is a gap meanwhile.
     pub dragging: Option<String>,
     /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
     pub hovered_card: Option<(String, String)>,
@@ -403,13 +428,14 @@ impl Dirigent {
         };
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
-        let project_order = cache.get(PROJECT_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let pinned_projects = cache.get(PINNED_PROJECTS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
         let presets = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let isolate = cache.get(LAST_ISOLATE_KEY).as_deref() == Some("1");
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
+        let collapsed = Section::parse_folded(cache.get(COLLAPSED_KEY).as_deref());
         let cache = Arc::new(Mutex::new(cache));
 
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -455,7 +481,8 @@ impl Dirigent {
         let mut this = Self {
             hosts: host_states,
             links,
-            project_order,
+            pinned_projects,
+            new_project_host: None,
             dragging: None,
             hovered_card: None,
             pane: Pane::Inbox,
@@ -464,7 +491,7 @@ impl Dirigent {
             sidebar_width,
             sidebar_hidden: false,
             sidebar_peek: false,
-            collapsed: HashSet::new(),
+            collapsed,
             log_width,
             log_on: false,
             resizing: None,
@@ -549,9 +576,16 @@ impl Dirigent {
     }
 
     /// Finished since the user last opened it, on any device (never opened counts too). A
-    /// thread waiting on jobs or sub-agents isn't finished yet, so it isn't unread either.
+    /// thread waiting on jobs or sub-agents isn't finished yet, and one still running (asking
+    /// while it works) isn't done moving, so neither is unread.
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
-        self.status(host, t).finished() && t.seen_at.is_none_or(|s| t.updated_at > s)
+        self.snoozable(host, t) && t.seen_at.is_none_or(|s| t.updated_at > s)
+    }
+
+    /// Finished and at rest. Snoozing a running thread (asking while it works) would undo
+    /// itself on its next entry, so it only goes to these.
+    pub fn snoozable(&self, host: &str, t: &ThreadSummary) -> bool {
+        self.status(host, t).finished() && !t.running()
     }
 
     /// A thread's title colour in the sidebar and lists: amber while the model waits on an
@@ -653,15 +687,11 @@ impl Dirigent {
 
     /// The user is looking at this thread: whatever it has now is read, on every device.
     /// Called again on each `Threads` push while the thread is open, so a mark goes out
-    /// only once the thread is finished (a busy one can't be unread, see `unread`) and has
-    /// moved since the last one: the host's push of the mark must not trigger another. The
-    /// flag is set here ahead of that push.
+    /// only while the thread is `unread`: finished, at rest, and moved since the last mark
+    /// (the host's push of the mark must not trigger another). The flag is set here ahead
+    /// of that push.
     fn mark_seen(&mut self, host: &str, id: &str) {
-        let Some(updated_at) = self
-            .summary(host, id)
-            .filter(|t| self.status(host, t).finished() && t.seen_at.is_none_or(|s| s < t.updated_at))
-            .map(|t| t.updated_at)
-        else {
+        let Some(updated_at) = self.summary(host, id).filter(|t| self.unread(host, t)).map(|t| t.updated_at) else {
             return;
         };
         let rid = self.next_id();
@@ -812,7 +842,12 @@ impl Dirigent {
                 {
                     h.projects.push(project.clone());
                 }
-                // Straight into a first thread for the new project.
+                // A project is added to be worked in: pinned to the sidebar (unless its
+                // group already is), and straight into a first thread for it.
+                let key = projects::group_key(&host, &project, &self.links);
+                if !self.is_pinned_project(&key) {
+                    self.set_project_pinned(&key, true, cx);
+                }
                 self.new_draft(Some(Target { host, project_id: project.id }), cx);
             }
             ServerMessage::Models { models, .. } => {
@@ -1027,17 +1062,17 @@ impl Dirigent {
         }
     }
 
-    /// Persist the pane so the next launch resumes there and Esc on a settings page goes
-    /// back to it (`close_settings`). The settings pages, the draft page and the new-project
-    /// form leave the last stored pane alone (the draft's text is kept by `save_draft`, the
-    /// page itself isn't).
+    /// Persist the pane so the next launch resumes there and Esc on a settings page or the
+    /// Projects page goes back to it (`go_back`). Those pages and the draft page leave
+    /// the last stored pane alone (the draft's text is kept by `save_draft`, the page itself
+    /// isn't).
     fn remember_pane(&self) {
         let value = match &self.pane {
             Pane::Inbox => "inbox".to_owned(),
             Pane::Workpool => "workpool".to_owned(),
             Pane::Project { group_key } => format!("project\n{group_key}"),
             Pane::Thread(t) => format!("thread\n{}\n{}", t.host, t.id),
-            Pane::Config | Pane::Settings | Pane::Usage | Pane::Draft { .. } | Pane::NewProject { .. } => return,
+            Pane::Config | Pane::Settings | Pane::Usage | Pane::Projects | Pane::Draft { .. } => return,
         };
         let _ = self.cache.lock().unwrap().set(PANE_KEY, &value);
     }
@@ -1048,10 +1083,10 @@ impl Dirigent {
         self.open_pane(&value, cx);
     }
 
-    /// Esc on a settings page: back to the pane stored by `remember_pane`. The inbox goes
-    /// first: it is the fallback when that pane is gone, and `show` does the housekeeping
-    /// (menu, selection, focus) that `open_pane` doesn't.
-    fn close_settings(&mut self, cx: &mut Context<Self>) {
+    /// Esc on a settings page or the Projects page (`is_utility`): back to the pane stored
+    /// by `remember_pane`. The inbox goes first: it is the fallback when that pane is gone,
+    /// and `show` does the housekeeping (menu, selection, focus) that `open_pane` doesn't.
+    fn go_back(&mut self, cx: &mut Context<Self>) {
         let back = self.cache.lock().unwrap().get(PANE_KEY);
         self.show(Pane::Inbox, cx);
         if let Some(value) = back {
@@ -1452,22 +1487,37 @@ impl Dirigent {
 
     // ---- projects ----
 
-    /// Open the path form for a new project on `host` (default: first connected host).
-    pub fn start_new_project(&mut self, host: Option<String>, cx: &mut Context<Self>) {
-        let host =
-            host.or_else(|| self.hosts.iter().find(|h| h.status == HostStatus::Connected).or(self.hosts.first()).map(|h| h.name.clone()));
-        let Some(host) = host else { return };
-        self.set_pane(Pane::NewProject { host }, cx);
+    /// The sidebar's folder: the Projects page. With no project yet, the add form's path
+    /// field takes the focus.
+    pub fn show_projects(&mut self, cx: &mut Context<Self>) {
+        self.show(Pane::Projects, cx);
+        if self.groups().0.is_empty() {
+            self.focus(self.path_input.focus_handle(cx), cx);
+        }
+    }
+
+    /// The host the Projects page adds a project on: the one picked, else the first
+    /// connected one.
+    pub fn new_project_host(&self) -> Option<String> {
+        let picked = self.new_project_host.as_ref().filter(|h| self.hosts.iter().any(|s| s.name == **h));
+        picked
+            .cloned()
+            .or_else(|| self.hosts.iter().find(|h| h.status == HostStatus::Connected).or(self.hosts.first()).map(|h| h.name.clone()))
+    }
+
+    /// Pick the host of the Projects page's add form, and put the focus in its path field.
+    pub fn pick_new_project_host(&mut self, host: String, cx: &mut Context<Self>) {
+        self.new_project_host = Some(host);
         self.menu = None;
         self.focus(self.path_input.focus_handle(cx), cx);
         cx.notify();
     }
 
+    /// Enter in the Projects page's path field.
     fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Pane::NewProject { host } = &self.pane else {
+        let Some(host) = self.new_project_host().filter(|_| matches!(self.pane, Pane::Projects)) else {
             return;
         };
-        let host = host.clone();
         let path = self.path_input.read(cx).text().trim().to_owned();
         if path.is_empty() {
             return;
@@ -1923,6 +1973,8 @@ impl Dirigent {
         }
     }
 
+    /// Remove a project from its host (its threads are kept, as orphans). A pin on a group
+    /// that is gone is skipped (`projects::pinned`) and dropped on the next reorder.
     pub fn remove_project(&mut self, host: &str, project_id: &str, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::RemoveProject { id, project_id: project_id.to_owned() });
@@ -1951,29 +2003,59 @@ impl Dirigent {
                 }
             }
         }
+        drop(cache); // `save_pins` locks it again
+        // The members' group key changed: a pinned group stays pinned under its new key(s).
+        let new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
+        self.pinned_projects = projects::repin(&self.pinned_projects, group_key, &new);
+        self.save_pins();
         self.menu = None;
         cx.notify();
     }
 
-    /// The sidebar's project groups and the orphan threads.
+    /// Every project group (the Projects page; the sidebar shows the pinned ones) and the
+    /// orphan threads.
     pub fn groups(&self) -> (Vec<projects::Group>, Vec<(String, ThreadSummary)>) {
-        projects::groups(&self.hosts, &self.links, &self.project_order)
+        projects::groups(&self.hosts, &self.links)
     }
 
-    /// Put the group at `index` of the sidebar's project list (the drag's live reorder),
-    /// freezing the whole list in its current order so nothing else moves.
+    /// The keys of the pinned groups that still exist, in the sidebar's order.
+    pub fn pinned_keys(&self) -> Vec<String> {
+        let (groups, _) = self.groups();
+        projects::pinned(&groups, &self.pinned_projects).into_iter().map(|g| g.key.clone()).collect()
+    }
+
+    pub fn is_pinned_project(&self, group_key: &str) -> bool {
+        self.pinned_projects.iter().any(|k| k == group_key)
+    }
+
+    /// Pin a project group to the sidebar (at the end) or unpin it.
+    pub fn set_project_pinned(&mut self, group_key: &str, pinned: bool, cx: &mut Context<Self>) {
+        self.pinned_projects.retain(|k| k != group_key);
+        if pinned {
+            self.pinned_projects.push(group_key.to_owned());
+        }
+        self.save_pins();
+        cx.notify();
+    }
+
+    fn save_pins(&self) {
+        if let Ok(json) = serde_json::to_string(&self.pinned_projects) {
+            let _ = self.cache.lock().unwrap().set(PINNED_PROJECTS_KEY, &json);
+        }
+    }
+
+    /// Put the pinned group at `index` of the sidebar's pinned list (the drag's live
+    /// reorder). Keys of groups that are gone are dropped on the way.
     pub fn move_project(&mut self, group_key: &str, index: usize, cx: &mut Context<Self>) {
-        let mut keys: Vec<String> = self.groups().0.into_iter().map(|g| g.key).collect();
+        let mut keys = self.pinned_keys();
         let Some(from) = keys.iter().position(|k| k == group_key) else { return };
         if from == index {
             return;
         }
         let key = keys.remove(from);
         keys.insert(index.min(keys.len()), key);
-        if let Ok(json) = serde_json::to_string(&keys) {
-            let _ = self.cache.lock().unwrap().set(PROJECT_ORDER_KEY, &json);
-        }
-        self.project_order = keys;
+        self.pinned_projects = keys;
+        self.save_pins();
         cx.notify();
     }
 
@@ -2386,8 +2468,8 @@ impl Dirigent {
         if self.panel_open() {
             self.close_panel();
             cx.notify();
-        } else if is_settings(&self.pane) {
-            self.close_settings(cx);
+        } else if is_utility(&self.pane) {
+            self.go_back(cx);
         }
     }
 
@@ -2444,6 +2526,8 @@ impl Dirigent {
         if !self.collapsed.remove(&section) {
             self.collapsed.insert(section);
         }
+        let saved: Vec<_> = Section::ALL.into_iter().filter(|s| self.collapsed.contains(s)).map(Section::key).collect();
+        let _ = self.cache.lock().unwrap().set(COLLAPSED_KEY, &saved.join(" "));
         cx.notify();
     }
 
@@ -2767,9 +2851,15 @@ fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
     }
 }
 
-/// The settings pages: Config, Hosts, Usage.
-fn is_settings(pane: &Pane) -> bool {
+/// The settings pages: Config, Hosts, Usage. The settings gear is lit while one is open.
+pub fn is_settings(pane: &Pane) -> bool {
     matches!(pane, Pane::Config | Pane::Settings | Pane::Usage)
+}
+
+/// Pages you visit and leave with Esc (back to where you were): the settings pages and
+/// the Projects page.
+fn is_utility(pane: &Pane) -> bool {
+    is_settings(pane) || matches!(pane, Pane::Projects)
 }
 
 /// Attachments as the cache stores them.

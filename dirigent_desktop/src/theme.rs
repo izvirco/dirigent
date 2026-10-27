@@ -218,7 +218,8 @@ pub enum Status {
     /// Idle, but with sub-agents still working for it (derived from the thread list, see
     /// `Dirigent::status`): their replies will wake it.
     Waiting,
-    /// Finished its turn with `ask_user` questions open: the user is the blocker.
+    /// `ask_user` questions open: the user is the blocker, even while the agent keeps
+    /// working (the tool doesn't block), so it sits in the Inbox, not the Workpool.
     Asking,
     Done,
     /// Done, but snoozed out of the sidebar until its next run.
@@ -230,12 +231,12 @@ impl Status {
     /// Status from the host's view of the thread alone; `Waiting` needs the other threads
     /// (`Dirigent::status`).
     pub fn of(t: &ThreadSummary) -> Self {
-        if t.running() {
+        if t.asking() && !t.archived {
+            Status::Asking
+        } else if t.running() {
             Status::Working
         } else if t.archived {
             Status::Archived
-        } else if t.asking() {
-            Status::Asking
         } else if t.snoozed {
             Status::Snoozed
         } else {
@@ -248,7 +249,8 @@ impl Status {
         matches!(self, Status::Asking | Status::Done | Status::Snoozed)
     }
 
-    /// An agent is at it, directly or through sub-agents: what the Workpool lists.
+    /// An agent is at it, directly or through sub-agents, and asks nothing: what the
+    /// Workpool lists.
     pub fn busy(self) -> bool {
         matches!(self, Status::Working | Status::Waiting)
     }

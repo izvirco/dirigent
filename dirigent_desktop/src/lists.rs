@@ -1,11 +1,13 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar, the new-project form and the settings pages (Hosts here, Config in
-//! `settings.rs`, Usage in `usage.rs`; `settings_header` carries the tabs between them).
+//! 40px header bar, the Projects page (every project, pins, the add form) and the
+//! settings pages (Hosts here, Config in `settings.rs`, Usage in `usage.rs`;
+//! `settings_header` carries the tabs between them).
 
-use crate::app::{ArchiveAt, Dirigent, Pane, Target};
+use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Target};
 use crate::icons::icon;
-use crate::menu::Side;
+use crate::menu::{self, Side};
 use crate::net::HostStatus;
+use crate::projects::Group;
 use crate::theme::{self, Status};
 use crate::{hosts, projects, thread};
 use dirigent_protocol::ThreadSummary;
@@ -32,31 +34,210 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             })
         }
         Pane::Project { group_key } => project_page(this, group_key, pane, cx),
-        Pane::NewProject { host } => pane.child(header(div().child(format!("New project on {host}")), None)).child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .p_6()
-                .max_w(px(560.))
-                .child(div().text_color(rgba(theme::t().fg_1)).child("Absolute path of a directory on that host. Enter to add it."))
-                .child(
-                    div()
-                        .w_full()
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .bg(rgba(theme::t().raised))
-                        .border_1()
-                        .border_color(rgba(theme::t().line))
-                        .child(this.path_input.clone()),
-                ),
-        ),
+        Pane::Projects => projects_page(this, pane, cx),
         Pane::Config => crate::settings::render(this, pane, cx),
         Pane::Settings => settings_page(this, pane, cx),
         Pane::Usage => crate::usage::render(this, pane, cx),
         Pane::Thread(_) | Pane::Draft { .. } => pane,
     }
+}
+
+/// The Projects page (the sidebar's folder): every project group as a row (pin toggle,
+/// name, its hosts, thread count, `⋯` menu), "Removed projects" last, then the
+/// form to add one. A row opens the project's page; a pinned one is also listed in the
+/// sidebar.
+fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
+    let (groups, orphans) = this.groups();
+    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, &groups, this, cx)).collect();
+    let removed = (!orphans.is_empty()).then(|| {
+        entry_row("proj/orphans", projects::ORPHANS, cx)
+            .child(div().size(px(24.)).flex_shrink_0())
+            .child(div().w(px(160.)).flex_shrink_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.))
+                    .text_color(rgba(theme::t().fg_2))
+                    .child("Threads whose project was removed"),
+            )
+            .child(thread_count(orphans.len()))
+            .child(div().size(px(24.)).flex_shrink_0())
+    });
+
+    // The add form: the path field, after a host chip when there is more than one host.
+    let host = this.new_project_host().unwrap_or_default();
+    let host_open = this.menu == Some(Menu::NewProjectHost);
+    let host_chip = (this.hosts.len() > 1).then(|| {
+        let items = this
+            .hosts
+            .iter()
+            .map(|h| {
+                let name = h.name.clone();
+                let status = format!("{:?}", h.status).to_lowercase();
+                menu::item(
+                    format!("nph/{name}"),
+                    name.clone(),
+                    status,
+                    name == host,
+                    move |this, cx| this.pick_new_project_host(name.clone(), cx),
+                    cx,
+                )
+            })
+            .collect();
+        theme::labeled_chip("new-project-host", "on", host.clone(), false, host_open)
+            .flex_shrink_0()
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::NewProjectHost, cx)))
+            .children(host_open.then(|| menu::popup(Side::Below(26.), items, cx)))
+    });
+    let field = div()
+        .flex_1()
+        .px_3()
+        .py_2()
+        .rounded_md()
+        .bg(rgba(theme::t().raised))
+        .border_1()
+        .border_color(rgba(theme::t().line))
+        .child(this.path_input.clone());
+    let form = div()
+        .flex()
+        .flex_col()
+        .gap_3()
+        .pt_6()
+        .child(
+            div()
+                .text_color(rgba(theme::t().fg_1))
+                .child(format!("Add a project: the absolute path of a directory on {host}. Enter to add it.")),
+        )
+        .child(div().flex().flex_row().items_center().gap_2().children(host_chip).child(field));
+
+    let column = div().w_full().max_w(px(760.)).flex().flex_col().gap_1().py_6().px_6().children(rows).children(removed).child(form);
+    pane.child(header(div().child("Projects"), None)).child(scroll("projects", div().flex().flex_col().items_center().child(column)))
+}
+
+/// A Projects page row: opens the project's page (`key`) when clicked.
+fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>) -> Stateful<Div> {
+    let key = key.to_owned();
+    div()
+        .id(ElementId::Name(id.into()))
+        .group("row")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .h(px(36.))
+        .px_2()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|d| d.bg(rgba(theme::t().hover)))
+        .on_click(cx.listener(move |this, _, _, cx| this.show(Pane::Project { group_key: key.clone() }, cx)))
+}
+
+fn thread_count(n: usize) -> Div {
+    let text = if n == 1 { "1 thread".to_owned() } else { format!("{n} threads") };
+    div().w(px(80.)).flex_shrink_0().text_right().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(text)
+}
+
+/// One project group on the Projects page: the pin toggle (amber while pinned, faint
+/// otherwise), its name, its hosts on one line, its thread count, and the `⋯`
+/// menu: link it into another group, unlink it, remove it from a host (its threads are
+/// kept, under Removed projects).
+fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+    let key = g.key.clone();
+    let pinned = this.is_pinned_project(&key);
+    let menu_open = this.menu == Some(Menu::Project { group_key: key.clone() });
+    let link_open = this.menu == Some(Menu::Link { group_key: key.clone() });
+
+    let mut actions: Vec<AnyElement> = vec![];
+    if menu_open {
+        let k = key.clone();
+        actions.push(menu::item(
+            "link",
+            "Link to another project",
+            "",
+            false,
+            move |this, cx| this.toggle_menu(Menu::Link { group_key: k.clone() }, cx),
+            cx,
+        ));
+        if g.manual {
+            let k = key.clone();
+            actions.push(menu::item("unlink", "Unlink", "", false, move |this, cx| this.link_group(&k, None, cx), cx));
+        }
+        for m in &g.members {
+            let (h, pid) = (m.host.clone(), m.project.id.clone());
+            let label = if g.members.len() > 1 { format!("Remove from {h}") } else { "Remove project".to_owned() };
+            actions.push(menu::item(
+                format!("rm/{h}/{pid}"),
+                label,
+                "threads are kept",
+                false,
+                move |this, cx| this.remove_project(&h, &pid, cx),
+                cx,
+            ));
+        }
+    }
+    if link_open {
+        actions.push(menu::header("Link into"));
+        for other in all.iter().filter(|o| o.key != key) {
+            let (k, target) = (key.clone(), other.key.clone());
+            let hosts = other.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ");
+            actions.push(menu::item(
+                format!("lnk/{}", other.key),
+                other.name.clone(),
+                hosts,
+                false,
+                move |this, cx| this.link_group(&k, Some(&target), cx),
+                cx,
+            ));
+        }
+        if all.len() < 2 {
+            actions.push(menu::header("No other projects"));
+        }
+    }
+
+    let small_button = |id: String| {
+        div()
+            .id(SharedString::from(id))
+            .relative()
+            .size(px(24.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .hover(|d| d.bg(rgba(theme::t().line)))
+    };
+    let k = key.clone();
+    let pin = small_button(format!("pin/{key}"))
+        .when(!pinned, |d| d.opacity(0.5).group_hover("row", |d| d.opacity(1.)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.set_project_pinned(&k, !pinned, cx)
+        }))
+        .child(icon("pin", if pinned { theme::t().warn } else { theme::t().fg_2 }).size(px(14.)));
+    let open = menu_open || link_open;
+    let k = key.clone();
+    let more = small_button(format!("pm/{key}"))
+        .opacity(if open { 1. } else { 0. })
+        .group_hover("row", |d| d.opacity(1.))
+        .when(open, |d| d.bg(rgba(theme::t().line)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_menu(Menu::Project { group_key: k.clone() }, cx)
+        }))
+        .child(icon("ellipsis", theme::t().fg_1))
+        .children(open.then(|| menu::popup(Side::Below(24.), actions, cx)));
+    let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
+    hosts.dedup(); // members come sorted by host
+    let hosts = hosts.join(", ");
+    entry_row(format!("proj/{key}"), &key, cx)
+        .child(pin)
+        .child(div().w(px(160.)).flex_shrink_0().truncate().font_weight(FontWeight::MEDIUM).child(g.name.clone()))
+        .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(hosts))
+        .child(thread_count(g.threads.len()))
+        .child(more)
+        .into_any_element()
 }
 
 /// Settings: a narrow centered column of sections. For now just Hosts: every host with
@@ -399,7 +580,7 @@ fn thread_row(
         .child(column(150.).text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
         .child(column(32.).text_right().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
         // Rows that can't be snoozed keep an empty slot, so the columns stay aligned.
-        .child(if matches!(status, Status::Asking | Status::Done | Status::Snoozed) {
+        .child(if this.snoozable(host, t) {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| this.set_snoozed(&h3, &id3, !snoozed, cx))
                 .into_any_element()

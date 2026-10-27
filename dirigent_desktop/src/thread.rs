@@ -100,7 +100,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .items_center()
         .gap_1()
         .font_weight(FontWeight::NORMAL)
-        .when(matches!(status, Status::Asking | Status::Done | Status::Snoozed), |d| {
+        .when(summary.as_ref().is_some_and(|s| this.snoozable(&host, s)), |d| {
             // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
             d.child(theme::tinted_icon_button(
                 "hdr-snooze",
@@ -381,7 +381,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             ));
         }
         if items.is_empty() {
-            items.push(menu::header("No projects yet. Add one with + in the sidebar."));
+            items.push(menu::header("No projects yet. Add one with the folder in the sidebar."));
         }
         menu::popup(Side::Below(26.), items, cx)
     });
