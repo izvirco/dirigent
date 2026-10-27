@@ -92,31 +92,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             cx,
         )
     });
-    // Archiving a thread with a workspace: remove it (uncommitted changes go with it), or
-    // leave it on disk for the user and just let the thread go.
-    let archive_open = this.menu == Some(Menu::ConfirmArchive);
-    let archive_confirm = archive_open.then(|| {
-        let (h, i) = (host.clone(), id.clone());
-        let (h2, i2) = (host.clone(), id.clone());
-        let dirty = workspace.as_deref().and_then(|w| this.vcs_of(&host, w)).is_some_and(|v| v.dirty);
-        let note = if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." };
-        menu::popup(
-            Side::BelowRight(26.),
-            vec![
-                menu::header(note),
-                menu::danger("arch-rm", "Archive and remove workspace", move |this, cx| this.archive_with_workspace(&h, &i, false, cx), cx),
-                menu::item(
-                    "arch-keep",
-                    "Archive, keep workspace on disk",
-                    "",
-                    false,
-                    move |this, cx| this.archive_with_workspace(&h2, &i2, true, cx),
-                    cx,
-                ),
-            ],
-            cx,
-        )
-    });
+    let archive_confirm = archive_confirm(&host, &id, Side::BelowRight(26.), this, cx);
+    let archive_open = archive_confirm.is_some();
     let actions = div()
         .flex()
         .flex_row()
@@ -299,6 +276,36 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         .children(empty)
         .child(handle);
     Some(panel)
+}
+
+/// The `ConfirmArchive` popup for this thread, if it is the one asking: archive it and
+/// remove its workspace (uncommitted changes go with it), or leave the workspace on disk
+/// for the user and just let the thread go. Goes under the archive button that was clicked.
+pub fn archive_confirm(host: &str, id: &str, side: Side, this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+    if this.menu.as_ref() != Some(&Menu::ConfirmArchive { host: host.to_owned(), id: id.to_owned() }) {
+        return None;
+    }
+    let workspace = this.summary(host, id)?.workspace.clone();
+    let dirty = workspace.as_deref().and_then(|w| this.vcs_of(host, w)).is_some_and(|v| v.dirty);
+    let note = if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." };
+    let (h, i) = (host.to_owned(), id.to_owned());
+    let (h2, i2) = (host.to_owned(), id.to_owned());
+    Some(menu::popup(
+        side,
+        vec![
+            menu::header(note),
+            menu::danger("arch-rm", "Archive and remove workspace", move |this, cx| this.archive_with_workspace(&h, &i, false, cx), cx),
+            menu::item(
+                "arch-keep",
+                "Archive, keep workspace on disk",
+                "",
+                false,
+                move |this, cx| this.archive_with_workspace(&h2, &i2, true, cx),
+                cx,
+            ),
+        ],
+        cx,
+    ))
 }
 
 /// A workspace's name is its directory's basename: the host names the directory, the git

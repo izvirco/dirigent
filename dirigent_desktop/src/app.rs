@@ -271,8 +271,12 @@ pub enum Menu {
     NewProjectHost,
     /// Thread header: confirm deletion.
     ConfirmDelete,
-    /// Thread header: archiving a thread that has a workspace asks what to do with it.
-    ConfirmArchive,
+    /// Archiving a thread that has a workspace asks what to do with it, under whichever
+    /// archive button was clicked (thread header, sidebar card, list row).
+    ConfirmArchive {
+        host: String,
+        id: String,
+    },
     /// Composer chip on a thread: move into / out of a workspace.
     Workspace,
     /// The `New workspace from` popup (`base_search` over the repo's refs) behind the
@@ -1389,12 +1393,10 @@ impl Dirigent {
     }
 
     pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, cx: &mut Context<Self>) {
-        // Archiving a thread that owns a workspace asks what to do with it, from its header.
-        if archived && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) && self.menu != Some(Menu::ConfirmArchive) {
-            if !self.open().is_some_and(|t| t.host == host && t.id == thread_id) {
-                self.select_thread(host, thread_id, cx);
-            }
-            self.menu = Some(Menu::ConfirmArchive);
+        // Archiving a thread that owns a workspace asks what to do with it (`thread::archive_confirm`).
+        let confirm = Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned() };
+        if archived && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) && self.menu.as_ref() != Some(&confirm) {
+            self.menu = Some(confirm);
             self.request_thread_vcs(host, thread_id);
             cx.notify();
             return;
@@ -2637,7 +2639,7 @@ impl Dirigent {
         }
         self.menu = if self.menu.as_ref() == Some(&menu) { None } else { Some(menu) };
         // The workspace menus say whether there is uncommitted work: ask again as they open.
-        if matches!(self.menu, Some(Menu::Workspace | Menu::Base | Menu::ConfirmArchive))
+        if matches!(self.menu, Some(Menu::Workspace | Menu::Base))
             && let Some((host, id)) = self.open().map(|t| (t.host.clone(), t.id.clone()))
         {
             self.request_thread_vcs(&host, &id);
