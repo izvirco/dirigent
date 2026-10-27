@@ -20,6 +20,7 @@ mod theme;
 mod thread;
 mod usage;
 mod view;
+mod working;
 
 use app::{Abort, Dirigent, NewThread, Quit, ToggleLog, ToggleSidebar};
 use cache::Cache;

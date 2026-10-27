@@ -840,24 +840,6 @@ impl Streaming {
         self.running_tools.iter().find(|(i, _)| i == id).map(|(_, t)| *t)
     }
 
-    /// What the model is doing right now, for the work line: the running tool (named from
-    /// `steps`, the run's persisted and streamed steps) and its elapsed time, else the kind
-    /// of step being streamed.
-    pub fn activity(&self, steps: &[Step], now: i64) -> Option<String> {
-        if let Some((id, since)) = self.running_tools.last() {
-            let name = steps.iter().rev().find_map(|s| match s {
-                Step::Tool(t) if &t.id == id => Some(t.name.as_str()),
-                _ => None,
-            });
-            return Some(format!("{} {}", name.unwrap_or("tool"), crate::thread::elapsed(now - since)));
-        }
-        match self.steps.last()? {
-            Step::Thinking(_) => Some("thinking".into()),
-            Step::Text(_) => Some("writing".into()),
-            Step::Tool(_) | Step::Steer { .. } | Step::Notice(_) | Step::CacheMiss(_) | Step::Child { .. } => None,
-        }
-    }
-
     /// Returns true when the delta completed a line (the only time the view changes).
     fn append(&mut self, idx: usize, delta: Option<&Value>, make: impl FnOnce(String) -> Step) -> bool {
         let delta = delta.and_then(Value::as_str).unwrap_or("");
@@ -1177,19 +1159,5 @@ mod tests {
         assert!(s.running_tools.is_empty());
         s.apply(&json!({"type":"agent_settled"}), 0);
         assert!(s.steps.is_empty());
-    }
-
-    #[test]
-    fn activity_names_the_running_tool() {
-        let tool = Step::Tool(ToolCall { id: "c".into(), name: "bash".into(), ..Default::default() });
-        let w = Work { steps: vec![Step::Text("a".into()), tool], ..Default::default() };
-        let mut s = Streaming::default();
-        assert_eq!(s.activity(&w.steps, 0), None);
-        s.running_tools.push(("c".into(), 1000));
-        assert_eq!(s.activity(&w.steps, 3500).as_deref(), Some("bash 2s"));
-        s.running_tools.clear();
-        s.steps.push(Step::Thinking("t".into()));
-        assert_eq!(s.activity(&w.steps, 0).as_deref(), Some("thinking"));
-        assert_eq!(w.latest_text(), Some("a"));
     }
 }

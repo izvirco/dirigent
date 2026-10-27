@@ -26,15 +26,15 @@ use crate::ruler;
 use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo};
 use crate::view::{Item, Stats, Step, ToolCall, Work};
+use crate::working;
 use dirigent_protocol::PromptMode;
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, Context, Div, ElementId, Focusable, FontWeight, HighlightStyle, MouseButton, ObjectFit,
-    SharedString, Stateful, StyledText, Window, anchored, deferred, div, img, list, point, prelude::*, px, relative, rgba,
+    Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, Window, anchored,
+    deferred, div, img, list, point, prelude::*, px, relative, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 /// Work key for the run in progress while it has no persisted item yet.
 pub const TAIL: usize = usize::MAX;
@@ -1569,9 +1569,9 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys
         .when(queued, |d| d.child(div().flex_shrink_0().text_color(rgba(theme::t().fg_2)).child("queued")))
 }
 
-/// A turn's work as one line: `› model effort · 1m 23s · 4 tool calls`, plus what it is
-/// doing right now while `live` (`· bash 3.2s`). Click to show its log in the panel;
-/// tinted while the panel shows it.
+/// A turn's work as one line: `model effort · 1m 23s · 4 tool calls`; while `live`,
+/// `· Working for 12s ·` and the line animated (`working.rs`). Click to show its log in the
+/// panel; tinted while the panel shows it.
 fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mut Context<Dirigent>) -> AnyElement {
     let shown = t.log == Some(key);
     let tools = match w.tool_count() {
@@ -1579,63 +1579,21 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
         1 => "1 tool call".to_owned(),
         n => format!("{n} tool calls"),
     };
-    let activity = live.then(|| t.streaming.activity(&w.steps, now).unwrap_or_else(|| "waiting".into()));
-    let dot = || div().text_color(rgba(theme::t().fg_2)).child("·");
-    row(step_id(key, usize::MAX))
+    let model = w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned();
+    let time = if live { format!("Working for {}", elapsed(now - w.started)) } else { duration(w.duration(now)) };
+    let parts: Vec<String> =
+        [Some(model), w.effort.clone(), Some("·".into()), Some(time), Some("·".into()), Some(tools)].into_iter().flatten().collect();
+    let row = row(step_id(key, usize::MAX))
         .my_1()
         .gap_2()
         .text_size(px(STEP_SIZE))
+        .text_color(rgba(theme::t().fg_1))
         .when(shown, |d| d.bg(rgba(theme::t().raised)))
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_log(key, cx)))
-        .child(div().text_color(rgba(theme::t().fg)).child(w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned()))
-        .children(w.effort.clone().map(|e| div().text_color(rgba(theme::t().accent_ink)).child(e)))
-        .child(dot())
-        .child(div().text_color(rgba(theme::t().fg_1)).child(if live { elapsed(now - w.started) } else { duration(w.duration(now)) }))
-        .child(dot())
-        .child(div().text_color(rgba(theme::t().fg_1)).child(tools))
-        .children(activity.map(|a| div().flex().flex_row().gap_2().min_w_0().child(dot()).child(activity_text(key, a))))
-        .into_any()
-}
-
-/// One pass of the light over the activity word takes this long...
-const SWEEP: Duration = Duration::from_millis(3600);
-/// ...of which it is in flight for this share; it rests off the word for the remainder.
-const FLIGHT: f32 = 0.7;
-
-/// The activity word while a turn runs (`waiting`, `thinking`, `bash 3s`): the working
-/// colour, with a light passing over its letters every few seconds. The light is a comet,
-/// brightest at its head and fading over a long tail behind it, and it rests between
-/// passes, so the line reads as alive without ever blinking. The phase comes from the
-/// app's shared animation clock, so the element id changing under it (the live work
-/// getting its persisted key) doesn't restart the pass. Under reduced motion gpui
-/// renders it still, at the rest.
-fn activity_text(key: usize, text: String) -> AnyElement {
-    div()
-        .min_w_0()
-        .truncate()
-        .text_color(rgba(theme::t().working))
-        .with_animation(("activity", key), Animation::new(SWEEP).repeat_synced(), move |d, v| d.child(comet(&text, v)))
-        .into_any_element()
-}
-
-/// `text` with each char lit for the light at phase `v` (0..1 of a pass): working colour
-/// for a char far from the light, the full foreground under its head.
-fn comet(text: &str, v: f32) -> StyledText {
-    // How many chars the light falls off over ahead of its head, and behind it.
-    const HEAD: f32 = 0.8;
-    const TAIL: f32 = 3.;
-    // It enters head first and leaves tail last, so each end gets its own clearance:
-    // at both ends of the flight (and through the rest) no char is visibly lit.
-    let n = text.chars().count() as f32;
-    let (from, to) = (-2. * HEAD, n + 2. * TAIL);
-    let pos = from + (to - from) * (v / FLIGHT).min(1.);
-    let (working, fg) = (theme::t().working, theme::t().fg);
-    let lit = text.char_indices().enumerate().map(|(i, (at, c))| {
-        let d = i as f32 + 0.5 - pos;
-        let w = (-(d / if d > 0. { HEAD } else { TAIL }).powi(2)).exp();
-        (at..at + c.len_utf8(), HighlightStyle { color: Some(theme::mix(working, fg, w)), ..Default::default() })
-    });
-    StyledText::new(text.to_owned()).with_highlights(lit)
+        .on_click(cx.listener(move |this, _, _, cx| this.toggle_log(key, cx)));
+    if live {
+        return row.child(working::line(key, parts.join(" "))).into_any();
+    }
+    row.children(parts.into_iter().map(|p| div().when(p == "·", |d| d.text_color(rgba(theme::t().fg_2))).child(p))).into_any()
 }
 
 /// The work the log panel shows (`t.log`) and whether it is the run in progress.
