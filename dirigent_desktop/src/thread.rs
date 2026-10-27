@@ -522,10 +522,7 @@ fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
 fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let t = theme::t();
     let picker_open = this.menu == Some(Menu::Base);
-    let open_picker = |this: &mut Dirigent, window: &mut Window, cx: &mut Context<Dirigent>| match this.menu {
-        Some(Menu::Base) => this.close_menu(cx),
-        _ => this.open_base_picker(window, cx),
-    };
+    let open_picker = |this: &mut Dirigent, window: &mut Window, cx: &mut Context<Dirigent>| this.toggle_base_picker(window, cx);
     match &this.pane {
         Pane::Draft { .. } => {
             let (_, _, info) = this.draft_vcs()?;
