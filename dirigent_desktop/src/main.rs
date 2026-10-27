@@ -22,7 +22,7 @@ mod usage;
 mod view;
 mod working;
 
-use app::{Abort, Dirigent, NewThread, Quit, ToggleLog, ToggleSidebar};
+use app::{Dirigent, Dismiss, NewThread, Quit, ToggleLog, ToggleSidebar};
 use cache::Cache;
 use dirigent_service::hosts;
 use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
@@ -52,7 +52,7 @@ fn main() {
         cx.bind_keys(input::key_bindings());
         cx.bind_keys([
             KeyBinding::new("ctrl-n", NewThread, Some(app::KEY_CONTEXT)),
-            KeyBinding::new("escape", Abort, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("escape", Dismiss, Some(app::KEY_CONTEXT)),
             // `[` reaches the handler even from inside an input; see `Dirigent::toggle_sidebar`.
             KeyBinding::new("[", ToggleSidebar, Some(app::KEY_CONTEXT)),
             KeyBinding::new("]", ToggleLog, Some(app::KEY_CONTEXT)),

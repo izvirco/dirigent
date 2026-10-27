@@ -718,7 +718,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     });
 
     // One round button in the corner: send, or stop while running. While running, ctrl+Enter
-    // steers and shift+Enter queues a follow-up (see `input::Submitted`); Esc also stops.
+    // steers and shift+Enter queues a follow-up (see `input::Submitted`).
     let action = if running {
         div()
             .id("stop")

@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-actions!(dirigent, [NewThread, Abort, ToggleSidebar, ToggleLog, Quit]);
+actions!(dirigent, [NewThread, Dismiss, ToggleSidebar, ToggleLog, Quit]);
 
 pub const KEY_CONTEXT: &str = "Dirigent";
 const TOAST_TTL: Duration = Duration::from_secs(8);
@@ -1027,7 +1027,8 @@ impl Dirigent {
         }
     }
 
-    /// Persist the pane so the next launch resumes there. The draft page and the new-project
+    /// Persist the pane so the next launch resumes there and Esc on a settings page goes
+    /// back to it (`close_settings`). The settings pages, the draft page and the new-project
     /// form leave the last stored pane alone (the draft's text is kept by `save_draft`, the
     /// page itself isn't).
     fn remember_pane(&self) {
@@ -1036,24 +1037,35 @@ impl Dirigent {
             Pane::Workpool => "workpool".to_owned(),
             Pane::Project { group_key } => format!("project\n{group_key}"),
             Pane::Thread(t) => format!("thread\n{}\n{}", t.host, t.id),
-            Pane::Config => "config".to_owned(),
-            Pane::Settings => "settings".to_owned(),
-            Pane::Usage => "usage".to_owned(),
-            Pane::Draft { .. } | Pane::NewProject { .. } => return,
+            Pane::Config | Pane::Settings | Pane::Usage | Pane::Draft { .. } | Pane::NewProject { .. } => return,
         };
         let _ = self.cache.lock().unwrap().set(PANE_KEY, &value);
     }
 
-    /// Reopen the pane stored by `remember_pane`; a thread only if the cache still knows it.
+    /// Reopen the pane stored by `remember_pane`.
     fn restore_pane(&mut self, cx: &mut Context<Self>) {
         let Some(value) = self.cache.lock().unwrap().get(PANE_KEY) else { return };
+        self.open_pane(&value, cx);
+    }
+
+    /// Esc on a settings page: back to the pane stored by `remember_pane`. The inbox goes
+    /// first: it is the fallback when that pane is gone, and `show` does the housekeeping
+    /// (menu, selection, focus) that `open_pane` doesn't.
+    fn close_settings(&mut self, cx: &mut Context<Self>) {
+        let back = self.cache.lock().unwrap().get(PANE_KEY);
+        self.show(Pane::Inbox, cx);
+        if let Some(value) = back {
+            self.open_pane(&value, cx);
+            self.remember_pane();
+        }
+    }
+
+    /// Open a pane stored by `remember_pane`; a thread only if the cache still knows it.
+    /// Anything else leaves the pane as it is.
+    fn open_pane(&mut self, value: &str, cx: &mut Context<Self>) {
         let parts: Vec<&str> = value.split('\n').collect();
         match parts.as_slice() {
             ["workpool"] => self.set_pane(Pane::Workpool, cx),
-            ["config"] => self.show_config(cx),
-            ["settings"] => self.set_pane(Pane::Settings, cx),
-            // The hosts aren't connected yet; the request goes out as each one connects.
-            ["usage"] => self.set_pane(Pane::Usage, cx),
             ["project", key] => self.set_pane(Pane::Project { group_key: (*key).to_owned() }, cx),
             ["thread", host, id] if self.summary(host, id).is_some() => {
                 let (host, id) = ((*host).to_owned(), (*id).to_owned());
@@ -2357,8 +2369,8 @@ impl Dirigent {
     }
 
     /// Escape: close the image preview or the open menu, drop the text selection, else
-    /// stop the running agent, else close the log panel.
-    pub fn abort(&mut self, _: &Abort, _: &mut Window, cx: &mut Context<Self>) {
+    /// close the log panel or leave the settings pages. Never stops the agent.
+    pub fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
         if self.preview.is_some() {
             self.set_preview(None, cx);
             return;
@@ -2371,11 +2383,11 @@ impl Dirigent {
             cx.notify();
             return;
         }
-        if self.is_running() {
-            self.stop(cx);
-        } else if self.panel_open() {
+        if self.panel_open() {
             self.close_panel();
             cx.notify();
+        } else if is_settings(&self.pane) {
+            self.close_settings(cx);
         }
     }
 
@@ -2755,6 +2767,11 @@ fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
     }
 }
 
+/// The settings pages: Config, Hosts, Usage.
+fn is_settings(pane: &Pane) -> bool {
+    matches!(pane, Pane::Config | Pane::Settings | Pane::Usage)
+}
+
 /// Attachments as the cache stores them.
 fn image_rows(images: &[Attachment]) -> Vec<(u32, &str, &[u8])> {
     images.iter().map(|a| (a.n, a.image.format.mime_type(), a.image.bytes.as_slice())).collect()
@@ -2819,7 +2836,7 @@ impl Render for Dirigent {
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::new_thread))
-            .on_action(cx.listener(Self::abort))
+            .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_log_key))
             .on_action(|_: &Quit, _, cx| cx.quit())
