@@ -5,6 +5,7 @@
 //! `dirigent_service` binary is a thin wrapper for remote hosts.
 
 mod blobs;
+mod dirs;
 mod git;
 pub mod hosts;
 mod runtime;
@@ -108,6 +109,7 @@ impl Service {
         let id = match &req {
             ClientMessage::ListProjects { id }
             | ClientMessage::AddProject { id, .. }
+            | ClientMessage::ListDirs { id, .. }
             | ClientMessage::RemoveProject { id, .. }
             | ClientMessage::ListThreads { id }
             | ClientMessage::GetThread { id, .. }
@@ -145,14 +147,18 @@ impl Service {
                 ServerMessage::Projects { reply_to: Some(id), projects: self.storage.lock().unwrap().list_projects()? }
             }
             ClientMessage::AddProject { id, path } => {
-                let path = std::path::PathBuf::from(path.trim());
-                anyhow::ensure!(path.is_absolute(), "path must be absolute");
+                let path = dirs::expand(&path)?;
                 anyhow::ensure!(path.is_dir(), "not a directory on this host: {}", path.display());
                 let origin = git::origin(&path);
                 let project_id = uuid::Uuid::now_v7().to_string();
                 let project = self.storage.lock().unwrap().add_project(&project_id, &path.to_string_lossy(), origin.as_deref(), now())?;
                 self.push_projects();
                 ServerMessage::ProjectAdded { reply_to: id, project }
+            }
+            ClientMessage::ListDirs { id, path } => {
+                // A big directory is many stats: off the async workers.
+                let dir = dirs::expand(&path)?;
+                ServerMessage::Dirs { reply_to: id, dirs: tokio::task::spawn_blocking(move || dirs::list(&dir)).await?? }
             }
             ClientMessage::RemoveProject { id, project_id } => {
                 self.storage.lock().unwrap().remove_project(&project_id, now())?;

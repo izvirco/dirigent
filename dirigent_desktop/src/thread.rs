@@ -746,7 +746,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .bg(rgba(if ready { theme::t().accent } else { theme::t().hover }))
             .hover(|d| d.bg(rgba(if ready { theme::t().accent_active } else { theme::t().line })))
             .on_click(cx.listener(|this, _, window, cx| {
-                this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted { queued: false }));
+                this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted { queued: false, ctrl: true }));
                 window.focus(&this.composer.focus_handle(cx), cx);
             }))
             .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))

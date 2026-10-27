@@ -4,6 +4,8 @@
 //! A project lives on one host. Projects on different hosts are shown as one group when
 //! they share a normalized git origin (automatic) or the user linked them (manual, stored
 //! in the desktop cache as a group key). Threads whose project was removed are orphans.
+//! A group shows its directory's name unless the user renamed it (desktop cache, by group
+//! key; the directory is untouched).
 
 use crate::net::HostStatus;
 use dirigent_protocol::{ModelInfo, Project, ThreadSummary};
@@ -24,6 +26,9 @@ pub const ORPHANS: &str = "orphans";
 /// (host, project id) → manual group key.
 pub type Links = HashMap<(String, String), String>;
 
+/// Group key → the name the user gave the group (UI only; else its directory's basename).
+pub type Names = HashMap<String, String>;
+
 pub struct Member {
     pub host: String,
     pub project: Project,
@@ -31,8 +36,10 @@ pub struct Member {
 
 pub struct Group {
     pub key: String,
-    /// Basename of the first member's path.
+    /// The name the user gave it, else `dir_name`.
     pub name: String,
+    /// The basename of its first member's path: its name unless renamed.
+    pub dir_name: String,
     pub members: Vec<Member>,
     /// (host, thread), most recent first.
     pub threads: Vec<(String, ThreadSummary)>,
@@ -67,7 +74,7 @@ pub fn basename(path: &str) -> &str {
 }
 
 /// Groups by most recent activity (then name); plus orphan threads (most recent first).
-pub fn groups(hosts: &[HostState], links: &Links) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
+pub fn groups(hosts: &[HostState], links: &Links, names: &Names) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
     let mut by_key: HashMap<String, Group> = HashMap::new();
     let mut seen: Vec<String> = vec![];
     for host in hosts {
@@ -76,7 +83,9 @@ pub fn groups(hosts: &[HostState], links: &Links) -> (Vec<Group>, Vec<(String, T
             let manual = links.contains_key(&(host.name.clone(), project.id.clone()));
             let group = by_key.entry(key.clone()).or_insert_with(|| {
                 seen.push(key.clone());
-                Group { key: key.clone(), name: basename(&project.path).to_owned(), members: vec![], threads: vec![], manual: false }
+                let dir_name = basename(&project.path).to_owned();
+                let name = names.get(&key).cloned().unwrap_or_else(|| dir_name.clone());
+                Group { key: key.clone(), name, dir_name, members: vec![], threads: vec![], manual: false }
             });
             group.manual |= manual;
             group.members.push(Member { host: host.name.clone(), project: project.clone() });
@@ -187,7 +196,7 @@ mod tests {
         let mut links = Links::new();
         links.insert(("box".into(), "m".into()), "local/n".into());
 
-        let (groups, orphans) = groups(&hosts, &links);
+        let (groups, orphans) = groups(&hosts, &links, &Names::new());
         assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["app", "notes"]);
         let app = &groups[0];
         assert_eq!(app.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>(), ["box", "local"]);
@@ -212,8 +221,8 @@ mod tests {
             vec![project("a", "/a", None), project("b", "/b", None), project("c", "/c", None)],
             vec![thread("t1", Some("a"), 1), thread("t2", Some("b"), 2), thread("t3", Some("c"), 3)],
         )];
-        let (groups, _) = groups(&hosts, &Links::new());
-        assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["c", "b", "a"]); // by activity
+        let (groups, _) = groups(&hosts, &Links::new(), &[("local/b".to_owned(), "bee".to_owned())].into());
+        assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["c", "bee", "a"]); // by activity; b renamed
         // Pin order, a stale key skipped.
         let pins = ["local/a".into(), "gone".into(), "local/c".into()];
         assert_eq!(pinned(&groups, &pins).iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["a", "c"]);

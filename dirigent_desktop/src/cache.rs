@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS projects (
     PRIMARY KEY (host, id)
 );
 CREATE TABLE IF NOT EXISTS links (host TEXT NOT NULL, project_id TEXT NOT NULL, group_key TEXT NOT NULL, PRIMARY KEY (host, project_id));
+CREATE TABLE IF NOT EXISTS project_names (group_key TEXT PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS threads (
     host TEXT NOT NULL, id TEXT NOT NULL, project_id TEXT, cwd TEXT NOT NULL, name TEXT,
     model TEXT, thinking_level TEXT,
@@ -143,6 +144,22 @@ impl Cache {
                 .conn
                 .execute("INSERT OR REPLACE INTO links (host, project_id, group_key) VALUES (?1, ?2, ?3)", params![host, project_id, k])?,
             None => self.conn.execute("DELETE FROM links WHERE host = ?1 AND project_id = ?2", params![host, project_id])?,
+        };
+        Ok(())
+    }
+
+    /// Names the user gave project groups (UI only; the directory keeps its name): group key → name.
+    pub fn project_names(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare("SELECT group_key, name FROM project_names")?;
+        Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_project_name(&self, group_key: &str, name: Option<&str>) -> Result<()> {
+        match name {
+            Some(n) => {
+                self.conn.execute("INSERT OR REPLACE INTO project_names (group_key, name) VALUES (?1, ?2)", params![group_key, n])?
+            }
+            None => self.conn.execute("DELETE FROM project_names WHERE group_key = ?1", [group_key])?,
         };
         Ok(())
     }
