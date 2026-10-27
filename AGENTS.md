@@ -1,6 +1,6 @@
 # Dirigent — notes for agents
 
-Read `plan.md` (architecture) and `testing.md` (how to drive the UI) first.
+Read `testing.md` (how to drive the UI) first.
 
 ## Rules
 

@@ -1,5 +1,5 @@
 //! dirigent_service: owns this host's threads (sqlite), drives the pi runtime,
-//! and serves them to desktops over WebSocket. See plan.md §3.
+//! and serves them to desktops over WebSocket.
 //!
 //! A library so the desktop can run the local service in-process (`run`); the
 //! `dirigent_service` binary is a thin wrapper for remote hosts.
