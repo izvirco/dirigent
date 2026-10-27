@@ -1,6 +1,6 @@
-//! Lucide icons (ISC, see assets/icons/LICENSE), embedded in the binary and served to
-//! gpui's `svg()` through an `AssetSource`. Add an icon: drop the svg in assets/icons
-//! and list it here.
+//! Lucide icons (ISC) and the lab logos from Simple Icons (CC0), see assets/icons/LICENSE,
+//! embedded in the binary and served to gpui's `svg()` through an `AssetSource`. Add an
+//! icon: drop the svg in assets/icons and list it here.
 
 use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, px, rgba, svg};
 use std::borrow::Cow;
@@ -23,6 +23,7 @@ icons!(
     "circle-check",
     "circle-help",
     "circle-x",
+    "claude",
     "copy",
     "corner-down-right",
     "ellipsis",
@@ -32,6 +33,7 @@ icons!(
     "list",
     "message-circle-question",
     "moon",
+    "openai",
     "panel-left-close",
     "panel-left-open",
     "panel-right-close",
@@ -39,7 +41,9 @@ icons!(
     "pin",
     "play",
     "plus",
+    "server",
     "settings",
+    "sparkles",
     "square",
     "trash-2",
     "triangle-alert",

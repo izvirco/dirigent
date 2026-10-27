@@ -4,6 +4,7 @@
 //! slides in as a floating panel while the mouse rests on the left edge.
 
 use crate::app::{Dirigent, Menu, Pane, Resize, Section, Target};
+use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
@@ -290,7 +291,7 @@ fn section(
                 (None, Some(ms)) => duration(ms),
                 (None, None) => String::new(),
             };
-            thread_card(host, t, elapsed, this.hosts.len() > 1, this, cx)
+            thread_card(host, t, elapsed, this, cx)
         })
         .collect();
     // Count every thread the page lists (snoozed ones too), not just the cards.
@@ -341,55 +342,61 @@ fn nav_row(
         .child(fold)
 }
 
-/// A thread under Inbox / Workpool: `project, host … elapsed` / title / model. The title
-/// is amber while the model waits on an answer, accent while the thread is unread, and led by an amber pin while pinned. Hovering a finished thread swaps its run
-/// time for a snooze button, which drops it from the sidebar until its next run.
-fn thread_card(
-    host: &str,
-    t: &ThreadSummary,
-    elapsed: String,
-    show_host: bool,
-    this: &Dirigent,
-    cx: &mut Context<Dirigent>,
-) -> Stateful<Div> {
+/// A thread under Inbox / Workpool: `project … elapsed` / title / `branch … [server] logo`.
+/// The title is amber while the model waits on an answer, accent while the thread is
+/// unread, and led by an amber pin while pinned. The last line has the thread's
+/// workspace name or branch (`vcs_label`) and the logo of the model's lab, preceded by a
+/// server icon when the thread lives on another host. Hovering a finished thread swaps
+/// its run time for snooze (drops it from the sidebar until its next run) and archive
+/// buttons; hovering any card opens `specs` to its right.
+fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
+    let hovered = this.hovered_card.as_ref().is_some_and(|(hh, i)| hh == host && *i == t.id);
     let unread = this.unread(host, t);
     let pinned = t.pinned;
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
     let titling = this.titling(host, &t.id);
     let title_id = SharedString::from(format!("title/{h}/{id}"));
-    let mut place = this.project_name(host, t);
-    if show_host {
-        place = if place.is_empty() { host.to_owned() } else { format!("{place}, {host}") };
-    }
-    let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
+    let place = this.project_name(host, t);
+    let vcs = vcs_label(host, t, this);
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
-    // Run time and snooze button are stacked so swapping them on hover doesn't shift layout.
-    let snooze = this.status(host, t).finished().then(|| {
-        let (h, id) = (h.clone(), id.clone());
+    type Action = Box<dyn Fn(&mut Dirigent, &mut Context<Dirigent>)>;
+    let button = |id: String, name: &'static str, on_click: Action| {
         div()
-            .id(SharedString::from(format!("snooze/{h}/{id}")))
-            .absolute()
-            .top(px(-4.))
-            .right(px(-4.))
+            .id(SharedString::from(id))
             .size(px(20.))
             .flex()
             .items_center()
             .justify_center()
             .rounded_sm()
-            .opacity(0.)
-            .group_hover("card", |d| d.opacity(1.))
             .hover(|d| d.bg(rgba(theme::t().line)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 cx.stop_propagation();
-                this.set_snoozed(&h, &id, true, cx)
+                on_click(this, cx)
             }))
-            .child(icon("moon", theme::t().fg_1))
+            .child(icon(name, theme::t().fg_1))
+    };
+    // Run time and the buttons are stacked so swapping them on hover doesn't shift layout.
+    let actions = this.status(host, t).finished().then(|| {
+        let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
+        div()
+            .absolute()
+            .top(px(-4.))
+            .right(px(-4.))
+            .flex()
+            .flex_row()
+            .gap_0p5()
+            .opacity(0.)
+            .group_hover("card", |d| d.opacity(1.))
+            .child(button(format!("snooze/{h}/{id}"), "moon", Box::new(move |this, cx| this.set_snoozed(&h1, &id1, true, cx))))
+            .child(button(format!("archive/{h}/{id}"), "archive", Box::new(move |this, cx| this.set_archived(&h2, &id2, true, cx))))
     });
+    let (h1, id1) = (h.clone(), id.clone());
     div()
         .id(SharedString::from(format!("card/{h}/{id}")))
         .group("card")
+        .relative()
         .flex()
         .flex_col()
         .gap_0p5()
@@ -400,13 +407,22 @@ fn thread_card(
         .when(selected, |d| d.bg(rgba(theme::t().hover)))
         .hover(|d| d.bg(rgba(theme::t().hover)))
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &id, cx)))
+        .on_hover(cx.listener(move |this, over, _, cx| {
+            let me = (h1.clone(), id1.clone());
+            if *over {
+                this.hovered_card = Some(me);
+            } else if this.hovered_card == Some(me) {
+                this.hovered_card = None;
+            }
+            cx.notify();
+        }))
         .child(
             div().flex().flex_row().items_center().gap_2().child(small(place, theme::t().fg_2).flex_1()).child(
                 div()
                     .relative()
                     .flex_shrink_0()
-                    .child(small(elapsed, theme::t().fg_2).when(snooze.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))))
-                    .children(snooze),
+                    .child(small(elapsed.clone(), theme::t().fg_2).when(actions.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))))
+                    .children(actions),
             ),
         )
         .child(
@@ -421,7 +437,71 @@ fn thread_card(
                 .children(pinned.then(theme::pin_mark))
                 .child(theme::title_text(title_id, title, titling)),
         )
-        .when(!model.is_empty(), |d| d.child(small(model, theme::t().fg_2)))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1p5()
+                .child(small(vcs, theme::t().fg_2).flex_1())
+                .children((host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(px(12.))))
+                .children(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(px(12.)))),
+        )
+        .children(hovered.then(|| menu::popup(Side::Right, specs(host, t, elapsed, this), cx)))
+}
+
+/// The thread's place in version control: its workspace name (also its git branch / jj
+/// workspace, see the service's `workspace_name`), else the branch (git) or change id (jj)
+/// of its directory as last probed (`Dirigent::request_sidebar_vcs`); "" until known.
+fn vcs_label(host: &str, t: &ThreadSummary, this: &Dirigent) -> String {
+    match &t.workspace {
+        Some(w) => projects::basename(w).to_owned(),
+        None => this.vcs_of(host, &t.cwd).and_then(|v| v.branch.clone()).unwrap_or_default(),
+    }
+}
+
+/// Icon of the lab behind a `provider/model` key: by provider, else by model family (a
+/// gateway like openrouter serves both), else a generic spark.
+fn lab_logo(model: &str) -> &'static str {
+    let (provider, name) = model.split_once('/').unwrap_or(("", model));
+    if provider == "anthropic" || name.contains("claude") {
+        "claude"
+    } else if provider == "openai" || name.starts_with("gpt") || name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4")
+    {
+        "openai"
+    } else {
+        "sparkles"
+    }
+}
+
+/// The hovered card's popup: the title, then one line each for what the card abbreviates:
+/// `project, host` / model (effort) / workspace name or branch / run time.
+fn specs(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent) -> Vec<AnyElement> {
+    let model = match (&t.model, &t.thinking_level) {
+        (Some(m), Some(e)) => format!("{m} ({e})"),
+        (Some(m), None) => m.clone(),
+        (None, _) => String::new(),
+    };
+    let vcs = vcs_label(host, t, this);
+    let run = match (elapsed.is_empty(), t.running()) {
+        (true, _) => String::new(),
+        (false, true) => format!("running for {elapsed}"),
+        (false, false) => format!("last run {elapsed}"),
+    };
+    let line = |value: String| div().px_2().py_0p5().max_w(px(360.)).truncate().text_size(px(12.)).child(value).into_any();
+    let mut rows = vec![
+        div()
+            .px_2()
+            .py_0p5()
+            .max_w(px(360.))
+            .truncate()
+            .font_weight(FontWeight::MEDIUM)
+            .child(t.name.clone().unwrap_or_else(|| "Untitled".into()))
+            .into_any(),
+        line(format!("{}, {host}", this.project_name(host, t))),
+    ];
+    rows.extend([model, vcs, run].into_iter().filter(|s| !s.is_empty()).map(line));
+    rows
 }
 
 /// Trailing count on a `row`; its margin is the row's right inset, so it ends where the
