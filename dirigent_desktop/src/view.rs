@@ -24,8 +24,6 @@ pub enum Item {
     Compaction,
     /// Informational line (warnings, unknown entries, ...).
     Notice(String),
-    /// The turn's last request re-billed what the cache should have held (`CacheBaseline`).
-    CacheMiss(String),
     /// A sub-agent of this thread finished (`dirigent:child`) between turns: `text` is the
     /// notice line, the thread is a click away.
     Child {
@@ -61,7 +59,7 @@ pub enum Step {
     /// Something that reached the model mid-run on its own: an `async_bash` job ending.
     Notice(String),
     /// A request of the run re-billed what the cache should have held (`CacheBaseline`).
-    /// Shown under the work line like `Child`, and in the log.
+    /// Shown only in the log, not in the transcript.
     CacheMiss(String),
     /// A sub-agent started (the model's `dirigent` spawn) or finished (`dirigent:child`)
     /// during the run. Shown under the work line like `Item::Child`, and in the log.
@@ -484,8 +482,9 @@ impl Timeline {
             msg.get("errorMessage").and_then(Value::as_str).map(str::to_owned).or((stop == Some("aborted")).then(|| "aborted".into()));
         // A failed request's miss isn't shown (pi doesn't either); it still moved the baseline.
         let miss = miss.filter(|_| error.is_none());
+        // Misses go in the work, for the log; one keeps a turn's otherwise empty work.
+        self.work_mut(ix).steps.extend(miss.map(Step::CacheMiss));
         if calls_tools && error.is_none() {
-            self.work_mut(ix).steps.extend(miss.map(Step::CacheMiss));
             return Some(ix);
         }
         // The turn is over: close the work (drop it if nothing happened) and add the reply.
@@ -499,10 +498,6 @@ impl Timeline {
         }
         if let Some(e) = error {
             self.add(Item::Error(e));
-        }
-        // After the reply, as pi has it; an item, since the work may have been dropped.
-        if let Some(m) = miss {
-            self.add(Item::CacheMiss(m));
         }
         Some(ix.min(self.items.len().saturating_sub(1)))
     }
@@ -1043,7 +1038,7 @@ mod tests {
 
     /// Misses as pi counts them: against the previous request, reset by a compaction,
     /// re-based by a cache warm, hidden on failed requests, priced at the model's last
-    /// read rate; mid-run they go in the work, at a turn's end after the reply.
+    /// read rate; they go in the work (for the log), never in the transcript.
     #[test]
     fn cache_misses() {
         // Anthropic-ish rates per token: input 5e-6, cache read 0.5e-6, cache write 6.25e-6.
@@ -1088,7 +1083,6 @@ mod tests {
             .iter()
             .flat_map(|i| match i {
                 Item::Work(w) => w.steps.iter().filter_map(|s| if let Step::CacheMiss(m) = s { Some(m.as_str()) } else { None }).collect(),
-                Item::CacheMiss(m) => vec![m.as_str()],
                 _ => vec![],
             })
             .collect();
@@ -1101,9 +1095,11 @@ mod tests {
                 "cache miss: 30k tokens re-billed (~$0.17)",
             ]
         );
-        // The turn-ending miss comes after the reply.
-        let ix = t.items.iter().position(|i| matches!(i, Item::CacheMiss(_))).unwrap();
-        assert_eq!(t.items[ix - 1], Item::Assistant("ok".into()));
+        // A turn-ending miss keeps its otherwise empty work, before the reply.
+        let ix = t.items.iter().rposition(|i| matches!(i, Item::Work(_))).unwrap();
+        let Item::Work(w) = &t.items[ix] else { unreachable!() };
+        assert_eq!(w.steps, [Step::CacheMiss("cache miss: 30k tokens re-billed (~$0.17)".into())]);
+        assert_eq!(t.items[ix + 1], Item::Assistant("ok".into()));
     }
 
     #[test]

@@ -1301,7 +1301,6 @@ fn render_timeline_item(
             .into_any(),
         Item::Compaction => notice_line(keys.plain("context compacted".to_owned())),
         Item::Notice(text) => notice_line(keys.plain(text.clone())),
-        Item::CacheMiss(text) => cache_line(keys.plain(text.clone())),
         Item::Child { thread_id, text } => child_line(format!("child/{ix}"), &t.host, thread_id, text, cx),
     }
 }
@@ -1330,11 +1329,6 @@ fn child_line(id: String, host: &str, thread_id: &str, text: &str, cx: &mut Cont
 /// A quiet one-liner between messages (compaction, warnings, unknown entries).
 fn notice_line(text: impl IntoElement) -> AnyElement {
     div().w_full().py_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(text).into_any()
-}
-
-/// A cache miss: a notice in amber, since it's money (`view::CacheBaseline`).
-fn cache_line(text: impl IntoElement) -> AnyElement {
-    div().w_full().py_1().text_size(px(12.)).text_color(rgba(theme::t().warn)).child(text).into_any()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1457,7 +1451,8 @@ fn user_bubble(
 
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,
 /// kept after the run), the work line, then the sub-agents it started or that finished
-/// meanwhile (`Step::Child`) and its cache misses. Pending steers are rendered by the tail.
+/// meanwhile (`Step::Child`). Pending steers are rendered by the tail; cache misses show
+/// only in the log.
 #[allow(clippy::too_many_arguments)]
 fn work_block(
     w: &Work,
@@ -1478,7 +1473,6 @@ fn work_block(
         .enumerate()
         .filter_map(|(i, s)| match s {
             Step::Child { thread_id, text } => Some(child_line(format!("child/{key}/{i}"), &t.host, thread_id, text, cx)),
-            Step::CacheMiss(text) => Some(cache_line(keys.plain(text.clone()))),
             _ => None,
         })
         .collect();
