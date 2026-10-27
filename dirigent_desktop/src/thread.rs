@@ -1605,14 +1605,16 @@ const FLIGHT: f32 = 0.7;
 /// The activity word while a turn runs (`waiting`, `thinking`, `bash 3s`): the working
 /// colour, with a light passing over its letters every few seconds. The light is a comet,
 /// brightest at its head and fading over a long tail behind it, and it rests between
-/// passes, so the line reads as alive without ever blinking. Under reduced motion gpui
+/// passes, so the line reads as alive without ever blinking. The phase comes from the
+/// app's shared animation clock, so the element id changing under it (the live work
+/// getting its persisted key) doesn't restart the pass. Under reduced motion gpui
 /// renders it still, at the rest.
 fn activity_text(key: usize, text: String) -> AnyElement {
     div()
         .min_w_0()
         .truncate()
         .text_color(rgba(theme::t().working))
-        .with_animation(("activity", key), Animation::new(SWEEP).repeat(), move |d, v| d.child(comet(&text, v)))
+        .with_animation(("activity", key), Animation::new(SWEEP).repeat_synced(), move |d, v| d.child(comet(&text, v)))
         .into_any_element()
 }
 
@@ -1622,8 +1624,10 @@ fn comet(text: &str, v: f32) -> StyledText {
     // How many chars the light falls off over ahead of its head, and behind it.
     const HEAD: f32 = 0.8;
     const TAIL: f32 = 3.;
+    // It enters head first and leaves tail last, so each end gets its own clearance:
+    // at both ends of the flight (and through the rest) no char is visibly lit.
     let n = text.chars().count() as f32;
-    let (from, to) = (-2. * TAIL, n + 2. * HEAD);
+    let (from, to) = (-2. * HEAD, n + 2. * TAIL);
     let pos = from + (to - from) * (v / FLIGHT).min(1.);
     let (working, fg) = (theme::t().working, theme::t().fg);
     let lit = text.char_indices().enumerate().map(|(i, (at, c))| {
