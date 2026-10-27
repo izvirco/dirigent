@@ -271,11 +271,12 @@ pub enum Menu {
     NewProjectHost,
     /// Thread header: confirm deletion.
     ConfirmDelete,
-    /// Archiving a thread that has a workspace asks what to do with it, under whichever
-    /// archive button was clicked (thread header, sidebar card, list row).
+    /// Archiving a thread that has a workspace asks what to do with it, under the archive
+    /// button that was clicked (`at`: the thread may show in several places at once).
     ConfirmArchive {
         host: String,
         id: String,
+        at: ArchiveAt,
     },
     /// Composer chip on a thread: move into / out of a workspace.
     Workspace,
@@ -288,6 +289,14 @@ pub enum Menu {
     Theme,
     TitleModel,
     TitleEffort,
+}
+
+/// Which archive button opened `Menu::ConfirmArchive`, so only that one shows the popup.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArchiveAt {
+    Header,
+    Sidebar,
+    List,
 }
 
 pub struct Dirigent {
@@ -1274,7 +1283,7 @@ impl Dirigent {
         if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
             t.workspace = None;
         }
-        self.set_archived(host, thread_id, true, cx);
+        self.set_archived(host, thread_id, true, ArchiveAt::Header, cx);
     }
 
     /// Re-render once a second, for as long as the app lives, so every clock on screen
@@ -1392,11 +1401,13 @@ impl Dirigent {
         }
     }
 
-    pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, cx: &mut Context<Self>) {
-        // Archiving a thread that owns a workspace asks what to do with it (`thread::archive_confirm`).
-        let confirm = Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned() };
-        if archived && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) && self.menu.as_ref() != Some(&confirm) {
-            self.menu = Some(confirm);
+    /// Archive / restore a thread. Archiving one that owns a workspace instead asks what to
+    /// do with it (`thread::archive_confirm`, under the button `at`); `archive_with_workspace`
+    /// comes back here once decided.
+    pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, at: ArchiveAt, cx: &mut Context<Self>) {
+        let asking = matches!(&self.menu, Some(Menu::ConfirmArchive { host: h, id, .. }) if h == host && id == thread_id);
+        if archived && !asking && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) {
+            self.menu = Some(Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned(), at });
             self.request_thread_vcs(host, thread_id);
             cx.notify();
             return;

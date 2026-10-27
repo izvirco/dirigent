@@ -3,7 +3,7 @@
 //! buttons. Docked it has a drag handle on its right edge; hidden (`[` or the button) it
 //! slides in as a floating panel while the mouse rests on the left edge.
 
-use crate::app::{Dirigent, Menu, Pane, Resize, Section, Target};
+use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Resize, Section, Target};
 use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -368,7 +368,9 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
     let place = this.project_name(host, t);
     let vcs = vcs_label(host, t, this);
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
-    let archive_confirm = thread::archive_confirm(host, &t.id, Side::Below(20.), this, cx);
+    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Sidebar, Side::Below(20.), this, cx);
+    // The buttons stay (and the run time stays hidden) while the archive popup is open.
+    let asking = archive_confirm.is_some();
     type Action = Box<dyn Fn(&mut Dirigent, &mut Context<Dirigent>)>;
     let button = |id: String, name: &'static str, on_click: Action| {
         div()
@@ -388,7 +390,6 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
     // Run time and the buttons are stacked so swapping them on hover doesn't shift layout.
     let actions = this.status(host, t).finished().then(|| {
         let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
-        let asking = archive_confirm.is_some();
         div()
             .absolute()
             .top(px(-4.))
@@ -400,10 +401,14 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
             .group_hover("card", |d| d.opacity(1.))
             .child(button(format!("snooze/{h}/{id}"), "moon", Box::new(move |this, cx| this.set_snoozed(&h1, &id1, true, cx))))
             .child(
-                button(format!("archive/{h}/{id}"), "archive", Box::new(move |this, cx| this.set_archived(&h2, &id2, true, cx)))
-                    .relative()
-                    .when(asking, |d| d.bg(rgba(theme::t().line)))
-                    .children(archive_confirm),
+                button(
+                    format!("archive/{h}/{id}"),
+                    "archive",
+                    Box::new(move |this, cx| this.set_archived(&h2, &id2, true, ArchiveAt::Sidebar, cx)),
+                )
+                .relative()
+                .when(asking, |d| d.bg(rgba(theme::t().line)))
+                .children(archive_confirm),
             )
     });
     let (h1, id1) = (h.clone(), id.clone());
@@ -435,7 +440,11 @@ fn thread_card(host: &str, t: &ThreadSummary, elapsed: String, this: &Dirigent, 
                 div()
                     .relative()
                     .flex_shrink_0()
-                    .child(small(elapsed.clone(), theme::t().fg_2).when(actions.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))))
+                    .child(
+                        small(elapsed.clone(), theme::t().fg_2)
+                            .when(asking, |d| d.opacity(0.))
+                            .when(actions.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))),
+                    )
                     .children(actions),
             ),
         )

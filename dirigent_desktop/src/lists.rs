@@ -2,7 +2,7 @@
 //! 40px header bar, the new-project form and the settings pages (Hosts here, Config in
 //! `settings.rs`, Usage in `usage.rs`; `settings_header` carries the tabs between them).
 
-use crate::app::{Dirigent, Pane, Target};
+use crate::app::{ArchiveAt, Dirigent, Pane, Target};
 use crate::icons::icon;
 use crate::menu::Side;
 use crate::net::HostStatus;
@@ -343,7 +343,7 @@ fn thread_row(
     let (h3, id3, snoozed) = (h.clone(), id.clone(), status == Status::Snoozed);
     let pinned = t.pinned;
     let archive_icon = if archived { "archive-restore" } else { "archive" };
-    let archive_confirm = thread::archive_confirm(host, &t.id, Side::BelowRight(24.), this, cx);
+    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::List, Side::BelowRight(24.), this, cx);
 
     div()
         .id(SharedString::from(format!("row/{h}/{id}")))
@@ -382,7 +382,7 @@ fn thread_row(
         })
         .child(
             row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, archive_confirm.is_some(), cx, move |this, cx| {
-                this.set_archived(&h2, &id2, !archived, cx)
+                this.set_archived(&h2, &id2, !archived, ArchiveAt::List, cx)
             })
             .relative()
             .children(archive_confirm),
