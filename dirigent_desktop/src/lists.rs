@@ -9,7 +9,8 @@ use crate::net::HostStatus;
 use crate::theme::{self, Status};
 use crate::{hosts, projects, thread};
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, px, rgba, uniform_list};
+use std::ops::Range;
 
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
@@ -19,7 +20,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             pane.child(header(div().child("Inbox"), None)).child(if rows.is_empty() {
                 theme::empty("Nothing waiting", "Threads land here when their agent finishes or asks you something.").into_any_element()
             } else {
-                scroll("inbox", thread_list(&rows, true, this, cx)).into_any_element()
+                thread_list("inbox", rows.into_iter().map(Item::row).collect(), true, cx).into_any_element()
             })
         }
         Pane::Workpool => {
@@ -27,7 +28,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             pane.child(header(div().child("Workpool"), None)).child(if rows.is_empty() {
                 theme::empty("No agents working", "Start one with ctrl n.").into_any_element()
             } else {
-                scroll("workpool", thread_list(&rows, true, this, cx)).into_any_element()
+                thread_list("workpool", rows.into_iter().map(Item::row).collect(), true, cx).into_any_element()
             })
         }
         Pane::Project { group_key } => project_page(this, group_key, pane, cx),
@@ -258,12 +259,6 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
         };
         (g.name.clone(), g.threads.iter().map(|(h, t)| (h.as_str(), t)).collect(), Some(g.member_for(None).into()))
     };
-    let paths = groups
-        .iter()
-        .find(|g| g.key == group_key)
-        .map(|g| g.members.iter().map(|m| format!("{}  {}", m.host, m.project.path)).collect::<Vec<_>>())
-        .unwrap_or_default();
-
     this.sort_as_queue(&mut threads);
     let (active, archived): (Vec<_>, Vec<_>) = threads.into_iter().partition(|(_, t)| !t.archived);
     let new_thread = (group_key != projects::ORPHANS).then(|| {
@@ -273,35 +268,26 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
     });
 
     let title = breadcrumb(None, None, None, name, false, false, cx);
-    let mut body = div().id("project-page").flex_1().overflow_y_scroll().flex().flex_col();
-    if !paths.is_empty() {
-        body = body.child(
-            div()
-                .px_4()
-                .py_2()
-                .border_b_1()
-                .border_color(rgba(theme::t().line_soft))
-                .text_size(px(12.))
-                .text_color(rgba(theme::t().fg_2))
-                .children(paths.into_iter().map(|p| div().child(p))),
-        );
-    }
-    if active.is_empty() && archived.is_empty() {
-        body = body.child(theme::empty("No threads yet", "Start one with New thread."));
+    let body = if active.is_empty() && archived.is_empty() {
+        theme::empty("No threads yet", "Start one with New thread.").into_any_element()
     } else {
-        body = body.child(thread_list(&active, false, this, cx));
+        let mut items: Vec<Item> = active.into_iter().map(Item::row).collect();
         if !archived.is_empty() {
-            body = body.child(section_label(format!("Archived  {}", archived.len()))).child(thread_list(&archived, false, this, cx));
+            items.push(Item::Label(format!("Archived  {}", archived.len())));
+            items.extend(archived.into_iter().map(Item::row));
         }
-    }
+        thread_list(SharedString::from(format!("threads/{group_key}")), items, false, cx).into_any_element()
+    };
     pane.child(header(title, new_thread)).child(body)
 }
 
 /// A band between list sections (`Archived`): the canvas colour at 40% over the panel, a
-/// shade darker than the rows without going solid on a see-through theme.
-pub fn section_label(text: String) -> Div {
+/// shade darker than the rows without going solid on a see-through theme. As tall as a
+/// row: the virtualized list needs uniform items.
+fn section_label(text: String) -> Div {
     div()
-        .h(px(32.))
+        .w_full()
+        .h(px(ROW_H))
         .px_4()
         .flex()
         .items_center()
@@ -315,15 +301,52 @@ pub fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     div().id(id).flex_1().overflow_y_scroll().flex().flex_col().child(content)
 }
 
-/// Flat rows: status glyph, title (amber while asking, accent while unread, an amber pin before it while pinned),
-/// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
-/// moon glyph) and archive.
-fn thread_list(rows: &[(&str, &ThreadSummary)], show_project: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
-    let show_host = this.hosts.len() > 1;
-    div().flex().flex_col().children(rows.iter().map(|(host, t)| thread_row(host, t, show_host, show_project, now, this, cx)))
+/// Every item of a thread list is this tall (rows and section labels alike).
+const ROW_H: f32 = 38.;
+
+/// One item of a thread list: a thread (by key, looked up when it's on screen) or a
+/// section label.
+enum Item {
+    Row { host: String, id: String },
+    Label(String),
 }
 
+impl Item {
+    fn row((host, t): (&str, &ThreadSummary)) -> Self {
+        Item::Row { host: host.to_owned(), id: t.id.clone() }
+    }
+}
+
+/// A scrolling, virtualized thread list filling the rest of the pane: only the rows on
+/// screen are built, so a project with thousands of archived threads stays cheap.
+fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, cx: &mut Context<Dirigent>) -> UniformList {
+    let count = items.len();
+    uniform_list(
+        id,
+        count,
+        cx.processor(move |this, range: Range<usize>, _, cx| {
+            let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
+            let show_host = this.hosts.len() > 1;
+            items[range]
+                .iter()
+                .map(|item| match item {
+                    Item::Label(text) => section_label(text.clone()).into_any_element(),
+                    Item::Row { host, id } => match this.summary(host, id) {
+                        Some(t) => thread_row(host, t, show_host, show_project, now, this, cx).into_any_element(),
+                        // Unreachable (items come from this frame's `this`); one element per
+                        // index keeps the vec aligned with `range`.
+                        None => div().h(px(ROW_H)).into_any_element(),
+                    },
+                })
+                .collect::<Vec<_>>()
+        }),
+    )
+    .flex_1()
+}
+
+/// A thread row: status glyph, title (amber while asking, accent while unread, an amber pin before it while pinned),
+/// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
+/// moon glyph) and archive.
 fn thread_row(
     host: &str,
     t: &ThreadSummary,
@@ -348,11 +371,12 @@ fn thread_row(
     div()
         .id(SharedString::from(format!("row/{h}/{id}")))
         .group("row")
+        .w_full()
         .flex()
         .flex_row()
         .items_center()
         .gap_3()
-        .h(px(38.))
+        .h(px(ROW_H))
         .px_4()
         .border_b_1()
         .border_color(rgba(theme::t().line_soft))
@@ -370,15 +394,17 @@ fn thread_row(
                     .child(title),
             ),
         )
-        .when(show_host, |d| d.child(div().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
-        .when(!project.is_empty(), |d| d.child(div().text_size(px(12.)).text_color(rgba(theme::t().fg_1)).child(project)))
-        .child(div().w(px(150.)).truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
-        .child(div().w(px(32.)).text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
-        .when(matches!(status, Status::Asking | Status::Done | Status::Snoozed), |d| {
+        .when(show_host, |d| d.child(column(90.).text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
+        .when(show_project, |d| d.child(column(140.).text_size(px(12.)).text_color(rgba(theme::t().fg_1)).child(project)))
+        .child(column(150.).text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
+        .child(column(32.).text_right().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
+        // Rows that can't be snoozed keep an empty slot, so the columns stay aligned.
+        .child(if matches!(status, Status::Asking | Status::Done | Status::Snoozed) {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
-            d.child(row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| {
-                this.set_snoozed(&h3, &id3, !snoozed, cx)
-            }))
+            row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| this.set_snoozed(&h3, &id3, !snoozed, cx))
+                .into_any_element()
+        } else {
+            div().size(px(24.)).flex_shrink_0().into_any_element()
         })
         .child(
             row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, archive_confirm.is_some(), cx, move |this, cx| {
@@ -387,6 +413,12 @@ fn thread_row(
             .relative()
             .children(archive_confirm),
         )
+}
+
+/// A fixed-width cell of a thread row: every row lays its columns out the same way, so
+/// they line up like a table.
+fn column(width: f32) -> Div {
+    div().w(px(width)).flex_shrink_0().truncate()
 }
 
 /// A thread row's trailing action: hidden until the row is hovered (or always shown while
@@ -402,6 +434,7 @@ fn row_action(
     div()
         .id(SharedString::from(id))
         .size(px(24.))
+        .flex_shrink_0()
         .flex()
         .items_center()
         .justify_center()
