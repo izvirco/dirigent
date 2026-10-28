@@ -229,9 +229,12 @@ impl Cache {
         Ok(rows.filter_map(|r| r.ok()).filter_map(|s| serde_json::from_str(&s).ok()).collect())
     }
 
+    /// A thread's entries as of a snapshot (`Thread`). Those past its end stay: pushed after
+    /// the host read it, they may have arrived first.
     pub fn set_entries(&mut self, host: &str, thread_id: &str, entries: &[Entry]) -> Result<()> {
+        let end = entries.last().map_or(-1, |e| e.seq as i64);
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM entries WHERE host = ?1 AND thread_id = ?2", params![host, thread_id])?;
+        tx.execute("DELETE FROM entries WHERE host = ?1 AND thread_id = ?2 AND seq <= ?3", params![host, thread_id, end])?;
         for e in entries {
             tx.execute(
                 "INSERT INTO entries (host, thread_id, seq, json) VALUES (?1,?2,?3,?4)",
@@ -239,6 +242,17 @@ impl Cache {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Drop a thread's entries past `after` up to `to`: what a cache ahead of its host held
+    /// past the host's snapshot (see `Dirigent::fetch_open`).
+    pub fn remove_entries(&self, host: &str, thread_id: &str, after: Option<u64>, to: u64) -> Result<()> {
+        let after = after.map_or(-1, |s| s as i64);
+        self.conn.execute(
+            "DELETE FROM entries WHERE host = ?1 AND thread_id = ?2 AND seq > ?3 AND seq <= ?4",
+            params![host, thread_id, after, to as i64],
+        )?;
         Ok(())
     }
 
@@ -452,6 +466,22 @@ mod tests {
         t.spend = dirigent_protocol::Spend { input: 1200, output: 30, cached: 900, cost: 0.25 };
         cache.set_threads("h", std::slice::from_ref(&t)).unwrap();
         assert_eq!(cache.threads("h").unwrap(), vec![t]);
+    }
+
+    #[test]
+    fn entries_past_a_snapshot_stay_unless_stale() {
+        let mut cache = Cache::in_memory().unwrap();
+        let entry = |seq| Entry { seq, id: format!("e{seq}"), parent_id: None, kind: "message".into(), json: serde_json::json!({}) };
+        for seq in [0, 2, 3] {
+            cache.add_entry("h", "t", &entry(seq)).unwrap();
+        }
+        let seqs = |cache: &Cache| cache.entries("h", "t").unwrap().iter().map(|e| e.seq).collect::<Vec<_>>();
+        // Read before 3 was pushed, it fills the gap at 1 and leaves 3.
+        cache.set_entries("h", "t", &[entry(0), entry(1), entry(2)]).unwrap();
+        assert_eq!(seqs(&cache), [0, 1, 2, 3]);
+        // Unless 3 is what a cache ahead of its host held.
+        cache.remove_entries("h", "t", Some(2), 3).unwrap();
+        assert_eq!(seqs(&cache), [0, 1, 2]);
     }
 
     #[test]
