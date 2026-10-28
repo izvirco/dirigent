@@ -11,9 +11,11 @@ hover = "#212121"
 popup = "#212121"
 line = "#2a2a2a"
 line_soft = "#1e1e1e"
+# The background pattern's ink (config.toml's `[background]`): its alpha is how strongly it shows.
+pattern = "#2a2a2a4d"
 
 # Text: primary, secondary, tertiary.
-fg = "#e6e2dc"
+fg = "#cdc9c4"
 fg_1 = "#948f88"
 fg_2 = "#605c57"
 
@@ -25,6 +27,9 @@ accent_line = "#7a6044"
 accent_ink = "#d1a97a"
 selection = "#d1a97a55"
 bubble = "#3a2d20"
+# The composer's glow: three rings fading out from it, the first in this colour (its alpha
+# the glow's strength).
+glow = "#7a604460"
 
 # The stop button: fill, hover fill, icon.
 danger = "#4e2626"

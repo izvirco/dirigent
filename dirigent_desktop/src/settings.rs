@@ -2,11 +2,12 @@
 //! sections on the right. General, Thread titles and Agent tools are the UI over
 //! `config.toml` (`config.rs`), Hosts over `hosts.toml`. Everything saves as it is
 //! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
-//! warning mark on a font field whose family isn't installed; theme, text size, title
-//! model, reasoning, the agent tools and telemetry are chips, a stepper and switches that
-//! save at once; a host on Enter. `Test` opens a sample first message, runs it through
+//! warning mark on a font field whose family isn't installed; theme, text size, background,
+//! title model, reasoning, the agent tools and telemetry are chips, a stepper and switches
+//! that save at once; a host on Enter. `Test` opens a sample first message, runs it through
 //! the title settings on the local host, and shows the title with what it cost.
 
+use crate::ambient::{Pattern, Reach};
 use crate::app::{Dirigent, Menu};
 use crate::icons::icon;
 use crate::input::TextInput;
@@ -222,17 +223,40 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .children(theme_menu);
     let s = &this.settings;
     let f = &this.config.fonts;
+    let bg = this.config.background;
     section(
         "Appearance",
         div()
             .flex()
             .flex_col()
             .child(row("Theme", theme_chip))
+            .child(row("Background", background_chip(this, cx)))
+            .when(bg.pattern != Pattern::Off, |d| {
+                let on = bg.reach == Reach::Full;
+                d.child(row("In main pane", switch("bg-reach", on, cx, |this, cx| this.toggle_background_reach(cx))))
+            })
             .child(row("Text size", text_size(f.size(), cx)))
             .child(row("UI font", font_field(s, &s.font_ui, &f.ui)))
             .child(row("Prose font", font_field(s, &s.font_prose, &f.prose)))
             .child(row("Code font", font_field(s, &s.font_code, &f.code))),
     )
+}
+
+/// The background pattern behind the sidebar (`ambient.rs`): a chip with the pattern's
+/// name that opens the list of them.
+fn background_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
+    let open = this.menu == Some(Menu::Background);
+    let current = this.config.background.pattern;
+    let menu = open.then(|| {
+        let items = Pattern::ALL
+            .into_iter()
+            .map(|p| menu::item(format!("bg/{}", p.name()), p.name(), "", p == current, move |this, cx| this.set_background(p, cx), cx))
+            .collect();
+        menu::popup(Side::BelowRight(26.), items, cx)
+    });
+    theme::labeled_chip("bg-chip", "Pattern", current.name(), current == Pattern::Off, open)
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Background, cx)))
+        .children(menu)
 }
 
 /// `−  13  +`: the UI's text size, a px at a time (also ctrl - / ctrl =, ctrl 0 resets).

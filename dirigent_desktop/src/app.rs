@@ -3,6 +3,7 @@
 //! pages) and `thread.rs` (one thread + composer).
 
 use crate::add_project;
+use crate::ambient::{self, Pattern, Reach};
 use crate::cache::Cache;
 use crate::input::{self, Arrow, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
@@ -340,8 +341,9 @@ pub enum Menu {
     Base,
     /// Usage modal: what a series is (model / provider / everything).
     UsageGroup,
-    /// Settings modal: theme, title model, title reasoning level.
+    /// Settings modal: theme, background pattern, title model, title reasoning level.
     Theme,
+    Background,
     TitleModel,
     TitleEffort,
 }
@@ -434,6 +436,9 @@ pub struct Dirigent {
     /// that notices hand edits.
     pub config: config::Config,
     pub fonts: theme::Fonts,
+    /// The background pattern's picture (`ambient.rs`), kept in step with the window by
+    /// `render` and moved along by `tick`.
+    pub field: ambient::Field,
     watch: config::Watch,
     /// Bumped on every keystroke in a text setting; the 300ms timer it starts only applies
     /// if no later keystroke bumped it again (`schedule_apply`).
@@ -585,6 +590,7 @@ impl Dirigent {
             toasts: vec![],
             config,
             fonts,
+            field: ambient::Field::default(),
             watch: config::Watch::new(),
             config_edit: 0,
             settings,
@@ -1539,7 +1545,7 @@ impl Dirigent {
 
     /// Re-render once a second, for as long as the app lives, so every clock on screen
     /// (run and tool timers, `rel_time` ages) advances in whole-second steps. Also keeps
-    /// the Usage modal's numbers fresh while it is open.
+    /// the Usage modal's numbers fresh while it is open, and the background pattern moving.
     fn tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -1553,6 +1559,7 @@ impl Dirigent {
                         this.reload_config(cx);
                     }
                     this.titling.retain(|_, since| since.elapsed() < TITLING_TTL);
+                    this.redraw_field(this.ticks.is_multiple_of(ambient::CLOCK_SECS), cx);
                     // The repo changes under us (commits, rebases in a terminal): keep what the
                     // draft page and the workspace menus show fresh while they are on screen.
                     if this.ticks.is_multiple_of(VCS_REFRESH_SECS) {
@@ -2008,6 +2015,51 @@ impl Dirigent {
 
     pub fn toggle_telemetry(&mut self, cx: &mut Context<Self>) {
         self.edit_config(|c| c.telemetry = !c.telemetry, cx);
+    }
+
+    pub fn set_background(&mut self, pattern: Pattern, cx: &mut Context<Self>) {
+        self.edit_config(|c| c.background.pattern = pattern, cx);
+    }
+
+    /// Settings' switch: the pattern behind the sidebar only, or through the main pane too.
+    pub fn toggle_background_reach(&mut self, cx: &mut Context<Self>) {
+        let reach = if self.config.background.reach == Reach::Full { Reach::Edge } else { Reach::Full };
+        self.edit_config(|c| c.background.reach = reach, cx);
+    }
+
+    /// What the background picture should be drawn for now (`None`: the pattern is off): the
+    /// window's height, by its width with `Reach::Full`, else by the strip the sidebar
+    /// covers (docked, or floating a gutter in), in the theme's `pattern` ink.
+    fn field_spec(&self, window: &Window) -> Option<ambient::Spec> {
+        let bg = self.config.background;
+        if bg.pattern == Pattern::Off {
+            return None;
+        }
+        let view = window.viewport_size();
+        let width = match bg.reach {
+            Reach::Full => view.width,
+            Reach::Edge => u(self.sidebar_width + 2. * theme::GUTTER).min(view.width),
+        };
+        Some(ambient::Spec::new(bg.pattern, f32::from(width), f32::from(view.height), window.scale_factor(), theme::t().pattern))
+    }
+
+    /// Redraw the background picture if it is due (`tick`: the clock moved), off the main
+    /// thread; the picture it replaces leaves the atlas a round later (`Field::show`).
+    fn redraw_field(&mut self, tick: bool, cx: &mut Context<Self>) {
+        let Some(spec) = self.field.due(tick) else { return };
+        let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_secs_f64() * 1000.).unwrap_or(0.);
+        let image = cx.background_spawn(async move { ambient::draw(spec, now) });
+        cx.spawn(async move |this, cx| {
+            let image = image.await;
+            this.update(cx, |this, cx| {
+                if let Some(old) = this.field.show(spec, image) {
+                    cx.drop_image(old, None);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// A switch in Settings › Agent tools.
@@ -3504,14 +3556,22 @@ impl Render for Dirigent {
         self.selection.begin_frame();
         self.settle_jump(window);
         self.settle_panel();
+        self.field.want = self.field_spec(window);
+        self.redraw_field(false, cx);
         let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
         let main = match &self.pane {
             Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, cx),
             _ => lists::render(self, cx),
         };
         let docked = !self.sidebar_hidden;
-        // The main pane fills the window right of the sidebar, edge to edge.
-        let panel = div().flex_1().min_w_0().bg(rgba(theme::t().panel)).overflow_hidden().flex().flex_col().child(main);
+        // The main pane fills the window right of the sidebar, edge to edge. With the
+        // background pattern under it (`Reach::Full`) its fill lets some of it through.
+        let bg = self.config.background;
+        let mut fill = theme::t().panel;
+        if bg.pattern != Pattern::Off && bg.reach == Reach::Full {
+            fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE).round() as u32);
+        }
+        let panel = div().flex_1().min_w_0().bg(rgba(fill)).overflow_hidden().flex().flex_col().child(main);
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -3539,6 +3599,9 @@ impl Render for Dirigent {
             // No ligatures, anywhere: `calt` is what Lilex uses for them, `liga` for good measure.
             .font_features(FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)])))
             .text_size(text::base())
+            // The background pattern, on the canvas under everything (`ambient.rs`); behind
+            // the sidebar only, the sidebar draws it itself, clipped to it.
+            .when(bg.reach == Reach::Full, |d| d.children(self.field.layer(px(0.))))
             .when(docked, |d| d.child(sidebar::docked(self, cx)))
             .child(panel)
             .when(!docked, |d| d.child(sidebar::peek(self, cx)))

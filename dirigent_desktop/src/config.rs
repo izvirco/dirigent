@@ -1,9 +1,9 @@
-//! `~/.config/dirigent/config.toml`: fonts, theme, telemetry, and how threads are named.
+//! `~/.config/dirigent/config.toml`: fonts, theme, background, telemetry, and how threads are named.
 //! Edited by hand or from the Settings modal; the file is the truth. `Watch` notices hand
 //! edits (to it or to the theme dir) so they apply without a restart.
 //!
 //! ```toml
-//! theme = "dirigent"
+//! theme = "vir-dark"
 //! telemetry = false
 //!
 //! [fonts]
@@ -11,6 +11,10 @@
 //! ui = "Lilex"
 //! prose = "Lilex"
 //! code = "Lilex"
+//!
+//! [background]
+//! pattern = "halftone"  # off, hatching, contours, spring, halftone (`ambient.rs`)
+//! reach = "full"        # full: behind the sidebar and the main pane; edge: the sidebar only
 //!
 //! [title]
 //! model = "anthropic/claude-haiku-5-5"
@@ -23,6 +27,7 @@
 //! dirigent = true
 //! ```
 
+use crate::ambient::{Pattern, Reach};
 use crate::theme::Fonts;
 use anyhow::{Context, Result};
 use dirigent_protocol::TitleGen;
@@ -63,8 +68,17 @@ pub struct Config {
     /// Not wired to anything yet.
     pub telemetry: bool,
     pub fonts: FontConfig,
+    pub background: BackgroundConfig,
     pub title: TitleGen,
     pub tools: ToolsConfig,
+}
+
+/// The background pattern (`ambient.rs`): which, and how far it reaches.
+#[derive(Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackgroundConfig {
+    pub pattern: Pattern,
+    pub reach: Reach,
 }
 
 /// Dirigent's own agent tools (see the runtime's `tools.ts`). Sent with every prompt; a
@@ -116,6 +130,7 @@ impl Default for Config {
             theme: crate::theme::BUILTIN[0].0.to_owned(),
             telemetry: false,
             fonts: FontConfig::default(),
+            background: BackgroundConfig::default(),
             title: TitleGen { model: "anthropic/claude-haiku-5-5".into(), reasoning: "low".into(), prompt: DEFAULT_TITLE_PROMPT.into() },
             tools: ToolsConfig::default(),
         }
@@ -282,6 +297,9 @@ mod tests {
         assert_eq!(c.fonts.size(), 13.);
         assert_eq!(c.title.reasoning, "low");
         assert_eq!(c.tools.enabled(), ["async_bash", "ask_user", "dirigent"]);
+        assert!(c.background.pattern == Pattern::Halftone && c.background.reach == Reach::Full);
+        let c: Config = toml::from_str("[background]\npattern = \"spring\"\nreach = \"edge\"\n").unwrap();
+        assert!(c.background.pattern == Pattern::Spring && c.background.reach == Reach::Edge);
         let c: Config = toml::from_str("[tools]\nask_user = false\n").unwrap();
         assert_eq!(c.tools.enabled(), ["async_bash", "dirigent"]);
         // A whole number will do, and the size is held to its range.

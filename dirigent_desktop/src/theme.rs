@@ -27,8 +27,9 @@ use std::time::Duration;
 
 /// The built-in themes: `(name, toml)`. The first is the default.
 pub const BUILTIN: &[(&str, &str)] = &[
-    ("dirigent", include_str!("../assets/themes/dirigent.toml")),
-    ("dirigent-transparent", include_str!("../assets/themes/dirigent-transparent.toml")),
+    ("vir-dark", include_str!("../assets/themes/vir-dark.toml")),
+    ("vir-dark-transparent", include_str!("../assets/themes/vir-dark-transparent.toml")),
+    ("vir-soft-dark", include_str!("../assets/themes/vir-soft-dark.toml")),
     ("midnight", include_str!("../assets/themes/midnight.toml")),
     ("carbon", include_str!("../assets/themes/carbon.toml")),
     ("gruvbox-dark-hard", include_str!("../assets/themes/gruvbox-dark-hard.toml")),
@@ -47,6 +48,8 @@ pub struct Theme {
     // Surfaces, darkest to lightest (lightest to darkest in a light theme).
     #[serde(with = "hex")]
     pub canvas: u32,
+    /// Over the canvas; clear in the `-transparent` themes, where the canvas alone colours
+    /// the window.
     #[serde(with = "hex")]
     pub panel: u32,
     #[serde(with = "hex")]
@@ -61,6 +64,9 @@ pub struct Theme {
     pub line: u32,
     #[serde(with = "hex")]
     pub line_soft: u32,
+    /// The background pattern's ink (`ambient.rs`); its alpha is how strongly it shows.
+    #[serde(with = "hex")]
+    pub pattern: u32,
     // Text: primary, secondary, tertiary.
     #[serde(with = "hex")]
     pub fg: u32,
@@ -85,6 +91,10 @@ pub struct Theme {
     /// (`hover` instead in an archived thread).
     #[serde(with = "hex")]
     pub bubble: u32,
+    /// The composer's glow (`thread::glow`): three rings fading out from it, the first in
+    /// this colour, the next two at a half and a fifth of its alpha.
+    #[serde(with = "hex")]
+    pub glow: u32,
     // The stop button: a deep fill, its hover, and a light icon (the same pairing as send).
     #[serde(with = "hex")]
     pub danger: u32,
@@ -554,8 +564,9 @@ mod tests {
         for (name, text) in BUILTIN {
             parse(text).unwrap_or_else(|e| panic!("{name}: {e:#}"));
         }
-        assert_eq!(parse(BUILTIN[0].1).unwrap().canvas, 0x0a0b0dff);
-        assert_eq!(parse(BUILTIN[1].1).unwrap().canvas, 0x000000e6);
+        assert_eq!(parse(BUILTIN[0].1).unwrap().canvas, 0x060709ff);
+        assert_eq!(parse(BUILTIN[0].1).unwrap().pattern, 0x2c32424d);
+        assert_eq!(parse(BUILTIN[1].1).unwrap().canvas, 0x000000f2);
         assert_eq!(background(&parse(BUILTIN[0].1).unwrap()), WindowBackgroundAppearance::Opaque);
         assert_eq!(background(&parse(BUILTIN[1].1).unwrap()), WindowBackgroundAppearance::Blurred);
         assert_eq!(alpha(0x11223344, 0x80), 0x11223380);
