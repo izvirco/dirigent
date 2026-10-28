@@ -22,7 +22,7 @@ use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
     AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, Window, actions, div, prelude::*, px, rgba,
+    ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Window, actions, div, prelude::*, px, rgba,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -365,6 +365,10 @@ pub struct Dirigent {
     pub sidebar_hidden: bool,
     pub sidebar_peek: bool,
     pub collapsed: HashSet<Section>,
+    /// Scroll state of the Inbox's and the Workpool's card lists: they tell the sidebar
+    /// whether they are clipped, i.e. have met (`sidebar::seam`).
+    pub inbox_scroll: ScrollHandle,
+    pub workpool_scroll: ScrollHandle,
     /// Work log panel width (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     /// The log section is on: it sticks across threads, every thread opened showing its
@@ -525,6 +529,8 @@ impl Dirigent {
             sidebar_hidden: false,
             sidebar_peek: false,
             collapsed,
+            inbox_scroll: ScrollHandle::new(),
+            workpool_scroll: ScrollHandle::new(),
             log_width,
             log_on: false,
             resizing: None,
