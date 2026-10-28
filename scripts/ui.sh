@@ -52,10 +52,10 @@ else
   SESSION=default
 fi
 DIR=/tmp/dirigent-ui/$SESSION
-# Every checkout and workspace builds into one target dir, so a fresh workspace doesn't start
-# from a cold build. Cargo serializes builds into it.
-TARGET=${XDG_CACHE_HOME:-$HOME/.cache}/dirigent-ui/target
-BIN=$TARGET/debug/dirigent_desktop
+# The checkout's own target dir, the one `cargo test` uses. Never share one across checkouts:
+# cargo maps every checkout's crates onto the same files and judges freshness by mtime, so
+# one checkout would run another's build. The dev shell's sccache warms a fresh one.
+BIN=$ROOT/target/debug/dirigent_desktop
 mkdir -p "$DIR"
 
 alive() { [ -f "$DIR/$1.pid" ] && kill -0 "$(cat "$DIR/$1.pid")" 2>/dev/null; }
@@ -84,7 +84,7 @@ rpc() { bun "$ROOT/scripts/ui-rpc.ts" "$(port)" "$@"; }
 # Only errors are printed; the last line says what happened.
 build() {
   [ -d node_modules ] || bun install --frozen-lockfile # a fresh workspace
-  if ! CARGO_TARGET_DIR=$TARGET "${NIX_BUILD[@]}" cargo build -q -p dirigent_desktop --message-format short 2>"$DIR/build.log"; then
+  if ! "${NIX_BUILD[@]}" cargo build -q -p dirigent_desktop --message-format short 2>"$DIR/build.log"; then
     grep -E 'error' "$DIR/build.log" | grep -v '^error: could not compile' | head -30 || true
     echo "build failed, full output: $DIR/build.log" >&2
     exit 1
@@ -137,7 +137,6 @@ case "${1:-}" in
     PROJECT=$(cd "$PROJECT" && pwd)
     ID=$(P=$PROJECT rpc '{"type":"list_projects"}' 'r.projects.find(p => p.path === process.env.P)?.id ?? ""')
     [ -n "$ID" ] || ID=$(rpc "{\"type\":\"add_project\",\"path\":\"$PROJECT\"}" 'r.project.id')
-    build # the shared binary may be another checkout's by now
     kill_group app
     sqlite3 "$DIR/data/desktop.db" "INSERT OR REPLACE INTO kv (key, value) VALUES ('last_model', '$MODEL'),
       ('last_target', 'local' || char(10) || '$ID'); DELETE FROM kv WHERE key IN ('pane', 'last_effort', 'last_isolate');

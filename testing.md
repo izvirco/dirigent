@@ -37,8 +37,8 @@ scripts/ui.sh reset                  # stop + wipe the session's data: fresh ser
   `wait-idle`, not a guessed `sleep`.
 - `start` rebuilds and relaunches the app; run it again after every code change. Its last line says `ready` or
   `build failed` (with the errors above it; full output in `<session>/build.log`). It runs `bun install` in a
-  checkout without `node_modules`. Builds go to one target dir shared by every checkout and workspace
-  (`~/.cache/dirigent-ui/target`), so a fresh workspace isn't a cold build.
+  checkout without `node_modules`. Builds go to the checkout's own `target/`, the one `cargo test` uses; the
+  dev shell's sccache (`RUSTC_WRAPPER`) serves a fresh workspace the dependencies other checkouts compiled.
 - The data survives restarts (projects, threads, picked model, the pane you were on), so a restart can land you
   somewhere else than the last shot showed: take a shot before clicking on. `reset` for a clean slate.
 - After `start`, a click chain without shots in between is only safe on a known layout (`setup` gives you one).
