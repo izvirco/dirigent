@@ -1,15 +1,12 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar, the Projects page (every project, pins) and the
-//! settings pages (Hosts here, Config in `settings.rs`, Usage in `usage.rs`;
-//! `settings_header` carries the tabs between them).
+//! 40px header bar and the Projects page (every project, pins).
 
 use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Target};
 use crate::icons::icon;
 use crate::menu::{self, Side};
-use crate::net::HostStatus;
 use crate::projects::Group;
 use crate::theme::{self, Status};
-use crate::{hosts, projects, thread};
+use crate::{projects, thread};
 use dirigent_protocol::ThreadSummary;
 use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, px, rgba, uniform_list};
 use std::ops::Range;
@@ -35,9 +32,6 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         }
         Pane::Project { group_key } => project_page(this, group_key, pane, cx),
         Pane::Projects => projects_page(this, pane, cx),
-        Pane::Config => crate::settings::render(this, pane, cx),
-        Pane::Settings => settings_page(this, pane, cx),
-        Pane::Usage => crate::usage::render(this, pane, cx),
         Pane::Thread(_) | Pane::Draft { .. } => pane,
     }
 }
@@ -215,108 +209,6 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
         .child(thread_count(g.threads.len()))
         .child(more)
         .into_any_element()
-}
-
-/// Settings: a narrow centered column of sections. For now just Hosts: every host with
-/// its url and status (hover reveals remove), then the add form.
-fn settings_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
-    let rows = this.hosts.iter().map(|h| {
-        let (dot, status) = match h.status {
-            HostStatus::Connected => (theme::t().done, "connected"),
-            HostStatus::Connecting => (theme::t().warn, "connecting"),
-            HostStatus::Disconnected => (theme::t().error, "disconnected"),
-        };
-        let name = h.name.clone();
-        div()
-            .id(SharedString::from(format!("host/{name}")))
-            .group("row")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(px(38.))
-            .px_2()
-            .border_b_1()
-            .border_color(rgba(theme::t().line_soft))
-            .child(div().size(px(6.)).rounded_full().bg(rgba(dot)))
-            .child(div().w(px(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(this.fonts.mono.clone())
-                    .text_size(px(12.))
-                    .text_color(rgba(theme::t().fg_1))
-                    .child(h.url.clone()),
-            )
-            .child(div().w(px(90.)).flex_shrink_0().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(status))
-            .child(if name == hosts::LOCAL {
-                div().size(px(24.)).into_any_element()
-            } else {
-                div()
-                    .id(SharedString::from(format!("rm-host/{name}")))
-                    .size(px(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .opacity(0.)
-                    .group_hover("row", |d| d.opacity(1.))
-                    .hover(|d| d.bg(rgba(theme::t().hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_host(&name, cx)))
-                    .child(icon("x", theme::t().fg_1))
-                    .into_any_element()
-            })
-    });
-    let field = |input: gpui::Entity<crate::input::TextInput>| {
-        div().px_3().py_2().rounded_md().bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line)).child(input)
-    };
-    let form = div()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .pt_4()
-        .child(
-            div()
-                .text_color(rgba(theme::t().fg_1))
-                .child("Add a host running dirigent_service, reachable over your tailnet. Enter to add it."),
-        )
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .gap_2()
-                .child(field(this.host_name_input.clone()).w(px(150.)))
-                .child(field(this.host_url_input.clone()).flex_1()),
-        )
-        .child(
-            div().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(format!("Also editable by hand: {}", hosts::path().display())),
-        );
-
-    let hosts = settings_section("Hosts", div().flex().flex_col().children(rows).child(form));
-    let column = div().w_full().max_w(px(600.)).flex().flex_col().gap_8().py_8().px_6().child(hosts);
-    pane.child(settings_header(Pane::Settings, cx)).child(scroll("settings", div().flex().flex_col().items_center().child(column)))
-}
-
-/// The settings pages' header: `Settings` and the tabs (Config, Hosts, Usage), the open one bright.
-pub fn settings_header(active: Pane, cx: &mut Context<Dirigent>) -> Div {
-    let title = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .child(div().mr_3().child("Settings"))
-        .child(theme::tab("Config", matches!(active, Pane::Config), cx, |this, cx| this.show_config(cx)))
-        .child(theme::tab("Hosts", matches!(active, Pane::Settings), cx, |this, cx| this.show_settings(cx)))
-        .child(theme::tab("Usage", matches!(active, Pane::Usage), cx, |this, cx| this.show_usage(cx)));
-    header(title, None)
-}
-
-/// A settings section: title over its content.
-pub fn settings_section(title: &'static str, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
 }
 
 /// The main pane's top bar: a title on the left, optional actions on the right.

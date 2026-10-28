@@ -15,6 +15,7 @@ icons!(
     "archive",
     "archive-restore",
     "arrow-up",
+    "chart-no-axes-combined",
     "check",
     "chevron-down",
     "chevron-left",

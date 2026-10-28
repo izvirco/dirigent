@@ -126,7 +126,7 @@ pub enum ClientMessage {
         ask_id: String,
         answers: Option<Vec<Vec<String>>>,
     },
-    /// Name `text` the way a thread's first prompt would be named (the settings page's `Test`).
+    /// Name `text` the way a thread's first prompt would be named (Settings › Thread titles' `Test`).
     GenerateTitle {
         id: u64,
         title: TitleGen,

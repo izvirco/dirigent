@@ -55,7 +55,7 @@ const LOG_MIN: f32 = 280.;
 const LOG_MAX: f32 = 800.;
 /// How long a message's copy button shows its check.
 const COPIED_TTL: Duration = Duration::from_millis(1200);
-/// How often the usage page re-asks the hosts while it shows a window that ends now.
+/// How often the Usage modal re-asks the hosts while it shows a window that ends now.
 const USAGE_REFRESH_SECS: u64 = 30;
 /// A thread's title shows as generating for at most this long after its first prompt.
 const TITLING_TTL: Duration = Duration::from_secs(60);
@@ -205,12 +205,6 @@ pub enum Pane {
     },
     /// Every project group: pin, link, remove, and the form to add one (`lists::projects_page`).
     Projects,
-    /// Settings › Config: `config.toml` (fonts, theme, thread titles, telemetry; `settings.rs`).
-    Config,
-    /// Settings › Hosts: remote hosts (`hosts.toml`) with their status, and the form to add one.
-    Settings,
-    /// Settings › Usage: tokens and cost over time, across hosts (`usage.rs`).
-    Usage,
     /// New-thread page: the composer alone, centered. The thread is created on the host
     /// when the first message is sent.
     Draft {
@@ -317,12 +311,22 @@ pub enum Menu {
     /// The `New workspace from` popup (`base_search` over the repo's refs) behind the
     /// composer's workspace chip.
     Base,
-    /// Usage page: what a series is (model / provider / everything).
+    /// Usage modal: what a series is (model / provider / everything).
     UsageGroup,
-    /// Config page: theme, title model, title reasoning level.
+    /// Settings modal: theme, title model, title reasoning level.
     Theme,
     TitleModel,
     TitleEffort,
+}
+
+/// The modals opened from the sidebar's bottom bar; they float over whatever pane is open
+/// (see `modal.rs`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Modal {
+    /// `settings.rs`: config, thread titles, agent tools, hosts.
+    Settings,
+    /// `usage.rs`: tokens and cost over time, across hosts.
+    Usage,
 }
 
 /// Which archive button opened `Menu::ConfirmArchive`, so only that one shows the popup.
@@ -354,6 +358,8 @@ pub struct Dirigent {
     /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
     pub hovered_card: Option<(String, String)>,
     pub pane: Pane,
+    /// Settings or Usage, over the pane (the Add project modal is `add_project`).
+    pub modal: Option<Modal>,
     pub menu: Option<Menu>,
     /// The current mouse press closed a menu (clicked outside it). Suppresses `toggle_menu`
     /// for that click, so pressing a menu's own trigger closes it rather than reopening it.
@@ -378,14 +384,14 @@ pub struct Dirigent {
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
-    /// The settings page's add-host form.
+    /// Settings › Hosts' add-host form.
     pub host_name_input: Entity<TextInput>,
     pub host_url_input: Entity<TextInput>,
     /// Filter for the model picker's all-models page.
     pub model_search: Entity<TextInput>,
     /// Filter (or free text) for the workspace base picker.
     pub base_search: Entity<TextInput>,
-    /// The usage page: window, grouping, hidden series and the hosts' buckets.
+    /// The Usage modal: window, grouping, hidden series and the hosts' buckets.
     pub usage: usage::State,
     /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
     pub usage_from: Entity<TextInput>,
@@ -405,7 +411,7 @@ pub struct Dirigent {
     /// Bumped on every keystroke in a text setting; the 300ms timer it starts only applies
     /// if no later keystroke bumped it again (`schedule_apply`).
     config_edit: u64,
-    /// The Config page's inputs and title test.
+    /// The Settings modal's tab, inputs and title test.
     pub settings: settings::State,
     /// Threads whose title is being generated (since their first prompt), with when it started.
     titling: HashMap<(String, String), Instant>,
@@ -523,6 +529,7 @@ impl Dirigent {
             dragging: None,
             hovered_card: None,
             pane: Pane::Inbox,
+            modal: None,
             menu: None,
             menu_dismissed: false,
             sidebar_width,
@@ -846,7 +853,7 @@ impl Dirigent {
                         self.request_dirs(true, cx);
                     }
                 }
-                if status == HostStatus::Connected && matches!(self.pane, Pane::Usage) {
+                if status == HostStatus::Connected && self.modal == Some(Modal::Usage) {
                     self.request_usage(cx);
                 }
                 // The connection dropped under a sent draft: its request may never have
@@ -1004,6 +1011,9 @@ impl Dirigent {
             // An agent asked for the user's attention on a thread.
             ServerMessage::Focus { thread_id } => {
                 if self.summary(&host, &thread_id).is_some() {
+                    // The agent wants it seen: a Settings or Usage modal would hide it,
+                    // and keys would type into its composer under the dim.
+                    self.modal = None;
                     self.select_thread(&host, &thread_id, cx);
                 }
             }
@@ -1158,17 +1168,16 @@ impl Dirigent {
         }
     }
 
-    /// Persist the pane so the next launch resumes there and Esc on a settings page or the
-    /// Projects page goes back to it (`go_back`). Those pages and the draft page leave
-    /// the last stored pane alone (the draft's text is kept by `save_draft`, the page itself
-    /// isn't).
+    /// Persist the pane so the next launch resumes there and Esc on the Projects page goes
+    /// back to it (`go_back`). That page and the draft page leave the last stored pane
+    /// alone (the draft's text is kept by `save_draft`, the page itself isn't).
     fn remember_pane(&self) {
         let value = match &self.pane {
             Pane::Inbox => "inbox".to_owned(),
             Pane::Workpool => "workpool".to_owned(),
             Pane::Project { group_key } => format!("project\n{group_key}"),
             Pane::Thread(t) => format!("thread\n{}\n{}", t.host, t.id),
-            Pane::Config | Pane::Settings | Pane::Usage | Pane::Projects | Pane::Draft { .. } => return,
+            Pane::Projects | Pane::Draft { .. } => return,
         };
         let _ = self.cache.lock().unwrap().set(PANE_KEY, &value);
     }
@@ -1179,8 +1188,7 @@ impl Dirigent {
         self.open_pane(&value, cx);
     }
 
-    /// Esc on a settings page or the Projects page (`is_utility`): back to the pane stored
-    /// by `remember_pane`. The inbox goes first: it is the fallback when that pane is gone,
+    /// Esc on the Projects page: back to the pane stored by `remember_pane`. The inbox goes first: it is the fallback when that pane is gone,
     /// and `show` does the housekeeping (menu, selection, focus) that `open_pane` doesn't.
     fn go_back(&mut self, cx: &mut Context<Self>) {
         let back = self.cache.lock().unwrap().get(PANE_KEY);
@@ -1433,14 +1441,14 @@ impl Dirigent {
 
     /// Re-render once a second, for as long as the app lives, so every clock on screen
     /// (run and tool timers, `rel_time` ages) advances in whole-second steps. Also keeps
-    /// the usage page's numbers fresh while it is open.
+    /// the Usage modal's numbers fresh while it is open.
     fn tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = this.update(cx, |this, cx| {
                     this.ticks += 1;
-                    if this.ticks % USAGE_REFRESH_SECS == 0 && matches!(this.pane, Pane::Usage) && this.usage.at_now() {
+                    if this.ticks % USAGE_REFRESH_SECS == 0 && this.modal == Some(Modal::Usage) && this.usage.at_now() {
                         this.request_usage(cx);
                     }
                     if this.watch.changed() {
@@ -1498,7 +1506,7 @@ impl Dirigent {
     }
 
     pub fn new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
-        if self.add_project.is_some() {
+        if self.add_project.is_some() || self.modal.is_some() {
             return; // modal: nothing happens under it
         }
         self.new_draft(None, cx);
@@ -1729,32 +1737,67 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A press on the modal's dim: closes it, unless the press only closed a menu (the
-    /// host dropdown).
+    /// A press on a modal's dim: closes it, unless the press only closed a menu (a
+    /// dropdown in the modal).
     pub fn dim_pressed(&mut self, cx: &mut Context<Self>) {
-        if !self.menu_dismissed {
+        if self.menu_dismissed {
+            return;
+        }
+        if self.add_project.is_some() {
             self.close_add_project(cx);
+        } else {
+            self.close_modal(cx);
         }
     }
 
-    // ---- hosts ----
+    // ---- settings and usage modals ----
 
-    /// The settings page; opening it also picks up hand edits to `hosts.toml`.
-    pub fn show_settings(&mut self, cx: &mut Context<Self>) {
-        self.show(Pane::Settings, cx);
-        self.sync_hosts(cx);
-        self.focus(self.host_name_input.focus_handle(cx), cx);
+    /// The gear: the Settings modal, on the tab it was left on.
+    pub fn open_settings(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::Settings);
+        self.menu = None;
+        self.fill_settings(cx);
+        self.set_settings_tab(self.settings.tab, cx);
+    }
+
+    /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
+    /// form; the others take focus off the inputs, so keys don't type under the modal.
+    pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
+        self.settings.tab = tab;
+        if tab == settings::Tab::Hosts {
+            self.sync_hosts(cx);
+            self.focus(self.host_name_input.focus_handle(cx), cx);
+        } else {
+            self.focus(self.focus_handle.clone(), cx);
+        }
+        cx.notify();
+    }
+
+    /// The chart button: the Usage modal, fresh numbers asked for.
+    pub fn open_usage(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::Usage);
+        self.menu = None;
+        self.focus(self.focus_handle.clone(), cx);
+        self.request_usage(cx);
+    }
+
+    /// Esc or a press on the dim: back to the pane, with the composer focused if it has one.
+    fn close_modal(&mut self, cx: &mut Context<Self>) {
+        self.modal = None;
+        self.menu = None;
+        // The chart's hover-out never fires once it's gone; a reopen would show a stale readout.
+        self.usage.hover = None;
+        if composer_key(&self.pane).is_some() {
+            self.focus_composer(cx);
+        } else {
+            self.focus(self.focus_handle.clone(), cx);
+        }
+        cx.notify();
     }
 
     // ---- config ----
 
-    /// The settings gear lands here: `config.toml`'s page.
-    pub fn show_config(&mut self, cx: &mut Context<Self>) {
-        self.show(Pane::Config, cx);
-        self.fill_settings(cx);
-    }
-
-    /// Put the config into the Config page's fields (deferred: the fields need the window).
+    /// Put the config into the Settings modal's fields (deferred: the fields need the window).
     fn fill_settings(&self, cx: &mut Context<Self>) {
         let (window, settings, config) = (self.window, self.settings.clone(), self.config.clone());
         cx.defer(move |cx| {
@@ -1788,7 +1831,7 @@ impl Dirigent {
                 for font in self.apply_config(c, cx) {
                     self.toast(format!("font `{font}` is not installed"), cx);
                 }
-                if matches!(self.pane, Pane::Config) {
+                if self.modal == Some(Modal::Settings) {
                     self.fill_settings(cx);
                 }
             }
@@ -1835,7 +1878,7 @@ impl Dirigent {
         self.edit_config(|c| c.telemetry = !c.telemetry, cx);
     }
 
-    /// A switch in Settings › Config's tools section.
+    /// A switch in Settings › Agent tools.
     pub fn toggle_tool(&mut self, name: &str, cx: &mut Context<Self>) {
         self.edit_config(
             |c| match name {
@@ -2123,7 +2166,7 @@ impl Dirigent {
             self.links.retain(|(h, _), _| *h != name);
             // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
-                self.set_pane(Pane::Settings, cx);
+                self.set_pane(Pane::Inbox, cx);
             }
             let _ = self.cache.lock().unwrap().remove_host(&name);
         }
@@ -2316,11 +2359,6 @@ impl Dirigent {
     }
 
     // ---- usage ----
-
-    pub fn show_usage(&mut self, cx: &mut Context<Self>) {
-        self.show(Pane::Usage, cx);
-        self.request_usage(cx);
-    }
 
     /// Ask every host for the window shown. Replies to older requests are ignored. The
     /// buckets already shown stay up until each host's reply replaces them, so a refresh
@@ -2756,8 +2794,8 @@ impl Dirigent {
         }
     }
 
-    /// Escape: close the image preview or the open menu, drop the text selection, else
-    /// close the log panel or leave the settings pages. Never stops the agent.
+    /// Escape: close the image preview, the open menu or a modal, drop the text selection,
+    /// else close the log panel or leave the Projects page. Never stops the agent.
     pub fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
         if self.preview.is_some() {
             self.set_preview(None, cx);
@@ -2770,6 +2808,9 @@ impl Dirigent {
         if self.add_project.is_some() {
             return self.close_add_project(cx);
         }
+        if self.modal.is_some() {
+            return self.close_modal(cx);
+        }
         if self.renaming.take().is_some() {
             self.focus(self.focus_handle.clone(), cx);
             return cx.notify();
@@ -2781,7 +2822,7 @@ impl Dirigent {
         if self.panel_open() {
             self.close_panel();
             cx.notify();
-        } else if is_utility(&self.pane) {
+        } else if matches!(self.pane, Pane::Projects) {
             self.go_back(cx);
         }
     }
@@ -2823,6 +2864,11 @@ impl Dirigent {
             self.base_search.clone(),
             self.usage_from.clone(),
             self.usage_to.clone(),
+            self.settings.font_ui.clone(),
+            self.settings.font_prose.clone(),
+            self.settings.font_code.clone(),
+            self.settings.prompt.clone(),
+            self.settings.sample.clone(),
         ];
         if let Pane::Thread(t) = &self.pane {
             inputs.extend(t.asks.iter().flat_map(|f| f.custom.iter().flatten().cloned()));
@@ -3173,17 +3219,6 @@ fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
     }
 }
 
-/// The settings pages: Config, Hosts, Usage. The settings gear is lit while one is open.
-pub fn is_settings(pane: &Pane) -> bool {
-    matches!(pane, Pane::Config | Pane::Settings | Pane::Usage)
-}
-
-/// Pages you visit and leave with Esc (back to where you were): the settings pages and
-/// the Projects page.
-fn is_utility(pane: &Pane) -> bool {
-    is_settings(pane) || matches!(pane, Pane::Projects)
-}
-
 /// Attachments as a prompt carries them.
 fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
     images
@@ -3305,6 +3340,10 @@ impl Render for Dirigent {
             .child(panel)
             .when(!docked, |d| d.child(sidebar::peek(self, cx)))
             .children(self.add_project.as_ref().map(|s| add_project::render(self, s, cx)))
+            .children(self.modal.map(|m| match m {
+                Modal::Settings => settings::render(self, cx),
+                Modal::Usage => usage::render(self, cx),
+            }))
             .children(self.preview.clone().map(|image| thread::preview(image, cx)))
             .children((!toasts.is_empty()).then(|| {
                 div().absolute().bottom_4().right_4().flex().flex_col().gap_1().children(toasts.into_iter().map(|m| {

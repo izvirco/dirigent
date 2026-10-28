@@ -1,6 +1,7 @@
-//! Settings › Usage: what the agents cost over time, across every host.
+//! The Usage modal, behind the chart button left of the sidebar's gear: what the agents
+//! cost over time, across every host.
 //!
-//! The page is one big chart of cost over time: a smoothed line per series (a model, a
+//! The modal is one big chart of cost over time: a smoothed line per series (a model, a
 //! provider, or everything, see `Group`), the area under each faintly filled. Hovering
 //! it puts a crosshair on the slot under the mouse with a card beside the cursor that
 //! splits every line's cost into input / output tokens and the cached share. The legend
@@ -12,9 +13,10 @@
 //! the last day / week / month ending now (`‹ ›` page it back and forth), or a custom
 //! pair of dates. The slot width follows the window so a line has ~50 points.
 
-use crate::app::{Dirigent, Menu, Pane};
+use crate::app::{Dirigent, Menu};
 use crate::input::TextInput;
 use crate::menu::{self, Side};
+use crate::modal;
 use crate::theme::{self, dollars, kilo};
 use chrono::{Local, NaiveDate, TimeZone};
 use dirigent_protocol::UsageBucket;
@@ -97,7 +99,7 @@ impl Group {
     }
 }
 
-/// The page's state, on `Dirigent` (the custom range's date inputs live beside it there).
+/// The modal's state, on `Dirigent` (the custom range's date inputs live beside it there).
 #[derive(Default)]
 pub struct State {
     pub range: Range,
@@ -349,13 +351,11 @@ impl Layout {
     }
 }
 
-pub fn render(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
+pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let s = &this.usage;
     let model = Rc::new(Model::build(s));
     let hover_slot = s.hover.and_then(|p| Layout::new(*s.plot.borrow()).slot_at(p.x, model.slots));
     let body = div()
-        .flex_1()
-        .min_h_0()
         .flex()
         .flex_col()
         .px_6()
@@ -364,7 +364,7 @@ pub fn render(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
         .child(hero(this, &model, cx))
         .child(chart(this, model.clone(), hover_slot, cx))
         .child(legend(&model, cx));
-    pane.child(crate::lists::settings_header(Pane::Usage, cx)).child(body)
+    modal::frame(modal::large(body), cx)
 }
 
 /// The headline — what the window cost — and, on the right, the window and grouping controls.
@@ -546,16 +546,16 @@ fn chart(this: &Dirigent, model: Rc<Model>, hover_slot: Option<usize>, cx: &mut 
         .children(card)
 }
 
-/// Paint the chart: gridlines with their dollar labels, time ticks, one smoothed line
-/// (and its area) per visible series, and the crosshair with a dot per line on the
-/// hovered slot.
+/// Paint the chart: horizontal gridlines with their dollar labels, time labels, one
+/// smoothed line (and its area) per visible series, and the crosshair with a dot per line
+/// on the hovered slot.
 fn paint(model: &Model, layout: &Layout, since: i64, bucket: i64, hover: Option<usize>, window: &mut Window, cx: &mut gpui::App) {
     let n = model.slots;
     let line: Hsla = rgba(theme::t().line).into();
     let soft: Hsla = rgba(theme::t().line_soft).into();
     let (bounds, plot) = (layout.bounds, layout.plot);
 
-    // Time ticks: faint verticals through the plot, labels along the bottom.
+    // Time ticks: labels along the bottom (no verticals: the hover crosshair is the only one).
     let span = bucket * n as i64;
     let px_per_ms = f32::from(bounds.size.width) / span as f32;
     let step = TICKS.into_iter().find(|t| *t as f32 * px_per_ms >= TICK_MIN_PX).unwrap_or(TICKS[TICKS.len() - 1]);
@@ -569,7 +569,6 @@ fn paint(model: &Model, layout: &Layout, since: i64, bucket: i64, hover: Option<
             if x - w / 2. >= bounds.left() && x + w / 2. <= bounds.right() {
                 text(&label, 11., theme::t().fg_2, point(x - w / 2., bounds.bottom() - px(16.)), window, cx);
             }
-            window.paint_quad(fill(Bounds::new(point(x, plot.top()), size(px(1.), plot.size.height)), soft));
         }
         t += step;
     }
