@@ -559,7 +559,7 @@ export function threadId(s: string): string {
 }
 
 /** The markdown link the desktop opens the thread from. */
-export function threadLink(t: ThreadSummary): string {
+export function threadLink(t: Pick<ThreadSummary, "id" | "name">): string {
   const name = (t.name ?? "untitled").replace(/[[\]]/g, "");
   return `[${name}](${LINK}${t.id})`;
 }
