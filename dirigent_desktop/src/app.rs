@@ -10,11 +10,12 @@ use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status};
 use crate::view::{self, Item, Streaming, Timeline};
-use crate::{config, hosts, settings};
+use crate::{config, hosts, images, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
 use dirigent_protocol::{
-    Ask, ClientMessage, Entry, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs, prompt_title,
+    Ask, ClientMessage, Entry, FirstPrompt, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs,
+    prompt_title,
 };
 use futures::StreamExt;
 use gpui::EntityInputHandler;
@@ -225,6 +226,15 @@ pub struct Attachment {
     pub image: Arc<gpui::Image>,
 }
 
+/// A sent draft waiting for its `ThreadCreated`: the request, its host, and the message, which
+/// goes back into the draft if the thread can't be created and prompted.
+struct PendingDraft {
+    id: u64,
+    host: String,
+    text: String,
+    images: Vec<Attachment>,
+}
+
 /// An image an entry references by blob id (see `Dirigent::blobs`).
 pub struct Blob {
     pub image: Arc<gpui::Image>,
@@ -390,6 +400,9 @@ pub struct Dirigent {
     /// Like the text, they belong to the thread (or draft) in view: `set_pane` saves them to
     /// the cache and loads the other thread's (see `save_draft`).
     attachments: Vec<Attachment>,
+    /// Pasted images still being shrunk (`attach`): sending waits for them, as their tokens
+    /// aren't in the text yet.
+    fitting: usize,
     /// The image shown full-size over everything; click or Esc closes it.
     pub preview: Option<Arc<gpui::Image>>,
     /// Mouse selection in the transcript or the work log.
@@ -398,9 +411,8 @@ pub struct Dirigent {
     /// from the host once (`blob_requests`) when the thread shows them.
     pub blobs: HashMap<String, Blob>,
     blob_requests: HashSet<String>,
-    /// A draft was sent: the `CreateThread` request id and the message to prompt with once
-    /// the host confirms the thread.
-    pending: Option<(u64, String, Vec<Attachment>)>,
+    /// A draft was sent (`CreateThread` with its first prompt), not yet confirmed.
+    pending: Option<PendingDraft>,
     /// Draft: start the thread in its own workspace (the composer's `isolated` chip), and
     /// from where (`None` = the vcs default; reset with every draft).
     pub isolate: bool,
@@ -452,7 +464,7 @@ impl Dirigent {
         let composer = cx.new(|cx| TextInput::new(cx, "Calibre - The Game", false));
         let path_input = cx.new(|cx| TextInput::new(cx, "/absolute/path/to/project", true));
         cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(s.queued, window, cx)).detach();
-        cx.subscribe_in(&composer, window, |this, _, p: &ImagePasted, window, cx| this.attach(p.0.clone(), window, cx)).detach();
+        cx.subscribe(&composer, |this, _, p: &ImagePasted, cx| this.attach(p.0.clone(), cx)).detach();
         cx.subscribe(&composer, |this, _, _: &input::Changed, cx| this.save_draft(cx)).detach();
         cx.subscribe_in(&path_input, window, |this, _, _: &Submitted, window, cx| this.add_project(window, cx)).detach();
         let host_name_input = cx.new(|cx| TextInput::new(cx, "name", true));
@@ -516,6 +528,7 @@ impl Dirigent {
             settings,
             titling: HashMap::new(),
             attachments: vec![],
+            fitting: 0,
             preview: None,
             selection: Selection::default(),
             blobs: HashMap::new(),
@@ -796,6 +809,14 @@ impl Dirigent {
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Usage) {
                     self.request_usage(cx);
                 }
+                // The connection dropped under a sent draft: its request may never have
+                // arrived (a host that got it still runs the thread), so the draft comes back.
+                if status == HostStatus::Disconnected
+                    && let Some(p) = self.pending.take_if(|p| p.host == host)
+                {
+                    self.restore_draft(p.text, &p.images, cx);
+                    self.toast(format!("{host}: connection lost, the message is back in the draft"), cx);
+                }
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Draft { .. }) {
                     self.refresh_draft_vcs();
                 }
@@ -934,11 +955,11 @@ impl Dirigent {
             }
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, mut thread } => {
-                let pending = self.pending.take_if(|(id, ..)| *id == reply_to);
-                if let Some((_, text, _)) = &pending {
-                    // Our draft: it goes straight to work, so list it that way before the
-                    // host's push confirms it (no flash through the inbox with no model,
-                    // nor through "Untitled": the host names it the same way on `Prompt`).
+                let pending = self.pending.take_if(|p| p.id == reply_to && p.host == host);
+                if let Some(PendingDraft { text, .. }) = &pending {
+                    // Our draft: it went straight to work, so list it that way unless the
+                    // host's push already did (no flash through the inbox with no model, nor
+                    // through "Untitled": the host names it the same way on its first prompt).
                     thread.name = thread.name.or_else(|| prompt_title(text));
                     thread.running_since = Some(now_ms());
                     thread.model = self.model.clone();
@@ -949,9 +970,12 @@ impl Dirigent {
                 {
                     h.threads.insert(0, thread.clone());
                 }
-                if let Some((_, text, images)) = pending {
+                // The host prompted it already (`CreateThread::prompt`).
+                if let Some(PendingDraft { text, .. }) = pending {
+                    self.titling.insert((host.clone(), thread.id.clone()), Instant::now());
                     self.select_thread(&host, &thread.id, cx);
-                    self.prompt(&host, &thread.id, text, images, PromptMode::Prompt, cx);
+                    self.remember_model();
+                    self.echo(&host, &thread.id, text, PromptMode::Prompt);
                 }
             }
             ServerMessage::Error { reply_to, message } => {
@@ -959,15 +983,10 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
-                // A failed create puts the draft back so nothing typed is lost: into the
-                // cache, and into the composer if the draft page is still in view.
-                if let Some((_, text, images)) = self.pending.take_if(|(id, ..)| Some(*id) == reply_to) {
-                    let content = input::Content { selection: text.len()..text.len(), text, reversed: false };
-                    let (host, id) = DRAFT_KEY;
-                    let _ = self.cache.lock().unwrap().set_draft(host, id, &content, &image_rows(&images));
-                    if composer_key(&self.pane).is_some_and(|k| k == DRAFT_KEY) {
-                        self.load_composer(cx);
-                    }
+                // A failed create (or first prompt: the host deleted the thread again) puts
+                // the draft back so nothing typed is lost.
+                if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.host == host) {
+                    self.restore_draft(p.text, &p.images, cx);
                 }
                 self.toast(format!("{host}: {message}"), cx)
             }
@@ -2237,13 +2256,34 @@ impl Dirigent {
 
     // ---- attachments ----
 
-    /// The pasted image gets the next number in this draft and its token goes in at the
-    /// cursor (which saves the draft, images included, through `Changed`).
-    fn attach(&mut self, image: gpui::Image, window: &mut Window, cx: &mut Context<Self>) {
-        let n = self.attachments.iter().map(|a| a.n).max().unwrap_or(0) + 1;
-        self.attachments.push(Attachment { n, image: Arc::new(image) });
-        self.composer.update(cx, |input, cx| input.replace_text_in_range(None, &format!("{} ", image_token(n)), window, cx));
-        cx.notify();
+    /// A pasted image, once shrunk to what a prompt carries (`images::fit`; off the UI
+    /// thread, a big screenshot takes a moment), gets the next number in this draft and its
+    /// token goes in at the cursor (which saves the draft, images included, through
+    /// `Changed`). Dropped if the composer moved on to another thread meanwhile.
+    fn attach(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
+        let key = composer_key(&self.pane).map(|(h, id)| (h.to_owned(), id.to_owned()));
+        let fitted = cx.background_spawn(async move { images::fit(image) });
+        self.fitting += 1;
+        cx.spawn(async move |this, cx| {
+            let image = fitted.await;
+            this.update(cx, |this, cx| {
+                this.fitting -= 1;
+                if composer_key(&this.pane).map(|(h, id)| (h.to_owned(), id.to_owned())) != key {
+                    return;
+                }
+                let n = this.attachments.iter().map(|a| a.n).max().unwrap_or(0) + 1;
+                this.attachments.push(Attachment { n, image: Arc::new(image) });
+                let (window, composer) = (this.window, this.composer.clone());
+                window
+                    .update(cx, |_, window, cx| {
+                        composer.update(cx, |input, cx| input.replace_text_in_range(None, &format!("{} ", image_token(n)), window, cx))
+                    })
+                    .ok();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Attachments whose token is still in the composer, in paste order.
@@ -2279,6 +2319,17 @@ impl Dirigent {
         } else {
             // Images are kept while their token is in the text; `attachments()` prunes the rest.
             let _ = cache.set_draft(host, id, &content, &image_rows(&self.attachments));
+        }
+    }
+
+    /// Put a sent draft's message back as the draft page's draft: into the cache, and into
+    /// the composer if the draft page is still in view.
+    fn restore_draft(&mut self, text: String, images: &[Attachment], cx: &mut Context<Self>) {
+        let content = input::Content { selection: text.len()..text.len(), text, reversed: false };
+        let (host, id) = DRAFT_KEY;
+        let _ = self.cache.lock().unwrap().set_draft(host, id, &content, &image_rows(images));
+        if composer_key(&self.pane).is_some_and(|k| k == DRAFT_KEY) {
+            self.load_composer(cx);
         }
     }
 
@@ -2331,6 +2382,10 @@ impl Dirigent {
     /// While a run is active, `queued` sends a follow-up instead of steering.
     fn send(&mut self, queued: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).text().trim().to_owned();
+        if self.fitting > 0 {
+            self.toast("Still shrinking the pasted image", cx);
+            return;
+        }
         if text.is_empty() {
             return;
         }
@@ -2349,12 +2404,27 @@ impl Dirigent {
             if self.pending.is_some() {
                 return;
             }
+            // A request to an offline host is dropped: keep the draft instead.
+            if self.host(&target.host).is_none_or(|h| h.status != HostStatus::Connected) {
+                self.toast(format!("{} is offline", target.host), cx);
+                return;
+            }
             let _ = self.cache.lock().unwrap().set(LAST_TARGET_KEY, &format!("{}\n{}", target.host, target.project_id));
             // Isolation is only on offer for a repo (the chip hides otherwise).
             let workspace = self.isolate && self.draft_vcs().is_some_and(|(_, _, v)| v.is_some_and(|v| v.vcs.is_some()));
             let base = self.base.clone().filter(|_| workspace);
+            // The first prompt goes with the create, so the thread exists only if it started
+            // (named from it: see `config.toml` `[title]`).
+            let prompt = FirstPrompt {
+                text: text.clone(),
+                model: self.model.clone(),
+                thinking_level: self.effort.clone(),
+                images: wire_images(&images),
+                title: Some(self.config.title.clone()),
+                tools: Some(self.config.tools.enabled()),
+            };
             let id = self.next_id();
-            self.pending = Some((id, text, images));
+            self.pending = Some(PendingDraft { id, host: target.host.clone(), text, images });
             self.clear_composer(window, cx);
             self.net.send(
                 &target.host,
@@ -2367,6 +2437,7 @@ impl Dirigent {
                     name: None,
                     report: Default::default(),
                     notify: Default::default(),
+                    prompt: Some(prompt),
                 },
             );
             return;
@@ -2388,7 +2459,7 @@ impl Dirigent {
                 (true, true) => PromptMode::FollowUp,
             };
             self.clear_composer(window, cx);
-            self.prompt(&host, &thread_id, text, images, mode, cx);
+            self.prompt(&host, &thread_id, text, &images, mode, cx);
         }
     }
 
@@ -2403,7 +2474,7 @@ impl Dirigent {
         }
     }
 
-    fn prompt(&mut self, host: &str, thread_id: &str, text: String, images: Vec<Attachment>, mode: PromptMode, cx: &mut Context<Self>) {
+    fn prompt(&mut self, host: &str, thread_id: &str, text: String, images: &[Attachment], mode: PromptMode, cx: &mut Context<Self>) {
         let id = self.next_id();
         // A thread's first prompt also names it (see `config.toml` `[title]`).
         let first = mode == PromptMode::Prompt && self.summary(host, thread_id).is_some_and(|s| s.entry_count == 0);
@@ -2411,13 +2482,6 @@ impl Dirigent {
         if first {
             self.titling.insert((host.to_owned(), thread_id.to_owned()), Instant::now());
         }
-        let images = images
-            .iter()
-            .map(|a| ImageAttachment {
-                mime_type: a.image.format.mime_type().to_owned(),
-                data: base64::engine::general_purpose::STANDARD.encode(&a.image.bytes),
-            })
-            .collect();
         self.net.send(
             host,
             ClientMessage::Prompt {
@@ -2427,13 +2491,19 @@ impl Dirigent {
                 mode,
                 model: self.model.clone(),
                 thinking_level: self.effort.clone(),
-                images,
+                images: wire_images(images),
                 title,
                 tools: Some(self.config.tools.enabled()),
             },
         );
         self.remember_model();
-        // Echo the message in the tail until the host's persisted entry replaces it.
+        self.echo(host, thread_id, text, mode);
+        cx.notify();
+    }
+
+    /// Show a sent message in the open thread's tail until the host's persisted entry
+    /// replaces it.
+    fn echo(&mut self, host: &str, thread_id: &str, text: String, mode: PromptMode) {
         if let Pane::Thread(t) = &mut self.pane
             && t.host == host
             && t.id == thread_id
@@ -2447,7 +2517,6 @@ impl Dirigent {
                 t.log_list.set_follow_mode(FollowMode::Tail);
             }
         }
-        cx.notify();
     }
 
     /// Escape: close the image preview or the open menu, drop the text selection, else
@@ -2860,6 +2929,17 @@ pub fn is_settings(pane: &Pane) -> bool {
 /// the Projects page.
 fn is_utility(pane: &Pane) -> bool {
     is_settings(pane) || matches!(pane, Pane::Projects)
+}
+
+/// Attachments as a prompt carries them.
+fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
+    images
+        .iter()
+        .map(|a| ImageAttachment {
+            mime_type: a.image.format.mime_type().to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(&a.image.bytes),
+        })
+        .collect()
 }
 
 /// Attachments as the cache stores them.

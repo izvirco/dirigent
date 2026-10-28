@@ -13,7 +13,7 @@ mod storage;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, HostInfo, PromptMode, Report, ServerMessage, ThreadSummary, Vcs};
+use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, ThreadSummary, Vcs};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -166,7 +166,7 @@ impl Service {
                 let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
-            ClientMessage::CreateThread { id, project_id, workspace, base, parent, name, report, notify } => {
+            ClientMessage::CreateThread { id, project_id, workspace, base, parent, name, report, notify, prompt } => {
                 let thread_id = uuid::Uuid::now_v7().to_string();
                 let mut thread = {
                     let storage = self.storage.lock().unwrap();
@@ -198,7 +198,17 @@ impl Service {
                     thread.cwd = ws.clone();
                     thread.workspace = Some(ws);
                 }
-                // No push: the creator's `Prompt` follows at once and pushes the thread already running.
+                // No push: the first prompt (along, or the creator's `Prompt` right after) pushes
+                // the thread already running. One that can't be prompted goes again, so the
+                // creator keeps its draft instead of a thread that never started.
+                if let Some(p) = &prompt
+                    && let Err(e) = self.prompt(&thread_id, PromptMode::Prompt, p).await
+                {
+                    if let Err(e) = self.delete_thread(&thread_id) {
+                        eprintln!("[service] delete unprompted thread {thread_id}: {e:#}");
+                    }
+                    return Err(e);
+                }
                 ServerMessage::ThreadCreated { reply_to: id, thread }
             }
             ClientMessage::MoveToWorkspace { id, thread_id, base } => {
@@ -224,35 +234,7 @@ impl Service {
                 ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
             }
             ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
-                // The run starts now, not at pi's `agent_start`: loading the session (and a nix
-                // dev shell) can take seconds, and clients should see the thread working with
-                // the model it will use for all of it. A new turn is a new task, too
-                // (`prompted_at`: steers, follow-ups and answers don't count).
-                if mode == PromptMode::Prompt {
-                    self.storage.lock().unwrap().set_prompted(&thread_id, &text, model.as_deref(), thinking_level.as_deref(), now())?;
-                    self.runtime.begin_run(&thread_id);
-                    self.push_threads();
-                }
-                if let Some(tools) = &tools {
-                    self.storage.lock().unwrap().set_tools(&thread_id, tools)?;
-                }
-                let sent = match self.ensure_loaded(&thread_id, model.as_deref(), thinking_level.as_deref()).await {
-                    Ok(()) => self.runtime.prompt(
-                        &thread_id,
-                        &text,
-                        mode,
-                        model.as_deref(),
-                        thinking_level.as_deref(),
-                        &images,
-                        title.as_ref(),
-                        tools.as_deref(),
-                    ),
-                    Err(e) => Err(e),
-                };
-                if sent.is_err() && self.runtime.settle(&thread_id).is_some() {
-                    self.push_threads();
-                }
-                sent?;
+                self.prompt(&thread_id, mode, &FirstPrompt { text, model, thinking_level, images, title, tools }).await?;
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::Answer { id, thread_id, ask_id, answers } => {
@@ -345,22 +327,54 @@ impl Service {
                 ServerMessage::Search { reply_to: id, hits: self.storage.lock().unwrap().search(&query, limit.clamp(1, 100))? }
             }
             ClientMessage::DeleteThread { id, thread_id } => {
-                if self.runtime.is_loaded(&thread_id) {
-                    let _ = self.runtime.unload(&thread_id);
-                }
-                // Its workspace has no owner without the thread.
-                if self.storage.lock().unwrap().thread_workspace(&thread_id)?.is_some()
-                    && let Err(e) = self.remove_workspace(&thread_id, false)
-                {
-                    eprintln!("[service] remove workspace of {thread_id}: {e:#}");
-                }
-                self.storage.lock().unwrap().delete_thread(&thread_id)?;
-                // Its `async_bash` logs go with it.
-                let _ = std::fs::remove_dir_all(data_dir().join("jobs").join(&thread_id));
-                self.push_threads();
+                self.delete_thread(&thread_id)?;
                 ServerMessage::Ok { reply_to: id }
             }
         })
+    }
+
+    /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
+    /// `Prompt`'s fields (or is a `CreateThread`'s first prompt).
+    async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
+        let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
+        // The run starts now, not at pi's `agent_start`: loading the session (and a nix
+        // dev shell) can take seconds, and clients should see the thread working with
+        // the model it will use for all of it. A new turn is a new task, too
+        // (`prompted_at`: steers, follow-ups and answers don't count).
+        if mode == PromptMode::Prompt {
+            self.storage.lock().unwrap().set_prompted(thread_id, &p.text, model, thinking_level, now())?;
+            self.runtime.begin_run(thread_id);
+            self.push_threads();
+        }
+        if let Some(tools) = &p.tools {
+            self.storage.lock().unwrap().set_tools(thread_id, tools)?;
+        }
+        let sent = match self.ensure_loaded(thread_id, model, thinking_level).await {
+            Ok(()) => self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref()),
+            Err(e) => Err(e),
+        };
+        if sent.is_err() && self.runtime.settle(thread_id).is_some() {
+            self.push_threads();
+        }
+        sent
+    }
+
+    /// Delete a thread and what is its alone: its loaded session, workspace and job logs.
+    fn delete_thread(&self, thread_id: &str) -> Result<()> {
+        if self.runtime.is_loaded(thread_id) {
+            let _ = self.runtime.unload(thread_id);
+        }
+        // Its workspace has no owner without the thread.
+        if self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some()
+            && let Err(e) = self.remove_workspace(thread_id, false)
+        {
+            eprintln!("[service] remove workspace of {thread_id}: {e:#}");
+        }
+        self.storage.lock().unwrap().delete_thread(thread_id)?;
+        // Its `async_bash` logs go with it.
+        let _ = std::fs::remove_dir_all(data_dir().join("jobs").join(thread_id));
+        self.push_threads();
+        Ok(())
     }
 
     // ---- sub-agents ----

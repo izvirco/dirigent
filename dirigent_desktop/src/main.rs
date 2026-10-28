@@ -4,6 +4,7 @@ mod app;
 mod cache;
 mod config;
 mod icons;
+mod images;
 mod input;
 mod lists;
 mod markdown;
