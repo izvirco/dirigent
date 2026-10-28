@@ -48,6 +48,9 @@ pub enum ClientMessage {
     /// (`notify`); both are ignored without a parent.
     /// `name` names it from the start (an agent names the threads it starts); a thread
     /// without one is titled from its first prompt.
+    /// `prompt` sends the thread its first prompt in the same request (a `Prompt` in mode
+    /// `prompt`): if it can't be delivered the thread is deleted again and the request
+    /// fails, so a client never ends up with a thread that silently never started.
     CreateThread {
         id: u64,
         project_id: String,
@@ -63,6 +66,8 @@ pub enum ClientMessage {
         report: Report,
         #[serde(default)]
         notify: Notify,
+        #[serde(default)]
+        prompt: Option<FirstPrompt>,
     },
     /// Move a thread into its own workspace at `base` (or recreate one that went missing,
     /// where its branch is resumed and `base` is ignored). Refused while the thread runs
@@ -408,6 +413,20 @@ pub struct UsageBucket {
     pub messages: u64,
 }
 
+/// A thread's first prompt, sent along with `CreateThread`: the fields of a `Prompt`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FirstPrompt {
+    pub text: String,
+    pub model: Option<String>,
+    pub thinking_level: Option<String>,
+    #[serde(default)]
+    pub images: Vec<ImageAttachment>,
+    #[serde(default)]
+    pub title: Option<TitleGen>,
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+}
+
 /// An image sent with a prompt: base64 bytes and their mime type (`image/png`, ...).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageAttachment {
@@ -591,6 +610,14 @@ mod tests {
             name: Some("Review".into()),
             report: Report::Done,
             notify: Notify::WhenIdle,
+            prompt: Some(FirstPrompt {
+                text: "hi".into(),
+                model: Some("a/b".into()),
+                thinking_level: Some("low".into()),
+                images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into() }],
+                title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
+                tools: None,
+            }),
         });
         roundtrip(ClientMessage::ListHosts { id: 20 });
         roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
@@ -670,7 +697,8 @@ mod tests {
                 parent: None,
                 name: None,
                 report: Report::Reply,
-                notify: Notify::Asap
+                notify: Notify::Asap,
+                prompt: None,
             }
         );
         let s: ClientMessage = serde_json::from_value(json!({"type":"search_threads","id":1,"query":"x"})).unwrap();

@@ -22,7 +22,8 @@ base64 = "0.22"
 unicode-segmentation = "1"
 toml = "0.8"
 pulldown-cmark = { version = "0.13", default-features = false }
-# Image headers, for inline image sizes. The same crate gpui decodes with, so no extra build.
+# Image headers for inline image sizes, and shrinking pasted images (`images.rs`). The same
+# crate gpui decodes with, so no extra build.
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",

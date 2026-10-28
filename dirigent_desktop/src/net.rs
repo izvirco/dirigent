@@ -13,9 +13,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 /// Request id used by the connection task itself for the refresh requests on (re)connect.
 pub const CONNECT_LIST_ID: u64 = 0;
+
+/// Largest message (and frame: the host sends each message as one) we read; the host
+/// reads the same (`dirigent_service` `server.rs`).
+const MAX_MESSAGE: usize = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostStatus {
@@ -103,7 +108,8 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
     let mut embedded: Option<tokio::task::JoinHandle<()>> = None;
     loop {
         status(HostStatus::Connecting);
-        match tokio_tungstenite::connect_async(&url).await {
+        let config = WebSocketConfig::default().max_frame_size(Some(MAX_MESSAGE)).max_message_size(Some(MAX_MESSAGE));
+        match tokio_tungstenite::connect_async_with_config(&url, Some(config), false).await {
             Ok((ws, _)) => {
                 backoff = Duration::from_millis(300);
                 status(HostStatus::Connected);
@@ -120,7 +126,10 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                     tokio::select! {
                         Some(req) = rx.recv() => {
                             let text = serde_json::to_string(&req).unwrap();
-                            if sink.send(Message::Text(text.into())).await.is_err() { break }
+                            if let Err(e) = sink.send(Message::Text(text.into())).await {
+                                eprintln!("[net] {name}: send: {e}");
+                                break;
+                            }
                         }
                         item = stream.next() => match item {
                             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
@@ -133,10 +142,17 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                                 Err(e) => eprintln!("[net] {name}: bad message ({e}): {}", &text[..text.len().min(200)]),
                             },
                             Some(Ok(_)) => {}
-                            _ => break,
+                            Some(Err(e)) => {
+                                eprintln!("[net] {name}: read: {e}");
+                                break;
+                            }
+                            None => break,
                         }
                     }
                 }
+                // What was sent meanwhile is dropped too, not sent on the reconnect: the UI
+                // gives back what it had pending once it sees `Disconnected`.
+                while rx.try_recv().is_ok() {}
                 status(HostStatus::Disconnected);
             }
             Err(e) => {

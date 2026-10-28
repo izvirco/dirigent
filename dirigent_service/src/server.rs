@@ -25,8 +25,12 @@ pub async fn serve(svc: Arc<Service>, addrs: &[SocketAddr]) -> anyhow::Result<()
     Ok(())
 }
 
+/// Largest message we read, and frame too: clients send each message as one frame, so
+/// axum's 16 MiB frame default would cut off big requests far below its message limit.
+const MAX_MESSAGE: usize = 64 << 20;
+
 async fn upgrade(ws: WebSocketUpgrade, State(svc): State<Arc<Service>>) -> Response {
-    ws.on_upgrade(move |socket| connection(socket, svc))
+    ws.max_frame_size(MAX_MESSAGE).max_message_size(MAX_MESSAGE).on_upgrade(move |socket| connection(socket, svc))
 }
 
 async fn connection(socket: WebSocket, svc: Arc<Service>) {
@@ -58,7 +62,17 @@ async fn connection(socket: WebSocket, svc: Arc<Service>) {
         }
     });
 
-    while let Some(Ok(msg)) = ws_rx.next().await {
+    while let Some(msg) = ws_rx.next().await {
+        // A failed read ends the connection: say why. Mostly a client that went without a
+        // close frame, but it may be a message over the limit, which the client only sees
+        // as the connection dropping.
+        let msg = match msg {
+            Ok(msg) => msg,
+            Err(e) => {
+                eprintln!("[service] connection dropped: {e}");
+                break;
+            }
+        };
         let Message::Text(text) = msg else { continue };
         match serde_json::from_str::<ClientMessage>(&text) {
             Ok(req) => {
