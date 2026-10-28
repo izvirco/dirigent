@@ -16,7 +16,7 @@ use crate::menu::{self, Side};
 use crate::modal;
 use crate::net::HostStatus;
 use crate::projects::Group;
-use crate::theme;
+use crate::theme::{self, text, u};
 use dirigent_protocol::Dir;
 use gpui::{
     AnyElement, Context, Div, FontWeight, ScrollStrategy, SharedString, UniformListScrollHandle, div, prelude::*, px, rgba, uniform_list,
@@ -108,7 +108,7 @@ pub fn render(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Any
         Some(offer) => link_page(offer, cx),
         None => browse_page(this, state, cx),
     };
-    modal::frame(div().w(px(WIDTH)).child(page), cx)
+    modal::frame(div().w(u(WIDTH)).child(page), cx)
 }
 
 /// `<host ▾> <path> [Add]`, a hairline, then the directory list (or a note in its place:
@@ -162,10 +162,10 @@ fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Di
         Some(Ok(_)) if dir == state.dir => None,
         _ => Some(("Loading…".to_owned(), false)),
     };
-    let list = div().h(px(LIST_H)).flex().flex_col().p_1().child(match note {
+    let list = div().h(u(LIST_H)).flex().flex_col().p_1().child(match note {
         Some((note, error)) => div()
             .p_2()
-            .text_size(px(12.))
+            .text_size(text::sm())
             .text_color(rgba(if error { theme::t().error } else { theme::t().fg_2 }))
             .child(note)
             .into_any_element(),
@@ -193,7 +193,7 @@ fn dir_list(
                     div()
                         .id(i)
                         .w_full()
-                        .h(px(ROW_H))
+                        .h(u(ROW_H))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -206,7 +206,7 @@ fn dir_list(
                         .on_click(cx.listener(move |this, _, _, cx| this.set_project_path(path.clone(), cx)))
                         .child(
                             icon(if repo { "git-branch" } else { "folder" }, if repo { theme::t().accent_ink } else { theme::t().fg_2 })
-                                .size(px(14.)),
+                                .size(u(14.)),
                         )
                         .child(div().min_w_0().truncate().child(name))
                         .into_any_element()
@@ -237,12 +237,12 @@ fn link_page(offer: &Offer, cx: &mut Context<Dirigent>) -> Div {
             .flex_row()
             .items_center()
             .gap_3()
-            .h(px(36.))
+            .h(u(36.))
             .px_2()
             .rounded_md()
             .bg(rgba(theme::t().raised))
             .child(div().font_weight(FontWeight::MEDIUM).child(offer.name.clone()))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(members.clone()))
+            .child(div().flex_1().min_w_0().truncate().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(members.clone()))
             .child(
                 theme::button(SharedString::from(format!("link/{key}")), "git-fork", "Link")
                     .on_click(cx.listener(move |this, _, _, cx| this.finish_add_project(Some(target.clone()), cx))),

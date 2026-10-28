@@ -25,7 +25,7 @@ mod usage;
 mod view;
 mod working;
 
-use app::{Dirigent, Dismiss, NewThread, Quit, ToggleLog, ToggleSidebar};
+use app::{Dirigent, Dismiss, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
 use cache::Cache;
 use dirigent_service::hosts;
 use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
@@ -62,6 +62,11 @@ fn main() {
             KeyBinding::new("ctrl-q", Quit, Some(app::KEY_CONTEXT)),
             // Copies the transcript selection; an input with its own selection handles it first.
             KeyBinding::new("ctrl-c", input::Copy, Some(app::KEY_CONTEXT)),
+            // The text size (`[fonts] size`), like zoom in a browser; `+` is shift-= on most layouts.
+            KeyBinding::new("ctrl-=", TextBigger, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("ctrl-+", TextBigger, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("ctrl--", TextSmaller, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("ctrl-0", TextReset, Some(app::KEY_CONTEXT)),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);

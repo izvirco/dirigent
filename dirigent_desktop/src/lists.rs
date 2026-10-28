@@ -5,10 +5,10 @@ use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Target};
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::Group;
-use crate::theme::{self, Status};
+use crate::theme::{self, Status, text, u};
 use crate::{projects, thread};
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, px, rgba, uniform_list};
+use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, rgba, uniform_list};
 use std::ops::Range;
 
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
@@ -45,19 +45,19 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
     let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, &groups, this, cx)).collect();
     let removed = (!orphans.is_empty()).then(|| {
         entry_row("proj/orphans", projects::ORPHANS, cx)
-            .child(div().size(px(24.)).flex_shrink_0())
-            .child(div().w(px(160.)).flex_shrink_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
+            .child(div().size(u(24.)).flex_shrink_0())
+            .child(div().w(u(160.)).flex_shrink_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.))
+                    .text_size(text::sm())
                     .text_color(rgba(theme::t().fg_2))
                     .child("Threads whose project was removed"),
             )
             .child(thread_count(orphans.len()))
-            .child(div().size(px(24.)).flex_shrink_0())
+            .child(div().size(u(24.)).flex_shrink_0())
     });
 
     let add = theme::button("add-project", "plus", "Add project").on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx)));
@@ -65,7 +65,7 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
     if rows.is_empty() && removed.is_none() {
         return pane.child(theme::empty("No projects yet", "Add a directory on one of your hosts with Add project."));
     }
-    let column = div().w_full().max_w(px(760.)).flex().flex_col().gap_1().py_6().px_6().children(rows).children(removed);
+    let column = div().w_full().max_w(u(760.)).flex().flex_col().gap_1().py_6().px_6().children(rows).children(removed);
     pane.child(scroll("projects", div().flex().flex_col().items_center().child(column)))
 }
 
@@ -79,7 +79,7 @@ fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>)
         .flex_row()
         .items_center()
         .gap_3()
-        .h(px(36.))
+        .h(u(36.))
         .px_2()
         .rounded_md()
         .cursor_pointer()
@@ -89,7 +89,7 @@ fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>)
 
 fn thread_count(n: usize) -> Div {
     let text = if n == 1 { "1 thread".to_owned() } else { format!("{n} threads") };
-    div().w(px(80.)).flex_shrink_0().text_right().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(text)
+    div().w(u(80.)).flex_shrink_0().text_right().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text)
 }
 
 /// One project group on the Projects page: the pin toggle (amber while pinned, faint
@@ -155,7 +155,7 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
         div()
             .id(SharedString::from(id))
             .relative()
-            .size(px(24.))
+            .size(u(24.))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -170,7 +170,7 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
             cx.stop_propagation();
             this.set_project_pinned(&k, !pinned, cx)
         }))
-        .child(icon("pin", if pinned { theme::t().warn } else { theme::t().fg_2 }).size(px(14.)));
+        .child(icon("pin", if pinned { theme::t().warn } else { theme::t().fg_2 }).size(u(14.)));
     let open = menu_open || link_open;
     let k = key.clone();
     let more = small_button(format!("pm/{key}"))
@@ -190,8 +190,8 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
     let name = if this.renaming.as_deref() == Some(key.as_str()) {
         // Pulled left by its padding + border so the text stays where the name was.
         div()
-            .ml(px(-7.))
-            .mr(px(7.))
+            .ml(u(-7.))
+            .mr(u(7.))
             .px_1p5()
             .py_0p5()
             .rounded_md()
@@ -204,8 +204,8 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
     };
     entry_row(format!("proj/{key}"), &key, cx)
         .child(pin)
-        .child(name.w(px(160.)).flex_shrink_0().font_weight(FontWeight::MEDIUM))
-        .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(hosts))
+        .child(name.w(u(160.)).flex_shrink_0().font_weight(FontWeight::MEDIUM))
+        .child(div().flex_1().min_w_0().truncate().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(hosts))
         .child(thread_count(g.threads.len()))
         .child(more)
         .into_any_element()
@@ -217,7 +217,7 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .flex()
         .flex_row()
         .items_center()
-        .h(px(40.))
+        .h(u(40.))
         .flex_shrink_0()
         .px_4()
         .border_b_1()
@@ -251,7 +251,7 @@ pub fn breadcrumb(
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let has_project = project.is_some();
-    let chevron = || icon("chevron-right", theme::t().fg_2).size(px(12.)).flex_shrink_0();
+    let chevron = || icon("chevron-right", theme::t().fg_2).size(u(12.)).flex_shrink_0();
     let row = || div().flex().flex_row().items_center().gap_1().min_w_0();
     // The title has priority: the parent's name and the title's part (`tail`) share a row,
     // and `tail` doesn't shrink but is capped at that row's width (its `min_w_0` matters:
@@ -337,11 +337,11 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
 fn section_label(text: String) -> Div {
     div()
         .w_full()
-        .h(px(ROW_H))
+        .h(u(ROW_H))
         .px_4()
         .flex()
         .items_center()
-        .text_size(px(12.))
+        .text_size(text::sm())
         .text_color(rgba(theme::t().fg_2))
         .bg(rgba(theme::alpha(theme::t().canvas, 0x66)))
         .child(text)
@@ -385,7 +385,7 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
                         Some(t) => thread_row(host, t, show_host, show_project, now, this, cx).into_any_element(),
                         // Unreachable (items come from this frame's `this`); one element per
                         // index keeps the vec aligned with `range`.
-                        None => div().h(px(ROW_H)).into_any_element(),
+                        None => div().h(u(ROW_H)).into_any_element(),
                     },
                 })
                 .collect::<Vec<_>>()
@@ -426,7 +426,7 @@ fn thread_row(
         .flex_row()
         .items_center()
         .gap_3()
-        .h(px(ROW_H))
+        .h(u(ROW_H))
         .px_4()
         .border_b_1()
         .border_color(rgba(theme::t().line_soft))
@@ -444,17 +444,17 @@ fn thread_row(
                     .child(title),
             ),
         )
-        .when(show_host, |d| d.child(column(90.).text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
-        .when(show_project, |d| d.child(column(140.).text_size(px(12.)).text_color(rgba(theme::t().fg_1)).child(project)))
-        .child(column(150.).text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(model))
-        .child(column(32.).text_right().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
+        .when(show_host, |d| d.child(column(90.).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
+        .when(show_project, |d| d.child(column(140.).text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child(project)))
+        .child(column(150.).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(model))
+        .child(column(32.).text_right().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
         // Rows that can't be snoozed keep an empty slot, so the columns stay aligned.
         .child(if this.snoozable(host, t) {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| this.set_snoozed(&h3, &id3, !snoozed, cx))
                 .into_any_element()
         } else {
-            div().size(px(24.)).flex_shrink_0().into_any_element()
+            div().size(u(24.)).flex_shrink_0().into_any_element()
         })
         .child(
             row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, archive_confirm.is_some(), cx, move |this, cx| {
@@ -468,7 +468,7 @@ fn thread_row(
 /// A fixed-width cell of a thread row: every row lays its columns out the same way, so
 /// they line up like a table.
 fn column(width: f32) -> Div {
-    div().w(px(width)).flex_shrink_0().truncate()
+    div().w(u(width)).flex_shrink_0().truncate()
 }
 
 /// A thread row's trailing action: hidden until the row is hovered (or always shown while
@@ -483,7 +483,7 @@ fn row_action(
 ) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
-        .size(px(24.))
+        .size(u(24.))
         .flex_shrink_0()
         .flex()
         .items_center()

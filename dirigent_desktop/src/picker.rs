@@ -8,9 +8,9 @@
 use crate::app::{Dirigent, Menu, Preset};
 use crate::icons::icon;
 use crate::menu::{self, ROW_H, Side};
-use crate::theme;
+use crate::theme::{self, text, u};
 use dirigent_protocol::ModelInfo;
-use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, rgba};
 
 /// Both pages share one width so flipping between them doesn't resize the popup.
 const WIDTH: f32 = 430.;
@@ -22,7 +22,7 @@ pub fn menu(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> Any
         Some(Menu::AllModels) => all_models(this, no_target, cx),
         _ => presets(this, cx),
     };
-    menu::popup(Side::Above, vec![div().w(px(WIDTH)).flex().flex_col().children(page).into_any()], cx)
+    menu::popup(Side::Above, vec![div().w(u(WIDTH)).flex().flex_col().children(page).into_any()], cx)
 }
 
 /// `{Saved presets | Save preset} … All models ›`, a hairline, then the preset rows.
@@ -33,9 +33,9 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
         Some(_) if !saved => header_button("save-preset", "Save preset", None, theme::t().accent_ink)
             .on_click(cx.listener(|this, _, _, cx| this.save_preset(cx)))
             .into_any(),
-        _ => div().px_1p5().text_size(px(11.5)).text_color(rgba(theme::t().fg_2)).child("Saved presets").into_any(),
+        _ => div().px_1p5().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child("Saved presets").into_any(),
     };
-    let header = div().flex().flex_row().items_center().justify_between().h(px(ROW_H)).flex_shrink_0().px_0p5().child(left).child(
+    let header = div().flex().flex_row().items_center().justify_between().h(u(ROW_H)).flex_shrink_0().px_0p5().child(left).child(
         header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1)
             .on_click(cx.listener(|this, _, window, cx| this.open_all_models(window, cx))),
     );
@@ -60,7 +60,7 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
 fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let back = div()
         .id("models-back")
-        .size(px(ROW_H))
+        .size(u(ROW_H))
         .flex_shrink_0()
         .flex()
         .items_center()
@@ -75,10 +75,10 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(ROW_H))
+        .h(u(ROW_H))
         .flex_shrink_0()
         .child(back)
-        .child(div().flex_1().min_w_0().text_size(px(13.)).child(this.model_search.clone()));
+        .child(div().flex_1().min_w_0().text_size(text::base()).child(this.model_search.clone()));
 
     let models = this.filtered_models(cx);
     let items: Vec<AnyElement> = if models.is_empty() {
@@ -91,7 +91,7 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
     } else {
         models.iter().map(|m| model_row(m, this, cx)).collect()
     };
-    let list = div().id("models-list").flex().flex_col().max_h(px(LIST_H)).overflow_y_scroll().children(items).into_any();
+    let list = div().id("models-list").flex().flex_col().max_h(u(LIST_H)).overflow_y_scroll().children(items).into_any();
     vec![header.into_any(), menu::separator(), list]
 }
 
@@ -122,13 +122,13 @@ fn preset_row(
         .group("preset")
         .on_click(cx.listener(move |this, _, _, cx| this.use_preset(&preset, cx)))
         .child(div().flex_shrink_0().child(name))
-        .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(px(12.)).child(p.model.clone()))
-        .children(p.effort.clone().map(|e| div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).text_size(px(12.)).child(e)))
+        .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(text::sm()).child(p.model.clone()))
+        .children(p.effort.clone().map(|e| div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).text_size(text::sm()).child(e)))
         .child(div().flex_1())
         .children(index.map(|i| {
             div()
                 .id(ElementId::Name(format!("p/{i}/x").into()))
-                .size(px(20.))
+                .size(u(20.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -140,7 +140,7 @@ fn preset_row(
                     cx.stop_propagation();
                     this.remove_preset(i, cx);
                 }))
-                .child(icon("x", theme::t().fg_1).size(px(12.)))
+                .child(icon("x", theme::t().fg_1).size(u(12.)))
         }))
         .into_any()
 }
@@ -153,13 +153,13 @@ fn header_button(id: &'static str, label: &'static str, trailing: Option<&'stati
         .flex_row()
         .items_center()
         .gap_0p5()
-        .h(px(22.))
+        .h(u(22.))
         .px_1p5()
         .rounded_md()
         .cursor_pointer()
-        .text_size(px(12.))
+        .text_size(text::sm())
         .text_color(rgba(color))
         .hover(|d| d.bg(rgba(theme::t().line)).text_color(rgba(theme::t().fg)))
         .child(label)
-        .children(trailing.map(|name| icon(name, color).size(px(12.))))
+        .children(trailing.map(|name| icon(name, color).size(u(12.))))
 }

@@ -2,7 +2,8 @@
 //! embedded in the binary and served to gpui's `svg()` through an `AssetSource`. Add an
 //! icon: drop the svg in assets/icons and list it here.
 
-use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, px, rgba, svg};
+use crate::theme::u;
+use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, rgba, svg};
 use std::borrow::Cow;
 
 macro_rules! icons {
@@ -34,6 +35,7 @@ icons!(
     "hourglass",
     "list",
     "message-circle-question",
+    "minus",
     "moon",
     "openai",
     "panel-left-close",
@@ -65,7 +67,7 @@ impl AssetSource for Assets {
     }
 }
 
-/// A 14px icon. `Svg` ignores the inherited text color, so it takes one explicitly.
+/// A 14px icon (design pixels, `theme::u`). `Svg` ignores the inherited text color, so it takes one explicitly.
 pub fn icon(name: &'static str, color: u32) -> Svg {
-    svg().path(format!("icons/{name}.svg")).size(px(14.)).flex_shrink_0().text_color(rgba(color))
+    svg().path(format!("icons/{name}.svg")).size(u(14.)).flex_shrink_0().text_color(rgba(color))
 }

@@ -24,7 +24,7 @@ use crate::menu::{self, Side};
 use crate::picker;
 use crate::ruler;
 use crate::select::{Doc, Keys};
-use crate::theme::{self, Fonts, Status, dollars, kilo};
+use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
 use crate::view::{Item, Stats, Step, ToolCall, Work};
 use crate::working;
 use dirigent_protocol::PromptMode;
@@ -39,9 +39,8 @@ use std::sync::Arc;
 /// Work key for the run in progress while it has no persisted item yet.
 pub const TAIL: usize = usize::MAX;
 const MAX_RESULT_CHARS: usize = 20_000;
-/// Tool rows are compact and table-like; everything inside a work shares this size.
+/// Tool rows are compact and table-like: this tall, their text `text::sm`.
 const ROW_H: f32 = 22.;
-const STEP_SIZE: f32 = 12.5;
 /// Default log panel width; the user can drag it between `app::LOG_MIN` and `LOG_MAX`.
 pub const LOG_WIDTH: f32 = 400.;
 
@@ -195,10 +194,10 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .ml_2()
             .flex_shrink_0()
             .font_weight(FontWeight::NORMAL)
-            .text_size(px(12.))
+            .text_size(text::sm())
             .font_family(this.fonts.mono.clone())
             .text_color(rgba(if missing { theme::t().warn } else { theme::t().fg_1 }))
-            .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(px(12.)))
+            .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(u(12.)))
             .child(name)
     });
     // A sub-agent's parent before its title, a click away (the right panel's tree has the whole family).
@@ -237,9 +236,9 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
             .items_center()
             .justify_center()
             .px_6()
-            .text_size(px(12.))
+            .text_size(text::sm())
             .text_color(rgba(theme::t().fg_2))
-            .child("Sub-agents this thread spawns show up here.")
+            .child(div().w_full().text_center().child("Sub-agents this thread spawns show up here."))
     });
     let tree = tree.map(|tree| {
         div()
@@ -256,16 +255,18 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         .id("panel-resize")
         .absolute()
         .top_0()
-        .left(px(-3.))
-        .w(px(6.))
+        .left(u(-3.))
+        .w(u(6.))
         .h_full()
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
     let panel = div()
         .relative()
-        .w(px(this.log_width))
+        .w(u(this.log_width))
         .flex_shrink_0()
+        // Half the pane at most: a narrow window (or a big text size) keeps room for the transcript.
+        .max_w(relative(0.5))
         .h_full()
         .border_l_1()
         .border_color(rgba(theme::t().line_soft))
@@ -322,7 +323,7 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
     let (h2, i2) = (host.to_owned(), id.to_owned());
     div()
         .w_full()
-        .max_w(px(theme::COMPOSER))
+        .max_w(u(theme::COMPOSER))
         .mb_2()
         .px_3()
         .py_2()
@@ -334,7 +335,7 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
         .bg(rgba(t.raised))
         .border_1()
         .border_color(rgba(t.warn))
-        .text_size(px(12.5))
+        .text_size(text::sm())
         .child(icon("triangle-alert", t.warn))
         .child(
             div()
@@ -343,7 +344,7 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
                 .flex()
                 .flex_col()
                 .child(div().text_color(rgba(t.fg)).child("The thread's workspace was removed outside dirigent."))
-                .child(div().text_size(px(11.5)).text_color(rgba(t.fg_1)).font_family(mono).truncate().child(workspace.to_owned())),
+                .child(div().text_size(text::xs()).text_color(rgba(t.fg_1)).font_family(mono).truncate().child(workspace.to_owned())),
         )
         .child(
             theme::button("ws-recreate", "git-branch", "Recreate")
@@ -419,13 +420,13 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
                 .flex_row()
                 .items_center()
                 .gap_1()
-                .h(px(26.))
+                .h(u(26.))
                 .px_2()
                 .rounded_md()
                 .bg(rgba(theme::t().raised))
                 .border_1()
                 .border_color(rgba(theme::t().line))
-                .text_size(px(12.))
+                .text_size(text::sm())
                 .child(div().text_color(rgba(theme::t().fg_1)).child("on"))
                 .child(div().font_weight(FontWeight::MEDIUM).child(t.host.clone()))
                 .into_any_element()
@@ -452,12 +453,12 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
     // The warnings hang off the card's bottom edge in a zero-height layer, so showing or
     // hiding them (the chip toggles that) never moves the composer.
     let card =
-        div().relative().w_full().max_w(px(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx)).child(
+        div().relative().w_full().max_w(u(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx)).child(
             div().absolute().bottom_0().left_0().right_0().h_0().flex().flex_col().items_center().children(draft_warnings(this, cx)),
         );
     // No header: the page is just the composer, a little above true center so it reads as
     // the page's subject, not its footer.
-    pane.child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(px(40.)).child(card))
+    pane.child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(u(40.)).child(card))
 }
 
 /// What a thread started in the project directory would walk into: another thread already
@@ -483,7 +484,7 @@ fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     if lines.is_empty() || this.isolate || info.is_none_or(|v| v.vcs.is_none()) {
         return None;
     }
-    Some(div().mt_3().flex().flex_col().items_center().gap_1().text_size(px(12.5)).children(lines.into_iter().enumerate().map(
+    Some(div().mt_3().flex().flex_col().items_center().gap_1().text_size(text::sm()).children(lines.into_iter().enumerate().map(
         |(i, (text, color))| {
             div()
                 .flex()
@@ -491,7 +492,7 @@ fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                 .items_center()
                 .justify_center()
                 .gap_1p5()
-                .child(icon("triangle-alert", color).size(px(12.)))
+                .child(icon("triangle-alert", color).size(u(12.)))
                 .child(div().text_color(rgba(color)).child(text))
                 .child(
                     div()
@@ -611,10 +612,10 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
         .flex()
         .flex_row()
         .items_center()
-        .h(px(menu::ROW_H))
+        .h(u(menu::ROW_H))
         .flex_shrink_0()
         .px_2()
-        .child(div().flex_1().min_w_0().text_size(px(13.)).child(this.base_search.clone()));
+        .child(div().flex_1().min_w_0().text_size(text::base()).child(this.base_search.clone()));
     let typed = this.base_search.read(cx).text().trim().to_owned();
     let refs = this.filtered_refs(cx);
     let drafting = matches!(this.pane, Pane::Draft { .. });
@@ -650,9 +651,9 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
         let base = typed.clone();
         items.push(menu::item("base/typed", typed, "as typed", false, move |this, cx| this.pick_base(Some(base.clone()), cx), cx));
     }
-    let list = div().id("base-list").flex().flex_col().max_h(px(BASE_LIST_H)).overflow_y_scroll().children(items).into_any();
+    let list = div().id("base-list").flex().flex_col().max_h(u(BASE_LIST_H)).overflow_y_scroll().children(items).into_any();
     let body = div()
-        .w(px(360.))
+        .w(u(360.))
         .flex()
         .flex_col()
         .child(in_project)
@@ -700,7 +701,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         div()
             .id("ctx-usage")
             .relative()
-            .h(px(24.))
+            .h(u(24.))
             .px_1p5()
             .flex()
             .items_center()
@@ -722,7 +723,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let action = if running {
         div()
             .id("stop")
-            .size(px(28.))
+            .size(u(28.))
             .flex()
             .items_center()
             .justify_center()
@@ -732,12 +733,12 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .bg(rgba(theme::t().danger))
             .hover(|d| d.bg(rgba(theme::t().danger_active)))
             .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-            .child(icon("square", theme::t().danger_ink).size(px(11.)))
+            .child(icon("square", theme::t().danger_ink).size(u(11.)))
     } else {
         let ready = has_text && this.model.is_some() && !no_target;
         div()
             .id("send")
-            .size(px(28.))
+            .size(u(28.))
             .flex()
             .items_center()
             .justify_center()
@@ -755,17 +756,17 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     div()
         .relative()
         .w_full()
-        .max_w(px(theme::COMPOSER))
+        .max_w(u(theme::COMPOSER))
         .flex()
         .flex_col()
-        .rounded(px(CORNER))
+        .rounded(u(CORNER))
         .bg(rgba(theme::t().raised))
         // No border of its own: the glow rings are the only edge, so it stays soft.
         .border_1()
         .border_color(gpui::transparent_black())
         .shadow_md()
         .children(glow())
-        .child(div().px_4().pt_4().pb_3().text_size(px(14.)).line_height(px(22.)).child(this.composer.clone()))
+        .child(div().px_4().pt_4().pb_3().text_size(text::lg()).line_height(u(22.)).child(this.composer.clone()))
         .children(attachment_strip(this, cx))
         .child(
             div()
@@ -817,8 +818,8 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
         let ask_id = ask_id.clone();
         div()
             .id(ElementId::Name(format!("ask/{}/row/{i}", form.ask.id).into()))
-            .h(px(24.))
-            .ml(px(6. * depth as f32))
+            .h(u(24.))
+            .ml(u(6. * depth as f32))
             .px_2()
             .flex()
             .flex_row()
@@ -828,13 +829,13 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
             .cursor_pointer()
             .bg(rgba(t.hover))
             .opacity(1. - 0.15 * depth as f32)
-            .text_size(px(12.))
+            .text_size(text::sm())
             .hover(move |d| d.bg(rgba(t.line)).opacity(1.))
             .on_click(cx.listener(move |this, _, _, cx| this.show_ask_tab(&ask_id, i, cx)))
             .child(if done {
-                icon("check", t.done).size(px(11.)).into_any_element()
+                icon("check", t.done).size(u(11.)).into_any_element()
             } else {
-                div().size(px(11.)).flex_shrink_0().rounded_full().border_1().border_color(rgba(t.fg_2)).into_any_element()
+                div().size(u(11.)).flex_shrink_0().rounded_full().border_1().border_color(rgba(t.fg_2)).into_any_element()
             })
             .child(div().min_w_0().truncate().text_color(rgba(if done { t.fg_1 } else { t.fg })).child(question.text.clone()))
             .when(done, |d| {
@@ -848,9 +849,9 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
     // label wraps, so the row grows past its one-line height for long options.
     let option_row = |id: ElementId, on: bool, multi: bool, body: AnyElement| {
         let mark = div()
-            .size(px(11.))
+            .size(u(11.))
             .flex_shrink_0()
-            .when(multi, |d| d.rounded(px(2.)))
+            .when(multi, |d| d.rounded(u(2.)))
             .when(!multi, |d| d.rounded_full())
             .border_1()
             .border_color(rgba(if on { t.accent_line } else { t.fg_2 }))
@@ -858,7 +859,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
         div()
             .id(id)
             .w_full()
-            .min_h(px(26.))
+            .min_h(u(26.))
             .px_2()
             .py_1()
             .flex()
@@ -867,7 +868,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
             .gap_2()
             .rounded_md()
             .cursor_pointer()
-            .text_size(px(12.5))
+            .text_size(text::sm())
             .text_color(rgba(if on { t.fg } else { t.fg_1 }))
             .hover(move |d| d.bg(rgba(t.hover)))
             .child(mark)
@@ -902,21 +903,21 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
     let action = (complete || next).then(|| {
         div()
             .id(ElementId::Name(format!("ask-next/{ask_id}").into()))
-            .h(px(24.))
+            .h(u(24.))
             .px_2p5()
             .flex()
             .items_center()
             .gap_1()
             .rounded_md()
             .cursor_pointer()
-            .text_size(px(12.))
+            .text_size(text::sm())
             .bg(rgba(if complete { t.accent } else { t.hover }))
             .text_color(rgba(t.fg))
             .font_weight(FontWeight::MEDIUM)
             .hover(move |d| d.bg(rgba(if complete { t.accent_active } else { t.line })))
             .on_click(cx.listener(move |this, _, _, cx| this.next_ask_tab(&next_id, cx)))
             .child(if complete { "Answer" } else { "Next" })
-            .when(!complete, |d| d.child(icon("chevron-right", t.fg).size(px(11.))))
+            .when(!complete, |d| d.child(icon("chevron-right", t.fg).size(u(11.))))
     });
     let card = div()
         .flex()
@@ -930,7 +931,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
         .border_1()
         .border_color(rgba(t.line))
         .shadow_sm()
-        .child(div().px_2().text_size(px(13.)).line_height(px(19.)).child(q.text.clone()))
+        .child(div().px_2().text_size(text::base()).line_height(u(19.)).child(q.text.clone()))
         .child(div().flex().flex_col().gap_0p5().children(options).children(custom))
         .child(
             div()
@@ -938,7 +939,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
                 .flex_row()
                 .items_center()
                 .justify_end()
-                .child(div().text_size(px(11.5)).text_color(rgba(t.fg_2)).child(format!("{} of {}", qi + 1, form.ask.questions.len())))
+                .child(div().text_size(text::xs()).text_color(rgba(t.fg_2)).child(format!("{} of {}", qi + 1, form.ask.questions.len())))
                 .child(div().flex_1())
                 .children(action),
         );
@@ -949,7 +950,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
 
     div()
         .w_full()
-        .max_w(px(theme::COMPOSER * 0.9))
+        .max_w(u(theme::COMPOSER * 0.9))
         // It floats over the transcript: clicks must not reach what's under it (the wheel
         // still scrolls the transcript).
         .block_mouse_except_scroll()
@@ -959,7 +960,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
         .px_3()
         .pt_2()
         .pb_2p5()
-        .rounded(px(CORNER))
+        .rounded(u(CORNER))
         .bg(rgba(t.raised))
         .shadow_md()
         .when(form.sent, |d| d.opacity(0.5))
@@ -970,7 +971,7 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
                 .items_center()
                 .gap_2()
                 .mb_1()
-                .text_size(px(12.))
+                .text_size(text::sm())
                 .text_color(rgba(t.fg_1))
                 .child(icon("message-circle-question", t.warn))
                 .child(div().flex_1().child("The agent asks"))
@@ -993,9 +994,9 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
         let remove = div()
             .id(ElementId::NamedInteger("att-rm".into(), n as u64))
             .absolute()
-            .top(px(-6.))
-            .right(px(-6.))
-            .size(px(18.))
+            .top(u(-6.))
+            .right(u(-6.))
+            .size(u(18.))
             .flex()
             .items_center()
             .justify_center()
@@ -1011,7 +1012,7 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
                 cx.stop_propagation();
                 this.remove_attachment(n, window, cx);
             }))
-            .child(icon("x", theme::t().fg).size(px(11.)));
+            .child(icon("x", theme::t().fg).size(u(11.)));
         thumb_box()
             .id(ElementId::NamedInteger("att".into(), n as u64))
             .group("att")
@@ -1044,17 +1045,18 @@ fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context
         n += 1;
         let eid = ElementId::NamedInteger("md-img".into(), seed.wrapping_shl(8) | n);
         let Some(Blob { image, size: Some((w, h)) }) = blobs.get(id) else {
-            return div().w(px(THUMB * 3.)).h(px(THUMB * 2.)).rounded_md().bg(rgba(theme::t().accent)).into_any();
+            return div().w(u(THUMB * 3.)).h(u(THUMB * 2.)).rounded_md().bg(rgba(theme::t().accent)).into_any();
         };
         // The box has the bitmap's shape: as wide as the column allows, up to the natural
-        // size and INLINE_IMAGE_H tall; the img fills it. (An `img` clamped by max sizes
-        // instead gets laid out taller than its parent counts it and overlaps what follows:
-        // gpui makes both its sizes definite. And the box needs its plain block parent: in a
-        // flex column, taffy takes an aspect-ratio item's height from its unclamped width.)
+        // size (real px: a big text size doesn't blur it) and INLINE_IMAGE_H tall; the img
+        // fills it. (An `img` clamped by max sizes instead gets laid out taller than its
+        // parent counts it and overlaps what follows: gpui makes both its sizes definite. And
+        // the box needs its plain block parent: in a flex column, taffy takes an
+        // aspect-ratio item's height from its unclamped width.)
         let box_ = div()
             .id(eid)
             .w_full()
-            .max_w(px(w.min(w * INLINE_IMAGE_H / h)))
+            .max_w(px(*w).min(u(w * INLINE_IMAGE_H / h)))
             .aspect_ratio(w / h)
             .cursor_pointer()
             .on_click(cx.listener({
@@ -1089,7 +1091,7 @@ fn result_images(images: &[String], blobs: &HashMap<String, Blob>, seed: u64, cx
 
 /// The 3:2 thumbnail box; `thumb` goes inside, centered.
 fn thumb_box() -> Div {
-    div().relative().flex_shrink_0().flex().items_center().justify_center().w(px(THUMB * 1.5)).h(px(THUMB)).rounded_md()
+    div().relative().flex_shrink_0().flex().items_center().justify_center().w(u(THUMB * 1.5)).h(u(THUMB)).rounded_md()
 }
 
 /// An image scaled down to fit the thumbnail box. Not `size_full`: `img` imposes the
@@ -1125,12 +1127,7 @@ const BUBBLE_PAD: f32 = 16.;
 fn glow() -> impl Iterator<Item = Div> {
     [0x60, 0x30, 0x14].into_iter().enumerate().map(|(i, alpha)| {
         let out = 2. * (i + 1) as f32;
-        div()
-            .absolute()
-            .inset(px(-out))
-            .rounded(px(CORNER + out))
-            .border_1()
-            .border_color(rgba(theme::alpha(theme::t().accent_line, alpha)))
+        div().absolute().inset(u(-out)).rounded(u(CORNER + out)).border_1().border_color(rgba(theme::alpha(theme::t().accent_line, alpha)))
     })
 }
 
@@ -1166,8 +1163,8 @@ fn stats_card(t: &OpenThread) -> AnyElement {
         .border_1()
         .border_color(rgba(theme::t().line))
         .shadow_md()
-        .text_size(px(12.))
-        .line_height(px(18.))
+        .text_size(text::sm())
+        .line_height(u(18.))
         .text_color(rgba(theme::t().fg))
         .child(format!("{} in / {} out", kilo(s.input), kilo(s.output)))
         .child(dim(format!("{} cached ({}%)", kilo(s.cached), s.cached_pct())))
@@ -1182,9 +1179,7 @@ fn stats_card(t: &OpenThread) -> AnyElement {
         .top_0()
         .left_0()
         .size_0()
-        .child(deferred(
-            anchored().anchor(Anchor::BottomLeft).offset(point(px(0.), px(-6.))).snap_to_window_with_margin(px(8.)).child(card),
-        ))
+        .child(deferred(anchored().anchor(Anchor::BottomLeft).offset(point(px(0.), u(-6.))).snap_to_window_with_margin(u(8.)).child(card)))
         .into_any()
 }
 
@@ -1202,7 +1197,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     // User bubbles go gray in an archived thread, so it reads as one at a glance.
     let archived = this.summary(&t.host, &t.id).is_some_and(|s| s.archived);
     let bubble = if archived { theme::t().hover } else { theme::t().bubble };
-    let mut col = div().w_full().max_w(px(theme::COLUMN)).flex().flex_col();
+    let mut col = div().w_full().max_w(u(theme::COLUMN)).flex().flex_col();
     if ix < t.timeline.items.len() {
         if live.as_ref().is_none_or(|(k, _)| *k != ix) {
             col = col.child(render_timeline_item(&t.timeline.items[ix], ix, t, bubble, blobs, now, &fonts, keys, cx));
@@ -1297,9 +1292,9 @@ fn render_timeline_item(
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
             .w_full()
-            .py(px(2.))
-            .text_size(px(STEP_SIZE))
-            .line_height(px(19.))
+            .py(u(2.))
+            .text_size(text::sm())
+            .line_height(u(19.))
             .text_color(rgba(theme::t().error))
             .child(keys.plain(text.clone()))
             .into_any(),
@@ -1320,19 +1315,19 @@ fn child_line(id: String, host: &str, thread_id: &str, text: &str, cx: &mut Cont
         .flex_row()
         .items_center()
         .gap_1p5()
-        .text_size(px(12.))
+        .text_size(text::sm())
         .text_color(rgba(theme::t().fg_2))
         .cursor_pointer()
         .hover(|d| d.text_color(rgba(theme::t().fg)))
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&host, &thread_id, cx)))
-        .child(icon("corner-down-right", theme::t().fg_2).size(px(12.)))
+        .child(icon("corner-down-right", theme::t().fg_2).size(u(12.)))
         .child(text.to_owned())
         .into_any()
 }
 
 /// A quiet one-liner between messages (compaction, warnings, unknown entries).
 fn notice_line(text: impl IntoElement) -> AnyElement {
-    div().w_full().py_1().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(text).into_any()
+    div().w_full().py_1().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text).into_any()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1352,8 +1347,8 @@ fn reply_block(
         .w_full()
         .py_1()
         .font_family(fonts.prose.clone())
-        .text_size(px(14.))
-        .line_height(px(22.))
+        .text_size(text::lg())
+        .line_height(u(22.))
         .child(body)
         .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP))
         .children(corner_buttons(ix, text, t, cx))
@@ -1365,7 +1360,7 @@ const PIN_GAP: f32 = 6.;
 /// A pinned message's amber bar in the left margin, `left` px before the block's edge
 /// (so bubbles and replies line up despite the bubble's overhang).
 fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
-    t.is_pinned(ix).then(|| div().absolute().left(px(-left)).top_1().bottom_1().w(px(2.)).rounded_full().bg(rgba(theme::t().warn)))
+    t.is_pinned(ix).then(|| div().absolute().left(u(-left)).top_1().bottom_1().w(u(2.)).rounded_full().bg(rgba(theme::t().warn)))
 }
 
 /// `pin` and `copy` in a message's top right corner, revealed on hover. Copy puts the
@@ -1435,18 +1430,18 @@ fn user_bubble(
     div()
         .group("msg")
         .relative()
-        .mx(px(-BUBBLE_PAD))
+        .mx(u(-BUBBLE_PAD))
         .mt_4()
         .mb_3()
-        .px(px(BUBBLE_PAD))
+        .px(u(BUBBLE_PAD))
         .py_3()
         .rounded_lg()
         // A shade under the send button's accent, so bubbles sit back from the chrome
         // (`hover` gray in an archived thread; see `render_item`).
         .bg(rgba(bubble))
         .font_family(fonts.prose.clone())
-        .text_size(px(14.))
-        .line_height(px(22.))
+        .text_size(text::lg())
+        .line_height(u(22.))
         .child(markdown::render(text, &fonts.mono, keys, None))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
@@ -1509,8 +1504,8 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &
         .items_center()
         .gap_2()
         .mb_1()
-        .text_size(px(11.5))
-        .line_height(px(14.))
+        .text_size(text::xs())
+        .line_height(u(14.))
         .child(div().text_color(rgba(theme::t().accent_ink)).child("steer"))
         .child(div().flex_1())
         .children(cancel)
@@ -1518,16 +1513,16 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &
     div()
         .group("msg")
         .relative()
-        .mx(px(-BUBBLE_PAD))
+        .mx(u(-BUBBLE_PAD))
         .my_2()
-        .px(px(BUBBLE_PAD))
+        .px(u(BUBBLE_PAD))
         .py_2p5()
         .rounded_lg()
         .bg(rgba(bubble))
         .when(pending, |d| d.opacity(0.7))
         .font_family(fonts.prose.clone())
-        .text_size(px(14.))
-        .line_height(px(22.))
+        .text_size(text::lg())
+        .line_height(u(22.))
         .child(label)
         .child(markdown::render(text, &fonts.mono, keys, None))
 }
@@ -1557,9 +1552,9 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys
         .flex()
         .flex_row()
         .gap_2()
-        .py(px(2.))
-        .text_size(px(STEP_SIZE))
-        .line_height(px(19.))
+        .py(u(2.))
+        .text_size(text::sm())
+        .line_height(u(19.))
         .child(div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).child("steer"))
         .child(div().flex_1().min_w_0().text_color(rgba(theme::t().fg_1)).child(keys.plain(text.to_owned())))
         // `cancel` sits left of `queued` so `queued` stays flush right while it's invisible.
@@ -1584,7 +1579,7 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
     let row = row(step_id(key, usize::MAX))
         .my_1()
         .gap_2()
-        .text_size(px(STEP_SIZE))
+        .text_size(text::sm())
         .text_color(rgba(theme::t().fg_1))
         .when(shown, |d| d.bg(rgba(theme::t().raised)))
         .on_click(cx.listener(move |this, _, _, cx| this.toggle_log(key, cx)));
@@ -1637,7 +1632,7 @@ fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
                 .into_any()
         }),
     );
-    Some(steps.flex_1().min_h_0().w_full().text_size(px(STEP_SIZE)).line_height(px(19.)).into_any_element())
+    Some(steps.flex_1().min_h_0().w_full().text_size(text::sm()).line_height(u(19.)).into_any_element())
 }
 
 /// One step of the shown work as a log list item; a placeholder while it has none.
@@ -1647,7 +1642,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
     let Some(key) = t.log else { return div().into_any() };
     let Some(step) = work.steps.get(six) else {
         let text = if live { "Waiting for the model" } else { "No steps" };
-        return div().h(px(ROW_H)).flex().items_center().text_color(rgba(theme::t().fg_2)).child(text).into_any();
+        return div().h(u(ROW_H)).flex().items_center().text_color(rgba(theme::t().fg_2)).child(text).into_any();
     };
     let mono = &this.fonts.mono;
     let blobs = &this.blobs;
@@ -1662,7 +1657,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         Step::Steer { text, queued } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
         Step::Child { thread_id, text } => child_line(format!("log-child/{key}/{six}"), &t.host, thread_id, text, cx),
         Step::CacheMiss(text) => div()
-            .h(px(ROW_H))
+            .h(u(ROW_H))
             .flex()
             .items_center()
             .child(div().min_w_0().truncate().text_color(rgba(theme::t().warn)).child(keys.plain(text.clone())))
@@ -1671,7 +1666,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         Step::Notice(text) => {
             let failed = text.contains("exit ") && !text.contains("exit 0");
             div()
-                .h(px(ROW_H))
+                .h(u(ROW_H))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -1744,8 +1739,8 @@ fn render_tool(
 fn row(id: ElementId) -> gpui::Stateful<Div> {
     div()
         .id(id)
-        .h(px(ROW_H))
-        .mx(px(-4.))
+        .h(u(ROW_H))
+        .mx(u(-4.))
         .px_1()
         .rounded_sm()
         .flex()

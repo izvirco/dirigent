@@ -12,6 +12,8 @@ Read `testing.md` (how to drive the UI) first.
 
 ## Gotchas that cost time
 
+- **Sizes zoom with `[fonts] size`**: write lengths as `theme::u(n)` (design px, `n` at the default 13) and text sizes as `theme::text::{xs, sm, base, lg}`, never gpui's `px(n)` / `.text_sm()`. `px` is for hairlines and pixel math (mouse positions, paint); divide by `theme::zoom()` to turn pixels into design px. gpui's rem spacing (`p_2`, `gap_1`) zooms through the window's rem size.
+
 - **pi persistence**: messages are appended to `SessionManager` silently; `entry_appended` only fires for custom entries. The runtime diffs `getEntryCount()` after each event and emits `entry` messages. Don't rely on `entry_appended`.
 - **gpui popups**: an `anchored()` child is `position: absolute` and lands at the flex _static position_ (e.g. centered in its parent). Wrap it in a zero-size `absolute().top_0().left_0()` div (see `menu.rs`).
 - **gpui `svg()`** ignores inherited text color; pass it explicitly (`icons::icon(name, color)`).
