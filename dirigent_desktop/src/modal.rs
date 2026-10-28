@@ -4,8 +4,8 @@
 //! (`add_project.rs`), or `Dirigent::modal` (Settings, Usage).
 
 use crate::app::Dirigent;
-use crate::theme;
-use gpui::{AnyElement, Context, Div, MouseButton, div, prelude::*, px, rgba};
+use crate::theme::{self, u};
+use gpui::{AnyElement, Context, Div, MouseButton, div, prelude::*, rgba};
 
 /// The large card (Settings, Usage) at its biggest; smaller windows shrink it.
 const LARGE_W: f32 = 900.;
@@ -35,5 +35,5 @@ pub fn frame(card: Div, cx: &mut Context<Dirigent>) -> AnyElement {
 /// made for that surface show. The card's own `popup` fill stays under it: solid even in
 /// a translucent theme.
 pub fn large(body: Div) -> Div {
-    div().w_full().max_w(px(LARGE_W)).h_full().max_h(px(LARGE_H)).child(body.flex_1().min_h_0().rounded_lg().bg(rgba(theme::t().panel)))
+    div().w_full().max_w(u(LARGE_W)).h_full().max_h(u(LARGE_H)).child(body.flex_1().min_h_0().rounded_lg().bg(rgba(theme::t().panel)))
 }

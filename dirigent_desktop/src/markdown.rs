@@ -10,7 +10,7 @@
 //! text; any other image shows its alt text.
 
 use crate::select::{Block, Keys};
-use crate::theme;
+use crate::theme::{self, text, u};
 use gpui::{
     AnyElement, Div, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*,
     px, rgba,
@@ -80,7 +80,7 @@ impl Renderer<'_, '_> {
                     2 => 17.,
                     _ => 15.,
                 };
-                div().mt_1().text_size(px(size)).font_weight(FontWeight::SEMIBOLD).child(self.paragraph(ev)).into_any()
+                div().mt_1().text_size(u(size)).font_weight(FontWeight::SEMIBOLD).child(self.paragraph(ev)).into_any()
             }
             Tag::CodeBlock(_) => {
                 let mut code = String::new();
@@ -134,7 +134,7 @@ impl Renderer<'_, '_> {
                         div()
                             .flex()
                             .gap_2()
-                            .child(div().flex_shrink_0().min_w(px(16.)).text_color(rgba(theme::t().fg_1)).child(marker))
+                            .child(div().flex_shrink_0().min_w(u(16.)).text_color(rgba(theme::t().fg_1)).child(marker))
                             .child(div().flex_1().min_w_0().flex().flex_col().gap_1().children(self.blocks(ev)))
                             .into_any(),
                     );
@@ -223,8 +223,8 @@ impl Renderer<'_, '_> {
             .px_3()
             .py_2()
             .font_family(self.mono.clone())
-            .text_size(px(12.5))
-            .line_height(px(19.))
+            .text_size(text::sm())
+            .line_height(u(19.))
             .child(self.keys.plain(code))
     }
 }

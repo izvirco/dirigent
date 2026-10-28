@@ -9,7 +9,7 @@
 //! of them have settled — so the ruler costs nothing while it is still.
 
 use crate::app::{Dirigent, OpenThread, Pane};
-use crate::theme;
+use crate::theme::{self, text, u};
 use crate::view::Item;
 use gpui::{
     Anchor, AnyElement, Bounds, ClickEvent, Context, Hsla, ListState, MouseMoveEvent, Pixels, Point, anchored, canvas, deferred, div, fill,
@@ -19,6 +19,8 @@ use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
+
+// Lengths are design pixels, drawn `theme::zoom()` times as big (`theme::u`).
 
 /// Strip width; the reading column is centered, so this sits in its left margin.
 pub const WIDTH: f32 = 28.;
@@ -100,7 +102,8 @@ impl Grid {
 
     /// Vertical distance between marks: `PITCH`, or less once they'd overflow the strip.
     fn pitch(&self, n: usize) -> f32 {
-        self.snap(PITCH.min((f32::from(self.bounds.size.height) - 2. * PAD) / n.max(1) as f32))
+        let z = theme::zoom();
+        self.snap((PITCH * z).min((f32::from(self.bounds.size.height) - 2. * PAD * z) / n.max(1) as f32))
     }
 
     /// Offset of the first mark from the strip's top: the ruler is centered in it.
@@ -178,7 +181,7 @@ fn visible_items(list: &ListState) -> Range<usize> {
             break;
         }
         let overlap = b.bottom().min(vp.bottom()) - b.top().max(vp.top());
-        if overlap >= (b.size.height / 2.).min(px(40.)) {
+        if overlap >= (b.size.height / 2.).min(u(40.)) {
             start.get_or_insert(ix);
             end = ix + 1;
         }
@@ -209,6 +212,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             let dt = s.last_frame.map_or(0., |l| now.duration_since(l).as_secs_f32()).min(1. / 30.);
             s.last_frame = Some(now);
             // Exponential approach, frame-rate independent; reduced motion snaps.
+            let z = theme::zoom();
             let k = if cx.reduce_motion() { 1. } else { 1. - (-dt / TAU).exp() };
             s.tweens.resize(n, Tween::default());
             let mut settled = true;
@@ -216,17 +220,17 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 let hovered = s.hover == Some(i);
                 let tw = &mut s.tweens[i];
                 settled &= tw.step(k, if visible.contains(&m.item) { 1. } else { 0. });
-                let w = LENGTH * (1. - SHRINK * tw.on) * tw.grow;
+                let w = LENGTH * z * (1. - SHRINK * tw.on) * tw.grow;
                 let color: Hsla = rgba(if m.pinned { theme::t().warn } else { m.kind.color() }).into();
                 let color = if hovered { rgba(theme::t().fg).into() } else { color.opacity(DIM + (1. - DIM) * tw.on) };
-                let (x, y) = (px(grid.snap(f32::from(bounds.left()) + INSET)), grid.mark_y(i, n));
-                let h = px(grid.snap(if hovered { THICK + 1. } else { THICK }));
+                let (x, y) = (px(grid.snap(f32::from(bounds.left()) + INSET * z)), grid.mark_y(i, n));
+                let h = px(grid.snap(z * if hovered { THICK + 1. } else { THICK }));
                 if m.kind == Kind::Compaction {
-                    // Dotted: 2px dots with 2px gaps across the (shrinking) width.
+                    // Dotted: 2px dots with 2px gaps (zoomed) across the (shrinking) width.
                     let mut dx = 0.;
                     while dx < w {
-                        window.paint_quad(fill(Bounds::new(point(x + px(dx), y), size(px((w - dx).min(2.)), h)), color));
-                        dx += 4.;
+                        window.paint_quad(fill(Bounds::new(point(x + px(dx), y), size(px((w - dx).min(2. * z)), h)), color));
+                        dx += 4. * z;
                     }
                 } else {
                     window.paint_quad(fill(Bounds::new(point(x, y), size(px(w), h)), color));
@@ -246,7 +250,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .left_0()
         .top_0()
         .h_full()
-        .w(px(WIDTH))
+        .w(u(WIDTH))
         .when(n > 0, |d| d.cursor_pointer())
         .on_mouse_move(cx.listener(move |_, ev: &MouseMoveEvent, _, cx| {
             let mut s = hover_state.borrow_mut();
@@ -290,7 +294,7 @@ fn preview_card(i: usize, m: &Mark, t: &OpenThread, grid: &Grid, n: usize) -> An
         .flex()
         .flex_col()
         .gap_0p5()
-        .max_w(px(320.))
+        .max_w(u(320.))
         .px_2p5()
         .py_1p5()
         .rounded_md()
@@ -298,9 +302,9 @@ fn preview_card(i: usize, m: &Mark, t: &OpenThread, grid: &Grid, n: usize) -> An
         .border_1()
         .border_color(rgba(theme::t().line))
         .shadow_md()
-        .text_size(px(12.))
-        .line_height(px(17.))
-        .child(div().text_size(px(11.)).text_color(rgba(if m.pinned { theme::t().warn } else { theme::t().fg_2 })).child(label))
+        .text_size(text::sm())
+        .line_height(u(17.))
+        .child(div().text_size(text::xs()).text_color(rgba(if m.pinned { theme::t().warn } else { theme::t().fg_2 })).child(label))
         .when(!preview.is_empty(), |d| d.child(div().text_color(rgba(theme::t().fg)).child(preview)));
     // Window-positioned beside the mark; the zero-size absolute wrapper keeps the
     // anchored element out of the flex flow (see AGENTS.md).
@@ -312,8 +316,8 @@ fn preview_card(i: usize, m: &Mark, t: &OpenThread, grid: &Grid, n: usize) -> An
         .child(deferred(
             anchored()
                 .anchor(Anchor::TopLeft)
-                .position(point(grid.bounds.left() + px(WIDTH), grid.mark_y(i, n) - px(12.)))
-                .snap_to_window_with_margin(px(8.))
+                .position(point(grid.bounds.left() + u(WIDTH), grid.mark_y(i, n) - u(12.)))
+                .snap_to_window_with_margin(u(8.))
                 .child(card),
         ))
         .into_any()

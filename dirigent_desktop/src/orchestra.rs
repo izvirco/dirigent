@@ -4,10 +4,10 @@
 //! line under the tree says what the whole family consumed.
 
 use crate::app::Dirigent;
-use crate::theme::{self, Status};
+use crate::theme::{self, Status, text, u};
 use crate::thread::{duration, elapsed};
 use dirigent_protocol::{Spend, ThreadSummary};
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, prelude::*, rgba};
 use std::collections::HashSet;
 
 const ROW: f32 = 30.;
@@ -86,13 +86,13 @@ pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
                         .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
                         .child(thread.name.clone().unwrap_or_else(|| "Untitled".into())),
                 )
-                .child(small(model).max_w(px(120.)).truncate())
+                .child(small(model).max_w(u(120.)).truncate())
                 // Fits `12m 01s` at 11px; longer values widen the column rather than wrap.
-                .child(small(time).min_w(px(48.)).whitespace_nowrap().text_right())
+                .child(small(time).min_w(u(48.)).whitespace_nowrap().text_right())
                 .into_any_element()
         })
         .collect();
-    Some(div().flex().flex_col().gap(px(2.)).pt_2().children(rows).when(total != Spend::default(), |d| d.child(spend_line(total))))
+    Some(div().flex().flex_col().gap(u(2.)).pt_2().children(rows).when(total != Spend::default(), |d| d.child(spend_line(total))))
 }
 
 /// The family's totals, right-aligned under the tree (once anything was spent), worded
@@ -117,11 +117,11 @@ fn tree_row(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(ROW))
-        .pl(px(8. + depth as f32 * INDENT))
+        .h(u(ROW))
+        .pl(u(8. + depth as f32 * INDENT))
         .pr_2()
         .rounded_md()
-        .text_size(px(12.5))
+        .text_size(text::sm())
         .cursor_pointer()
         .when(selected, |d| d.bg(rgba(theme::t().hover)))
         .hover(|d| d.bg(rgba(theme::t().hover)))
@@ -129,7 +129,7 @@ fn tree_row(
 }
 
 fn small(text: impl Into<SharedString>) -> Div {
-    div().flex_shrink_0().text_size(px(11.)).text_color(rgba(theme::t().fg_2)).child(text.into())
+    div().flex_shrink_0().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(text.into())
 }
 
 fn now_ms() -> i64 {

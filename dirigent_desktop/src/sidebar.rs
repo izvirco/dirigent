@@ -12,7 +12,7 @@ use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
-use crate::theme;
+use crate::theme::{self, text, u};
 use crate::thread::{self, duration, elapsed};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
@@ -51,8 +51,8 @@ struct Ghost {
 impl Render for Ghost {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .w(px(self.width))
-            .h(px(ROW))
+            .w(u(self.width))
+            .h(u(ROW))
             .pl_2()
             .flex()
             .items_center()
@@ -62,7 +62,7 @@ impl Render for Ghost {
             .border_color(rgba(theme::t().line))
             .shadow_md()
             .font_family(self.font.clone())
-            .text_size(px(13.))
+            .text_size(text::base())
             .text_color(rgba(theme::t().fg))
             .child(div().min_w_0().truncate().child(self.name.clone()))
     }
@@ -74,8 +74,8 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .id("sidebar-resize")
         .absolute()
         .top_0()
-        .right(px(-3.))
-        .w(px(6.))
+        .right(u(-3.))
+        .w(u(6.))
         .h_full()
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
@@ -83,7 +83,7 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     // A hairline on its right edge parts it from the main pane.
     div()
         .relative()
-        .w(px(this.sidebar_width))
+        .w(u(this.sidebar_width))
         .h_full()
         .flex_shrink_0()
         .border_r_1()
@@ -102,12 +102,12 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .left_0()
         .top_0()
         .h_full()
-        .w(px(if open { this.sidebar_width + 2. * theme::GUTTER } else { PEEK_ZONE }))
+        .w(u(if open { this.sidebar_width + 2. * theme::GUTTER } else { PEEK_ZONE }))
         .on_hover(cx.listener(|this, hovered, _, cx| this.set_peek(*hovered, cx)))
         .when(open, |d| {
-            d.p(px(theme::GUTTER)).child(
+            d.p(u(theme::GUTTER)).child(
                 div()
-                    .w(px(this.sidebar_width))
+                    .w(u(this.sidebar_width))
                     .h_full()
                     .rounded_lg()
                     .bg(rgba(theme::t().panel))
@@ -130,7 +130,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .flex()
         .flex_row()
         .items_center()
-        .h(px(40.)) // same as `lists::header`, so the title aligns with the main pane's
+        .h(u(40.)) // same as `lists::header`, so the title aligns with the main pane's
         .pl_4()
         .pr_2()
         .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
@@ -150,10 +150,10 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .map(|g| project_row(g, dragging.as_deref() == Some(&g.key), this, cx))
         .collect();
     let pinned = (!pinned.is_empty()).then(|| {
-        div().flex_shrink_0().flex().flex_col().gap(px(GAP)).pb_2().children(pinned).on_drag_move(cx.listener(
+        div().flex_shrink_0().flex().flex_col().gap(u(GAP)).pb_2().children(pinned).on_drag_move(cx.listener(
             |this, ev: &DragMoveEvent<DragProject>, _, cx| {
                 let n = this.pinned_keys().len();
-                let slot = (f32::from(ev.event.position.y - ev.bounds.top()) / (ROW + GAP)).floor().max(0.) as usize;
+                let slot = ((ev.event.position.y - ev.bounds.top()) / u(ROW + GAP)).floor().max(0.) as usize;
                 let key = ev.drag(cx).0.clone();
                 this.move_project(&key, slot.min(n.saturating_sub(1)), cx);
             },
@@ -207,8 +207,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         // Mirrors the title row: same height and right padding so the gear sits under the
         // `+`; on the left the button's 6px inner inset is taken off so the glyph starts
         // at the title's x.
-        .h(px(40.))
-        .pl(px(10.))
+        .h(u(40.))
+        .pl(u(10.))
         .pr_2()
         .child(theme::icon_button("sidebar-toggle", panel_icon, cx, move |this, cx| this.set_sidebar_hidden(!hidden, cx)))
         .child(
@@ -250,7 +250,7 @@ fn row(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(ROW))
+        .h(u(ROW))
         .pl_2()
         .rounded_md()
         .cursor_pointer()
@@ -284,15 +284,13 @@ fn header(
     // layout; the numbers keep the text inset (and spill out of the box to the left), the
     // chevron is centered like the title's `+`.
     let fill = || div().absolute().inset_0().flex().items_center();
-    let small = |color: u32| div().flex().flex_row().items_center().gap_0p5().text_size(px(11.)).text_color(rgba(color));
+    let small = |color: u32| div().flex().flex_row().items_center().gap_0p5().text_size(text::xs()).text_color(rgba(color));
     let numbers = fill()
         .justify_end()
         .gap_1p5()
         .pr_2()
         .group_hover("row", |d| d.opacity(0.))
-        .when(snoozed > 0, |d| {
-            d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(px(11.))).child(snoozed.to_string()))
-        })
+        .when(snoozed > 0, |d| d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(u(11.))).child(snoozed.to_string())))
         .when(n > 0, |d| d.child(small(color).child(n.to_string())));
     let fold = trailing(SharedString::from(format!("fold/{id}")))
         .on_click(cx.listener(move |this, _, _, cx| {
@@ -305,7 +303,7 @@ fn header(
                 .justify_center()
                 .opacity(0.)
                 .group_hover("row", |d| d.opacity(1.))
-                .child(icon(chevrons[open as usize], theme::t().fg_2).size(px(14.))),
+                .child(icon(chevrons[open as usize], theme::t().fg_2).size(u(14.))),
         );
     div().flex_shrink_0().px_2().child(
         row(id, selected, cx, move |this, cx| this.show(pane(), cx))
@@ -319,7 +317,7 @@ fn header(
 /// fairly (all long: equal parts; a short one keeps its height, the others share the
 /// rest) with nothing measured: `natural` comes from known row heights.
 fn share(id: &'static str, natural: f32) -> Stateful<Div> {
-    div().id(id).flex_1().min_h_0().max_h(px(natural)).overflow_y_scroll()
+    div().id(id).flex_1().min_h_0().max_h(u(natural)).overflow_y_scroll()
 }
 
 /// Where the Inbox's and the Workpool's cards meet: a hairline inset from the sides, fading
@@ -338,8 +336,8 @@ fn seam(this: &Dirigent) -> impl IntoElement {
         }
         let line: Hsla = rgba(theme::t().line).into();
         let clear = line.opacity(0.);
-        let left = Bounds::new(b.origin, size(px(FADE), b.size.height));
-        let right = Bounds::new(point(b.right() - px(FADE), b.top()), left.size);
+        let left = Bounds::new(b.origin, size(u(FADE), b.size.height));
+        let right = Bounds::new(point(b.right() - u(FADE), b.top()), left.size);
         // As in CSS, a 90° gradient runs left to right.
         window.paint_quad(fill(left, linear_gradient(90., linear_color_stop(clear, 0.), linear_color_stop(line, 1.))));
         window.paint_quad(fill(Bounds::from_corners(left.top_right(), right.bottom_left()), line));
@@ -376,13 +374,7 @@ fn cards(
             thread_card(host, t, vcs, elapsed, this, cx)
         })
         .collect();
-    share(id, natural)
-        .flex()
-        .flex_col()
-        .gap(px(GAP))
-        .px_2()
-        .when(n > 0, |d| if below { d.pt(px(GAP)) } else { d.py(px(GAP)) })
-        .children(cards)
+    share(id, natural).flex().flex_col().gap(u(GAP)).px_2().when(n > 0, |d| if below { d.pt(u(GAP)) } else { d.py(u(GAP)) }).children(cards)
 }
 
 /// A thread under Inbox / Workpool: `project ... elapsed` / title / `branch ... [server]
@@ -406,10 +398,10 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
     let title_id = SharedString::from(format!("title/{h}/{id}"));
     let place = this.project_name(host, t);
     let marks = || {
-        let server = (host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(px(12.)));
-        server.into_iter().chain(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(px(12.))))
+        let server = (host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(u(12.)));
+        server.into_iter().chain(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(u(12.))))
     };
-    let small = |text: String, color: u32| div().min_w_0().truncate().text_size(px(11.)).text_color(rgba(color)).child(text);
+    let small = |text: String, color: u32| div().min_w_0().truncate().text_size(text::xs()).text_color(rgba(color)).child(text);
     let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Sidebar, Side::Below(20.), this, cx);
     // The buttons stay (and the run time stays hidden) while the archive popup is open.
     let asking = archive_confirm.is_some();
@@ -417,7 +409,7 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
     let button = |id: String, name: &'static str, on_click: Action| {
         div()
             .id(SharedString::from(id))
-            .size(px(20.))
+            .size(u(20.))
             .flex()
             .items_center()
             .justify_center()
@@ -434,8 +426,8 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
         div()
             .absolute()
-            .top(px(-4.))
-            .right(px(-4.))
+            .top(u(-4.))
+            .right(u(-4.))
             .flex()
             .flex_row()
             .gap_0p5()
@@ -458,7 +450,7 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         .id(SharedString::from(format!("card/{h}/{id}")))
         .group("card")
         .relative()
-        .h(px(card_height(&vcs)))
+        .h(u(card_height(&vcs)))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -548,12 +540,12 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
         (false, true) => format!("running for {elapsed}"),
         (false, false) => format!("last run {elapsed}"),
     };
-    let line = |value: String| div().px_2().py_0p5().max_w(px(360.)).truncate().text_size(px(12.)).child(value).into_any();
+    let line = |value: String| div().px_2().py_0p5().max_w(u(360.)).truncate().text_size(text::sm()).child(value).into_any();
     let mut rows = vec![
         div()
             .px_2()
             .py_0p5()
-            .max_w(px(360.))
+            .max_w(u(360.))
             .truncate()
             .font_weight(FontWeight::MEDIUM)
             .child(t.name.clone().unwrap_or_else(|| "Untitled".into()))
@@ -570,8 +562,8 @@ fn trailing(id: SharedString) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
-        .w(px(26.))
-        .h(px(20.))
+        .w(u(26.))
+        .h(u(20.))
         .flex()
         .items_center()
         .justify_center()

@@ -7,6 +7,7 @@
 //! Adapted from zed's `gpui/examples/input.rs`, extended to multiple lines.
 
 use crate::select::{self, word_at};
+use crate::theme::u;
 use gpui::{
     App, Bounds, ClipboardEntry, ClipboardItem, ContentMask, Context, Corners, CursorStyle, Element, ElementId, ElementInputHandler,
     Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, InspectorElementId, LayoutId, MouseButton,
@@ -45,9 +46,9 @@ actions!(
 pub const KEY_CONTEXT: &str = "Input";
 /// A multiline input grows with its text up to this share of the window height, then scrolls.
 const MAX_HEIGHT_FRACTION: f32 = 0.7;
-/// Room kept for the composer's padding and chip row so the whole card stays within that share.
+/// Room (design pixels, `theme::u`) kept for the composer's padding and chip row so the whole card stays within that share.
 const CARD_CHROME: f32 = 90.;
-/// Right inset reserved for the scrollbar so text never runs under it.
+/// Right inset (design pixels) reserved for the scrollbar so text never runs under it.
 const BAR_GUTTER: f32 = 12.;
 /// Edits of one kind closer together than this join the same undo step.
 const UNDO_GROUP: Duration = Duration::from_secs(1);
@@ -757,7 +758,7 @@ struct Prepaint {
 
 /// Wrap width: single-line inputs use it all, multiline ones keep a gutter for the scrollbar.
 fn wrap_width(width: Pixels, single_line: bool) -> Pixels {
-    if single_line { width } else { (width - px(BAR_GUTTER)).max(px(1.)) }
+    if single_line { width } else { (width - u(BAR_GUTTER)).max(px(1.)) }
 }
 
 impl IntoElement for TextElement {
@@ -803,7 +804,7 @@ impl Element for TextElement {
                 Some(w) if w > px(0.) => Layout::shape(&text, placeholder, wrap_width(w, single_line), &font, window).height(),
                 _ => line_height,
             };
-            let max = if single_line { line_height } else { window.viewport_size().height * MAX_HEIGHT_FRACTION - px(CARD_CHROME) };
+            let max = if single_line { line_height } else { window.viewport_size().height * MAX_HEIGHT_FRACTION - u(CARD_CHROME) };
             size(width.unwrap_or(px(0.)), height.clamp(line_height, max.max(line_height)))
         });
         (id, ())
@@ -892,12 +893,12 @@ impl Element for TextElement {
             }
         });
         if content_h > visible {
-            let thumb_h = (visible * (f32::from(visible) / f32::from(content_h))).max(px(20.));
+            let thumb_h = (visible * (f32::from(visible) / f32::from(content_h))).max(u(20.));
             let thumb_y = (visible - thumb_h) * (f32::from(prepaint.scroll_y) / f32::from(content_h - visible));
-            let thumb = Bounds::new(point(bounds.right() - px(4.), bounds.origin.y + thumb_y), size(px(4.), thumb_h));
+            let thumb = Bounds::new(point(bounds.right() - u(4.), bounds.origin.y + thumb_y), size(u(4.), thumb_h));
             window.paint_quad(quad(
                 thumb,
-                Corners::all(px(2.)),
+                Corners::all(u(2.)),
                 rgba(crate::theme::alpha(crate::theme::t().fg_1, 0x66)),
                 px(0.),
                 rgba(0x00000000),

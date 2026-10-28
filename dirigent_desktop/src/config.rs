@@ -7,6 +7,7 @@
 //! telemetry = false
 //!
 //! [fonts]
+//! size = 13.0   # the UI's text size; every other size keeps its ratio to it
 //! ui = "Lilex"
 //! prose = "Lilex"
 //! code = "Lilex"
@@ -96,10 +97,14 @@ impl ToolsConfig {
     }
 }
 
-/// Font families as the user wrote them; `resolve` maps them to installed fonts.
+/// Font families as the user wrote them (`resolve` maps them to installed fonts) and the
+/// text size.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
+    /// The UI's text size in px; every other size keeps its ratio to it, and the layout
+    /// zooms with it (`theme::u`). Read through `size()`.
+    pub size: f32,
     pub ui: String,
     pub prose: String,
     pub code: String,
@@ -119,7 +124,7 @@ impl Default for Config {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { ui: "Lilex".into(), prose: "Lilex".into(), code: "Lilex".into() }
+        Self { size: crate::theme::DESIGN_SIZE, ui: "Lilex".into(), prose: "Lilex".into(), code: "Lilex".into() }
     }
 }
 
@@ -175,7 +180,21 @@ pub fn save(config: &Config) -> Result<()> {
     std::fs::write(&path, format!("{HEADER}{body}")).with_context(|| format!("write {}", path.display()))
 }
 
+/// The range `[fonts] size` is held to.
+pub const MIN_SIZE: f32 = 10.;
+pub const MAX_SIZE: f32 = 24.;
+
 impl FontConfig {
+    /// `size`, held to `MIN_SIZE..=MAX_SIZE` (a hand edit can say anything).
+    pub fn size(&self) -> f32 {
+        if self.size.is_nan() { crate::theme::DESIGN_SIZE } else { self.size.clamp(MIN_SIZE, MAX_SIZE) }
+    }
+
+    /// The families alone: what `resolve` depends on.
+    pub fn families(&self) -> [&str; 3] {
+        [&self.ui, &self.prose, &self.code]
+    }
+
     /// Installed family names for the three roles. A family that isn't installed falls
     /// back to the system's generic font (sans for ui / prose, monospace for code) and is
     /// reported in the returned list so the UI can say so.
@@ -260,10 +279,16 @@ mod tests {
         assert_eq!(c.theme, "kanagawa");
         assert_eq!(c.fonts.code, "Fira Code");
         assert_eq!(c.fonts.ui, "Lilex");
+        assert_eq!(c.fonts.size(), 13.);
         assert_eq!(c.title.reasoning, "low");
         assert_eq!(c.tools.enabled(), ["async_bash", "ask_user", "dirigent"]);
         let c: Config = toml::from_str("[tools]\nask_user = false\n").unwrap();
         assert_eq!(c.tools.enabled(), ["async_bash", "dirigent"]);
+        // A whole number will do, and the size is held to its range.
+        let c: Config = toml::from_str("[fonts]\nsize = 15\n").unwrap();
+        assert_eq!(c.fonts.size(), 15.);
+        let c: Config = toml::from_str("[fonts]\nsize = 99\n").unwrap();
+        assert_eq!(c.fonts.size(), MAX_SIZE);
         let round: Config = toml::from_str(&toml::to_string(&Config::default()).unwrap()).unwrap();
         assert!(round == Config::default());
     }

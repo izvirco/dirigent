@@ -8,17 +8,21 @@
 //! The palette is a `Theme` loaded from a toml file (`config.toml`'s `theme` names it):
 //! built-ins are embedded from `assets/themes/`, and `~/.config/dirigent/theme/<name>.toml`
 //! adds or overrides one. Read it anywhere with `theme::t()`.
+//!
+//! Sizes are design pixels (`u`): what they measure at the default text size, scaled with
+//! `[fonts] size` so the whole UI zooms with its text. Text sizes come from `text`.
 
 use crate::app::Dirigent;
 use crate::icons::icon;
 use anyhow::{Context as _, Result, bail};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
-    Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Hsla, Render, Rgba, SharedString, Stateful,
-    Svg, Window, WindowBackgroundAppearance, div, prelude::*, pulsating_between, px, rgba,
+    Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Hsla, Pixels, Render, Rgba, SharedString,
+    Stateful, Svg, Window, WindowBackgroundAppearance, div, prelude::*, pulsating_between, px, rgba,
 };
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 /// The built-in themes: `(name, toml)`. The first is the default.
@@ -193,6 +197,60 @@ pub fn load(name: &str) -> Result<Theme> {
     }
 }
 
+/// The text size the UI is designed at, and the default `[fonts] size`.
+pub const DESIGN_SIZE: f32 = 13.;
+
+/// `zoom()` as f32 bits, until `set_text_size`: 1.
+static ZOOM: AtomicU32 = AtomicU32::new(1f32.to_bits());
+
+/// Draw the UI for a base text size of `size` (`[fonts] size`): every `u` size scales by
+/// `size / DESIGN_SIZE`. True if that changed anything.
+pub fn set_text_size(size: f32) -> bool {
+    let zoom = (size / DESIGN_SIZE).to_bits();
+    ZOOM.swap(zoom, Ordering::Relaxed) != zoom
+}
+
+/// How much bigger than designed the UI is drawn: `[fonts] size / DESIGN_SIZE`.
+pub fn zoom() -> f32 {
+    f32::from_bits(ZOOM.load(Ordering::Relaxed))
+}
+
+/// A size in design pixels: `n` px at the default text size, scaled with `[fonts] size`,
+/// so the whole UI zooms with its text. Every size goes through it; gpui's own spacing
+/// (`p_2`, `gap_1`, `size_4`: rems) scales through the window's rem size
+/// (`Dirigent::render`). gpui's `px` is left for hairlines and pixel math.
+pub fn u(n: f32) -> Pixels {
+    px(n * zoom())
+}
+
+/// The type scale. `base` is the UI's own text, the size `[fonts] size` sets; the rest
+/// keep their ratio to it. Markdown headings and the usage total are display sizes of
+/// their own (still `u`).
+pub mod text {
+    use super::{DESIGN_SIZE, u};
+    use gpui::Pixels;
+
+    /// Captions: counts, timestamps, menu headers, small print.
+    pub fn xs() -> Pixels {
+        u(11.)
+    }
+
+    /// Secondary text: chips, details, tooltips, the work log, code blocks.
+    pub fn sm() -> Pixels {
+        u(12.)
+    }
+
+    /// The UI.
+    pub fn base() -> Pixels {
+        u(DESIGN_SIZE)
+    }
+
+    /// Reading text: the transcript and the composer.
+    pub fn lg() -> Pixels {
+        u(14.)
+    }
+}
+
 /// Gap between the window edge and the floating sidebar (`sidebar::peek`).
 pub const GUTTER: f32 = 8.;
 
@@ -261,7 +319,7 @@ impl Status {
     pub fn glyph(self) -> AnyElement {
         let t = t();
         match self {
-            Status::Working => div().size(px(16.)).flex().items_center().justify_center().child(dot(t.working)).into_any_element(),
+            Status::Working => div().size(u(16.)).flex().items_center().justify_center().child(dot(t.working)).into_any_element(),
             Status::Waiting => icon("hourglass", t.working).into_any_element(),
             Status::Asking => icon("circle-help", t.warn).into_any_element(),
             Status::Done => icon("circle-check", t.done).into_any_element(),
@@ -274,7 +332,7 @@ impl Status {
 /// The small amber pin shown before a pinned thread's name (sidebar cards, list rows,
 /// thread header).
 pub fn pin_mark() -> Svg {
-    icon("pin", t().warn).size(px(12.))
+    icon("pin", t().warn).size(u(12.))
 }
 
 /// A thread's title, truncated to its row. While `generating` (the name is on its way from
@@ -300,7 +358,7 @@ pub fn mix(a: u32, b: u32, k: f32) -> Hsla {
 
 /// A 7px status dot.
 pub fn dot(color: u32) -> Div {
-    div().size(px(7.)).rounded_full().bg(rgba(color)).flex_shrink_0()
+    div().size(u(7.)).rounded_full().bg(rgba(color)).flex_shrink_0()
 }
 
 /// A square icon-only button, 26px.
@@ -324,7 +382,7 @@ pub fn tinted_icon_button(
     div()
         .id(id)
         .relative()
-        .size(px(26.))
+        .size(u(26.))
         .flex()
         .items_center()
         .justify_center()
@@ -345,7 +403,7 @@ pub fn button(id: impl Into<SharedString>, name: &'static str, label: impl Into<
         .flex_row()
         .items_center()
         .gap_1p5()
-        .h(px(26.))
+        .h(u(26.))
         .px_2()
         .rounded_md()
         .cursor_pointer()
@@ -378,7 +436,7 @@ pub fn chip_in(id: impl Into<SharedString>, label: impl Into<SharedString>, colo
         .flex_row()
         .items_center()
         .gap_1()
-        .h(px(24.))
+        .h(u(24.))
         .px_1p5()
         .rounded_md()
         .cursor_pointer()
@@ -386,7 +444,7 @@ pub fn chip_in(id: impl Into<SharedString>, label: impl Into<SharedString>, colo
         .when(open, |d| d.bg(rgba(t.hover)).text_color(rgba(hover_color)))
         .hover(move |d| d.bg(rgba(t.hover)).text_color(rgba(hover_color)))
         .child(label.into())
-        .child(icon("chevron-down", chevron).size(px(12.)))
+        .child(icon("chevron-down", chevron).size(u(12.)))
 }
 
 /// One line of text shown under the mouse after a pause; pass to `.tooltip(...)`.
@@ -403,13 +461,13 @@ impl Render for Tooltip {
         div()
             .px_2()
             .py_1()
-            .max_w(px(320.))
+            .max_w(u(320.))
             .rounded_md()
             .bg(rgba(t.popup))
             .border_1()
             .border_color(rgba(t.line))
             .shadow_md()
-            .text_size(px(12.))
+            .text_size(text::sm())
             .text_color(rgba(t.fg))
             .child(self.0.clone())
     }
@@ -432,7 +490,7 @@ pub fn labeled_chip(
         .flex_row()
         .items_center()
         .gap_1p5()
-        .h(px(26.))
+        .h(u(26.))
         .pl_2p5()
         .pr_2()
         .rounded_md()
@@ -440,12 +498,12 @@ pub fn labeled_chip(
         .bg(rgba(t.raised))
         .border_1()
         .border_color(rgba(t.line))
-        .text_size(px(12.))
+        .text_size(text::sm())
         .when(open, |d| d.bg(rgba(t.hover)))
         .hover(move |d| d.bg(rgba(t.hover)))
         .child(div().text_color(rgba(t.fg_1)).child(prefix))
         .child(div().text_color(rgba(if dim { t.fg_2 } else { t.fg })).font_weight(FontWeight::MEDIUM).child(value.into()))
-        .child(icon("chevron-down", t.fg_2).size(px(12.)).ml_0p5())
+        .child(icon("chevron-down", t.fg_2).size(u(12.)).ml_0p5())
 }
 
 /// Centered empty state with a one-line hint.
@@ -458,7 +516,7 @@ pub fn empty(title: &'static str, hint: &'static str) -> Div {
         .justify_center()
         .gap_1()
         .child(div().text_color(rgba(t().fg_1)).child(title))
-        .child(div().text_size(px(12.)).text_color(rgba(t().fg_2)).child(hint))
+        .child(div().text_size(text::sm()).text_color(rgba(t().fg_2)).child(hint))
 }
 
 /// "now", "5m", "3h", "2d" for a millisecond age.

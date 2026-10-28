@@ -9,7 +9,7 @@ use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, OpenAppLink, Selection};
-use crate::theme::{self, Status};
+use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, images, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
@@ -28,7 +28,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-actions!(dirigent, [NewThread, Dismiss, ToggleSidebar, ToggleLog, Quit]);
+actions!(dirigent, [NewThread, Dismiss, ToggleSidebar, ToggleLog, Quit, TextBigger, TextSmaller, TextReset]);
 
 pub const KEY_CONTEXT: &str = "Dirigent";
 const TOAST_TTL: Duration = Duration::from_secs(8);
@@ -365,8 +365,8 @@ pub struct Dirigent {
     /// for that click, so pressing a menu's own trigger closes it rather than reopening it.
     /// Reset at the start of every press (`reset_menu_dismissed`).
     menu_dismissed: bool,
-    /// Sidebar: user-dragged width, hidden with `[`, and "peek" when hidden but the mouse
-    /// rests on the window's left edge.
+    /// Sidebar: user-dragged width (design pixels, `theme::u`), hidden with `[`, and "peek"
+    /// when hidden but the mouse rests on the window's left edge.
     pub sidebar_width: f32,
     pub sidebar_hidden: bool,
     pub sidebar_peek: bool,
@@ -375,7 +375,7 @@ pub struct Dirigent {
     /// whether they are clipped, i.e. have met (`sidebar::seam`).
     pub inbox_scroll: ScrollHandle,
     pub workpool_scroll: ScrollHandle,
-    /// Work log panel width (drag its left edge; `]` toggles the panel).
+    /// Work log panel width in design pixels (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
     /// The log section is on: it sticks across threads, every thread opened showing its
     /// latest work (`latest_work`). Set by opening a log by hand (a work line, the panel
@@ -515,6 +515,7 @@ impl Dirigent {
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
         let (fonts, missing) = config.fonts.resolve();
         settings.missing_fonts = missing.clone();
+        theme::set_text_size(config.fonts.size());
 
         let mut this = Self {
             hosts: host_states,
@@ -1805,19 +1806,27 @@ impl Dirigent {
         });
     }
 
-    /// Make `config` the one in force: theme and fonts. Families that don't resolve are
-    /// remembered for the page's warning marks and returned for whoever wants to toast.
+    /// Make `config` the one in force: theme, fonts and text size. Families that don't
+    /// resolve are remembered for the page's warning marks and returned for whoever wants
+    /// to toast.
     fn apply_config(&mut self, config: config::Config, cx: &mut Context<Self>) -> Vec<String> {
-        let fonts_changed = config.fonts != self.config.fonts;
+        let families_changed = config.fonts.families() != self.config.fonts.families();
         self.config = config;
         match theme::load(&self.config.theme) {
             Ok(t) => self.set_theme_now(t, cx),
             Err(e) => self.toast(format!("{e:#}"), cx),
         }
         let mut missing = vec![];
-        if fonts_changed {
+        if families_changed {
             (self.fonts, missing) = self.config.fonts.resolve();
             self.settings.missing_fonts = missing.clone();
+        }
+        // The transcript and log lists keep their items' measured heights.
+        if theme::set_text_size(self.config.fonts.size())
+            && let Pane::Thread(t) = &self.pane
+        {
+            t.list.remeasure();
+            t.log_list.remeasure();
         }
         cx.notify();
         missing
@@ -1872,6 +1881,32 @@ impl Dirigent {
 
     pub fn set_title_reasoning(&mut self, level: String, cx: &mut Context<Self>) {
         self.edit_config(|c| c.title.reasoning = level, cx);
+    }
+
+    /// Settings' size stepper and ctrl -/=: the next whole px up (`delta` > 0) or down.
+    pub fn step_text_size(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let size = self.config.fonts.size();
+        let next = if delta > 0. { size.floor() + 1. } else { size.ceil() - 1. };
+        self.set_text_size(next.clamp(config::MIN_SIZE, config::MAX_SIZE), cx);
+    }
+
+    /// Save `size` as the text size; nothing to save (no write, no menu closed) if it is already.
+    fn set_text_size(&mut self, size: f32, cx: &mut Context<Self>) {
+        if size != self.config.fonts.size() {
+            self.edit_config(|c| c.fonts.size = size, cx);
+        }
+    }
+
+    fn text_bigger(&mut self, _: &TextBigger, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_text_size(1., cx);
+    }
+
+    fn text_smaller(&mut self, _: &TextSmaller, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_text_size(-1., cx);
+    }
+
+    fn text_reset(&mut self, _: &TextReset, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_text_size(theme::DESIGN_SIZE, cx);
     }
 
     pub fn toggle_telemetry(&mut self, cx: &mut Context<Self>) {
@@ -2912,11 +2947,12 @@ impl Dirigent {
             return;
         }
         match self.resizing {
-            Some(Resize::Sidebar) => self.sidebar_width = f32::from(ev.position.x).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            // Widths are in design pixels (`theme::u`), so they zoom with the text.
+            Some(Resize::Sidebar) => self.sidebar_width = (f32::from(ev.position.x) / theme::zoom()).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
             Some(Resize::Log) => {
                 // The panel's right edge is the window's.
-                let right = f32::from(window.viewport_size().width);
-                self.log_width = (right - f32::from(ev.position.x)).clamp(LOG_MIN, LOG_MAX);
+                let width = window.viewport_size().width - ev.position.x;
+                self.log_width = (f32::from(width) / theme::zoom()).clamp(LOG_MIN, LOG_MAX);
             }
             None => return,
         }
@@ -3301,6 +3337,8 @@ fn reset_menu_dismissed(cx: &mut Context<Dirigent>) -> impl IntoElement {
 
 impl Render for Dirigent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // gpui's spacing (`p_2`, `gap_1`, ...) is in rems: 16px, zoomed like every `u` size.
+        window.set_rem_size(u(16.));
         self.selection.begin_frame();
         self.settle_jump(window);
         self.settle_panel();
@@ -3320,6 +3358,9 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_log_key))
             .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(Self::text_bigger))
+            .on_action(cx.listener(Self::text_smaller))
+            .on_action(cx.listener(Self::text_reset))
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::open_app_link))
             .child(reset_menu_dismissed(cx))
@@ -3335,7 +3376,7 @@ impl Render for Dirigent {
             .font_family(self.fonts.ui.clone())
             // No ligatures, anywhere: `calt` is what Lilex uses for them, `liga` for good measure.
             .font_features(FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)])))
-            .text_size(px(13.))
+            .text_size(text::base())
             .when(docked, |d| d.child(sidebar::docked(self, cx)))
             .child(panel)
             .when(!docked, |d| d.child(sidebar::peek(self, cx)))
@@ -3348,7 +3389,7 @@ impl Render for Dirigent {
             .children((!toasts.is_empty()).then(|| {
                 div().absolute().bottom_4().right_4().flex().flex_col().gap_1().children(toasts.into_iter().map(|m| {
                     div()
-                        .max_w(px(420.))
+                        .max_w(u(420.))
                         .px_3()
                         .py_2()
                         .rounded_md()
@@ -3360,7 +3401,7 @@ impl Render for Dirigent {
                         .border_1()
                         .border_color(rgba(theme::t().line))
                         .shadow_md()
-                        .child(div().size(px(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
+                        .child(div().size(u(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
                         // Shrinkable, so a long message wraps inside `max_w`.
                         .child(div().flex_1().min_w_0().child(m))
                 }))

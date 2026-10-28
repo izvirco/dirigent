@@ -2,7 +2,7 @@
 //! time (`Dirigent::menu`); clicking outside closes it (and that click opens no other menu).
 
 use crate::app::Dirigent;
-use crate::theme;
+use crate::theme::{self, text, u};
 use gpui::{
     Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, SharedString, Stateful, anchored, canvas, div, point, prelude::*, px,
     rgba, size,
@@ -46,12 +46,12 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
     // above everything else.
     canvas(
         move |bounds, window, cx| {
-            let y = bounds.origin.y + px(dy);
-            let room = if dy < 0. { y } else { window.viewport_size().height - y } - px(MARGIN);
+            let y = bounds.origin.y + u(dy);
+            let room = if dy < 0. { y } else { window.viewport_size().height - y } - u(MARGIN);
             let mut popup = anchored()
                 .anchor(anchor)
-                .offset(point(px(dx), px(dy)))
-                .snap_to_window_with_margin(px(MARGIN))
+                .offset(point(u(dx), u(dy)))
+                .snap_to_window_with_margin(u(MARGIN))
                 .child(
                     div()
                         .id("menu")
@@ -59,8 +59,8 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
                         .occlude()
                         .flex()
                         .flex_col()
-                        .max_w(px(520.))
-                        .max_h(room.clamp(px(60.), px(MAX_H)))
+                        .max_w(u(520.))
+                        .max_h(room.clamp(u(60.), u(MAX_H)))
                         .overflow_y_scroll()
                         .p_1()
                         .rounded_lg()
@@ -98,7 +98,7 @@ pub fn item(
     row(id, selected)
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
         .child(div().flex_shrink_0().child(label.into()))
-        .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(px(12.)).child(detail.into()))
+        .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(text::sm()).child(detail.into()))
         .into_any()
 }
 
@@ -111,7 +111,7 @@ pub fn row(id: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
         .flex_row()
         .items_center()
         .gap_2()
-        .h(px(ROW_H))
+        .h(u(ROW_H))
         .flex_shrink_0()
         .px_2()
         .rounded_md()
@@ -138,11 +138,11 @@ pub fn danger(
 pub fn header(text: impl Into<SharedString>) -> AnyElement {
     div()
         .px_2()
-        .h(px(ROW_H))
+        .h(u(ROW_H))
         .flex_shrink_0()
         .flex()
         .items_center()
-        .text_size(px(11.5))
+        .text_size(text::xs())
         .text_color(rgba(theme::t().fg_2))
         .child(text.into())
         .into_any()

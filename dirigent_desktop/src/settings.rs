@@ -2,10 +2,10 @@
 //! sections on the right. General, Thread titles and Agent tools are the UI over
 //! `config.toml` (`config.rs`), Hosts over `hosts.toml`. Everything saves as it is
 //! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
-//! warning mark on a font field whose family isn't installed; theme, title model,
-//! reasoning, the agent tools and telemetry are chips and switches that save at once; a
-//! host on Enter. `Test` opens a sample first message, runs it through the title settings
-//! on the local host, and shows the title with what it cost.
+//! warning mark on a font field whose family isn't installed; theme, text size, title
+//! model, reasoning, the agent tools and telemetry are chips, a stepper and switches that
+//! save at once; a host on Enter. `Test` opens a sample first message, runs it through
+//! the title settings on the local host, and shows the title with what it cost.
 
 use crate::app::{Dirigent, Menu};
 use crate::icons::icon;
@@ -14,10 +14,10 @@ use crate::lists::scroll;
 use crate::menu::{self, Side};
 use crate::modal;
 use crate::net::HostStatus;
-use crate::theme::{self, dollars, kilo};
+use crate::theme::{self, dollars, kilo, text, u};
 use crate::thread::duration;
 use crate::{config, hosts};
-use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, Stateful, div, prelude::*, rgba};
 use std::path::Path;
 use std::time::Instant;
 
@@ -127,7 +127,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let t = theme::t();
     let open = this.settings.tab;
     let nav = div()
-        .w(px(NAV_W))
+        .w(u(NAV_W))
         .flex_shrink_0()
         .flex()
         .flex_col()
@@ -137,7 +137,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .bg(rgba(t.canvas))
         .border_r_1()
         .border_color(rgba(t.line_soft))
-        .child(div().h(px(32.)).px_2().flex().items_center().font_weight(FontWeight::MEDIUM).child("Settings"))
+        .child(div().h(u(32.)).px_2().flex().items_center().font_weight(FontWeight::MEDIUM).child("Settings"))
         .children(Tab::ALL.map(|tab| nav_item(tab, tab == open, cx)));
     let sections = match open {
         Tab::General => vec![appearance(this, cx), telemetry(this, cx), saved_to(&config::path())],
@@ -155,7 +155,7 @@ fn nav_item(tab: Tab, on: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     div()
         .id(SharedString::from(format!("settings-tab/{}", tab.label())))
-        .h(px(28.))
+        .h(u(28.))
         .px_2()
         .flex()
         .items_center()
@@ -175,7 +175,7 @@ fn section(title: &'static str, body: impl IntoElement) -> Div {
 
 /// The file a tab's settings live in (also editable by hand), in small print at its bottom.
 fn saved_to(path: &Path) -> Div {
-    div().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(format!("Saved to {}", path.display()))
+    div().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(format!("Saved to {}", path.display()))
 }
 
 /// `label        control` on one line.
@@ -185,16 +185,16 @@ fn row(label: &'static str, control: impl IntoElement) -> Div {
         .flex_row()
         .items_center()
         .gap_3()
-        .min_h(px(28.))
+        .min_h(u(28.))
         .py_2()
-        .child(div().w(px(130.)).flex_shrink_0().text_color(rgba(theme::t().fg_1)).child(label))
+        .child(div().w(u(130.)).flex_shrink_0().text_color(rgba(theme::t().fg_1)).child(label))
         .child(div().flex_1().min_w_0().flex().flex_row().items_center().justify_end().child(control))
 }
 
 /// A bordered text field.
 fn field(input: Entity<TextInput>) -> Div {
     let t = theme::t();
-    div().w_full().px_3().py_1p5().rounded_md().bg(rgba(t.raised)).border_1().border_color(rgba(t.line)).text_size(px(12.5)).child(input)
+    div().w_full().px_3().py_1p5().rounded_md().bg(rgba(t.raised)).border_1().border_color(rgba(t.line)).text_size(text::sm()).child(input)
 }
 
 /// A font field: `field` with an amber warning at its right edge while the family the
@@ -228,10 +228,26 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .flex()
             .flex_col()
             .child(row("Theme", theme_chip))
+            .child(row("Text size", text_size(f.size(), cx)))
             .child(row("UI font", font_field(s, &s.font_ui, &f.ui)))
             .child(row("Prose font", font_field(s, &s.font_prose, &f.prose)))
             .child(row("Code font", font_field(s, &s.font_code, &f.code))),
     )
+}
+
+/// `−  13  +`: the UI's text size, a px at a time (also ctrl - / ctrl =, ctrl 0 resets).
+/// Everything else scales with it.
+fn text_size(size: f32, cx: &mut Context<Dirigent>) -> Div {
+    let step = |id: &'static str, icon: &'static str, delta: f32, tip: &'static str, cx: &mut Context<Dirigent>| {
+        theme::icon_button(id, icon, cx, move |this, cx| this.step_text_size(delta, cx)).tooltip(theme::tooltip(tip))
+    };
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .child(step("text-smaller", "minus", -1., "Smaller (ctrl -)", cx))
+        .child(div().w(u(32.)).text_center().child(format!("{size}")))
+        .child(step("text-bigger", "plus", 1., "Bigger (ctrl =)", cx))
 }
 
 fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
@@ -288,7 +304,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         let running = s.test_request.is_some();
         let run = div()
             .id("title-run")
-            .h(px(26.))
+            .h(u(26.))
             .px_3()
             .flex()
             .items_center()
@@ -336,7 +352,7 @@ fn test_result(s: &State) -> Option<Div> {
             .flex_col()
             .gap_0p5()
             .child(div().truncate().font_weight(FontWeight::MEDIUM).child(SharedString::from(format!("“{}”", r.title))))
-            .child(div().truncate().text_size(px(11.5)).text_color(rgba(t.fg_2)).child(format!(
+            .child(div().truncate().text_size(text::xs()).text_color(rgba(t.fg_2)).child(format!(
                 "{} · {} in · {} out · {} · {}",
                 theme::short_model(&r.model),
                 kilo(r.input),
@@ -345,7 +361,7 @@ fn test_result(s: &State) -> Option<Div> {
                 if r.cost < 0.01 { format!("${:.4}", r.cost) } else { dollars(r.cost) },
                 duration(r.duration_ms)
             ))),
-        Err(e) => div().flex_1().min_w_0().text_size(px(12.)).text_color(rgba(t.error)).child(e.clone()),
+        Err(e) => div().flex_1().min_w_0().text_size(text::sm()).text_color(rgba(t.error)).child(e.clone()),
     })
 }
 
@@ -359,16 +375,16 @@ fn switch(
     let t = theme::t();
     div()
         .id(id)
-        .w(px(34.))
-        .h(px(18.))
+        .w(u(34.))
+        .h(u(18.))
         .rounded_full()
         .cursor_pointer()
         .bg(rgba(if on { t.accent_line } else { t.line }))
-        .p(px(2.))
+        .p(u(2.))
         .flex()
         .when(on, |d| d.justify_end())
         .on_click(cx.listener(move |this, _, _, cx| toggle(this, cx)))
-        .child(div().size(px(14.)).rounded_full().bg(rgba(t.fg)))
+        .child(div().size(u(14.)).rounded_full().bg(rgba(t.fg)))
 }
 
 /// The agent tools dirigent adds to pi's: each a switch; the set goes out with every prompt,
@@ -411,27 +427,27 @@ fn hosts(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .flex_row()
             .items_center()
             .gap_3()
-            .h(px(38.))
+            .h(u(38.))
             .px_2()
-            .child(div().size(px(6.)).rounded_full().bg(rgba(dot)))
-            .child(div().w(px(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
+            .child(div().size(u(6.)).rounded_full().bg(rgba(dot)))
+            .child(div().w(u(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
                     .font_family(this.fonts.mono.clone())
-                    .text_size(px(12.))
+                    .text_size(text::sm())
                     .text_color(rgba(t.fg_1))
                     .child(h.url.clone()),
             )
-            .child(div().w(px(90.)).flex_shrink_0().text_size(px(12.)).text_color(rgba(t.fg_2)).child(status))
+            .child(div().w(u(90.)).flex_shrink_0().text_size(text::sm()).text_color(rgba(t.fg_2)).child(status))
             .child(if name == hosts::LOCAL {
-                div().size(px(24.)).into_any_element()
+                div().size(u(24.)).into_any_element()
             } else {
                 div()
                     .id(SharedString::from(format!("rm-host/{name}")))
-                    .size(px(24.))
+                    .size(u(24.))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -450,7 +466,7 @@ fn hosts(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .flex_row()
         .gap_2()
         .pt_4()
-        .child(field(this.host_name_input.clone()).w(px(150.)))
+        .child(field(this.host_name_input.clone()).w(u(150.)))
         .child(field(this.host_url_input.clone()).flex_1());
     section("Hosts", div().flex().flex_col().children(rows).child(form))
 }
