@@ -257,9 +257,12 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "ask_user",
     label: "Ask the user",
     description:
-      "Ask the user one or more questions, shown as a form. Returns at once; the answers arrive as a message, so " +
-      "keep working on what does not depend on them, or end your turn to wait.",
-    promptSnippet: "Ask the user questions; the answers arrive as a message",
+      "Ask the user one or more questions, shown as a form. Use it when you're blocked on decisions only the user " +
+      "can make: several questions at once, or a choice between concrete options. Don't use it for a single yes/no " +
+      'or a follow-up offer ("Want me to fix it?"): ask that in your reply and end your turn. Returns at once; the ' +
+      "answers arrive as a message, so keep working on what does not depend on them, or end your turn to wait.",
+    promptSnippet:
+      "Ask the user questions in a form, when you're blocked on their decisions (several questions, or a choice between options)",
     parameters: askUserParams,
     async execute(_id, params) {
       const ask: Ask = { id: shortId(), questions: params.questions };
