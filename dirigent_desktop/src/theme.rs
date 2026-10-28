@@ -425,7 +425,8 @@ pub fn chip(id: impl Into<SharedString>, label: impl Into<SharedString>, dim: bo
 }
 
 /// `chip` with its own text colour (kept on hover) and chevron colour (a faint chevron
-/// marks a menu that can't open right now).
+/// marks a menu that can't open right now). Short of room, its label truncates; the
+/// chevron stays.
 pub fn chip_in(id: impl Into<SharedString>, label: impl Into<SharedString>, color: u32, chevron: u32, open: bool) -> Stateful<Div> {
     let t = t();
     let hover_color = if color == t.fg_1 || color == t.fg_2 { t.fg } else { color };
@@ -436,6 +437,7 @@ pub fn chip_in(id: impl Into<SharedString>, label: impl Into<SharedString>, colo
         .flex_row()
         .items_center()
         .gap_1()
+        .min_w_0()
         .h(u(24.))
         .px_1p5()
         .rounded_md()
@@ -443,8 +445,8 @@ pub fn chip_in(id: impl Into<SharedString>, label: impl Into<SharedString>, colo
         .text_color(rgba(color))
         .when(open, |d| d.bg(rgba(t.hover)).text_color(rgba(hover_color)))
         .hover(move |d| d.bg(rgba(t.hover)).text_color(rgba(hover_color)))
-        .child(label.into())
-        .child(icon("chevron-down", chevron).size(u(12.)))
+        .child(div().min_w_0().truncate().child(label.into()))
+        .child(icon("chevron-down", chevron).size(u(12.)).flex_shrink_0())
 }
 
 /// One line of text shown under the mouse after a pause; pass to `.tooltip(...)`.

@@ -374,15 +374,17 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
     uniform_list(
         id,
         count,
-        cx.processor(move |this, range: Range<usize>, _, cx| {
+        cx.processor(move |this, range: Range<usize>, window, cx| {
             let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
-            let show_host = this.hosts.len() > 1;
+            // The list fills the pane: the window right of the docked sidebar, in design px.
+            let width = f32::from(window.viewport_size().width) / theme::zoom() - if this.sidebar_hidden { 0. } else { this.sidebar_width };
+            let cols = Columns::fit(width, this.hosts.len() > 1, show_project);
             items[range]
                 .iter()
                 .map(|item| match item {
                     Item::Label(text) => section_label(text.clone()).into_any_element(),
                     Item::Row { host, id } => match this.summary(host, id) {
-                        Some(t) => thread_row(host, t, show_host, show_project, now, this, cx).into_any_element(),
+                        Some(t) => thread_row(host, t, cols, now, this, cx).into_any_element(),
                         // Unreachable (items come from this frame's `this`); one element per
                         // index keeps the vec aligned with `range`.
                         None => div().h(u(ROW_H)).into_any_element(),
@@ -397,19 +399,11 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
 /// A thread row: status glyph, title (amber while asking, accent while unread, an amber pin before it while pinned),
 /// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
 /// moon glyph) and archive.
-fn thread_row(
-    host: &str,
-    t: &ThreadSummary,
-    show_host: bool,
-    show_project: bool,
-    now: i64,
-    this: &Dirigent,
-    cx: &mut Context<Dirigent>,
-) -> Stateful<Div> {
+fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
     let status = this.status(host, t);
-    let project = if show_project { this.project_name(host, t) } else { String::new() };
+    let project = if cols.project { this.project_name(host, t) } else { String::new() };
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
     let unread = this.unread(host, t);
     let (h2, id2, archived) = (h.clone(), id.clone(), t.archived);
@@ -444,9 +438,9 @@ fn thread_row(
                     .child(title),
             ),
         )
-        .when(show_host, |d| d.child(column(90.).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
-        .when(show_project, |d| d.child(column(140.).text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child(project)))
-        .child(column(150.).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(model))
+        .when(cols.host, |d| d.child(column(HOST_W).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
+        .when(cols.project, |d| d.child(column(PROJECT_W).text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child(project)))
+        .when(cols.model, |d| d.child(column(MODEL_W).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(model)))
         .child(column(32.).text_right().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
         // Rows that can't be snoozed keep an empty slot, so the columns stay aligned.
         .child(if this.snoozable(host, t) {
@@ -463,6 +457,49 @@ fn thread_row(
             .relative()
             .children(archive_confirm),
         )
+}
+
+// A thread row's optional columns, design px wide.
+const HOST_W: f32 = 90.;
+const PROJECT_W: f32 = 140.;
+const MODEL_W: f32 = 150.;
+/// The gap between a row's cells (`gap_3`).
+const GAP: f32 = 12.;
+/// Everything else a row spends: its padding, the status glyph (16, its widest; the icons
+/// are 14), the time, both actions, and the gaps after the glyph and before each of the
+/// last three.
+const ROW_FIXED: f32 = 2. * 16. + 16. + GAP + 3. * GAP + 32. + 2. * 24.;
+/// The title keeps at least this much; the optional columns give way first.
+const TITLE_MIN: f32 = 200.;
+
+/// Which optional columns the rows of a list show. Every row of a list shows the same
+/// ones, so they line up.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Columns {
+    host: bool,
+    project: bool,
+    model: bool,
+}
+
+impl Columns {
+    /// The columns that fit a list `width` design px wide while the title keeps `TITLE_MIN`.
+    /// `host` and `project` say whether they're wanted at all (several hosts; a list across
+    /// projects). They're kept in order of use, the project first, then the host, then the
+    /// model; the first that doesn't fit drops, and every one after it.
+    fn fit(width: f32, host: bool, project: bool) -> Self {
+        let mut room = width - ROW_FIXED - TITLE_MIN;
+        // Once a wanted column overdraws the room, it stays overdrawn for the rest.
+        let mut keep = |wanted: bool, w: f32| {
+            if wanted {
+                room -= w + GAP;
+            }
+            wanted && room >= 0.
+        };
+        let project = keep(project, PROJECT_W);
+        let host = keep(host, HOST_W);
+        let model = keep(true, MODEL_W);
+        Columns { host, project, model }
+    }
 }
 
 /// A fixed-width cell of a thread row: every row lays its columns out the same way, so
@@ -497,4 +534,20 @@ fn row_action(
             on_click(this, cx)
         }))
         .child(icon(name, color))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Columns;
+
+    #[test]
+    fn columns_give_way_model_then_host_then_project() {
+        let c = |host, project, model| Columns { host, project, model };
+        assert_eq!(Columns::fit(800., true, true), c(true, true, true));
+        assert_eq!(Columns::fit(700., true, true), c(true, true, false));
+        assert_eq!(Columns::fit(600., true, true), c(false, true, false));
+        assert_eq!(Columns::fit(500., true, true), c(false, false, false));
+        // A column that isn't wanted leaves its room to the next.
+        assert_eq!(Columns::fit(700., false, true), c(false, true, true));
+    }
 }

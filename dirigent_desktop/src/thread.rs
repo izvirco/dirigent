@@ -776,21 +776,46 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .gap_1()
                 .px_2()
                 .pb_2()
-                // Where the work happens comes first, then what does it.
-                .children(workspace_chip(this, cx))
+                // The chips take what the button leaves. When they don't all fit, the usage
+                // label goes first, whole: it wraps onto a second line, clipped away (popups
+                // draw deferred, unclipped). Then the chips' labels truncate (effort stays
+                // whole: it's short).
                 .child(
-                    theme::chip("model-chip", model_label, this.model.is_none(), model_open)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
-                        .children(model_menu),
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        // One chip tall (`chip_in`, `ctx-usage`), so line two is clipped whole.
+                        .h(u(24.))
+                        .overflow_hidden()
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap_1()
+                                // Where the work happens comes first, then what does it.
+                                .children(workspace_chip(this, cx))
+                                .child(
+                                    theme::chip("model-chip", model_label, this.model.is_none(), model_open)
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
+                                        .children(model_menu),
+                                )
+                                .child(
+                                    theme::chip("effort-chip", effort_label, this.effort.is_none(), effort_open)
+                                        .flex_shrink_0()
+                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Effort, cx)))
+                                        .children(effort_menu),
+                                ),
+                        )
+                        .children(usage),
                 )
-                .child(
-                    theme::chip("effort-chip", effort_label, this.effort.is_none(), effort_open)
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Effort, cx)))
-                        .children(effort_menu),
-                )
-                .children(usage)
-                .child(div().flex_1())
-                .child(action),
+                .child(action.flex_shrink_0()),
         )
 }
 
