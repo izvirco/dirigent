@@ -165,6 +165,7 @@ mod tests {
             prompted_at: Some(prompted_at),
             jobs: 0,
             spend: Default::default(),
+            setup: None,
         }
     }
 

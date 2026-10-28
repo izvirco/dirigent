@@ -56,10 +56,17 @@ pub enum ClientMessage {
     /// `name` names it from the start (an agent names the threads it starts); a thread
     /// without one is titled from its first prompt.
     /// `prompt` sends the thread its first prompt in the same request (a `Prompt` in mode
-    /// `prompt`): if it can't be delivered the thread is deleted again and the request
-    /// fails, so a client never ends up with a thread that silently never started.
+    /// `prompt`), so it is listed running from the start, never idle meanwhile: if it can't
+    /// be delivered the thread is deleted again and the request fails, so a client never
+    /// ends up with a thread that silently never started. Until it is delivered the thread
+    /// takes no other prompt.
+    /// `thread_id` (a lowercase, hyphenated uuid) lets the client know the thread's id before
+    /// the reply, to open it at once; the host picks one without it. A host from before this
+    /// field ignores it: the reply's id is the one.
     CreateThread {
         id: u64,
+        #[serde(default)]
+        thread_id: Option<String>,
         project_id: String,
         #[serde(default)]
         workspace: bool,
@@ -187,7 +194,8 @@ pub enum ClientMessage {
         #[serde(default = "default_limit")]
         limit: u64,
     },
-    /// Permanently remove a thread and its entries.
+    /// Permanently remove a thread and its entries. Refused while a `CreateThread` is still
+    /// starting it: that request deletes it itself if it can't start.
     DeleteThread {
         id: u64,
         thread_id: String,
@@ -249,7 +257,7 @@ pub enum ServerMessage {
     },
     ThreadCreated {
         reply_to: u64,
-        thread: ThreadSummary,
+        thread: Box<ThreadSummary>,
     },
     Ok {
         reply_to: u64,
@@ -478,7 +486,7 @@ impl ModelInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ThreadSummary {
     pub id: String,
     /// Missing when the project was removed (orphan thread).
@@ -533,6 +541,21 @@ pub struct ThreadSummary {
     /// What the thread's own agent has consumed so far (its sub-agents not included).
     #[serde(default)]
     pub spend: Spend,
+    /// The step its host is setting it up with, before it can take a message. Runtime
+    /// state, never stored.
+    #[serde(default)]
+    pub setup: Option<Setup>,
+}
+
+/// A step in setting a thread up (`ThreadSummary::setup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Setup {
+    /// Its isolated workspace is being made (`CreateThread::workspace`).
+    Workspace,
+    /// Its session is capturing the project's nix dev shell (`nix develop`); prompts wait
+    /// for it. Every load of a session in a project with a `flake.nix` does this.
+    NixShell,
 }
 
 /// Tokens and dollars summed over a thread's assistant messages, as pi reports them.
@@ -623,6 +646,7 @@ mod tests {
         roundtrip(ClientMessage::GetThread { id: 2, thread_id: "t".into() });
         roundtrip(ClientMessage::CreateThread {
             id: 3,
+            thread_id: Some("01a182e2-9989-7681-9439-c15c752508f6".into()),
             project_id: "p".into(),
             workspace: true,
             base: Some("main~2".into()),
@@ -711,6 +735,7 @@ mod tests {
             c,
             ClientMessage::CreateThread {
                 id: 1,
+                thread_id: None,
                 project_id: "p".into(),
                 workspace: false,
                 base: None,
@@ -728,6 +753,7 @@ mod tests {
         assert_eq!(t.prompted_at, None);
         assert_eq!(t.jobs, 0);
         assert_eq!(t.spend, Spend::default());
+        assert_eq!(t.setup, None);
         assert!(!t.pinned && t.seen_at.is_none() && t.pinned_entries.is_empty());
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
@@ -762,6 +788,7 @@ mod tests {
             prompted_at: Some(4),
             jobs: 2,
             spend: Spend { input: 10, output: 2, cached: 8, cost: 0.5 },
+            setup: Some(Setup::NixShell),
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
@@ -787,7 +814,7 @@ mod tests {
             header: json!({"type":"session"}),
             entries: vec![e.clone()],
         });
-        roundtrip(ServerMessage::ThreadCreated { reply_to: 2, thread: t });
+        roundtrip(ServerMessage::ThreadCreated { reply_to: 2, thread: Box::new(t) });
         roundtrip(ServerMessage::Title {
             reply_to: 3,
             title: "Fix it".into(),

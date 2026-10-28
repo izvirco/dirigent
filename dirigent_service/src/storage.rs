@@ -315,6 +315,7 @@ impl Storage {
                     output: r.get::<_, i64>(19)? as u64,
                     cached: r.get::<_, i64>(20)? as u64,
                 },
+                setup: None,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -565,6 +566,7 @@ impl Storage {
             prompted_at: None,
             jobs: 0,
             spend: Spend::default(),
+            setup: None,
         })
     }
 

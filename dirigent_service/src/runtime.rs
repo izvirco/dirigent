@@ -46,6 +46,11 @@ pub enum RuntimeMessage {
         thread_id: String,
         running: u32,
     },
+    /// A session load started (`active`) or finished capturing its nix dev shell.
+    NixShell {
+        thread_id: String,
+        active: bool,
+    },
     Error {
         thread_id: Option<String>,
         message: String,
@@ -145,6 +150,9 @@ struct Inner {
     running: HashMap<String, i64>,
     /// Running `async_bash` jobs per thread, as the runtime last reported (`jobs`); absent = none.
     jobs: HashMap<String, u32>,
+    /// Nix dev shell captures in progress per thread (`nix_shell`): a count, as a session
+    /// reloaded meanwhile starts another while the first still runs; absent = none.
+    nix_shells: HashMap<String, u32>,
     /// Callers waiting on a `loaded` reply, per thread.
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
@@ -258,6 +266,17 @@ impl Runtime {
             RuntimeMessage::Jobs { thread_id, running } => {
                 inner.jobs.insert(thread_id.clone(), *running);
             }
+            RuntimeMessage::NixShell { thread_id, active: true } => {
+                *inner.nix_shells.entry(thread_id.clone()).or_default() += 1;
+            }
+            RuntimeMessage::NixShell { thread_id, active: false } => {
+                if let Some(n) = inner.nix_shells.get_mut(thread_id) {
+                    *n -= 1;
+                    if *n == 0 {
+                        inner.nix_shells.remove(thread_id);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -268,6 +287,7 @@ impl Runtime {
         inner.loaded.clear();
         inner.running.clear();
         inner.jobs.clear();
+        inner.nix_shells.clear();
         for (_, waiters) in inner.pending_loads.drain() {
             for w in waiters {
                 let _ = w.send(Err("runtime exited".into()));
@@ -296,6 +316,11 @@ impl Runtime {
     /// How many `async_bash` jobs the thread has running.
     pub fn jobs(&self, thread_id: &str) -> u32 {
         self.inner.lock().unwrap().jobs.get(thread_id).copied().unwrap_or(0)
+    }
+
+    /// The thread's session is capturing its nix dev shell.
+    pub fn nix_shell(&self, thread_id: &str) -> bool {
+        self.inner.lock().unwrap().nix_shells.contains_key(thread_id)
     }
 
     /// A prompt is on its way: count the thread as running from now, so clients see it work

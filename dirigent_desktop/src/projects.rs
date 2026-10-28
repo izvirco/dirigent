@@ -173,6 +173,7 @@ mod tests {
             prompted_at: None,
             jobs: 0,
             spend: Default::default(),
+            setup: None,
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

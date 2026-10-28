@@ -32,3 +32,5 @@ image = { version = "0.25", default-features = false, features = [
   "bmp",
 ] }
 chrono = "0.4"
+# A new thread's id, picked here so its draft can open it before the host replies.
+uuid = { version = "1", features = ["v7"] }
