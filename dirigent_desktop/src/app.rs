@@ -103,12 +103,35 @@ pub struct OpenThread {
     /// `panel_open`). Clicking a work line resets it to the default; closing it from a
     /// work line or Esc sets `Some(false)`.
     pub panel: Option<bool>,
+    /// Its latest `GetThread` and the last entry it held when asking (see `fetch_open`).
+    fetching: Option<(u64, Option<u64>)>,
 }
 
 impl OpenThread {
     /// Timeline item `ix` is a pinned message.
     pub fn is_pinned(&self, ix: usize) -> bool {
         self.timeline.entry_id(ix).is_some_and(|id| self.pins.contains(id))
+    }
+
+    /// Fold a persisted entry in, from its push or from a snapshot, for a push that overtook
+    /// it or one this client never got (never both, see `ServerMessage::Entry`): the message
+    /// it persists supersedes what was streamed or echoed for it. Returns the item count
+    /// before and the first item it changed (`Timeline::push`).
+    fn fold(&mut self, entry: Entry) -> (usize, Option<usize>) {
+        match entry.json.pointer("/message/role").and_then(|r| r.as_str()) {
+            Some("assistant") => self.streaming.steps.clear(),
+            // A user message into an open work is a steer; `queue_update` already
+            // dropped its echo (see `Timeline::push_message`, `Streaming::apply`).
+            Some("user") if self.timeline.open_work().is_none() => self.streaming.confirm_prompt(),
+            _ => {}
+        }
+        if entry.json.get("customType").and_then(serde_json::Value::as_str) == Some("dirigent:answer") {
+            self.streaming.confirm_answer(&entry.json);
+        }
+        let n = self.timeline.items.len();
+        let changed = self.timeline.push(&entry.json);
+        self.entries.push(entry);
+        (n, changed)
     }
 }
 
@@ -856,13 +879,10 @@ impl Dirigent {
                 if let Some(h) = self.host_mut(&host) {
                     h.status = status;
                 }
-                // Requests made while offline are dropped, so the open thread's `GetThread`
-                // from startup (or from before a reconnect) is repeated here.
-                if status == HostStatus::Connected
-                    && let Some(id) = self.open().filter(|t| t.host == host).map(|t| t.id.clone())
-                {
-                    let rid = self.next_id();
-                    self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: id });
+                // The open thread is fetched once its host connects (`fetch_open` doesn't ask
+                // while it's offline).
+                if status == HostStatus::Connected && self.open().is_some_and(|t| t.host == host) {
+                    self.fetch_open();
                 }
                 // The modal's host: a reply can't come over a dropped connection (the add can
                 // be retried), and a listing asked for while offline is asked again.
@@ -1002,13 +1022,32 @@ impl Dirigent {
                     }
                 }
             }
-            ServerMessage::Thread { thread_id, entries, .. } => {
+            ServerMessage::Thread { reply_to, thread_id, entries, .. } => {
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host
                     && t.id == thread_id
                 {
-                    t.timeline = Timeline::from_entries(entries.iter().map(|e| &e.json));
-                    t.entries = entries;
+                    // The reply to our latest fetch: what we held past its end is stale (see
+                    // `fetch_open`), in the cache too.
+                    let end = entries.last().map(|e| e.seq);
+                    let stale = t
+                        .fetching
+                        .take_if(|(rid, _)| *rid == reply_to)
+                        .and_then(|(_, held)| held)
+                        .filter(|held| end.is_none_or(|end| *held > end));
+                    if let Some(to) = stale
+                        && let Err(e) = self.cache.lock().unwrap().remove_entries(&host, &thread_id, end, to)
+                    {
+                        eprintln!("[cache] {e:#}");
+                    }
+                    let (kept, fresh) = merge_snapshot(entries, std::mem::take(&mut t.entries), stale);
+                    t.timeline = Timeline::from_entries(kept.iter().map(|e| &e.json));
+                    t.entries = kept;
+                    // Their pushes are still on the way and will be skipped (see `Entry`):
+                    // they are folded in now, as if pushed.
+                    for e in fresh {
+                        t.fold(e);
+                    }
                     t.list.reset(t.timeline.items.len() + 1);
                     // The cache may have lagged: the log follows the latest work again.
                     if t.log.is_some() {
@@ -1057,7 +1096,9 @@ impl Dirigent {
                 // Our draft's thread, open since it was sent: its host has it now, prompted
                 // (`CreateThread::prompt`), and it is fetched if open, as entries made while it
                 // wasn't are missing. A host from before `CreateThread::thread_id` picked an id
-                // of its own: ours makes way for its thread, opened in its place.
+                // of its own: ours makes way for its thread, opened in its place. It prompted
+                // the thread before replying, so the message is cached or on its way: no echo,
+                // which nothing would confirm if the cache has it (see `ServerMessage::Entry`).
                 if let Some(p) = pending {
                     let open = self.open().is_some_and(|t| t.host == host && t.id == p.thread.id);
                     if thread.id != p.thread.id {
@@ -1068,11 +1109,9 @@ impl Dirigent {
                         self.titling.insert((host.clone(), thread.id.clone()), Instant::now());
                     }
                     if open && thread.id == p.thread.id {
-                        let rid = self.next_id();
-                        self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: thread.id.clone() });
+                        self.fetch_open();
                     } else if open {
                         self.select_thread(&host, &thread.id, cx);
-                        self.echo(&host, &thread.id, p.text, PromptMode::Prompt);
                     }
                 }
             }
@@ -1117,20 +1156,25 @@ impl Dirigent {
                     && t.host == host
                     && t.id == thread_id
                 {
-                    // The persisted message supersedes what we streamed / echoed optimistically.
-                    match entry.json.pointer("/message/role").and_then(|r| r.as_str()) {
-                        Some("assistant") => t.streaming.steps.clear(),
-                        // A user message into an open work is a steer; `queue_update` already
-                        // dropped its echo (see `Timeline::push_message`, `Streaming::apply`).
-                        Some("user") if t.timeline.open_work().is_none() => t.streaming.confirm_prompt(),
-                        _ => {}
+                    // One it has came with a snapshot (`select_thread`'s cache read, which the net
+                    // task fills before we see the push, or a `Thread` reply that overtook it) and
+                    // is skipped. An assistant message still drops what streamed, which the cache
+                    // read left alone: pushes come in order, so that is its own or older. (Not the
+                    // prompt echo: confirming twice would drop a later one.)
+                    if t.entries.last().is_some_and(|e| entry.seq <= e.seq) {
+                        if entry.json.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant")
+                            && !t.streaming.steps.is_empty()
+                        {
+                            t.streaming.steps.clear();
+                            let tail = t.timeline.items.len();
+                            t.list.remeasure_items(tail..tail + 1);
+                            if t.log.is_some() {
+                                t.log_list.remeasure();
+                            }
+                        }
+                        return;
                     }
-                    if entry.json.get("customType").and_then(serde_json::Value::as_str) == Some("dirigent:answer") {
-                        t.streaming.confirm_answer(&entry.json);
-                    }
-                    let n = t.timeline.items.len();
-                    let changed = t.timeline.push(&entry.json);
-                    t.entries.push(entry);
+                    let (n, changed) = t.fold(entry);
                     let m = t.timeline.items.len();
                     // The live work got its persisted item: the log panel follows it there.
                     if t.log == Some(thread::TAIL) {
@@ -1293,6 +1337,7 @@ impl Dirigent {
             center_on: None,
             asks: vec![],
             panel: None,
+            fetching: None,
         }));
         self.set_pane(pane, cx);
         if self.log_on {
@@ -1308,12 +1353,27 @@ impl Dirigent {
         // A thread its host is still creating has nothing to fetch yet: its entries arrive as
         // they are made, and `ThreadCreated` fetches it once it exists.
         if !self.is_pending(host, id) {
-            let rid = self.next_id();
-            self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
+            self.fetch_open();
         }
         self.request_thread_vcs(host, id);
         self.focus_composer(cx);
         cx.notify();
+    }
+
+    /// Ask the open thread's host for all of its entries (a `Thread` reply). Whatever the
+    /// thread holds now is in that reply, as a host stores an entry before pushing it, unless
+    /// the host lost it: a cache ahead of its host (whose db was restored from a backup).
+    /// What it held past the reply's end goes then, unlike entries pushed since. Not while
+    /// the host is offline, where the request would be dropped: connecting fetches it.
+    fn fetch_open(&mut self) {
+        let Some(host) = self.open().map(|t| t.host.clone()) else { return };
+        if self.host(&host).is_none_or(|h| h.status != HostStatus::Connected) {
+            return;
+        }
+        let rid = self.next_id();
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.fetching = Some((rid, t.entries.last().map(|e| e.seq)));
+        self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: t.id.clone() });
     }
 
     // ---- version control ----
@@ -3343,6 +3403,20 @@ fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
     }
 }
 
+/// A `Thread` reply against the entries the open thread has folded in (`have`), in two
+/// parts: the snapshot up to where `have` ends, plus what `have` holds past the snapshot's
+/// end but not up to `stale` (see `Dirigent::fetch_open`), and the snapshot's entries past
+/// `have` (`fresh`, for `OpenThread::fold`). A host interleaves replies and pushes in no
+/// particular order, so either can be ahead.
+fn merge_snapshot(mut snapshot: Vec<Entry>, have: Vec<Entry>, stale: Option<u64>) -> (Vec<Entry>, Vec<Entry>) {
+    let end = have.last().map(|e| e.seq);
+    let fresh = snapshot.split_off(snapshot.partition_point(|e| end.is_some_and(|end| e.seq <= end)));
+    let snapshot_end = snapshot.last().map(|e| e.seq);
+    let past = |e: &Entry| snapshot_end.is_none_or(|s| e.seq > s) && stale.is_none_or(|s| e.seq > s);
+    snapshot.extend(have.into_iter().filter(past));
+    (snapshot, fresh)
+}
+
 /// Attachments as a prompt carries them.
 fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
     images
@@ -3494,5 +3568,36 @@ impl Render for Dirigent {
                         .child(div().flex_1().min_w_0().child(m))
                 }))
             }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(seq: u64) -> Entry {
+        Entry { seq, id: format!("e{seq}"), parent_id: None, kind: "message".into(), json: serde_json::json!({}) }
+    }
+
+    fn seqs(entries: &[Entry]) -> Vec<u64> {
+        entries.iter().map(|e| e.seq).collect()
+    }
+
+    #[test]
+    fn snapshot_merges_with_pushes_either_way() {
+        let range = |a: u64, b: u64| (a..b).map(entry).collect::<Vec<_>>();
+        let merge = |snapshot, have, stale| {
+            let (kept, fresh) = merge_snapshot(snapshot, have, stale);
+            (seqs(&kept), seqs(&fresh))
+        };
+        // The snapshot is ahead: what it adds is folded in, as its pushes will be skipped.
+        assert_eq!(merge(range(0, 4), range(0, 2), None), (vec![0, 1], vec![2, 3]));
+        assert_eq!(merge(range(0, 2), vec![], None), (vec![], vec![0, 1]));
+        // Entries pushed after it was read arrived first: they stay.
+        assert_eq!(merge(range(0, 2), range(0, 4), None), (vec![0, 1, 2, 3], vec![]));
+        // ... unless we held them when asking: then the host lost them.
+        assert_eq!(merge(range(0, 2), range(0, 4), Some(2)), (vec![0, 1, 3], vec![]));
+        // A gap in what we had (a cache that missed pushes) is filled.
+        assert_eq!(merge(range(0, 4), vec![entry(0), entry(3)], None), (vec![0, 1, 2, 3], vec![]));
     }
 }
