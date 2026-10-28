@@ -54,10 +54,16 @@ const UNDO_GROUP: Duration = Duration::from_secs(1);
 const UNDO_DEPTH: usize = 200;
 
 /// Emitted on ctrl+Enter, or shift+Enter with `queued` (Enter alone inserts a newline;
-/// single-line inputs submit on Enter too). What `queued` means is up to the subscriber.
+/// single-line inputs submit on Enter too, with `ctrl` false). What `queued` means is up to
+/// the subscriber.
 pub struct Submitted {
     pub queued: bool,
+    pub ctrl: bool,
 }
+
+/// Up / Down in a single-line input (a multiline one moves its cursor instead): for a list
+/// under the input to move its selection. `down` is +1, up -1.
+pub struct Arrow(pub i32);
 
 /// Emitted when the clipboard held an image on paste (nothing is inserted; the
 /// subscriber decides what to do with it, if anything).
@@ -357,16 +363,16 @@ impl TextInput {
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(Submitted { queued: false });
+        cx.emit(Submitted { queued: false, ctrl: true });
     }
 
     fn submit_queued(&mut self, _: &SubmitQueued, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(Submitted { queued: true });
+        cx.emit(Submitted { queued: true, ctrl: false });
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         if self.single_line {
-            cx.emit(Submitted { queued: false });
+            cx.emit(Submitted { queued: false, ctrl: false });
         } else {
             self.replace_text_in_range(None, "\n", window, cx);
         }
@@ -389,10 +395,16 @@ impl TextInput {
     }
 
     fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            return cx.emit(Arrow(-1));
+        }
         self.move_vertical(-1., window, cx);
     }
 
     fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            return cx.emit(Arrow(1));
+        }
         self.move_vertical(1., window, cx);
     }
 
@@ -613,6 +625,7 @@ impl TextInput {
 }
 
 impl EventEmitter<Submitted> for TextInput {}
+impl EventEmitter<Arrow> for TextInput {}
 impl EventEmitter<ImagePasted> for TextInput {}
 impl EventEmitter<Changed> for TextInput {}
 

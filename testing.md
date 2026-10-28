@@ -88,13 +88,15 @@ state (picked model, drafts, pane) lives in `data/desktop.db` and is read at lau
 Landmarks at 1100×720 with the default 240 px sidebar (they move when the layout changes; trust the shot):
 compose button (217, 19) with the Projects folder (191, 19) left of it (lit while the Projects page is open). Pinned
 projects sit right under the title, the first at (43, 53) and the next ones 32 px apart, each with a hover-revealed
-new-thread `+` (217); drag one onto another row's y to reorder. Nothing is pinned on a fresh db; a project added from
-the Projects page is pinned at once. The Inbox and Workpool rows only show once they have a thread: Inbox right under
+new-thread `+` (217); drag one onto another row's y to reorder. Nothing is pinned on a fresh db, and an added project
+isn't either (its pin toggle on the Projects page). The Inbox and Workpool rows only show once they have a thread: Inbox right under
 the pins (at (35, 53) with none) with its cards below it; the Workpool row sits above the bottom bar (its cards stack
 up on it; folded by default, the chevron at x = 217 on a hovered nav row folds / unfolds, remembered across restarts).
 Projects page (folder): a row per project, pin toggle at x ≈ 333 (first row y = 81, rows 40 px apart), hover-revealed
-`⋯` at x ≈ 1006 (link / unlink / remove), the add form's path field under the rows (a host chip before it with more
-than one host); Esc goes back. The gear is lit on the settings pages.
+`⋯` at x ≈ 1006 (rename: the name turns into a field, Enter or a click elsewhere saves, Esc cancels, empty = the directory name; link / unlink / remove); Esc goes back. `Add project` (1020, 19) in its top bar (opened by itself with no
+project yet) is a centered modal: host chip (305, 243), path field (starts at `~/`) and `Add` (790, 243), the host's subdirectories
+under it filtered by the typed name (Up / Down select, Enter goes in, ctrl+Enter or `Add` adds). A project with no
+git-origin match but a same-named one on another host gets a second page: `Link` / `Don't link` (Esc = don't). The gear is lit on the settings pages.
 First list row (500, 58), draft page project chip (395, 289) and model chip (365, 379) → its "All models ›" link (680, 309), all-models search focused, Enter picks the top match.
 The draft's model chip moves right (to ~425–495) when the project is a git / jj repo: the `in project` chip comes first. Thread composer
 model chip (365, 676), thread header snooze / pin / archive / delete (942, 19) / (972, 19) / (1002, 19) / (1033, 19) and the right panel's icon button (1070, 19) at its far right; a sidebar card's snooze replaces its run time on hover (x = 216). The sidebar's bottom bar: hide/show (22, 699), settings gear (217, 699) → Settings › Config: theme chip (875, 122), font fields (740, 193 / 244 / 295; apply as you type), title model chip (846, 481), reasoning chip (879, 526), `Test` below the prompt (`scroll 665 400 10` first) opens the sample message with `Name it` under it, the telemetry switch is at the bottom; the Hosts tab is at (429, 19): name field (469, 228), address field (749, 228), Enter adds; the Usage tab is at (488, 19): range chips `1d 7d 30d custom` and `‹ ›` top right, legend rows under the chart toggle series.

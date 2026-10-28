@@ -23,8 +23,15 @@ pub enum ClientMessage {
     ListProjects {
         id: u64,
     },
-    /// Register a directory on this host as a project. The user is responsible for it existing.
+    /// Register a directory on this host as a project: an absolute path, or one under `~/`
+    /// (this host's home).
     AddProject {
+        id: u64,
+        path: String,
+    },
+    /// The subdirectories of a directory on this host (absolute or `~/…`), for the desktop's
+    /// add-project browser.
+    ListDirs {
         id: u64,
         path: String,
     },
@@ -223,6 +230,11 @@ pub enum ServerMessage {
     ProjectAdded {
         reply_to: u64,
         project: Project,
+    },
+    /// Reply to `ListDirs`: the subdirectories (dot ones included), sorted by name.
+    Dirs {
+        reply_to: u64,
+        dirs: Vec<Dir>,
     },
     /// Reply to `ListThreads`, or pushed (`reply_to: None`) whenever a thread changes.
     Threads {
@@ -435,6 +447,13 @@ pub struct ImageAttachment {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dir {
+    pub name: String,
+    /// It holds a `.git` or `.jj`: likely a project.
+    pub repo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,
     pub path: String,
@@ -598,6 +617,7 @@ mod tests {
     fn client_messages() {
         roundtrip(ClientMessage::ListProjects { id: 1 });
         roundtrip(ClientMessage::AddProject { id: 1, path: "/x".into() });
+        roundtrip(ClientMessage::ListDirs { id: 1, path: "~/".into() });
         roundtrip(ClientMessage::RemoveProject { id: 1, project_id: "p".into() });
         roundtrip(ClientMessage::ListThreads { id: 1 });
         roundtrip(ClientMessage::GetThread { id: 2, thread_id: "t".into() });
@@ -754,6 +774,7 @@ mod tests {
         assert_eq!(m.key(), "a/b");
         roundtrip(ServerMessage::Projects { reply_to: None, projects: vec![p.clone()] });
         roundtrip(ServerMessage::ProjectAdded { reply_to: 1, project: p });
+        roundtrip(ServerMessage::Dirs { reply_to: 1, dirs: vec![Dir { name: "work".into(), repo: true }] });
         roundtrip(ServerMessage::Models { reply_to: 1, models: vec![m] });
         let e = Entry::from_pi(0, json!({"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"hi"}}));
         assert_eq!(e.kind, "message");

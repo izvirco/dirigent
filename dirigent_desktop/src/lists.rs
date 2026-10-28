@@ -1,5 +1,5 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar, the Projects page (every project, pins, the add form) and the
+//! 40px header bar, the Projects page (every project, pins) and the
 //! settings pages (Hosts here, Config in `settings.rs`, Usage in `usage.rs`;
 //! `settings_header` carries the tabs between them).
 
@@ -43,8 +43,8 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 }
 
 /// The Projects page (the sidebar's folder): every project group as a row (pin toggle,
-/// name, its hosts, thread count, `⋯` menu), "Removed projects" last, then the
-/// form to add one. A row opens the project's page; a pinned one is also listed in the
+/// name, its hosts, thread count, `⋯` menu), "Removed projects" last; `Add project` in
+/// the top bar opens the modal (`add_project.rs`). A row opens the project's page; a pinned one is also listed in the
 /// sidebar.
 fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
     let (groups, orphans) = this.groups();
@@ -66,54 +66,13 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
             .child(div().size(px(24.)).flex_shrink_0())
     });
 
-    // The add form: the path field, after a host chip when there is more than one host.
-    let host = this.new_project_host().unwrap_or_default();
-    let host_open = this.menu == Some(Menu::NewProjectHost);
-    let host_chip = (this.hosts.len() > 1).then(|| {
-        let items = this
-            .hosts
-            .iter()
-            .map(|h| {
-                let name = h.name.clone();
-                let status = format!("{:?}", h.status).to_lowercase();
-                menu::item(
-                    format!("nph/{name}"),
-                    name.clone(),
-                    status,
-                    name == host,
-                    move |this, cx| this.pick_new_project_host(name.clone(), cx),
-                    cx,
-                )
-            })
-            .collect();
-        theme::labeled_chip("new-project-host", "on", host.clone(), false, host_open)
-            .flex_shrink_0()
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::NewProjectHost, cx)))
-            .children(host_open.then(|| menu::popup(Side::Below(26.), items, cx)))
-    });
-    let field = div()
-        .flex_1()
-        .px_3()
-        .py_2()
-        .rounded_md()
-        .bg(rgba(theme::t().raised))
-        .border_1()
-        .border_color(rgba(theme::t().line))
-        .child(this.path_input.clone());
-    let form = div()
-        .flex()
-        .flex_col()
-        .gap_3()
-        .pt_6()
-        .child(
-            div()
-                .text_color(rgba(theme::t().fg_1))
-                .child(format!("Add a project: the absolute path of a directory on {host}. Enter to add it.")),
-        )
-        .child(div().flex().flex_row().items_center().gap_2().children(host_chip).child(field));
-
-    let column = div().w_full().max_w(px(760.)).flex().flex_col().gap_1().py_6().px_6().children(rows).children(removed).child(form);
-    pane.child(header(div().child("Projects"), None)).child(scroll("projects", div().flex().flex_col().items_center().child(column)))
+    let add = theme::button("add-project", "plus", "Add project").on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx)));
+    let pane = pane.child(header(div().child("Projects"), Some(add.into_any_element())));
+    if rows.is_empty() && removed.is_none() {
+        return pane.child(theme::empty("No projects yet", "Add a directory on one of your hosts with Add project."));
+    }
+    let column = div().w_full().max_w(px(760.)).flex().flex_col().gap_1().py_6().px_6().children(rows).children(removed);
+    pane.child(scroll("projects", div().flex().flex_col().items_center().child(column)))
 }
 
 /// A Projects page row: opens the project's page (`key`) when clicked.
@@ -141,8 +100,8 @@ fn thread_count(n: usize) -> Div {
 
 /// One project group on the Projects page: the pin toggle (amber while pinned, faint
 /// otherwise), its name, its hosts on one line, its thread count, and the `⋯`
-/// menu: link it into another group, unlink it, remove it from a host (its threads are
-/// kept, under Removed projects).
+/// menu: rename it (UI only), link it into another group, unlink it, remove it from a host
+/// (its threads are kept, under Removed projects).
 fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let pinned = this.is_pinned_project(&key);
@@ -151,6 +110,8 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
 
     let mut actions: Vec<AnyElement> = vec![];
     if menu_open {
+        let k = key.clone();
+        actions.push(menu::item("rename", "Rename", "", false, move |this, cx| this.start_rename(&k, cx), cx));
         let k = key.clone();
         actions.push(menu::item(
             "link",
@@ -231,9 +192,25 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
     let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
     hosts.dedup(); // members come sorted by host
     let hosts = hosts.join(", ");
+    // While renaming, the name is a field; presses in it don't open the project.
+    let name = if this.renaming.as_deref() == Some(key.as_str()) {
+        // Pulled left by its padding + border so the text stays where the name was.
+        div()
+            .ml(px(-7.))
+            .mr(px(7.))
+            .px_1p5()
+            .py_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(theme::t().accent_line))
+            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(this.rename_input.clone())
+    } else {
+        div().truncate().child(g.name.clone())
+    };
     entry_row(format!("proj/{key}"), &key, cx)
         .child(pin)
-        .child(div().w(px(160.)).flex_shrink_0().truncate().font_weight(FontWeight::MEDIUM).child(g.name.clone()))
+        .child(name.w(px(160.)).flex_shrink_0().font_weight(FontWeight::MEDIUM))
         .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(hosts))
         .child(thread_count(g.threads.len()))
         .child(more)

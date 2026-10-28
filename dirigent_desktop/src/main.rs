@@ -1,5 +1,6 @@
 //! Dirigent desktop: gpui client for dirigent_service hosts.
 
+mod add_project;
 mod app;
 mod cache;
 mod config;

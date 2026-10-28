@@ -2,8 +2,9 @@
 //! Rendering lives in `sidebar.rs` (navigation), `lists.rs` (inbox / workpool / project
 //! pages) and `thread.rs` (one thread + composer).
 
+use crate::add_project;
 use crate::cache::Cache;
-use crate::input::{self, ImagePasted, Submitted, TextInput, image_token};
+use crate::input::{self, Arrow, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
@@ -300,7 +301,7 @@ pub enum Menu {
     Link {
         group_key: String,
     },
-    /// Projects page: the host a new project is added on.
+    /// Add project modal: the host the project is added on.
     NewProjectHost,
     /// Thread header: confirm deletion.
     ConfirmDelete,
@@ -335,10 +336,19 @@ pub enum ArchiveAt {
 pub struct Dirigent {
     pub hosts: Vec<HostState>,
     pub links: Links,
+    /// Names the user gave project groups (`projects::Names`).
+    pub names: projects::Names,
+    /// The Projects page row being renamed (group key), its name field `rename_input`.
+    pub renaming: Option<String>,
+    pub rename_input: Entity<TextInput>,
     /// The project group keys pinned to the sidebar, in its order (`projects::pinned`).
     pub pinned_projects: Vec<String>,
-    /// The host the Projects page adds a project on; `None`: the first connected one.
+    /// The host the Add project modal adds on; `None`: the first connected one.
     pub new_project_host: Option<String>,
+    /// The Add project modal, while open (its path field is `path_input`).
+    pub add_project: Option<add_project::State>,
+    /// `ListDirs` requests not answered yet: their errors are the modal's, never toasts.
+    dir_requests: HashSet<u64>,
     /// The pinned project being dragged in the sidebar; its row is a gap meanwhile.
     pub dragging: Option<String>,
     /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
@@ -347,7 +357,7 @@ pub struct Dirigent {
     pub menu: Option<Menu>,
     /// The current mouse press closed a menu (clicked outside it). Suppresses `toggle_menu`
     /// for that click, so pressing a menu's own trigger closes it rather than reopening it.
-    /// Reset at the start of every press by the root's capture handler.
+    /// Reset at the start of every press (`reset_menu_dismissed`).
     menu_dismissed: bool,
     /// Sidebar: user-dragged width, hidden with `[`, and "peek" when hidden but the mouse
     /// rests on the window's left edge.
@@ -440,6 +450,7 @@ impl Dirigent {
         };
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
+        let names = cache.project_names().unwrap_or_default().into_iter().collect();
         let pinned_projects = cache.get(PINNED_PROJECTS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
@@ -462,11 +473,16 @@ impl Dirigent {
         .detach();
 
         let composer = cx.new(|cx| TextInput::new(cx, "Calibre - The Game", false));
-        let path_input = cx.new(|cx| TextInput::new(cx, "/absolute/path/to/project", true));
+        let path_input = cx.new(|cx| TextInput::new(cx, "~/path/to/project", true));
         cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(s.queued, window, cx)).detach();
         cx.subscribe(&composer, |this, _, p: &ImagePasted, cx| this.attach(p.0.clone(), cx)).detach();
         cx.subscribe(&composer, |this, _, _: &input::Changed, cx| this.save_draft(cx)).detach();
-        cx.subscribe_in(&path_input, window, |this, _, _: &Submitted, window, cx| this.add_project(window, cx)).detach();
+        cx.subscribe(&path_input, |this, _, s: &Submitted, cx| if s.ctrl { this.confirm_add_project(cx) } else { this.enter_dir(cx) })
+            .detach();
+        cx.subscribe(&path_input, |this, _, _: &input::Changed, cx| this.project_path_changed(cx)).detach();
+        cx.subscribe(&path_input, |this, _, a: &Arrow, cx| this.move_dir_selection(a.0, cx)).detach();
+        let rename_input = cx.new(|cx| TextInput::new(cx, "project name", true));
+        cx.subscribe(&rename_input, |this, _, _: &Submitted, cx| this.finish_rename(true, cx)).detach();
         let host_name_input = cx.new(|cx| TextInput::new(cx, "name", true));
         let host_url_input = cx.new(|cx| TextInput::new(cx, "host:7777 or ws://host:7777/ws", true));
         for input in [&host_name_input, &host_url_input] {
@@ -493,8 +509,13 @@ impl Dirigent {
         let mut this = Self {
             hosts: host_states,
             links,
+            names,
+            renaming: None,
+            rename_input,
             pinned_projects,
             new_project_host: None,
+            add_project: None,
+            dir_requests: HashSet::new(),
             dragging: None,
             hovered_card: None,
             pane: Pane::Inbox,
@@ -748,12 +769,15 @@ impl Dirigent {
         self.host(host)?.projects.iter().find(|p| p.id == pid).map(|p| p.path.clone())
     }
 
-    /// Display name of a thread's project ("" for orphans).
+    /// Display name of a thread's project ("" for orphans): its group's, as on the Projects page.
     pub fn project_name(&self, host: &str, t: &ThreadSummary) -> String {
         t.project_id
             .as_deref()
             .and_then(|pid| self.host(host)?.projects.iter().find(|p| p.id == pid))
-            .map(|p| projects::basename(&p.path).to_owned())
+            .map(|p| {
+                let key = projects::group_key(host, p, &self.links);
+                self.names.get(&key).cloned().unwrap_or_else(|| projects::basename(&p.path).to_owned())
+            })
             .unwrap_or_default()
     }
 
@@ -806,6 +830,16 @@ impl Dirigent {
                     let rid = self.next_id();
                     self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: id });
                 }
+                // The modal's host: a reply can't come over a dropped connection (the add can
+                // be retried), and a listing asked for while offline is asked again.
+                if let Some(s) = self.add_project.as_mut().filter(|_| self.new_project_host.as_deref() == Some(&host)) {
+                    if status == HostStatus::Disconnected {
+                        s.add_request = None;
+                    }
+                    if status == HostStatus::Connected {
+                        self.request_dirs(true, cx);
+                    }
+                }
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Usage) {
                     self.request_usage(cx);
                 }
@@ -857,19 +891,33 @@ impl Dirigent {
                     h.projects = projects;
                 }
             }
-            ServerMessage::ProjectAdded { project, .. } => {
+            ServerMessage::ProjectAdded { reply_to, project } => {
                 if let Some(h) = self.host_mut(&host)
                     && !h.projects.iter().any(|p| p.id == project.id)
                 {
                     h.projects.push(project.clone());
                 }
-                // A project is added to be worked in: pinned to the sidebar (unless its
-                // group already is), and straight into a first thread for it.
-                let key = projects::group_key(&host, &project, &self.links);
-                if !self.is_pinned_project(&key) {
-                    self.set_project_pinned(&key, true, cx);
+                // The modal's add: on to the link page if it has one to offer, else closed,
+                // back on the Projects page with the new row. Not pinned: the user's call.
+                let ours = self.add_project.as_ref().is_some_and(|s| s.add_request == Some(reply_to));
+                if ours {
+                    match add_project::offer(&self.groups().0, &host, &project.id) {
+                        Some(offer) => {
+                            if let Some(s) = &mut self.add_project {
+                                s.link = Some(offer);
+                            }
+                        }
+                        None => self.add_project = None,
+                    }
+                    self.focus(self.focus_handle.clone(), cx);
                 }
-                self.new_draft(Some(Target { host, project_id: project.id }), cx);
+            }
+            ServerMessage::Dirs { reply_to, dirs } => {
+                self.dir_requests.remove(&reply_to);
+                if let Some(s) = self.add_project.as_mut().filter(|s| s.list_request == Some(reply_to)) {
+                    s.dirs = Some(Ok(dirs));
+                    s.selected = 0;
+                }
             }
             ServerMessage::Models { models, .. } => {
                 if let Some(h) = self.host_mut(&host) {
@@ -983,6 +1031,26 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
+                // A listing failure is the modal's, shown in its list if it is the current
+                // listing, else dropped (an earlier directory's; the modal closed).
+                if let Some(id) = reply_to.filter(|id| self.dir_requests.remove(id)) {
+                    if let Some(s) = self.add_project.as_mut().filter(|s| s.list_request == Some(id)) {
+                        // An older service doesn't know `ListDirs`.
+                        let message = if message.starts_with("bad request") {
+                            "This host's service can't list directories (too old). Type a full path.".to_owned()
+                        } else {
+                            message
+                        };
+                        s.dirs = Some(Err(message));
+                    }
+                    return;
+                }
+                // The Add project modal shows its own add failures.
+                if let Some(s) = self.add_project.as_mut().filter(|s| reply_to.is_some() && s.add_request == reply_to) {
+                    s.add_request = None;
+                    s.error = Some(message);
+                    return;
+                }
                 // A failed create (or first prompt: the host deleted the thread again) puts
                 // the draft back so nothing typed is lost.
                 if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.host == host) {
@@ -1070,6 +1138,9 @@ impl Dirigent {
     /// restores its own (`composer_key`). Other panes don't show the composer and leave it
     /// alone.
     fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
+        // Both belong to the Projects page: leaving it drops them.
+        self.renaming = None;
+        self.add_project = None;
         let (from, to) = (composer_key(&self.pane), composer_key(&pane));
         let (leaving, entering) = (from != to && from.is_some(), from != to && to.is_some());
         if leaving {
@@ -1421,6 +1492,9 @@ impl Dirigent {
     }
 
     pub fn new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
+        if self.add_project.is_some() {
+            return; // modal: nothing happens under it
+        }
         self.new_draft(None, cx);
     }
 
@@ -1506,17 +1580,16 @@ impl Dirigent {
 
     // ---- projects ----
 
-    /// The sidebar's folder: the Projects page. With no project yet, the add form's path
-    /// field takes the focus.
+    /// The sidebar's folder: the Projects page. With no project yet, the Add project modal
+    /// opens over it.
     pub fn show_projects(&mut self, cx: &mut Context<Self>) {
         self.show(Pane::Projects, cx);
         if self.groups().0.is_empty() {
-            self.focus(self.path_input.focus_handle(cx), cx);
+            self.open_add_project(cx);
         }
     }
 
-    /// The host the Projects page adds a project on: the one picked, else the first
-    /// connected one.
+    /// The host the Add project modal adds on: the one picked, else the first connected one.
     pub fn new_project_host(&self) -> Option<String> {
         let picked = self.new_project_host.as_ref().filter(|h| self.hosts.iter().any(|s| s.name == **h));
         picked
@@ -1524,26 +1597,138 @@ impl Dirigent {
             .or_else(|| self.hosts.iter().find(|h| h.status == HostStatus::Connected).or(self.hosts.first()).map(|h| h.name.clone()))
     }
 
-    /// Pick the host of the Projects page's add form, and put the focus in its path field.
+    /// Pick the Add project modal's host: its path starts over at `~/`.
     pub fn pick_new_project_host(&mut self, host: String, cx: &mut Context<Self>) {
         self.new_project_host = Some(host);
         self.menu = None;
+        self.set_project_path("~/".to_owned(), cx);
         self.focus(self.path_input.focus_handle(cx), cx);
         cx.notify();
     }
 
-    /// Enter in the Projects page's path field.
-    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(host) = self.new_project_host().filter(|_| matches!(self.pane, Pane::Projects)) else {
-            return;
-        };
-        let path = self.path_input.read(cx).text().trim().to_owned();
-        if path.is_empty() {
+    /// Open the Add project modal on its browse page, at `~/`.
+    pub fn open_add_project(&mut self, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.add_project = Some(add_project::State::default());
+        // Fixed while the modal is open, even if the default host would change.
+        self.new_project_host = self.new_project_host();
+        self.menu = None;
+        self.set_project_path("~/".to_owned(), cx);
+        self.focus(self.path_input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Put `text` in the modal's path field (deferred: callers may lack the window), then
+    /// list its directory.
+    pub fn set_project_path(&mut self, text: String, cx: &mut Context<Self>) {
+        let (window, input, this) = (self.window, self.path_input.clone(), cx.entity().downgrade());
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, cx| input.update(cx, |i, cx| i.set_text(&text, window, cx))).ok();
+            this.update(cx, |this, cx| this.project_path_changed(cx)).ok();
+        });
+    }
+
+    /// The path field changed: the selection goes back to the top, the last error away,
+    /// and a new directory part gets listed.
+    fn project_path_changed(&mut self, cx: &mut Context<Self>) {
+        if let Some(s) = &mut self.add_project {
+            s.selected = 0;
+            s.error = None;
+            add_project::reveal(s);
+        }
+        self.request_dirs(false, cx);
+        cx.notify();
+    }
+
+    /// Ask the host for the subdirectories of the path field's directory part, unless that
+    /// listing is already there or on its way (`force`: ask anyway, e.g. after a reconnect).
+    fn request_dirs(&mut self, force: bool, cx: &mut Context<Self>) {
+        let text = self.path_input.read(cx).text().to_owned();
+        let (dir, _) = add_project::split(&text);
+        let host = self.new_project_host().unwrap_or_default();
+        let id = self.next_id();
+        let Some(s) = &mut self.add_project else { return };
+        if !force && s.host == host && s.dir == dir && s.list_request.is_some() {
             return;
         }
+        (s.host, s.dir, s.dirs) = (host.clone(), dir.to_owned(), None);
+        s.list_request = (!dir.is_empty()).then_some(id);
+        if !dir.is_empty() {
+            self.dir_requests.insert(id);
+            self.net.send(&host, ClientMessage::ListDirs { id, path: dir.to_owned() });
+        }
+    }
+
+    /// Up / Down in the path field.
+    fn move_dir_selection(&mut self, by: i32, cx: &mut Context<Self>) {
+        let text = self.path_input.read(cx).text().to_owned();
+        let Some(s) = &mut self.add_project else { return };
+        let n = s.visible(&text).len();
+        if n > 0 {
+            s.selected = (s.selected as i32 + by).rem_euclid(n as i32) as usize;
+            add_project::reveal(s);
+            cx.notify();
+        }
+    }
+
+    /// Enter in the path field: into the selected directory.
+    fn enter_dir(&mut self, cx: &mut Context<Self>) {
+        let text = self.path_input.read(cx).text().to_owned();
+        let Some(s) = &self.add_project else { return };
+        if let Some(d) = s.visible(&text).get(s.selected) {
+            let path = format!("{}{}/", add_project::split(&text).0, d.name);
+            self.set_project_path(path, cx);
+        }
+    }
+
+    /// ctrl+Enter or `Add`: add the path as typed. The reply lands in `on_server_message`.
+    pub fn confirm_add_project(&mut self, cx: &mut Context<Self>) {
+        let path = self.path_input.read(cx).text().trim().to_owned();
+        let Some(host) = self.new_project_host().filter(|_| !path.is_empty()) else { return };
+        let connected = self.host(&host).is_some_and(|h| h.status == HostStatus::Connected);
         let id = self.next_id();
+        let Some(s) = self.add_project.as_mut().filter(|s| s.link.is_none() && s.add_request.is_none()) else { return };
+        if !connected {
+            s.error = Some(format!("{host} is not connected"));
+            return cx.notify();
+        }
+        s.add_request = Some(id);
+        s.error = None;
         self.net.send(&host, ClientMessage::AddProject { id, path });
-        self.path_input.update(cx, |input, cx| input.set_text("", window, cx));
+        cx.notify();
+    }
+
+    /// Leave the link page: link the new project into `target` (or don't), back to the
+    /// Projects page.
+    pub fn finish_add_project(&mut self, target: Option<String>, cx: &mut Context<Self>) {
+        if self.add_project.as_ref().is_none_or(|s| s.link.is_none()) {
+            return;
+        }
+        let Some(offer) = self.add_project.take().and_then(|s| s.link) else { return };
+        if let Some(target) = target {
+            self.link_group(&offer.key, Some(&target), cx);
+        }
+        self.focus(self.focus_handle.clone(), cx);
+        cx.notify();
+    }
+
+    /// Esc or a press outside the card: the browse page just closes, the link page means
+    /// "don't link".
+    fn close_add_project(&mut self, cx: &mut Context<Self>) {
+        if self.add_project.as_ref().is_some_and(|s| s.link.is_some()) {
+            return self.finish_add_project(None, cx);
+        }
+        self.add_project = None;
+        self.focus(self.focus_handle.clone(), cx);
+        cx.notify();
+    }
+
+    /// A press on the modal's dim: closes it, unless the press only closed a menu (the
+    /// host dropdown).
+    pub fn dim_pressed(&mut self, cx: &mut Context<Self>) {
+        if !self.menu_dismissed {
+            self.close_add_project(cx);
+        }
     }
 
     // ---- hosts ----
@@ -2023,6 +2208,15 @@ impl Dirigent {
             }
         }
         drop(cache); // `save_pins` locks it again
+        // Linked into another group: its name goes along, unless that one has its own.
+        if let Some(t) = target_key
+            && let Some(name) = self.names.get(group_key).cloned()
+        {
+            self.set_name(group_key, None);
+            if !self.names.contains_key(t) {
+                self.set_name(t, Some(name));
+            }
+        }
         // The members' group key changed: a pinned group stays pinned under its new key(s).
         let new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
         self.pinned_projects = projects::repin(&self.pinned_projects, group_key, &new);
@@ -2034,7 +2228,44 @@ impl Dirigent {
     /// Every project group (the Projects page; the sidebar shows the pinned ones) and the
     /// orphan threads.
     pub fn groups(&self) -> (Vec<projects::Group>, Vec<(String, ThreadSummary)>) {
-        projects::groups(&self.hosts, &self.links)
+        projects::groups(&self.hosts, &self.links, &self.names)
+    }
+
+    /// `Rename` in a Projects page row's menu: its name turns into a field (Enter saves,
+    /// Esc cancels).
+    pub fn start_rename(&mut self, group_key: &str, cx: &mut Context<Self>) {
+        let name = self.groups().0.into_iter().find(|g| g.key == group_key).map(|g| g.name).unwrap_or_default();
+        self.renaming = Some(group_key.to_owned());
+        self.menu = None;
+        let (window, input) = (self.window, self.rename_input.clone());
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, cx| input.update(cx, |i, cx| i.set_text(&name, window, cx))).ok();
+        });
+        self.focus(self.rename_input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Enter in the rename field (`refocus`: the focus goes back to the root), or a press
+    /// elsewhere (it keeps whatever focus the press gives): the group shows that name from
+    /// now on; an empty one (or the directory's own name) goes back to the directory's name.
+    fn finish_rename(&mut self, refocus: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.renaming.take() else { return };
+        let name = self.rename_input.read(cx).text().trim().to_owned();
+        let dir_name = self.groups().0.into_iter().find(|g| g.key == key).map(|g| g.dir_name);
+        let name = Some(name).filter(|n| !n.is_empty() && Some(n) != dir_name.as_ref());
+        self.set_name(&key, name);
+        if refocus {
+            self.focus(self.focus_handle.clone(), cx);
+        }
+        cx.notify();
+    }
+
+    fn set_name(&mut self, key: &str, name: Option<String>) {
+        let _ = self.cache.lock().unwrap().set_project_name(key, name.as_deref());
+        match name {
+            Some(n) => self.names.insert(key.to_owned(), n),
+            None => self.names.remove(key),
+        };
     }
 
     /// The keys of the pinned groups that still exist, in the sidebar's order.
@@ -2530,6 +2761,13 @@ impl Dirigent {
             self.close_menu(cx);
             return;
         }
+        if self.add_project.is_some() {
+            return self.close_add_project(cx);
+        }
+        if self.renaming.take().is_some() {
+            self.focus(self.focus_handle.clone(), cx);
+            return cx.notify();
+        }
         if self.selection.clear() {
             cx.notify();
             return;
@@ -2544,8 +2782,7 @@ impl Dirigent {
 
     // ---- sidebar ----
 
-    /// `[`. The composer is focused almost always, so the key only types a bracket when
-    /// the focused input already has text; in an empty one it toggles the sidebar.
+    /// `[`: toggles the sidebar, unless it types a bracket (`typed_bracket`).
     pub fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
         if self.typed_bracket("[", window, cx) {
             return;
@@ -2567,12 +2804,14 @@ impl Dirigent {
         self.toggle_panel(cx);
     }
 
-    /// A bracket key with text in the focused input types the bracket instead of acting.
+    /// A bracket key types itself, instead of acting, in a focused input other than the
+    /// composer, or in the composer once it has text.
     fn typed_bracket(&mut self, bracket: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut inputs = vec![
             self.composer.clone(),
             self.path_input.clone(),
             self.host_name_input.clone(),
+            self.rename_input.clone(),
             self.host_url_input.clone(),
             self.model_search.clone(),
             self.base_search.clone(),
@@ -2583,7 +2822,10 @@ impl Dirigent {
             inputs.extend(t.asks.iter().flat_map(|f| f.custom.iter().flatten().cloned()));
         }
         for input in inputs {
-            if input.focus_handle(cx).is_focused(window) && !input.read(cx).text().is_empty() {
+            // The composer is focused almost always, so an empty one lets the key act;
+            // any other input is focused on purpose and types it.
+            let typing = input != self.composer || !input.read(cx).text().is_empty();
+            if input.focus_handle(cx).is_focused(window) && typing {
                 input.update(cx, |i, cx| i.replace_text_in_range(None, bracket, window, cx));
                 return true;
             }
@@ -2631,6 +2873,11 @@ impl Dirigent {
 
     /// A press that no text block took (see `select::Block`) drops the selection.
     fn on_mouse_down(&mut self, _: &gpui::MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // A press outside the rename field (which stops its own) saves the rename, like a
+        // blur; the press then does whatever it does (focus included).
+        if self.renaming.is_some() {
+            self.finish_rename(false, cx);
+        }
         if !self.selection.is_dragging() && self.selection.clear() {
             cx.notify();
         }
@@ -2989,6 +3236,28 @@ fn decode_blob(mime: &str, data: &str) -> Option<Blob> {
     blob_from(mime, base64::engine::general_purpose::STANDARD.decode(data).ok()?)
 }
 
+/// Clears `menu_dismissed` at the start of every press, before any menu's
+/// `on_mouse_down_out` (capture runs in paint order and this paints first). A window-level
+/// listener rather than the root's `capture_any_mouse_down`: that one only fires while the
+/// root is hovered, and an occluding overlay (the Add project modal) unhovers it, which
+/// left the flag stuck and swallowed every later menu-trigger click.
+fn reset_menu_dismissed(cx: &mut Context<Dirigent>) -> impl IntoElement {
+    let this = cx.entity().downgrade();
+    gpui::canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let this = this.clone();
+            window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    this.update(cx, |this, _| this.menu_dismissed = false).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 impl Render for Dirigent {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.selection.begin_frame();
@@ -3012,8 +3281,7 @@ impl Render for Dirigent {
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::open_app_link))
-            // Capture runs root-first, i.e. before the menu's `on_mouse_down_out`.
-            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.menu_dismissed = false))
+            .child(reset_menu_dismissed(cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -3030,6 +3298,7 @@ impl Render for Dirigent {
             .when(docked, |d| d.child(sidebar::docked(self, cx)))
             .child(panel)
             .when(!docked, |d| d.child(sidebar::peek(self, cx)))
+            .children(self.add_project.as_ref().map(|s| add_project::render(self, s, cx)))
             .children(self.preview.clone().map(|image| thread::preview(image, cx)))
             .children((!toasts.is_empty()).then(|| {
                 div().absolute().bottom_4().right_4().flex().flex_col().gap_1().children(toasts.into_iter().map(|m| {
