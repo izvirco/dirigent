@@ -335,30 +335,6 @@ pub fn tinted_icon_button(
         .child(icon(name, color))
 }
 
-/// A text tab in a header: the settings pages' Config / Hosts / Usage, a thread's panels.
-/// The active one (`on`) is bright on the hover colour.
-pub fn tab(
-    label: &'static str,
-    on: bool,
-    cx: &mut Context<Dirigent>,
-    go: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
-) -> Stateful<Div> {
-    div()
-        .id(label)
-        .h(px(24.))
-        .px_2()
-        .flex()
-        .items_center()
-        .rounded_md()
-        .cursor_pointer()
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgba(if on { t().fg } else { t().fg_1 }))
-        .when(on, |d| d.bg(rgba(t().hover)))
-        .hover(|d| d.text_color(rgba(t().fg)))
-        .on_click(cx.listener(move |this, _, _, cx| go(this, cx)))
-        .child(label)
-}
-
 /// A small raised button with an icon and a label (header actions).
 pub fn button(id: impl Into<SharedString>, name: &'static str, label: impl Into<SharedString>) -> Stateful<Div> {
     let t = t();

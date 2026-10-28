@@ -1,20 +1,51 @@
-//! Settings > Config: the UI over `config.toml` (`config.rs`). Everything saves as it is
+//! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
+//! sections on the right. General, Thread titles and Agent tools are the UI over
+//! `config.toml` (`config.rs`), Hosts over `hosts.toml`. Everything saves as it is
 //! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
 //! warning mark on a font field whose family isn't installed; theme, title model,
-//! reasoning, the agent tools and telemetry are chips and switches that save at once.
-//! `Test` opens a sample first message, runs it through the title settings on the local
-//! host, and shows the title with what it cost.
+//! reasoning, the agent tools and telemetry are chips and switches that save at once; a
+//! host on Enter. `Test` opens a sample first message, runs it through the title settings
+//! on the local host, and shows the title with what it cost.
 
-use crate::app::{Dirigent, Menu, Pane};
+use crate::app::{Dirigent, Menu};
 use crate::icons::icon;
 use crate::input::TextInput;
-use crate::lists::{scroll, settings_header, settings_section};
+use crate::lists::scroll;
 use crate::menu::{self, Side};
+use crate::modal;
+use crate::net::HostStatus;
 use crate::theme::{self, dollars, kilo};
 use crate::thread::duration;
 use crate::{config, hosts};
-use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, Stateful, div, prelude::*, px, rgba};
+use std::path::Path;
 use std::time::Instant;
+
+/// The tab list's width.
+const NAV_W: f32 = 180.;
+
+/// The modal's tabs, in nav order.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tab {
+    #[default]
+    General,
+    Titles,
+    Tools,
+    Hosts,
+}
+
+impl Tab {
+    const ALL: [Tab; 4] = [Tab::General, Tab::Titles, Tab::Tools, Tab::Hosts];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::General => "General",
+            Tab::Titles => "Thread titles",
+            Tab::Tools => "Agent tools",
+            Tab::Hosts => "Hosts",
+        }
+    }
+}
 
 /// The sample first message `Test` starts with.
 const SAMPLE: &str = "The websocket client in net.rs reconnects with a fixed 1s delay, which hammers the service when a host is \
@@ -33,9 +64,10 @@ pub struct TitleResult {
     pub duration_ms: i64,
 }
 
-/// The page's inputs and the state of its title test.
+/// The open tab (the gear reopens the last one), the inputs and the title test's state.
 #[derive(Clone)]
 pub struct State {
+    pub tab: Tab,
     pub font_ui: Entity<TextInput>,
     pub font_prose: Entity<TextInput>,
     pub font_code: Entity<TextInput>,
@@ -54,6 +86,7 @@ impl State {
     pub fn new(cx: &mut Context<Dirigent>) -> Self {
         let field = |cx: &mut Context<Dirigent>, placeholder: &str, single: bool| cx.new(|cx| TextInput::new(cx, placeholder, single));
         Self {
+            tab: Tab::default(),
             font_ui: field(cx, "Font family", true),
             font_prose: field(cx, "Font family", true),
             font_code: field(cx, "Font family", true),
@@ -88,56 +121,74 @@ impl State {
     }
 }
 
-pub fn render(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
-    let column = div()
-        .w_full()
-        .max_w(px(600.))
+/// The modal: the tab list on the left (on the canvas, like the app's sidebar), the open
+/// tab's sections (scrolling) on the right.
+pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+    let t = theme::t();
+    let open = this.settings.tab;
+    let nav = div()
+        .w(px(NAV_W))
+        .flex_shrink_0()
         .flex()
         .flex_col()
-        .gap_8()
-        .py_8()
-        .px_6()
-        .child(appearance(this, cx))
-        .child(titles(this, cx))
-        .child(tools(this, cx))
-        .child(telemetry(this, cx))
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .text_size(px(12.))
-                .text_color(rgba(theme::t().fg_2))
-                .child(format!("Also editable by hand: {}", config::path().display()))
-                .child(format!(
-                    "Your themes: {}/<name>.toml (default.example.toml is the reference, rewritten on every start)",
-                    theme::dir().display()
-                )),
-        );
-    pane.child(settings_header(Pane::Config, cx)).child(scroll("config", div().flex().flex_col().items_center().child(column)))
+        .gap_0p5()
+        .p_2()
+        .rounded_l_lg()
+        .bg(rgba(t.canvas))
+        .border_r_1()
+        .border_color(rgba(t.line_soft))
+        .child(div().h(px(32.)).px_2().flex().items_center().font_weight(FontWeight::MEDIUM).child("Settings"))
+        .children(Tab::ALL.map(|tab| nav_item(tab, tab == open, cx)));
+    let sections = match open {
+        Tab::General => vec![appearance(this, cx), telemetry(this, cx), saved_to(&config::path())],
+        Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
+        Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
+        Tab::Hosts => vec![hosts(this, cx), saved_to(&hosts::path())],
+    };
+    let column = div().flex().flex_col().gap_8().px_8().py_6().children(sections);
+    let body = div().flex().flex_row().child(nav).child(div().flex_1().min_w_0().flex().flex_col().child(scroll("settings", column)));
+    modal::frame(modal::large(body), cx)
 }
 
-/// `label        control` on one line, with an optional hint under it.
-fn row(label: &'static str, control: impl IntoElement, hint: Option<&'static str>) -> Div {
+/// A tab in the list: the open one bright on the hover colour.
+fn nav_item(tab: Tab, on: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     div()
+        .id(SharedString::from(format!("settings-tab/{}", tab.label())))
+        .h(px(28.))
+        .px_2()
         .flex()
-        .flex_col()
-        .gap_1()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(rgba(if on { t.fg } else { t.fg_1 }))
+        .when(on, |d| d.bg(rgba(t.hover)))
+        .hover(|d| d.bg(rgba(t.hover)).text_color(rgba(t.fg)))
+        .on_click(cx.listener(move |this, _, _, cx| this.set_settings_tab(tab, cx)))
+        .child(tab.label())
+}
+
+/// A section: title over its content.
+fn section(title: &'static str, body: impl IntoElement) -> Div {
+    div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
+}
+
+/// The file a tab's settings live in (also editable by hand), in small print at its bottom.
+fn saved_to(path: &Path) -> Div {
+    div().text_size(px(12.)).text_color(rgba(theme::t().fg_2)).child(format!("Saved to {}", path.display()))
+}
+
+/// `label        control` on one line.
+fn row(label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .min_h(px(28.))
         .py_2()
-        .border_b_1()
-        .border_color(rgba(t.line_soft))
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_3()
-                .min_h(px(28.))
-                .child(div().w(px(130.)).flex_shrink_0().text_color(rgba(t.fg_1)).child(label))
-                .child(div().flex_1().min_w_0().flex().flex_row().items_center().justify_end().child(control)),
-        )
-        .children(hint.map(|h| div().pl(px(142.)).text_size(px(11.5)).text_color(rgba(t.fg_2)).child(h)))
+        .child(div().w(px(130.)).flex_shrink_0().text_color(rgba(theme::t().fg_1)).child(label))
+        .child(div().flex_1().min_w_0().flex().flex_row().items_center().justify_end().child(control))
 }
 
 /// A bordered text field.
@@ -171,15 +222,15 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .children(theme_menu);
     let s = &this.settings;
     let f = &this.config.fonts;
-    settings_section(
+    section(
         "Appearance",
         div()
             .flex()
             .flex_col()
-            .child(row("Theme", theme_chip, Some("Built-in, or a toml file in your theme directory.")))
-            .child(row("UI font", font_field(s, &s.font_ui, &f.ui), None))
-            .child(row("Prose font", font_field(s, &s.font_prose, &f.prose), None))
-            .child(row("Code font", font_field(s, &s.font_code, &f.code), Some("Installed family names, as fc-match knows them."))),
+            .child(row("Theme", theme_chip))
+            .child(row("UI font", font_field(s, &s.font_ui, &f.ui)))
+            .child(row("Prose font", font_field(s, &s.font_prose, &f.prose)))
+            .child(row("Code font", font_field(s, &s.font_code, &f.code))),
     )
 }
 
@@ -254,39 +305,19 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .flex_col()
             .gap_2()
             .pt_2()
-            .child(div().text_size(px(12.)).text_color(rgba(t.fg_1)).child("A first message to name. ctrl+Enter runs it."))
             .child(field(s.sample.clone()))
             .child(div().flex().flex_row().items_center().gap_2().child(run).children(test_result(s)))
     });
 
-    settings_section(
+    section(
         "Thread titles",
         div()
             .flex()
             .flex_col()
+            .child(row("Model", model_chip))
+            .child(row("Reasoning", effort_chip))
             .child(
-                div()
-                    .py_2()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.fg_1))
-                    .child("Every thread is named from its first message by one small model, so the titles read alike."),
-            )
-            .child(row("Model", model_chip, None))
-            .child(row("Reasoning", effort_chip, None))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .py_2()
-                    .child(div().text_color(rgba(t.fg_1)).child("Prompt"))
-                    .child(field(s.prompt.clone()))
-                    .child(
-                        div()
-                            .text_size(px(11.5))
-                            .text_color(rgba(t.fg_2))
-                            .child("The system prompt; the message is the user turn, between <message> tags."),
-                    ),
+                div().flex().flex_col().gap_1().py_2().child(div().text_color(rgba(t.fg_1)).child("Prompt")).child(field(s.prompt.clone())),
             )
             .child(div().flex().flex_row().pt_2().child(test_button))
             .children(test),
@@ -340,42 +371,86 @@ fn switch(
         .child(div().size(px(14.)).rounded_full().bg(rgba(t.fg)))
 }
 
-/// The agent tools dirigent adds to pi's: each a switch; the set goes out with every prompt.
+/// The agent tools dirigent adds to pi's: each a switch; the set goes out with every prompt,
+/// so a change reaches a thread with its next message.
 fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let t = theme::t();
     let c = &this.config.tools;
-    settings_section(
+    section(
         "Agent tools",
         div()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .py_2()
-                    .text_size(px(12.))
-                    .text_color(rgba(t.fg_1))
-                    .child("Tools of Dirigent's own, on top of pi's. A change reaches a thread with its next message."),
-            )
-            .child(row(
-                "async_bash",
-                switch("tool-async-bash", c.async_bash, cx, |this, cx| this.toggle_tool("async_bash", cx)),
-                Some("Runs a command in the background and tells the agent when it ends, so it can keep working meanwhile."),
-            ))
-            .child(row(
-                "ask_user",
-                switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx)),
-                Some("Lets the agent put questions to you as a form; the thread shows as Asking until you answer."),
-            ))
-            .child(row(
-                "dirigent",
-                switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx)),
-                Some("The orchestrator: spawn sub-agent threads, message and read threads, find and open them."),
-            )),
+            .child(row("async_bash", switch("tool-async-bash", c.async_bash, cx, |this, cx| this.toggle_tool("async_bash", cx))))
+            .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
+            .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx)))),
     )
 }
 
+/// Nothing is sent yet; the switch only records the choice.
 fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let on = this.config.telemetry;
     let switch = switch("telemetry", on, cx, |this, cx| this.toggle_telemetry(cx));
-    settings_section("Telemetry", row("Usage data", switch, Some("Nothing is sent yet; this only records your choice.")))
+    section("Telemetry", row("Usage data", switch))
+}
+
+/// Every host with its url and status (hover reveals remove; `local` stays), then the
+/// form to add one: name and address, Enter adds.
+fn hosts(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let t = theme::t();
+    let rows = this.hosts.iter().map(|h| {
+        let (dot, status) = match h.status {
+            HostStatus::Connected => (t.done, "connected"),
+            HostStatus::Connecting => (t.warn, "connecting"),
+            HostStatus::Disconnected => (t.error, "disconnected"),
+        };
+        let name = h.name.clone();
+        div()
+            .id(SharedString::from(format!("host/{name}")))
+            .group("row")
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .h(px(38.))
+            .px_2()
+            .child(div().size(px(6.)).rounded_full().bg(rgba(dot)))
+            .child(div().w(px(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .font_family(this.fonts.mono.clone())
+                    .text_size(px(12.))
+                    .text_color(rgba(t.fg_1))
+                    .child(h.url.clone()),
+            )
+            .child(div().w(px(90.)).flex_shrink_0().text_size(px(12.)).text_color(rgba(t.fg_2)).child(status))
+            .child(if name == hosts::LOCAL {
+                div().size(px(24.)).into_any_element()
+            } else {
+                div()
+                    .id(SharedString::from(format!("rm-host/{name}")))
+                    .size(px(24.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .opacity(0.)
+                    .group_hover("row", |d| d.opacity(1.))
+                    .hover(|d| d.bg(rgba(t.hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_host(&name, cx)))
+                    .child(icon("x", t.fg_1))
+                    .into_any_element()
+            })
+    });
+    let form = div()
+        .flex()
+        .flex_row()
+        .gap_2()
+        .pt_4()
+        .child(field(this.host_name_input.clone()).w(px(150.)))
+        .child(field(this.host_url_input.clone()).flex_1());
+    section("Hosts", div().flex().flex_col().children(rows).child(form))
 }

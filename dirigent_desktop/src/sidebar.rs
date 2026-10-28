@@ -1,13 +1,13 @@
 //! Left pane on the window canvas, top to bottom: the title row (Projects page folder, new
 //! thread `+`); the pinned projects; the Inbox (threads waiting on the user, not snoozed)
 //! with its cards hanging below it; the Workpool's cards (working threads) stacked up on
-//! its row; the hide/show and settings buttons. Inbox and Workpool fold (the Workpool
+//! its row; the hide/show, usage and settings buttons. Inbox and Workpool fold (the Workpool
 //! starts folded: out of sight, out of mind) and leave the sidebar while they have no
 //! thread at all.
 //! Docked it has a drag handle on its right edge; hidden (`[` or the button) it slides in
 //! as a floating panel while the mouse rests on the left edge.
 
-use crate::app::{ArchiveAt, Dirigent, Pane, Resize, Section, Target, is_settings};
+use crate::app::{ArchiveAt, Dirigent, Pane, Resize, Section, Target};
 use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -195,7 +195,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let working_cards =
         cards("workpool-cards", Section::Workpool, working, false, now, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
 
-    // Bottom bar: hide / show the sidebar on the left, settings on the right.
+    // Bottom bar: hide / show the sidebar on the left, the Usage and Settings modals on the
+    // right (the chart and the gear, side by side like the title row's folder and `+`).
     let hidden = this.sidebar_hidden;
     let panel_icon = if hidden { "panel-left-open" } else { "panel-left-close" };
     let bottom = div()
@@ -211,8 +212,11 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .pr_2()
         .child(theme::icon_button("sidebar-toggle", panel_icon, cx, move |this, cx| this.set_sidebar_hidden(!hidden, cx)))
         .child(
-            theme::icon_button("settings", "settings", cx, |this, cx| this.show_config(cx))
-                .when(is_settings(&this.pane), |d| d.bg(rgba(theme::t().hover))),
+            div()
+                .flex()
+                .flex_row()
+                .child(theme::icon_button("usage", "chart-no-axes-combined", cx, |this, cx| this.open_usage(cx)))
+                .child(theme::icon_button("settings", "settings", cx, |this, cx| this.open_settings(cx))),
         );
 
     div()

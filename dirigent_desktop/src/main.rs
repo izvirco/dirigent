@@ -10,6 +10,7 @@ mod input;
 mod lists;
 mod markdown;
 mod menu;
+mod modal;
 mod net;
 mod orchestra;
 mod picker;

@@ -1,5 +1,5 @@
 //! `~/.config/dirigent/config.toml`: fonts, theme, telemetry, and how threads are named.
-//! Edited by hand or from Settings › Config; the file is the truth. `Watch` notices hand
+//! Edited by hand or from the Settings modal; the file is the truth. `Watch` notices hand
 //! edits (to it or to the theme dir) so they apply without a restart.
 //!
 //! ```toml
@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
-const HEADER: &str = "# Dirigent settings. Also edited by Settings > Config; changes apply as you save.\n\n";
+const HEADER: &str = "# Dirigent settings. Also edited from Settings in the app; changes apply as you save.\n\n";
 
 /// The title model's system prompt. The runtime hands it the first message between
 /// `<message>` tags (`generateTitle`); the example shows a message full of instructions

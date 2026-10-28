@@ -13,13 +13,13 @@
 use crate::app::{Dirigent, Menu};
 use crate::icons::icon;
 use crate::menu::{self, Side};
+use crate::modal;
 use crate::net::HostStatus;
 use crate::projects::Group;
 use crate::theme;
 use dirigent_protocol::Dir;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, MouseButton, ScrollStrategy, SharedString, UniformListScrollHandle, div, prelude::*, px, rgba,
-    uniform_list,
+    AnyElement, Context, Div, FontWeight, ScrollStrategy, SharedString, UniformListScrollHandle, div, prelude::*, px, rgba, uniform_list,
 };
 use std::ops::Range;
 
@@ -102,36 +102,13 @@ impl State {
     }
 }
 
-/// The modal over a dimmed window; a press on the dim closes it (the card occludes it,
-/// so presses inside the card never reach it).
+/// The modal (see `modal.rs`).
 pub fn render(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> AnyElement {
-    let card = div()
-        .id("add-project")
-        .occlude()
-        .w(px(WIDTH))
-        .flex()
-        .flex_col()
-        .rounded_lg()
-        .bg(rgba(theme::t().popup))
-        .border_1()
-        .border_color(rgba(theme::t().line))
-        .shadow_lg()
-        .child(match &state.link {
-            Some(offer) => link_page(offer, cx),
-            None => browse_page(this, state, cx),
-        });
-    div()
-        .id("add-project-dim")
-        .occlude()
-        .absolute()
-        .inset_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(rgba(0x00000080))
-        .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.dim_pressed(cx)))
-        .child(card)
-        .into_any()
+    let page = match &state.link {
+        Some(offer) => link_page(offer, cx),
+        None => browse_page(this, state, cx),
+    };
+    modal::frame(div().w(px(WIDTH)).child(page), cx)
 }
 
 /// `<host ▾> <path> [Add]`, a hairline, then the directory list (or a note in its place:
