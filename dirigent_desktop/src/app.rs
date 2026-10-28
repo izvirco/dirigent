@@ -242,7 +242,7 @@ pub enum Pane {
 #[derive(Clone)]
 pub struct Attachment {
     pub n: u32,
-    pub image: Arc<gpui::Image>,
+    pub blob: Blob,
 }
 
 /// A sent draft waiting for its `ThreadCreated`: the request, where it went, the message,
@@ -258,7 +258,8 @@ struct PendingDraft {
     thread: ThreadSummary,
 }
 
-/// An image an entry references by blob id (see `Dirigent::blobs`).
+/// An image an entry references by blob id (see `Dirigent::blobs`), or a pasted one.
+#[derive(Clone)]
 pub struct Blob {
     pub image: Arc<gpui::Image>,
     /// Width and height in pixels, turned upright the way gpui draws it (EXIF orientation);
@@ -1300,9 +1301,16 @@ impl Dirigent {
 
     /// A click on a `dirigent://` link (see `select.rs`). `dirigent://thread/<id>` opens the
     /// thread wherever it lives: thread ids are unique across hosts, and sub-agents (not in
-    /// the sidebar) open like any other thread. Anything else, or an id no connected host
-    /// knows, gets a toast.
+    /// the sidebar) open like any other thread. `dirigent://image/<blob id>` (a user bubble's
+    /// `[image-N]`, see `thread::image_links`) shows that image full-size. Anything else, or
+    /// an id no connected host knows, gets a toast.
     fn open_app_link(&mut self, link: &OpenAppLink, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = link.url.strip_prefix("dirigent://image/") {
+            return match self.blobs.get(id) {
+                Some(blob) => self.set_preview(Some(blob.image.clone()), cx),
+                None => self.toast("The image hasn't loaded yet", cx),
+            };
+        }
         let Some(id) = link.url.strip_prefix("dirigent://thread/") else {
             return self.toast(format!("Can't open {}", link.url), cx);
         };
@@ -2721,17 +2729,21 @@ impl Dirigent {
     /// `Changed`). Dropped if the composer moved on to another thread meanwhile.
     fn attach(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
         let key = composer_key(&self.pane).map(|(h, id)| (h.to_owned(), id.to_owned()));
-        let fitted = cx.background_spawn(async move { images::fit(image) });
+        let fitted = cx.background_spawn(async move {
+            let image = images::fit(image);
+            let size = upright_size(&image.bytes);
+            Blob { image: Arc::new(image), size }
+        });
         self.fitting += 1;
         cx.spawn(async move |this, cx| {
-            let image = fitted.await;
+            let blob = fitted.await;
             this.update(cx, |this, cx| {
                 this.fitting -= 1;
                 if composer_key(&this.pane).map(|(h, id)| (h.to_owned(), id.to_owned())) != key {
                     return;
                 }
                 let n = this.attachments.iter().map(|a| a.n).max().unwrap_or(0) + 1;
-                this.attachments.push(Attachment { n, image: Arc::new(image) });
+                this.attachments.push(Attachment { n, blob });
                 let (window, composer) = (this.window, this.composer.clone());
                 window
                     .update(cx, |_, window, cx| {
@@ -2814,7 +2826,7 @@ impl Dirigent {
         let Some((host, id)) = composer_key(&self.pane) else { return };
         let (content, images) = self.cache.lock().unwrap().draft(host, id).unwrap_or_default();
         self.attachments =
-            images.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, image: image_from(&mime, bytes)? })).collect();
+            images.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, blob: blob_from(&mime, bytes)? })).collect();
         let (window, composer) = (self.window, self.composer.clone());
         cx.defer(move |cx| {
             window.update(cx, |_, window, cx| composer.update(cx, |input, cx| input.set_content(content, window, cx))).ok();
@@ -3474,15 +3486,15 @@ fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
     images
         .iter()
         .map(|a| ImageAttachment {
-            mime_type: a.image.format.mime_type().to_owned(),
-            data: base64::engine::general_purpose::STANDARD.encode(&a.image.bytes),
+            mime_type: a.blob.image.format.mime_type().to_owned(),
+            data: base64::engine::general_purpose::STANDARD.encode(&a.blob.image.bytes),
         })
         .collect()
 }
 
 /// Attachments as the cache stores them.
 fn image_rows(images: &[Attachment]) -> Vec<(u32, &str, &[u8])> {
-    images.iter().map(|a| (a.n, a.image.format.mime_type(), a.image.bytes.as_slice())).collect()
+    images.iter().map(|a| (a.n, a.blob.image.format.mime_type(), a.blob.image.bytes.as_slice())).collect()
 }
 
 /// A renderable image from stored bytes; `None` for formats gpui can't decode.
