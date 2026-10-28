@@ -16,7 +16,8 @@ use crate::theme;
 use crate::thread::{self, duration, elapsed};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
-    AnyElement, Context, Div, DragMoveEvent, FontWeight, MouseButton, Render, SharedString, Stateful, Window, div, prelude::*, px, rgba,
+    AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, Pixels, Render, SharedString, Stateful, Window,
+    canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
 };
 
 /// Default width; the user can drag it between `app::SIDEBAR_MIN` and `SIDEBAR_MAX`.
@@ -188,8 +189,11 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         this,
         cx,
     );
-    let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, now, this, cx);
-    let working_cards = cards("workpool-cards", Section::Workpool, working, false, now, this, cx).mt_auto();
+    // The seam only exists while both lists show cards; `seam` paints it once they meet.
+    let both = !this.collapsed.contains(&Section::Inbox) && !this.collapsed.contains(&Section::Workpool) && n_inbox > 0 && n_working > 0;
+    let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, now, this, cx).track_scroll(&this.inbox_scroll);
+    let working_cards =
+        cards("workpool-cards", Section::Workpool, working, false, now, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
 
     // Bottom bar: hide / show the sidebar on the left, settings on the right.
     let hidden = this.sidebar_hidden;
@@ -220,6 +224,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .children(pinned)
         .when(show_inbox, |d| d.child(inbox_header))
         .child(inbox_cards)
+        .when(both, |d| d.child(seam(this)))
         .child(working_cards)
         .when(n_working > 0, |d| d.child(working_header))
         .child(bottom.flex_shrink_0())
@@ -313,11 +318,35 @@ fn share(id: &'static str, natural: f32) -> Stateful<Div> {
     div().id(id).flex_1().min_h_0().max_h(px(natural)).overflow_y_scroll()
 }
 
-/// A section's thread cards (none while folded, `card_height` tall), each with how long its agent
-/// has run (live) or ran (last run). `below` says the cards hang below their header
+/// Where the Inbox's and the Workpool's cards meet: a hairline inset from the sides, fading
+/// out toward them, so the lists don't run into each other. Painted only while either list
+/// is clipped (they have met; apart, it would float in empty space). That is read off
+/// their scroll handles at paint time, after this frame's layout, so it is never a frame
+/// late; a pixel's slack keeps sub-pixel rounding at fractional scales from tripping it.
+/// While the lists are apart it sits under the Inbox's cards, unseen.
+fn seam(this: &Dirigent) -> impl IntoElement {
+    /// How far each end of the line fades in.
+    const FADE: f32 = 48.;
+    let (inbox, workpool) = (this.inbox_scroll.clone(), this.workpool_scroll.clone());
+    let paint = move |b: Bounds<Pixels>, _: (), window: &mut Window, _: &mut App| {
+        if inbox.max_offset().y < px(1.) && workpool.max_offset().y < px(1.) {
+            return;
+        }
+        let line: Hsla = rgba(theme::t().line).into();
+        let clear = line.opacity(0.);
+        let left = Bounds::new(b.origin, size(px(FADE), b.size.height));
+        let right = Bounds::new(point(b.right() - px(FADE), b.top()), left.size);
+        // As in CSS, a 90° gradient runs left to right.
+        window.paint_quad(fill(left, linear_gradient(90., linear_color_stop(clear, 0.), linear_color_stop(line, 1.))));
+        window.paint_quad(fill(Bounds::from_corners(left.top_right(), right.bottom_left()), line));
+        window.paint_quad(fill(right, linear_gradient(90., linear_color_stop(line, 0.), linear_color_stop(clear, 1.))));
+    };
+    canvas(|_, _, _| {}, paint).flex_shrink_0().h(px(1.)).mx_4()
+}
+
+/// A section's thread cards (none while folded, `card_height` tall), each with how long its
+/// agent has run (live) or ran (last run). `below` says the cards hang below their header
 /// (Inbox) rather than stack up on it (Workpool), which side the gap to the header goes.
-/// Stacked cards get a hairline on top, so they don't run into the Inbox's last (clipped)
-/// card.
 fn cards(
     id: &'static str,
     section: Section,
@@ -329,7 +358,7 @@ fn cards(
 ) -> Stateful<Div> {
     let rows = if this.collapsed.contains(&section) { vec![] } else { rows };
     let n = rows.len();
-    let mut natural = if !below && n > 0 { 1. + GAP } else { 0. };
+    let mut natural = if !below && n > 0 { GAP } else { 0. };
     let cards: Vec<_> = rows
         .into_iter()
         .map(|(host, t)| {
@@ -348,7 +377,7 @@ fn cards(
         .flex_col()
         .gap(px(GAP))
         .px_2()
-        .when(n > 0, |d| if below { d.pt(px(GAP)) } else { d.py(px(GAP)).border_t_1().border_color(rgba(theme::t().line_soft)) })
+        .when(n > 0, |d| if below { d.pt(px(GAP)) } else { d.py(px(GAP)) })
         .children(cards)
 }
 
