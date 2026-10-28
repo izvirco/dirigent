@@ -12,7 +12,7 @@ use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
-use crate::theme::{self, text, u};
+use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
@@ -382,8 +382,9 @@ fn cards(
 /// Outside version control there is no branch, so the card drops that line and the server
 /// icon and logo end the title line instead (`card_height`). The title is amber while the
 /// model waits on an answer, accent while the thread is unread, and led by an amber pin
-/// while pinned. The server icon shows when the thread lives on another host, the logo is
-/// the model's lab. Hovering a `snoozable` thread swaps
+/// while pinned. A thread waiting on sub-agents or jobs has an hourglass before its run
+/// time. The server icon shows when the thread lives on another host, the logo is the
+/// model's lab. Hovering a `snoozable` thread swaps
 /// its run time for snooze (drops it from the sidebar until its next run) and archive
 /// buttons (archiving a workspace thread asks under the button, `thread::archive_confirm`);
 /// hovering any card opens `specs` to its right, unless a menu is open.
@@ -397,6 +398,8 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
     let titling = this.titling(host, &t.id);
     let title_id = SharedString::from(format!("title/{h}/{id}"));
     let place = this.project_name(host, t);
+    // Idle on sub-agents or jobs: its run time is stuck, so an hourglass says it isn't done.
+    let waiting = this.status(host, t) == Status::Waiting;
     let marks = || {
         let server = (host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(u(12.)));
         server.into_iter().chain(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(u(12.))))
@@ -477,7 +480,13 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
                     .relative()
                     .flex_shrink_0()
                     .child(
-                        small(elapsed.clone(), theme::t().fg_2)
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap_1()
+                            .children(waiting.then(|| icon("hourglass", theme::t().working).size(u(8.))))
+                            .child(small(elapsed.clone(), theme::t().fg_2))
                             .when(asking, |d| d.opacity(0.))
                             .when(actions.is_some(), |d| d.group_hover("card", |d| d.opacity(0.))),
                     )
