@@ -143,12 +143,12 @@ const dirigentParams = Type.Object({
     ],
     {
       description:
-        "spawn: a sub-agent thread called `name` for `task`, here (you are told when it finishes: its reply, or with `report: done` only that it did). " +
-        "new: a top-level thread called `name` for `task` in any project on any host (`host`, `project`): a normal thread in the user's sidebar, not a sub-agent; you are never told how it goes, and it doesn't know you started it. " +
-        "send: message `thread_id` (`text`; a new turn if idle, else a steer or follow_up). " +
-        "read: a thread's final reply (`full` for the whole conversation). " +
+        "spawn: a sub-agent called `name` for `task`. " +
+        "new: a top-level thread for the user (not a sub-agent) called `name` for `task`, in any project on any host. " +
+        "send: message `thread_id` with `text`. " +
+        "read: a thread's final reply (`full`: the whole conversation). " +
         "status: your sub-agents, or one `thread_id`. " +
-        "list: the most recent top-level threads on every host. " +
+        "list: the latest top-level threads on every host. " +
         "search: threads on every host whose name or messages contain `query`. " +
         "projects: every host's projects. " +
         "archive / snooze / pin / abort / open (in the user's desktop): act on `thread_id`.",
@@ -180,12 +180,7 @@ const dirigentParams = Type.Object({
         'spawn: what you are told when it finishes: "reply" (default) its final reply, "done" only that it finished (use `read` for the replies you need; keeps many sub-agents\' replies out of your context).',
     }),
   ),
-  notify: Type.Optional(
-    Type.Union([Type.Literal("asap"), Type.Literal("when_idle")], {
-      description:
-        'spawn: when you are told: "asap" (default) after your current tool calls, "when_idle" once your turn has ended.',
-    }),
-  ),
+  notify: notifyParam,
   text: Type.Optional(Type.String({ description: "send: the message." })),
   mode: Type.Optional(
     Type.Union([Type.Literal("steer"), Type.Literal("follow_up")], {
@@ -195,8 +190,7 @@ const dirigentParams = Type.Object({
   ),
   model: Type.Optional(
     Type.String({
-      description:
-        "spawn / new: `provider/id`; default: your own model. Another host may not have it: the error lists the ones it has.",
+      description: "spawn / new: `provider/id`; default: your own model.",
     }),
   ),
   effort: Type.Optional(
@@ -228,10 +222,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "async_bash",
     label: "Background command",
     description:
-      "Run a command in the background. Returns at once with a job id and log path; when the job ends you get a " +
-      "message with its exit code and the last lines of output. For builds, tests and servers; use `bash` when " +
-      "you need the output before your next step.",
-    promptSnippet: "Run a command in the background; a message tells you when it ends",
+      "Run a long command in the background (builds, test suites, servers) and keep working; a message tells you " +
+      "when it ends. Use `bash` when you'd only wait for the output.",
+    promptSnippet:
+      "Run long commands (builds, tests, servers) in the background while you keep working",
     parameters: asyncBashParams,
     async execute(_id, params) {
       const action = params.action ?? "start";
@@ -259,8 +253,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     description:
       "Ask the user one or more questions, shown as a form. Use it when you're blocked on decisions only the user " +
       "can make: several questions at once, or a choice between concrete options. Don't use it for a single yes/no " +
-      'or a follow-up offer ("Want me to fix it?"): ask that in your reply and end your turn. Returns at once; the ' +
-      "answers arrive as a message, so keep working on what does not depend on them, or end your turn to wait.",
+      'or a follow-up offer ("Want me to fix it?"): ask that in your reply and end your turn.',
     promptSnippet:
       "Ask the user questions in a form, when you're blocked on their decisions (several questions, or a choice between options)",
     parameters: askUserParams,
@@ -277,15 +270,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "dirigent",
     label: "Dirigent",
     description:
-      "Orchestrate threads on this host and the hosts it reaches. Spawn sub-agents (each a thread of its own, " +
-      "started in your directory with your model unless told otherwise) and carry on; when one finishes you get " +
-      "a message, so end your turn to wait or keep working meanwhile. Start top-level threads (`new`) for work " +
-      "the user should see as a thread of its own; you won't hear back from them. Message, read, find, list, " +
-      "archive, snooze, pin or abort any thread, and open one for the user. Threads are listed as " +
-      "[name](dirigent://thread/<id>) links: the user clicks one in your reply to open the thread, so link the " +
-      "threads you start, find or mention.",
-    promptSnippet:
-      "Spawn sub-agents, start top-level threads, find and manage threads on every host",
+      "Work with dirigent threads when the user asks you to: spawn sub-agents, start a top-level thread (`new`), " +
+      "or find, read, message and manage other threads.",
+    promptSnippet: "Spawn sub-agents, start threads, or manage other threads, when the user asks",
     parameters: dirigentParams,
     async execute(_id, p) {
       const ours = new Set<string>(TOOL_NAMES);
@@ -304,8 +291,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       try {
         switch (p.action) {
           case "spawn": {
+            const name = need(p.name, "name");
             const id = await d.spawn({
-              name: need(p.name, "name"),
+              name,
               task: need(p.task, "task"),
               model: p.model,
               effort: p.effort,
@@ -317,8 +305,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
             const what = p.report === "done" ? "that it finished" : "its reply";
             const when = p.notify === "when_idle" ? "once your turn has ended" : "";
             return text(
+              // The desktop finds the id by this prefix (`spawned_id`): keep it.
               `Spawned sub-agent thread ${id}. You will get a message with ${what} when it finishes${when ? ` (${when})` : ""}; ` +
-                `use status / read to look in on it, send to steer it.`,
+                `use status / read to look in on it, send to steer it. Put ${threadLink({ id, name })} in your reply so the user can open it.`,
             );
           }
           case "new": {
