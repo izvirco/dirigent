@@ -38,6 +38,7 @@
           pkgs.oxfmt
           pkgs.pkg-config
           pkgs.cmake
+          pkgs.sccache
           # Headless UI testing: virtual X display, input, screenshots (see testing.md)
           pkgs.xvfb
           pkgs.xdotool
@@ -48,6 +49,13 @@
 
         env = {
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+          # Every checkout and workspace has its own target dir; sccache shares the compiled
+          # dependencies (crates.io, gpui) between them, so a fresh workspace isn't a cold build.
+          # Not shared: debug builds of our own crates (incremental), proc-macros, and crates that
+          # include build-script output (OUT_DIR). Don't set CARGO_TARGET_DIR: sccache hashes
+          # CARGO_* env vars, so it makes every entry private to that path (--target-dir is fine).
+          RUSTC_WRAPPER = "sccache";
+          SCCACHE_CACHE_SIZE = "50G";
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiLibs;
           # Software Vulkan (lavapipe): Xvfb has no GPU presentation. scripts/ui.sh sets
           # VK_ICD_FILENAMES to this for the test app only.
