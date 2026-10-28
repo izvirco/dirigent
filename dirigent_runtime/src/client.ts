@@ -66,12 +66,12 @@ type Reply = { type: string; reply_to?: number | null; [k: string]: any };
 export const LOCAL = "local";
 /** A host that doesn't answer a connect this fast is reported unreachable (an offline tailscale peer never refuses). */
 const CONNECT_MS = 3000;
-/** Every reply is quick (a `prompt` only waits for the session to load), so this is a dead host or a lost reply. */
+/** Every reply is quick (a `prompt` or `create_thread` only waits for a workspace and the session to load), so this is a dead host or a lost reply. */
 const REQUEST_MS = 30_000;
 const LINK = "dirigent://thread/";
 
 /** A request that got no reply in time: it may still have happened. */
-export class TimeoutError extends Error {}
+class TimeoutError extends Error {}
 
 /** One ws connection: numbered requests matched to their replies; pushes are ignored. */
 export class Client {
@@ -320,25 +320,34 @@ export class Dirigent {
     if (!me.project_id) throw new Error("no project to spawn in");
     const model = opts.model ?? me.model;
     if (opts.model) await this.checkModel(this.local, opts.model);
-    const created = await this.req<{ thread: ThreadSummary }>(this.local, {
-      type: "create_thread",
-      project_id: me.project_id,
-      workspace: opts.workspace ?? false,
-      base: opts.base ?? null,
-      parent: this.self.threadId,
-      name: opts.name,
-      report: opts.report ?? "reply",
-      notify: opts.notify ?? "asap",
-    });
-    const id = created.thread.id;
     const tail =
       opts.report === "done"
         ? "When you finish, it is told that you did and may read your final reply"
         : "When you finish, your final reply is reported to it";
+    // Picked here so the prompt, which goes with the create, can tell the child its id.
+    const id = Bun.randomUUIDv7();
     const text = `${opts.task.trim()}\n\n---\nYou are a sub-agent (thread ${id}) spawned by thread ${this.self.threadId}. ${tail}, so make that reply a complete, self-contained summary of what you did, found and left undone.`;
-    // The parent's tools reach the child through the service (`CreateThread { parent }`).
-    await this.start(this.local, id, text, model, opts.effort ?? me.thinking_level, null);
-    return id;
+    try {
+      const created = await this.req<{ thread: ThreadSummary }>(this.local, {
+        type: "create_thread",
+        thread_id: id,
+        project_id: me.project_id,
+        workspace: opts.workspace ?? false,
+        base: opts.base ?? null,
+        parent: this.self.threadId,
+        name: opts.name,
+        report: opts.report ?? "reply",
+        notify: opts.notify ?? "asap",
+        // The parent's tools reach the child through the service (`CreateThread { parent }`).
+        prompt: firstPrompt(text, model, opts.effort ?? me.thinking_level, null),
+      });
+      // A host from before `thread_id` picks an id of its own: the reply's is the one.
+      return created.thread.id;
+    } catch (e) {
+      if (e instanceof TimeoutError)
+        throw new TimeoutError(`${e.message}; it may have started anyway, as thread ${id}`);
+      throw e;
+    }
   }
 
   /**
@@ -359,48 +368,17 @@ export class Dirigent {
       base: opts.base ?? null,
       parent: null,
       name: opts.name,
+      // No parent to inherit tools from: it gets the ones the caller has.
+      prompt: firstPrompt(
+        opts.task.trim(),
+        model,
+        opts.effort ?? me.thinking_level,
+        this.self.tools,
+      ),
     });
     const t = created.thread;
-    // No parent to inherit tools from: it gets the ones the caller has.
-    await this.start(
-      host,
-      t.id,
-      opts.task.trim(),
-      model,
-      opts.effort ?? me.thinking_level,
-      this.self.tools,
-    );
     owners.set(t.id, host);
     return { host, thread: t, project };
-  }
-
-  /** The first prompt of a thread just created. A thread that can't start is deleted, so no empty one is left behind. */
-  private async start(
-    host: HostInfo,
-    id: string,
-    text: string,
-    model: string | null,
-    effort: string | null,
-    tools: string[] | null,
-  ): Promise<void> {
-    try {
-      await this.req(host, {
-        type: "prompt",
-        thread_id: id,
-        text,
-        mode: "prompt",
-        model,
-        thinking_level: effort,
-        images: [],
-        title: null,
-        tools,
-      });
-    } catch (e) {
-      // Without a reply it may have started after all: leave it.
-      if (!(e instanceof TimeoutError))
-        await this.req(host, { type: "delete_thread", thread_id: id }).catch(() => {});
-      throw e;
-    }
   }
 
   private async me(): Promise<ThreadSummary> {
@@ -584,6 +562,20 @@ export function threadId(s: string): string {
 export function threadLink(t: ThreadSummary): string {
   const name = (t.name ?? "untitled").replace(/[[\]]/g, "");
   return `[${name}](${LINK}${t.id})`;
+}
+
+/**
+ * A new thread's first prompt, sent with its `create_thread` (a `FirstPrompt`): the host
+ * starts the run as it creates the thread, so nobody sees it idle meanwhile, and deletes it
+ * again if the prompt can't be delivered, so no empty thread is left behind.
+ */
+function firstPrompt(
+  text: string,
+  model: string | null,
+  effort: string | null,
+  tools: string[] | null,
+) {
+  return { text, model, thinking_level: effort, images: [], title: null, tools };
 }
 
 function failures(each: Each<unknown>[]): string[] {

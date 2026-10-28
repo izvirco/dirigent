@@ -83,6 +83,7 @@ export type Outbound =
   | { type: "event"; thread_id: string; event: unknown }
   | { type: "ask"; thread_id: string; ask: Ask }
   | { type: "jobs"; thread_id: string; running: number }
+  | { type: "nix_shell"; thread_id: string; active: boolean }
   | { type: "warning"; thread_id: string; message: string }
   | { type: "error"; thread_id?: string; message: string };
 
@@ -169,7 +170,11 @@ export class Sessions {
       queueMicrotask(() => this.flushEntries(threadId, live));
     });
     if (existsSync(join(cwd, "flake.nix"))) {
-      live.nixEnv = captureNixEnv(cwd, threadId, this.send).then((e) => (live.env = e));
+      // Prompts wait for it (`prompt`); clients show the thread activating it meanwhile.
+      this.send({ type: "nix_shell", thread_id: threadId, active: true });
+      live.nixEnv = captureNixEnv(cwd, threadId, this.send)
+        .then((e) => (live.env = e))
+        .finally(() => this.send({ type: "nix_shell", thread_id: threadId, active: false }));
     }
     this.live.set(threadId, live);
 

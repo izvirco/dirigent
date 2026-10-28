@@ -15,7 +15,7 @@ use crate::{config, hosts, images, settings};
 use crate::{lists, ruler, sidebar, thread, usage};
 use base64::Engine;
 use dirigent_protocol::{
-    Ask, ClientMessage, Entry, FirstPrompt, ImageAttachment, ModelInfo, PromptMode, ServerMessage, ThreadSummary, TitleGen, Vcs,
+    Ask, ClientMessage, Entry, FirstPrompt, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs,
     prompt_title,
 };
 use futures::StreamExt;
@@ -221,13 +221,17 @@ pub struct Attachment {
     pub image: Arc<gpui::Image>,
 }
 
-/// A sent draft waiting for its `ThreadCreated`: the request, its host, and the message, which
-/// goes back into the draft if the thread can't be created and prompted.
+/// A sent draft waiting for its `ThreadCreated`: the request, where it went, the message,
+/// which goes back into the draft if the thread can't be created and prompted, and the
+/// thread as listed until the host lists it (it is open from the moment it is sent).
 struct PendingDraft {
     id: u64,
-    host: String,
+    target: Target,
+    /// The draft's workspace base, which a reopened draft would otherwise forget.
+    base: Option<String>,
     text: String,
     images: Vec<Attachment>,
+    thread: ThreadSummary,
 }
 
 /// An image an entry references by blob id (see `Dirigent::blobs`).
@@ -618,6 +622,22 @@ impl Dirigent {
         self.host(host)?.threads.iter().find(|t| t.id == id)
     }
 
+    /// Our draft's thread, which its host is still creating.
+    fn is_pending(&self, host: &str, id: &str) -> bool {
+        self.pending.as_ref().is_some_and(|p| p.target.host == host && p.thread.id == id)
+    }
+
+    /// Why the thread can't take a message yet, if it can't: its host is still creating it
+    /// or setting it up (`ThreadSummary::setup`). The composer keeps the text meanwhile.
+    pub fn not_ready(&self, host: &str, id: &str) -> Option<&'static str> {
+        match self.summary(host, id).and_then(|s| s.setup) {
+            Some(Setup::Workspace) => Some("Still creating the thread's workspace"),
+            Some(Setup::NixShell) => Some("Still activating the nix dev shell"),
+            None if self.is_pending(host, id) => Some("The thread is still starting"),
+            None => None,
+        }
+    }
+
     /// The open thread has an agent working.
     pub fn is_running(&self) -> bool {
         self.open().and_then(|t| self.summary(&t.host, &t.id)).is_some_and(|t| t.running())
@@ -860,9 +880,9 @@ impl Dirigent {
                 // The connection dropped under a sent draft: its request may never have
                 // arrived (a host that got it still runs the thread), so the draft comes back.
                 if status == HostStatus::Disconnected
-                    && let Some(p) = self.pending.take_if(|p| p.host == host)
+                    && let Some(p) = self.pending.take_if(|p| p.target.host == host)
                 {
-                    self.restore_draft(p.text, &p.images, cx);
+                    self.unsend_draft(p, cx);
                     self.toast(format!("{host}: connection lost, the message is back in the draft"), cx);
                 }
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Draft { .. }) {
@@ -942,8 +962,15 @@ impl Dirigent {
                 let was_running = self.is_running();
                 let ran: HashSet<String> =
                     self.host(&host).map(|h| h.threads.iter().filter(|t| t.running()).map(|t| t.id.clone()).collect()).unwrap_or_default();
+                // Our draft's thread stays listed (and open) until its host lists it.
+                let ours = self.pending.as_ref().filter(|p| p.target.host == host).map(|p| p.thread.clone());
                 if let Some(h) = self.host_mut(&host) {
                     h.threads = threads;
+                    if let Some(t) = ours
+                        && !h.threads.iter().any(|x| x.id == t.id)
+                    {
+                        h.threads.insert(0, t);
+                    }
                 }
                 self.request_sidebar_vcs(&host, &ran);
                 if let Pane::Thread(t) = &self.pane
@@ -1019,28 +1046,34 @@ impl Dirigent {
                 }
             }
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
-            ServerMessage::ThreadCreated { reply_to, mut thread } => {
-                let pending = self.pending.take_if(|p| p.id == reply_to && p.host == host);
-                if let Some(PendingDraft { text, .. }) = &pending {
-                    // Our draft: it went straight to work, so list it that way unless the
-                    // host's push already did (no flash through the inbox with no model, nor
-                    // through "Untitled": the host names it the same way on its first prompt).
-                    thread.name = thread.name.or_else(|| prompt_title(text));
-                    thread.running_since = Some(now_ms());
-                    thread.model = self.model.clone();
-                    thread.thinking_level = self.effort.clone();
-                }
+            ServerMessage::ThreadCreated { reply_to, thread } => {
+                let pending = self.pending.take_if(|p| p.id == reply_to && p.target.host == host);
+                // Listed unless a push of the host's lists it already.
                 if let Some(h) = self.host_mut(&host)
                     && !h.threads.iter().any(|t| t.id == thread.id)
                 {
-                    h.threads.insert(0, thread.clone());
+                    h.threads.insert(0, (*thread).clone());
                 }
-                // The host prompted it already (`CreateThread::prompt`).
-                if let Some(PendingDraft { text, .. }) = pending {
-                    self.titling.insert((host.clone(), thread.id.clone()), Instant::now());
-                    self.select_thread(&host, &thread.id, cx);
-                    self.remember_model();
-                    self.echo(&host, &thread.id, text, PromptMode::Prompt);
+                // Our draft's thread, open since it was sent: its host has it now, prompted
+                // (`CreateThread::prompt`), and it is fetched if open, as entries made while it
+                // wasn't are missing. A host from before `CreateThread::thread_id` picked an id
+                // of its own: ours makes way for its thread, opened in its place.
+                if let Some(p) = pending {
+                    let open = self.open().is_some_and(|t| t.host == host && t.id == p.thread.id);
+                    if thread.id != p.thread.id {
+                        if let Some(h) = self.host_mut(&host) {
+                            h.threads.retain(|t| t.id != p.thread.id);
+                        }
+                        self.titling.remove(&(host.clone(), p.thread.id.clone()));
+                        self.titling.insert((host.clone(), thread.id.clone()), Instant::now());
+                    }
+                    if open && thread.id == p.thread.id {
+                        let rid = self.next_id();
+                        self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: thread.id.clone() });
+                    } else if open {
+                        self.select_thread(&host, &thread.id, cx);
+                        self.echo(&host, &thread.id, p.text, PromptMode::Prompt);
+                    }
                 }
             }
             ServerMessage::Error { reply_to, message } => {
@@ -1070,8 +1103,8 @@ impl Dirigent {
                 }
                 // A failed create (or first prompt: the host deleted the thread again) puts
                 // the draft back so nothing typed is lost.
-                if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.host == host) {
-                    self.restore_draft(p.text, &p.images, cx);
+                if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.target.host == host) {
+                    self.unsend_draft(p, cx);
                 }
                 self.toast(format!("{host}: {message}"), cx)
             }
@@ -1272,8 +1305,12 @@ impl Dirigent {
         self.mark_seen(host, id);
         self.sync_asks(cx);
         self.fetch_blobs();
-        let rid = self.next_id();
-        self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
+        // A thread its host is still creating has nothing to fetch yet: its entries arrive as
+        // they are made, and `ThreadCreated` fetches it once it exists.
+        if !self.is_pending(host, id) {
+            let rid = self.next_id();
+            self.net.send(host, ClientMessage::GetThread { id: rid, thread_id: id.to_owned() });
+        }
         self.request_thread_vcs(host, id);
         self.focus_composer(cx);
         cx.notify();
@@ -2632,6 +2669,22 @@ impl Dirigent {
         }
     }
 
+    /// Our draft's thread didn't start (or may not have: the connection dropped). It leaves
+    /// the lists, the message goes back into the draft, and the draft opens again in its
+    /// place if the thread is in view.
+    fn unsend_draft(&mut self, p: PendingDraft, cx: &mut Context<Self>) {
+        let (host, id) = (p.target.host.clone(), p.thread.id);
+        if let Some(h) = self.host_mut(&host) {
+            h.threads.retain(|t| t.id != id);
+        }
+        self.titling.remove(&(host.clone(), id.clone()));
+        self.restore_draft(p.text, &p.images, cx);
+        if self.open().is_some_and(|t| t.host == host && t.id == id) {
+            self.new_draft(Some(p.target), cx);
+            self.base = p.base;
+        }
+    }
+
     /// Put a sent draft's message back as the draft page's draft: into the cache, and into
     /// the composer if the draft page is still in view.
     fn restore_draft(&mut self, text: String, images: &[Attachment], cx: &mut Context<Self>) {
@@ -2712,6 +2765,7 @@ impl Dirigent {
                 return;
             }
             if self.pending.is_some() {
+                self.toast("The last new thread is still starting", cx);
                 return;
             }
             // A request to an offline host is dropped: keep the draft instead.
@@ -2723,6 +2777,7 @@ impl Dirigent {
             // Isolation is only on offer for a repo (the chip hides otherwise).
             let workspace = self.isolate && self.draft_vcs().is_some_and(|(_, _, v)| v.is_some_and(|v| v.vcs.is_some()));
             let base = self.base.clone().filter(|_| workspace);
+            let cwd = self.draft_vcs().map(|(_, path, _)| path.to_owned()).unwrap_or_default();
             // The first prompt goes with the create, so the thread exists only if it started
             // (named from it: see `config.toml` `[title]`).
             let prompt = FirstPrompt {
@@ -2734,13 +2789,32 @@ impl Dirigent {
                 tools: Some(self.config.tools.enabled()),
             };
             let id = self.next_id();
-            self.pending = Some(PendingDraft { id, host: target.host.clone(), text, images });
+            // The thread opens at once, as it will be listed: working, named after the
+            // prompt until its title lands, and making its workspace if it gets one. The
+            // id is ours, so the host's pushes and reply land on it.
+            let now = now_ms();
+            let thread = ThreadSummary {
+                id: uuid::Uuid::now_v7().to_string(),
+                project_id: Some(target.project_id.clone()),
+                cwd,
+                name: prompt_title(&text),
+                model: self.model.clone(),
+                thinking_level: self.effort.clone(),
+                created_at: now,
+                updated_at: now,
+                running_since: Some(now),
+                prompted_at: Some(now),
+                setup: workspace.then_some(Setup::Workspace),
+                ..Default::default()
+            };
+            let thread_id = thread.id.clone();
             self.clear_composer(window, cx);
             self.net.send(
                 &target.host,
                 ClientMessage::CreateThread {
                     id,
-                    project_id: target.project_id,
+                    thread_id: Some(thread_id.clone()),
+                    project_id: target.project_id.clone(),
                     workspace,
                     base,
                     parent: None,
@@ -2750,6 +2824,15 @@ impl Dirigent {
                     prompt: Some(prompt),
                 },
             );
+            if let Some(h) = self.host_mut(&target.host) {
+                h.threads.insert(0, thread.clone());
+            }
+            let host = target.host.clone();
+            self.pending = Some(PendingDraft { id, target, base: self.base.clone(), text: text.clone(), images, thread });
+            self.titling.insert((host.clone(), thread_id.clone()), Instant::now());
+            self.remember_model();
+            self.select_thread(&host, &thread_id, cx);
+            self.echo(&host, &thread_id, text, PromptMode::Prompt);
             return;
         }
         if let Pane::Thread(t) = &self.pane {
@@ -2760,6 +2843,11 @@ impl Dirigent {
             }
             if self.summary(&t.host, &t.id).is_some_and(|s| s.workspace_missing) {
                 self.toast("The thread's workspace is gone; recreate it or move the thread back first", cx);
+                return;
+            }
+            // The text stays in the composer until the thread can take it.
+            if let Some(why) = self.not_ready(&t.host, &t.id) {
+                self.toast(why, cx);
                 return;
             }
             let (host, thread_id) = (t.host.clone(), t.id.clone());

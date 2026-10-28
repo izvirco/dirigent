@@ -195,6 +195,7 @@ impl Cache {
                 prompted_at: r.get(14)?,
                 jobs: 0,
                 spend: r.get::<_, Option<String>>(18)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                setup: None,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -407,6 +408,7 @@ mod tests {
             prompted_at: None,
             jobs: 0,
             spend: Default::default(),
+            setup: None,
         }
     }
 

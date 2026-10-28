@@ -27,7 +27,7 @@ use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
 use crate::view::{Item, Stats, Step, ToolCall, Work};
 use crate::working;
-use dirigent_protocol::PromptMode;
+use dirigent_protocol::{PromptMode, Setup};
 use gpui::{
     Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, Window, anchored,
     deferred, div, img, list, point, prelude::*, px, relative, rgba,
@@ -720,7 +720,10 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 
     // One round button in the corner: send, or stop while running. While running, ctrl+Enter
     // steers and shift+Enter queues a follow-up (see `input::Submitted`).
-    let action = if running {
+    // A thread its host is still setting up can't take a message (`not_ready`), nor be
+    // stopped: the send button stays, grey, and says why when pressed.
+    let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some());
+    let action = if running && !blocked {
         div()
             .id("stop")
             .size(u(28.))
@@ -735,7 +738,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
             .child(icon("square", theme::t().danger_ink).size(u(11.)))
     } else {
-        let ready = has_text && this.model.is_some() && !no_target;
+        let ready = has_text && this.model.is_some() && !no_target && !blocked;
         div()
             .id("send")
             .size(u(28.))
@@ -1221,6 +1224,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     let keys = &mut Keys::new(&this.selection, Doc::Thread, ix);
     // User bubbles go gray in an archived thread, so it reads as one at a glance.
     let archived = this.summary(&t.host, &t.id).is_some_and(|s| s.archived);
+    let setup = this.summary(&t.host, &t.id).and_then(|s| s.setup);
     let bubble = if archived { theme::t().hover } else { theme::t().bubble };
     let mut col = div().w_full().max_w(u(theme::COLUMN)).flex().flex_col();
     if ix < t.timeline.items.len() {
@@ -1234,7 +1238,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             col = col.child(user_bubble(text, &[], TAIL, t, bubble, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
-            col = col.child(work_block(&work, key, true, t, bubble, now, &fonts, keys, cx));
+            col = col.child(work_block(&work, key, true, setup, t, bubble, now, &fonts, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
@@ -1312,7 +1316,7 @@ fn render_timeline_item(
             let images: Vec<_> = images.iter().map(|id| blobs.get(id).map(|b| b.image.clone())).collect();
             user_bubble(text, &images, ix, t, bubble, fonts, keys, cx).into_any()
         }
-        Item::Work(w) => work_block(w, ix, false, t, bubble, now, fonts, keys, cx).into_any(),
+        Item::Work(w) => work_block(w, ix, false, None, t, bubble, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
@@ -1476,12 +1480,13 @@ fn user_bubble(
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,
 /// kept after the run), the work line, then the sub-agents it started or that finished
 /// meanwhile (`Step::Child`). Pending steers are rendered by the tail; cache misses show
-/// only in the log.
+/// only in the log. `live` is the run in progress, `setup` the step its thread is in.
 #[allow(clippy::too_many_arguments)]
 fn work_block(
     w: &Work,
     key: usize,
     live: bool,
+    setup: Option<Setup>,
     t: &OpenThread,
     bubble: u32,
     now: i64,
@@ -1500,7 +1505,7 @@ fn work_block(
             _ => None,
         })
         .collect();
-    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, t, now, cx)).children(children)
+    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, setup, t, now, cx)).children(children)
 }
 
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
@@ -1590,7 +1595,9 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys
 /// A turn's work as one line: `model effort · 1m 23s · 4 tool calls`; while `live`,
 /// `· Working for 12s ·` and the line animated (`working.rs`). Click to show its log in the
 /// panel; tinted while the panel shows it.
-fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mut Context<Dirigent>) -> AnyElement {
+/// The step its thread is being set up with (`setup`) stands in for the time and tool count
+/// until the model can start.
+fn work_line(w: &Work, key: usize, live: bool, setup: Option<Setup>, t: &OpenThread, now: i64, cx: &mut Context<Dirigent>) -> AnyElement {
     let shown = t.log == Some(key);
     let tools = match w.tool_count() {
         0 => "no tool calls".to_owned(),
@@ -1598,9 +1605,13 @@ fn work_line(w: &Work, key: usize, live: bool, t: &OpenThread, now: i64, cx: &mu
         n => format!("{n} tool calls"),
     };
     let model = w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned();
-    let time = if live { format!("Working for {}", elapsed(now - w.started)) } else { duration(w.duration()) };
-    let parts: Vec<String> =
-        [Some(model), w.effort.clone(), Some("·".into()), Some(time), Some("·".into()), Some(tools)].into_iter().flatten().collect();
+    let status = match (live, setup) {
+        (true, Some(Setup::Workspace)) => vec!["Creating a workspace…".to_owned()],
+        (true, Some(Setup::NixShell)) => vec!["Activating nix dev shell…".to_owned()],
+        (true, None) => vec![format!("Working for {}", elapsed(now - w.started)), "·".into(), tools],
+        (false, _) => vec![duration(w.duration()), "·".into(), tools],
+    };
+    let parts: Vec<String> = [Some(model), w.effort.clone(), Some("·".into())].into_iter().flatten().chain(status).collect();
     let row = row(step_id(key, usize::MAX))
         .my_1()
         .gap_2()

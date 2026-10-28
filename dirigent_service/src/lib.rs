@@ -14,9 +14,10 @@ mod storage;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, ThreadSummary, Vcs};
+use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, Vcs};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -43,6 +44,9 @@ pub struct Service {
     /// Threads whose workspace was gone (or no longer known to the vcs) at the last
     /// `sweep_workspaces`: what `workspace_missing` reports between sweeps.
     missing: Mutex<std::collections::HashSet<String>>,
+    /// Threads being created with their first prompt, until it is delivered: they take no
+    /// other prompt meanwhile. `Some(Workspace)` while their workspace is being made.
+    starting: Mutex<HashMap<String, Option<Setup>>>,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
@@ -56,11 +60,13 @@ impl Service {
     fn threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut threads = self.storage.lock().unwrap().list_threads()?;
         let missing = self.missing.lock().unwrap();
+        let starting = self.starting.lock().unwrap();
         for t in &mut threads {
             t.running_since = self.runtime.running_since(&t.id);
             t.jobs = self.runtime.jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
             t.workspace_missing = missing.contains(&t.id);
+            t.setup = starting.get(&t.id).copied().flatten().or(self.runtime.nix_shell(&t.id).then_some(Setup::NixShell));
         }
         Ok(threads)
     }
@@ -172,9 +178,16 @@ impl Service {
                 let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
-            ClientMessage::CreateThread { id, project_id, workspace, base, parent, name, report, notify, prompt } => {
-                let thread_id = uuid::Uuid::now_v7().to_string();
-                let mut thread = {
+            ClientMessage::CreateThread { id, thread_id, project_id, workspace, base, parent, name, report, notify, prompt } => {
+                let thread_id = match thread_id {
+                    // The client's pick, so it can open the thread before this reply.
+                    Some(t) => {
+                        anyhow::ensure!(uuid::Uuid::parse_str(&t).is_ok_and(|u| u.to_string() == t), "not a lowercase uuid: {t}");
+                        t
+                    }
+                    None => uuid::Uuid::now_v7().to_string(),
+                };
+                let thread = {
                     let storage = self.storage.lock().unwrap();
                     let mut cwd = storage.project_path(&project_id)?.ok_or_else(|| anyhow!("no such project"))?;
                     // A sub-agent works where its parent works, unless it gets its own workspace.
@@ -192,37 +205,54 @@ impl Service {
                         storage.set_tools(&thread_id, &storage.thread_tools(p)?)?;
                         storage.set_report(&thread_id, report, notify)?;
                     }
+                    // With its first prompt along, the thread works from the start: its run begins
+                    // under the lock that creates it, so any `Threads` push that lists it (other
+                    // threads' activity) lists it running, never idle in the inbox while its
+                    // workspace is made or its prompt is on the way.
+                    if let Some(p) = &prompt {
+                        storage.set_prompted(&thread_id, &p.text, p.model.as_deref(), p.thinking_level.as_deref(), now())?;
+                        self.runtime.begin_run(&thread_id);
+                        self.starting.lock().unwrap().insert(thread_id.clone(), workspace.then_some(Setup::Workspace));
+                    }
                     thread
                 };
                 if workspace {
-                    // A thread that can't get its workspace is never created: the draft stays.
-                    if let Err(e) = self.move_to_workspace(&thread_id, false, base.as_deref()) {
-                        let _ = self.storage.lock().unwrap().delete_thread(&thread_id);
-                        return Err(e);
+                    // Clients see it making its workspace. Without a prompt there is no push:
+                    // the creator's `Prompt` right after pushes it running.
+                    if prompt.is_some() {
+                        self.push_threads();
                     }
-                    let ws = self.workspace_dir(&thread_id).to_string_lossy().into_owned();
-                    thread.cwd = ws.clone();
-                    thread.workspace = Some(ws);
-                }
-                // No push: the first prompt (along, or the creator's `Prompt` right after) pushes
-                // the thread already running. One that can't be prompted goes again, so the
-                // creator keeps its draft instead of a thread that never started.
-                if let Some(p) = &prompt
-                    && let Err(e) = self.prompt(&thread_id, PromptMode::Prompt, p).await
-                {
-                    if let Err(e) = self.delete_thread(&thread_id) {
-                        eprintln!("[service] delete unprompted thread {thread_id}: {e:#}");
+                    // Off the async workers: `git worktree add` / `jj workspace add` can take a
+                    // while, and the push above would wait behind it on this one.
+                    let (this, id) = (self.clone(), thread_id.clone());
+                    let made = tokio::task::spawn_blocking(move || this.move_to_workspace(&id, true, base.as_deref()))
+                        .await
+                        .unwrap_or_else(|e| Err(anyhow!("making the workspace failed: {e}")));
+                    if let Err(e) = made {
+                        return Err(self.abandon(&thread_id, e));
                     }
-                    return Err(e);
                 }
-                ServerMessage::ThreadCreated { reply_to: id, thread }
+                if let Some(p) = &prompt {
+                    if let Some(setup) = self.starting.lock().unwrap().get_mut(&thread_id) {
+                        *setup = None;
+                    }
+                    self.push_threads();
+                    if let Err(e) = self.deliver(&thread_id, PromptMode::Prompt, p).await {
+                        return Err(self.abandon(&thread_id, e));
+                    }
+                    self.starting.lock().unwrap().remove(&thread_id);
+                }
+                // As it is listed now: in its workspace, prompted, running.
+                let thread = self.threads()?.into_iter().find(|t| t.id == thread_id).unwrap_or(thread);
+                ServerMessage::ThreadCreated { reply_to: id, thread: Box::new(thread) }
             }
             ClientMessage::MoveToWorkspace { id, thread_id, base } => {
-                self.move_to_workspace(&thread_id, true, base.as_deref())?;
+                self.move_to_workspace(&thread_id, false, base.as_deref())?;
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::RemoveWorkspace { id, thread_id, detach } => {
+                anyhow::ensure!(self.runtime.running_since(&thread_id).is_none(), "the thread is running");
                 self.remove_workspace(&thread_id, detach)?;
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
@@ -240,6 +270,9 @@ impl Service {
                 ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
             }
             ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
+                // Its first prompt goes first: a second one now would load its session ahead
+                // of it (in the project, while its workspace is being made).
+                anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
                 self.prompt(&thread_id, mode, &FirstPrompt { text, model, thinking_level, images, title, tools }).await?;
                 ServerMessage::Ok { reply_to: id }
             }
@@ -333,6 +366,8 @@ impl Service {
                 ServerMessage::Search { reply_to: id, hits: self.storage.lock().unwrap().search(&query, limit.clamp(1, 100))? }
             }
             ClientMessage::DeleteThread { id, thread_id } => {
+                // Its `CreateThread` deletes it if it doesn't start.
+                anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
                 self.delete_thread(&thread_id)?;
                 ServerMessage::Ok { reply_to: id }
             }
@@ -340,29 +375,52 @@ impl Service {
     }
 
     /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
-    /// `Prompt`'s fields (or is a `CreateThread`'s first prompt).
+    /// `Prompt`'s fields.
     async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
-        let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
         // The run starts now, not at pi's `agent_start`: loading the session (and a nix
         // dev shell) can take seconds, and clients should see the thread working with
         // the model it will use for all of it. A new turn is a new task, too
-        // (`prompted_at`: steers, follow-ups and answers don't count).
+        // (`prompted_at`: steers, follow-ups and answers don't count). `CreateThread` does
+        // the same for its first prompt, earlier.
         if mode == PromptMode::Prompt {
-            self.storage.lock().unwrap().set_prompted(thread_id, &p.text, model, thinking_level, now())?;
+            self.storage.lock().unwrap().set_prompted(thread_id, &p.text, p.model.as_deref(), p.thinking_level.as_deref(), now())?;
             self.runtime.begin_run(thread_id);
             self.push_threads();
         }
-        if let Some(tools) = &p.tools {
-            self.storage.lock().unwrap().set_tools(thread_id, tools)?;
-        }
-        let sent = match self.ensure_loaded(thread_id, model, thinking_level).await {
-            Ok(()) => self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref()),
-            Err(e) => Err(e),
-        };
+        let sent = self.deliver(thread_id, mode, p).await;
         if sent.is_err() && self.runtime.settle(thread_id).is_some() {
             self.push_threads();
         }
         sent
+    }
+
+    /// `prompt` after the run's start: load the session and send the prompt. On an error the
+    /// caller settles the run.
+    async fn deliver(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
+        let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
+        if let Some(tools) = &p.tools {
+            self.storage.lock().unwrap().set_tools(thread_id, tools)?;
+        }
+        self.ensure_loaded(thread_id, model, thinking_level).await?;
+        self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref())
+    }
+
+    /// A `CreateThread` with a prompt is still setting the thread up (`starting`).
+    fn starting(&self, thread_id: &str) -> bool {
+        self.starting.lock().unwrap().contains_key(thread_id)
+    }
+
+    /// A thread being created couldn't be set up or prompted: it goes again, so the creator
+    /// keeps its draft instead of a thread that never started. Its run is settled only once
+    /// it is gone, so no push lists it idle: the deletion's push drops it. Returns `e` for
+    /// the request's error.
+    fn abandon(&self, thread_id: &str, e: anyhow::Error) -> anyhow::Error {
+        if let Err(e) = self.delete_thread(thread_id) {
+            eprintln!("[service] delete unstarted thread {thread_id}: {e:#}");
+        }
+        self.runtime.settle(thread_id);
+        self.starting.lock().unwrap().remove(thread_id);
+        e
     }
 
     /// Delete a thread and what is its alone: its loaded session, workspace and job logs.
@@ -451,17 +509,14 @@ impl Service {
     /// Give the thread its own workspace (or recreate one whose directory went missing) and
     /// point it there. The session is unloaded so the next prompt starts in the new cwd; a
     /// thread with history also gets a notice entry so the model knows where it is now.
-    /// `must_be_clean`: moving a thread that already worked in the main checkout would
-    /// leave its uncommitted edits behind, so that is refused; a new thread starts from
-    /// HEAD on purpose.
-    fn move_to_workspace(&self, thread_id: &str, must_be_clean: bool, base: Option<&str>) -> Result<()> {
-        anyhow::ensure!(self.runtime.running_since(thread_id).is_none(), "the thread is running");
+    /// A thread that already worked is refused while it runs, and when it would leave its
+    /// uncommitted edits behind in the main checkout. A `new` one (being created) starts
+    /// from HEAD on purpose and may already count as running: its first prompt waits on this.
+    fn move_to_workspace(&self, thread_id: &str, new: bool, base: Option<&str>) -> Result<()> {
+        anyhow::ensure!(new || self.runtime.running_since(thread_id).is_none(), "the thread is running");
         let (repo, vcs) = self.thread_repo(thread_id)?;
         let recreating = self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some();
-        anyhow::ensure!(
-            recreating || !must_be_clean || !vcs::dirty(vcs, &repo)?,
-            "the working copy has uncommitted changes; commit them first"
-        );
+        anyhow::ensure!(recreating || new || !vcs::dirty(vcs, &repo)?, "the working copy has uncommitted changes; commit them first");
         let dest = self.workspace_dir(thread_id);
         // Recreating one the vcs forgot (`jj workspace forget` keeps the files): its leftover
         // directory makes way. The user picked `Recreate` over `Back to project`.
@@ -483,8 +538,9 @@ impl Service {
     }
 
     /// Take the thread back to its project directory, removing the workspace unless `detach`.
+    /// Not under a running agent: `RemoveWorkspace` refuses that; `delete_thread` may, as
+    /// the thread goes anyway.
     fn remove_workspace(&self, thread_id: &str, detach: bool) -> Result<()> {
-        anyhow::ensure!(self.runtime.running_since(thread_id).is_none(), "the thread is running");
         let ws = self.storage.lock().unwrap().thread_workspace(thread_id)?.ok_or_else(|| anyhow!("the thread has no workspace"))?;
         let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
         if !detach {
@@ -606,12 +662,14 @@ impl Service {
                 }
                 self.push_threads();
             }
-            RuntimeMessage::Jobs { .. } => self.push_threads(),
+            RuntimeMessage::Jobs { .. } | RuntimeMessage::NixShell { .. } => self.push_threads(),
             RuntimeMessage::Error { thread_id, message } => {
                 eprintln!("[service] runtime error {thread_id:?}: {message}");
                 // A prompt that failed before pi started (unknown model, nix shell) never settles.
+                // A thread still starting is deleted next (`abandon`): its push is the one.
                 if let Some(t) = &thread_id
                     && self.runtime.settle(t).is_some()
+                    && !self.starting(t)
                 {
                     self.push_threads();
                 }
@@ -753,6 +811,7 @@ pub async fn run(port: u16) -> Result<()> {
         storage: Mutex::new(storage),
         runtime,
         missing: Mutex::new(Default::default()),
+        starting: Mutex::new(Default::default()),
         push: broadcast::channel(1024).0,
         host_name,
     });
