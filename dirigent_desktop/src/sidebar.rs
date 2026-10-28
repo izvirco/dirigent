@@ -5,8 +5,11 @@
 //! starts folded: out of sight, out of mind) and leave the sidebar while they have no
 //! thread at all.
 //! Docked it has a drag handle on its right edge; hidden (`[` or the button) it slides in
-//! as a floating panel while the mouse rests on the left edge.
+//! as a floating panel while the mouse rests on the left edge. Either way the background
+//! pattern (`ambient.rs`) is behind it: docked it has no fill and shows the window's (or,
+//! behind the sidebar only, draws its own), floating it has its own copy.
 
+use crate::ambient::Reach;
 use crate::app::{ArchiveAt, Dirigent, Pane, Resize, Section, Target};
 use crate::hosts;
 use crate::icons::icon;
@@ -88,12 +91,17 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .flex_shrink_0()
         .border_r_1()
         .border_color(rgba(theme::t().line_soft))
+        // Behind the sidebar only, the pattern is drawn here, inside the border: the picture
+        // runs wider (sized for the floating sidebar) and a clear main pane would show it.
+        .when(this.config.background.reach == Reach::Edge, |d| d.children(this.field.layer(px(0.))))
         .child(content(this, cx))
         .child(handle)
 }
 
 /// Hidden sidebar: a hot zone on the left edge that, while hovered, grows into a floating
 /// copy of the sidebar. One element handles both so the hover never flickers between them.
+/// The copy is on the canvas colour made solid, so the pane under it never shows through
+/// (a translucent theme's canvas would let it).
 pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.sidebar_peek;
     div()
@@ -105,16 +113,20 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .w(u(if open { this.sidebar_width + 2. * theme::GUTTER } else { PEEK_ZONE }))
         .on_hover(cx.listener(|this, hovered, _, cx| this.set_peek(*hovered, cx)))
         .when(open, |d| {
+            // `rounded_lg`, inside its border.
+            let radius = u(8.) - px(1.);
             d.p(u(theme::GUTTER)).child(
                 div()
+                    .relative()
                     .w(u(this.sidebar_width))
                     .h_full()
                     .rounded_lg()
-                    .bg(rgba(theme::t().panel))
+                    .bg(rgba(theme::alpha(theme::t().canvas, 0xff)))
                     .border_1()
                     .border_color(rgba(theme::t().line))
                     .shadow_lg()
                     .overflow_hidden()
+                    .children(this.field.layer(radius))
                     .child(content(this, cx)),
             )
         })

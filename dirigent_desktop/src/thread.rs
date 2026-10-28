@@ -1044,10 +1044,7 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
         thumb_box()
             .id(ElementId::NamedInteger("att".into(), n as u64))
             .group("att")
-            .border_1()
-            .border_color(rgba(theme::t().line))
             .cursor_pointer()
-            .hover(|d| d.border_color(rgba(theme::t().accent_line)))
             .on_click(cx.listener({
                 let image = image.clone();
                 move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
@@ -1150,12 +1147,15 @@ const CORNER: f32 = 12.;
 /// Horizontal padding of a user bubble; it overhangs the column by the same amount.
 const BUBBLE_PAD: f32 = 16.;
 
-/// A soft glow: three 1px navy rings stepping out from the card, each fainter than the
-/// last, with a 1px gap between rings. Absolute, so they take no space and no clicks.
+/// A soft glow in the theme's `glow` colour: three 1px rings stepping out from the card,
+/// the first at the colour's alpha, the next two at a half and a fifth of it, with a 1px
+/// gap between rings. Absolute, so they take no space and no clicks.
 fn glow() -> impl Iterator<Item = Div> {
-    [0x60, 0x30, 0x14].into_iter().enumerate().map(|(i, alpha)| {
+    let color = theme::t().glow;
+    [1., 0.5, 0.21].into_iter().enumerate().map(move |(i, k)| {
         let out = 2. * (i + 1) as f32;
-        div().absolute().inset(u(-out)).rounded(u(CORNER + out)).border_1().border_color(rgba(theme::alpha(theme::t().accent_line, alpha)))
+        let alpha = ((color & 0xff) as f32 * k).round() as u32;
+        div().absolute().inset(u(-out)).rounded(u(CORNER + out)).border_1().border_color(rgba(theme::alpha(color, alpha)))
     })
 }
 
@@ -1442,11 +1442,10 @@ fn user_bubble(
     let thumbs = (!images.is_empty()).then(|| {
         div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, image)| {
             let id = ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64);
-            let box_ = thumb_box().id(id).border_1().border_color(rgba(theme::t().accent_line));
+            let box_ = thumb_box().id(id);
             match image {
                 Some(image) => box_
                     .cursor_pointer()
-                    .hover(|d| d.border_color(rgba(theme::t().accent_ink)))
                     .on_click(cx.listener({
                         let image = image.clone();
                         move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)

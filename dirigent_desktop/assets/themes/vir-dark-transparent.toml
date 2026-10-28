@@ -1,0 +1,51 @@
+# Dirigent theme "vir-dark-transparent": vir-dark on a black, 95% opaque window. Copy to
+# ~/.config/dirigent/theme/<name>.toml to make your own; config.toml's `theme = "<name>"` picks it.
+# Colours are #rrggbb, or #rrggbbaa for a translucent one.
+
+# The canvas is pure black at 95%, so the window is faintly see-through, blurred where the compositor supports it.
+# The main panel adds nothing on top: the canvas alone colours the whole window. Lines, inputs and user messages are
+# translucent too so it shows through.
+
+# Surfaces, from the window canvas (behind the sidebar) to the main panel, raised
+# cards and inputs, hover fills, and the two line weights.
+canvas = "#000000f2"
+panel = "#00000000"
+raised = "#13151ae6"
+hover = "#161c2980"
+# Menus, toasts and hover cards: they float over everything, so keep them solid.
+popup = "#161c29f2"
+line = "#2c324299"
+line_soft = "#2c324266"
+# The background pattern's ink (config.toml's `[background]`): its alpha is how strongly it shows.
+pattern = "#2c32421a"
+
+# Text: primary, secondary, tertiary.
+fg = "#cbcdd2"
+fg_1 = "#9a9fab"
+fg_2 = "#646a77"
+
+# The one accent, spent on live things: a fill (send button, running), a brighter fill
+# for the selected menu row, a line for focus rings, and a tint that reads as text.
+# Vir's coral is too bright to fill under light text, so fills are its navy and the coral
+# is the line and the tint.
+accent = "#263556e6"
+accent_active = "#2e4068"
+accent_line = "#f47c63"
+accent_ink = "#f88f78"
+selection = "#6f8fd455"
+bubble = "#1a243b80"
+# The composer's glow: three rings fading out from it, the first in this colour (its alpha
+# the glow's strength).
+glow = "#1a243b"
+
+# The stop button: fill, hover fill, icon.
+danger = "#4a1a24"
+danger_active = "#5e2230"
+danger_ink = "#f2a0ad"
+
+# Status: working dot and the Workpool in blue, done check, errors, snoozed / pinned amber. Errors lean crimson to
+# stay apart from the coral.
+working = "#6f8fd4"
+done = "#5fbf7a"
+error = "#e0465f"
+warn = "#e9c15a"
