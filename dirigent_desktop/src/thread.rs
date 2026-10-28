@@ -1018,7 +1018,7 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
         return None;
     }
     let thumbs = attachments.into_iter().map(|a| {
-        let (n, image) = (a.n, a.image);
+        let n = a.n;
         let remove = div()
             .id(ElementId::NamedInteger("att-rm".into(), n as u64))
             .absolute()
@@ -1041,21 +1041,21 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
                 this.remove_attachment(n, window, cx);
             }))
             .child(icon("x", theme::t().fg).size(u(11.)));
-        thumb_box()
+        thumb_box(Some(&a.blob))
             .id(ElementId::NamedInteger("att".into(), n as u64))
             .group("att")
             .cursor_pointer()
             .on_click(cx.listener({
-                let image = image.clone();
+                let image = a.blob.image.clone();
                 move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
             }))
-            .child(thumb(&image))
+            .child(thumb(&a.blob))
             .child(remove)
     });
     Some(div().flex().flex_row().flex_wrap().gap_3().px_4().pt_1().pb_3().children(thumbs))
 }
 
-/// Thumbnail height (boxes are 3:2) in the composer strip and under user bubbles.
+/// Thumbnail height in the composer strip, under user bubbles and in tool results.
 const THUMB: f32 = 64.;
 /// Tallest an image shown inline in a reply gets; wider ones also shrink to the column.
 const INLINE_IMAGE_H: f32 = 420.;
@@ -1096,35 +1096,43 @@ fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context
 /// Thumbnails of the images in a tool's result (`read` on an image file); click for full size.
 fn result_images(images: &[String], blobs: &HashMap<String, Blob>, seed: u64, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_row().flex_wrap().gap_3().children(images.iter().enumerate().map(|(i, id)| {
-        let box_ = thumb_box()
+        let blob = blobs.get(id);
+        let box_ = thumb_box(blob)
             .id(ElementId::NamedInteger("result-img".into(), seed.wrapping_shl(8) | i as u64))
             .border_1()
             .border_color(rgba(theme::t().line));
-        match blobs.get(id).map(|b| &b.image) {
-            Some(image) => box_
+        match blob {
+            Some(blob) => box_
                 .cursor_pointer()
                 .hover(|d| d.border_color(rgba(theme::t().accent_line)))
                 .on_click(cx.listener({
-                    let image = image.clone();
+                    let image = blob.image.clone();
                     move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
                 }))
-                .child(thumb(image)),
+                .child(thumb(blob)),
             None => box_.bg(rgba(theme::t().accent)),
         }
     }))
 }
 
-/// The 3:2 thumbnail box; `thumb` goes inside, centered.
-fn thumb_box() -> Div {
-    div().relative().flex_shrink_0().flex().items_center().justify_center().w(u(THUMB * 1.5)).h(u(THUMB)).rounded_md()
+/// Thumbnail width for `blob`: its shape at THUMB tall, so the image fills the box with
+/// no letterbox, kept between half and four times THUMB (`thumb` crops an image more
+/// extreme than that). 3:2 while the bytes are on their way, or if the size is unknown
+/// (gpui can't draw such an image either; the box stays blank).
+fn thumb_w(blob: Option<&Blob>) -> f32 {
+    THUMB * blob.and_then(|b| b.size).map_or(1.5, |(w, h)| (w / h).clamp(0.5, 4.))
 }
 
-/// An image scaled down to fit the thumbnail box. Not `size_full`: `img` imposes the
-/// bitmap's aspect ratio on its layout, which overflows a 3:2 box for portrait images.
-/// Left at its natural size (both dimensions definite, so the ratio no longer applies)
-/// and clamped to the box, `Contain` then fits the bitmap inside the clamped bounds.
-fn thumb(image: &Arc<gpui::Image>) -> gpui::Img {
-    img(image.clone()).max_w_full().max_h_full().rounded_md().object_fit(ObjectFit::Contain)
+/// The thumbnail box for `blob` (`None`: not here yet); `thumb` goes inside.
+fn thumb_box(blob: Option<&Blob>) -> Div {
+    div().relative().flex_shrink_0().w(u(thumb_w(blob))).h(u(THUMB)).rounded_md()
+}
+
+/// An image filling its `thumb_box`, cropped where the box's shape was clamped. With the
+/// box's aspect ratio: `img` otherwise takes the bitmap's, and taffy lays it out at that
+/// ratio even with both sizes set, overflowing a clamped box.
+fn thumb(blob: &Blob) -> gpui::Img {
+    img(blob.image.clone()).size_full().aspect_ratio(thumb_w(Some(blob)) / THUMB).rounded_md().object_fit(ObjectFit::Cover)
 }
 
 /// An image full-size over the whole window, on a dark scrim. Any click (or Esc) closes it.
@@ -1235,7 +1243,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
         // Echoes show their text only; the thumbnails come with the persisted entry.
         let echo = |mode| t.streaming.echo.iter().filter(move |(_, m)| *m == mode).map(|(text, _)| text.as_str()).collect::<Vec<_>>();
         for text in echo(PromptMode::Prompt) {
-            col = col.child(user_bubble(text, &[], TAIL, t, bubble, &fonts, keys, cx));
+            col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
             col = col.child(work_block(&work, key, true, setup, t, bubble, now, &fonts, keys, cx));
@@ -1249,7 +1257,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             }
         }
         for text in echo(PromptMode::FollowUp) {
-            col = col.child(user_bubble(text, &[], TAIL, t, bubble, &fonts, keys, cx));
+            col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, &fonts, keys, cx));
         }
         col = col.pb_6();
     }
@@ -1312,10 +1320,7 @@ fn render_timeline_item(
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
     match item {
-        Item::User { text, images, .. } => {
-            let images: Vec<_> = images.iter().map(|id| blobs.get(id).map(|b| b.image.clone())).collect();
-            user_bubble(text, &images, ix, t, bubble, fonts, keys, cx).into_any()
-        }
+        Item::User { text, images, .. } => user_bubble(text, images, blobs, ix, t, bubble, fonts, keys, cx).into_any(),
         Item::Work(w) => work_block(w, ix, false, None, t, bubble, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
@@ -1369,7 +1374,7 @@ fn reply_block(
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
-    let body = markdown::render(text, &fonts.mono, keys, Some(&mut inline_image(blobs, ix as u64, cx)));
+    let body = markdown::render(text, &fonts.mono, keys, Some(&mut inline_image(blobs, ix as u64, cx)), &[]);
     div()
         .group("msg")
         .relative()
@@ -1423,15 +1428,27 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirige
     )
 }
 
+/// A sent message's `[image-N]` tokens as links to the images they name
+/// (`dirigent://image/<blob id>`, see `Dirigent::open_app_link`). The images went out in
+/// paste order, which is N ascending, and only those whose token was in the text
+/// (`Dirigent::attachments`), so the k-th distinct N names the k-th image. A token typed
+/// by hand, with no image of its own, can shift that; nothing records the true pairing.
+fn image_links(text: &str, images: &[String]) -> Vec<(String, SharedString)> {
+    let ns = crate::input::image_numbers(text);
+    ns.into_iter().zip(images).map(|(n, id)| (crate::input::image_token(n), format!("dirigent://image/{id}").into())).collect()
+}
+
 /// The bubble bleeds past the column by its own padding, so its text lines up with
 /// replies and work lines instead of being inset. Attached images go under the text as
-/// thumbnails (a blank box while the bytes are on their way); click one to see it.
+/// thumbnails (a blank box while the bytes are on their way); click one, or its
+/// `[image-N]` in the text, to see it.
 /// `ix` is the bubble's timeline index: thumbnail ids must be unique across the thread,
 /// since gpui shares click state between same-id elements and drops clicks on the others.
 #[allow(clippy::too_many_arguments)]
 fn user_bubble(
     text: &str,
-    images: &[Option<Arc<gpui::Image>>],
+    images: &[String],
+    blobs: &HashMap<String, Blob>,
     ix: usize,
     t: &OpenThread,
     bubble: u32,
@@ -1440,17 +1457,17 @@ fn user_bubble(
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let thumbs = (!images.is_empty()).then(|| {
-        div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, image)| {
-            let id = ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64);
-            let box_ = thumb_box().id(id);
-            match image {
-                Some(image) => box_
+        div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, id)| {
+            let blob = blobs.get(id);
+            let box_ = thumb_box(blob).id(ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64));
+            match blob {
+                Some(blob) => box_
                     .cursor_pointer()
                     .on_click(cx.listener({
-                        let image = image.clone();
+                        let image = blob.image.clone();
                         move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
                     }))
-                    .child(thumb(image)),
+                    .child(thumb(blob)),
                 None => box_.bg(rgba(theme::t().accent)),
             }
         }))
@@ -1470,7 +1487,7 @@ fn user_bubble(
         .font_family(fonts.prose.clone())
         .text_size(text::lg())
         .line_height(u(22.))
-        .child(markdown::render(text, &fonts.mono, keys, None))
+        .child(markdown::render(text, &fonts.mono, keys, None, &image_links(text, images)))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
         .children(corner_buttons(ix, text, t, cx).map(|b| b.top_2().right_2()))
@@ -1553,7 +1570,7 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &
         .text_size(text::lg())
         .line_height(u(22.))
         .child(label)
-        .child(markdown::render(text, &fonts.mono, keys, None))
+        .child(markdown::render(text, &fonts.mono, keys, None, &[]))
 }
 
 /// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
@@ -1683,9 +1700,11 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
     let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Log, six);
     match step {
-        Step::Thinking(text) => div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys, None)).into_any(),
+        Step::Thinking(text) => {
+            div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys, None, &[])).into_any()
+        }
         Step::Text(text) => {
-            let body = markdown::render(text, mono, keys, Some(&mut inline_image(blobs, step_id_n((key, six)), cx)));
+            let body = markdown::render(text, mono, keys, Some(&mut inline_image(blobs, step_id_n((key, six)), cx)), &[]);
             div().py_0p5().text_color(rgba(theme::t().fg)).child(body).into_any()
         }
         Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),

@@ -26,7 +26,8 @@ use std::ops::Range;
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// A click on a `dirigent://` link (`dirigent://thread/<id>`). Dispatched to the focused
+/// A click on a `dirigent://` link (`dirigent://thread/<id>`, `dirigent://image/<blob id>`;
+/// see `Dirigent::open_app_link`). Dispatched to the focused
 /// element (the composer, normally) and bubbling up to the root view, which opens it.
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = dirigent, no_json)]

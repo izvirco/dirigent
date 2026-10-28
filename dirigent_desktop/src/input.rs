@@ -79,6 +79,15 @@ pub fn image_token(n: u32) -> String {
     format!("[image-{n}]")
 }
 
+/// The distinct `N`s of the `[image-N]` tokens in `text`, ascending.
+pub fn image_numbers(text: &str) -> Vec<u32> {
+    let mut ns: Vec<u32> =
+        image_tokens(text).into_iter().filter_map(|r| text[r].strip_prefix("[image-")?.strip_suffix(']')?.parse().ok()).collect();
+    ns.sort_unstable();
+    ns.dedup();
+    ns
+}
+
 /// Byte ranges of every `[image-N]` token in `text`.
 fn image_tokens(text: &str) -> Vec<Range<usize>> {
     let mut out = vec![];
@@ -996,6 +1005,7 @@ mod tests {
         let text = "see [image-1] and [image-23], not [image-] or [image-x] or [image-4";
         let found: Vec<_> = image_tokens(text).into_iter().map(|r| &text[r]).collect();
         assert_eq!(found, ["[image-1]", "[image-23]"]);
+        assert_eq!(image_numbers("[image-23] [image-1] [image-23]"), [1, 23]);
         assert_eq!(image_token(7), "[image-7]");
     }
 }
