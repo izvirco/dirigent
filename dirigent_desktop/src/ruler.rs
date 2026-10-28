@@ -22,7 +22,7 @@ use std::time::Instant;
 
 // Lengths are design pixels, drawn `theme::zoom()` times as big (`theme::u`).
 
-/// Strip width; the reading column is centered, so this sits in its left margin.
+/// Strip width; the reading column and composer are centered, so this sits in their left margin.
 pub const WIDTH: f32 = 28.;
 /// Marks start this far from the pane's left edge and are this long; only being in
 /// view changes their length.
@@ -189,7 +189,8 @@ fn visible_items(list: &ListState) -> Range<usize> {
     start.unwrap_or(end)..end
 }
 
-/// The strip, to be laid over the transcript list's left edge (same height).
+/// The strip, to be laid over the thread column's left edge (transcript and composer,
+/// so the composer's height doesn't move it).
 pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
     let marks: Rc<[Mark]> = marks(t).into();
@@ -279,7 +280,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
 }
 
 /// The hover card for mark `i`: what kind of message, and its first line or two,
-/// floated to the right of the mark over the transcript.
+/// floated to the right of the mark over the transcript (or composer).
 fn preview_card(i: usize, m: &Mark, t: &OpenThread, grid: &Grid, n: usize) -> AnyElement {
     let text = match &t.timeline.items[m.item] {
         Item::User { text, .. } | Item::Assistant(text) => text.as_str(),

@@ -9,7 +9,7 @@
 //! resizable panel on the pane's right with the full log, so the reading column only ever
 //! grows. While a run goes on, the model's latest prose streams below its work line a line
 //! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
-//! over the list's left edge: one mark per message, hover to preview, click to jump.
+//! over the column's left edge, transcript and composer: one mark per message, hover to preview, click to jump.
 //! Messages can be pinned (the button next to `copy`); pins colour their marks.
 //! Questions the model asked (`ask_user`) float above the composer (`ask_card`), out of the
 //! transcript's flow, until they are answered or dismissed. Steers (typed, or the answers
@@ -135,23 +135,16 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         )
         .into_any_element();
 
+    // The ruler spans the whole column, composer included, so it stays put while the
+    // composer grows and shrinks; it sits in the margin left of the composer.
     let column = div()
+        .relative()
         .flex_1()
         .min_w_0()
         .h_full()
         .flex()
         .flex_col()
-        .child(
-            div()
-                .relative()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .flex()
-                .flex_col()
-                .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().w_full())
-                .child(ruler::render(this, cx)),
-        )
+        .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().min_h_0().w_full())
         .child(
             // The ask stack is a zero-height layer at the composer's top edge that grows
             // upward (`justify_end`), so it covers the transcript instead of pushing it.
@@ -181,7 +174,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 )
                 .children(banner)
                 .child(composer(this, cx)),
-        );
+        )
+        .child(ruler::render(this, cx));
     let titling = this.titling(&host, &id);
     // `⎇ dirigent-abcd1234` after the title while the thread works in its own workspace.
     let branch = workspace.as_deref().map(|w| {
