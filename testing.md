@@ -127,7 +127,8 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
   `DISPLAY` for you: `scripts/ui.sh run xdotool mousedown 1` (e.g. to shoot a drag halfway), `scripts/ui.sh run import …`.
 - The app is launched with `VK_ICD_FILENAMES=$DIRIGENT_UI_VK_ICD` (lavapipe; Xvfb can't present GPU frames),
   `--data-dir <session>/data --config-dir <session>/config`, `DIRIGENT_PORT=<port>`, `DIRIGENT_BIND=127.0.0.1` (the
-  embedded service stays off the tailnet), and `DIRIGENT_RUNTIME` (this checkout's runtime), in its own process group (`setsid`).
+  embedded service stays off the tailnet), `DIRIGENT_RUNTIME` (this checkout's runtime) and `DIRIGENT_PREFIX`
+  (`<session>/prefix`, where an update installs instead of `~/.local`), in its own process group (`setsid`).
   Lilex, the default font, is built into the binary. An app that restarted itself (an update) has a new pid and
   group: `ui.sh` finds it by its command line (binary + session data dir), so `stop` and friends still work.
 - The tool paths from `nix develop` are cached in `/tmp/dirigent-ui/devenv-<hash>.sh`, keyed by `flake.nix` +
@@ -144,9 +145,12 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
 - **The update button** needs an update api with a newer release for `linux-x86_64`: `dirigent_api serve` with
   `S3_PREFIX=test/` (releases published there with `dirigent_api publish`, see `packaging/README.md`), then
   `DIRIGENT_UPDATE_URL=http://127.0.0.1:<api port>/api/v0/updates/<channel> scripts/ui.sh start` (and `setup`, which
-  relaunches). Checked at launch; the download lands in `<session>/data/updates/`. Linux has no installer yet, so
-  "Restart" just restarts the app; "Restart when idle" shows with a local agent working (a prompt with `sleep 20`).
-  Signed with your own key in a debug build: `DIRIGENT_UPDATE_KEY=<its public key>`.
+  relaunches). Checked at launch; the download lands in `<session>/data/updates/`. The release is a Linux
+  tarball laid out as the release workflow packs it (a `dirigent/` with the debug binary as `dirigent` and
+  `packaging/linux/install.sh`; `runtime/` can be left out, `DIRIGENT_RUNTIME` stands in). "Restart" installs it
+  into `<session>/prefix/lib/dirigent` and starts it from there (`<session>/data/logs/install.log` has the
+  script's output); "Restart when idle" shows with a local agent working (a prompt with `sleep 20`). Signed with
+  your own key in a debug build: `DIRIGENT_UPDATE_KEY=<its public key>`.
 
 ## Non-UI crates
 

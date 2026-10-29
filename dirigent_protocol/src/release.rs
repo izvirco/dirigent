@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 pub struct Release {
     /// Semver, compared against the running build's `CARGO_PKG_VERSION`.
     pub version: String,
-    /// The installer (Windows) to download. Its minisign signature is at `{url}.minisig`.
+    /// The installer to download: the setup exe (Windows) or the tarball (Linux). Its
+    /// minisign signature is at `{url}.minisig`.
     pub url: String,
     #[serde(default)]
     pub notes: String,

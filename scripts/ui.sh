@@ -59,8 +59,10 @@ BIN=$ROOT/target/debug/dirigent_desktop
 mkdir -p "$DIR"
 
 # The session's app by its command line (absolute binary, then the session's data dir): an
-# app that restarted itself (`update.rs`) has a new pid and process group.
-APP_CMD="^$BIN --data-dir $DIR/data( |$)"
+# app that restarted itself (`update.rs`) has a new pid and process group. An update installs
+# into the session's own prefix (DIRIGENT_PREFIX, never ~/.local) and starts from there.
+PREFIX=$DIR/prefix
+APP_CMD="^($BIN|$PREFIX/lib/dirigent/dirigent) --data-dir $DIR/data( |$)"
 alive() {
   [ -f "$DIR/$1.pid" ] && kill -0 "$(cat "$DIR/$1.pid")" 2>/dev/null && return
   [ "$1" = app ] && pgrep -f "$APP_CMD" >/dev/null
@@ -110,7 +112,7 @@ launch() {
   mkdir -p "$DIR/data" "$DIR/config"
   env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" \
     DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 DIRIGENT_RUNTIME="$ROOT/dirigent_runtime/src/index.ts" \
-    setsid "$BIN" --data-dir "$DIR/data" --config-dir "$DIR/config" >"$DIR/app.log" 2>&1 </dev/null &
+    DIRIGENT_PREFIX="$PREFIX" setsid "$BIN" --data-dir "$DIR/data" --config-dir "$DIR/config" >"$DIR/app.log" 2>&1 </dev/null &
   echo $! >"$DIR/app.pid"
   WIN=$(timeout 20 xdotool search --sync --onlyvisible --class dirigent | head -1) ||
     { echo "window never appeared, see $DIR/app.log" >&2; exit 1; }

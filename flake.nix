@@ -69,7 +69,7 @@
       cargoDeps = rustPlatform.fetchCargoVendor {
         name = "dirigent";
         src = rustSrc;
-        hash = "sha256-yx6Xuv/DQajVEtm4Hmoj1CWVAJYL/zXvoru/tR0jLgo=";
+        hash = "sha256-yJTx56z0qkDLewWZD626W9RtOwsJ/x7fEDZjK+5X+vo=";
       };
       # One crate's binary, in `bin/`.
       crate =
