@@ -26,6 +26,7 @@ mod settings;
 mod sidebar;
 mod theme;
 mod thread;
+mod titlebar;
 mod usage;
 mod view;
 mod working;
@@ -89,7 +90,11 @@ fn main() {
                     window_background,
                     // app_id/title are what testing.md keys on to find this window.
                     app_id: Some("dirigent".into()),
-                    titlebar: Some(TitlebarOptions { title: Some("Dirigent".into()), ..Default::default() }),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Dirigent".into()),
+                        appears_transparent: titlebar::CUSTOM,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Dirigent::new(cache, config, window, cx)),

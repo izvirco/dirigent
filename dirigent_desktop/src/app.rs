@@ -13,7 +13,7 @@ use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{config, hosts, images, settings};
-use crate::{lists, ruler, sidebar, thread, usage};
+use crate::{lists, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
     Ask, ClientMessage, Entry, FirstPrompt, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs,
@@ -395,6 +395,10 @@ pub struct Dirigent {
     /// for that click, so pressing a menu's own trigger closes it rather than reopening it.
     /// Reset at the start of every press (`reset_menu_dismissed`).
     menu_dismissed: bool,
+    /// The current left press is on a title-bar grab area (`titlebar::grab`): it moves the
+    /// window, so the root's `on_mouse_down` leaves the selection and a rename alone. Reset
+    /// at the start of every press (`reset_menu_dismissed`), as the root may not see it.
+    pub caption_press: bool,
     /// Sidebar: user-dragged width (design pixels, `theme::u`), hidden with `[`, and "peek"
     /// when hidden but the mouse rests on the window's left edge.
     pub sidebar_width: f32,
@@ -566,6 +570,7 @@ impl Dirigent {
             modal: None,
             menu: None,
             menu_dismissed: false,
+            caption_press: false,
             sidebar_width,
             sidebar_hidden: false,
             sidebar_peek: false,
@@ -3177,6 +3182,9 @@ impl Dirigent {
 
     /// A press that no text block took (see `select::Block`) drops the selection.
     fn on_mouse_down(&mut self, _: &gpui::MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.caption_press) {
+            return;
+        }
         // A press outside the rename field (which stops its own) saves the rename, like a
         // blur; the press then does whatever it does (focus included).
         if self.renaming.is_some() {
@@ -3543,6 +3551,34 @@ fn decode_blob(mime: &str, data: &str) -> Option<Blob> {
     blob_from(mime, base64::engine::general_purpose::STANDARD.decode(data).ok()?)
 }
 
+/// The root's mouse moves and left releases (resizing, dragging a selection or a project),
+/// at window level for the reason `reset_menu_dismissed` is: the root's own `on_mouse_move` / `on_mouse_up`
+/// only fire while it's hovered, and an occluder under the mouse (a header's actions, the
+/// open sidebar peek, a modal's dim) would leave a drag running after the release.
+/// Bubble phase, painted first, so they run last, as the root's did.
+fn track_mouse(cx: &mut Context<Dirigent>) -> impl IntoElement {
+    let this = cx.entity().downgrade();
+    gpui::canvas(
+        |_, _, _| {},
+        move |_, _, window, _| {
+            let moved = this.clone();
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
+                if phase == gpui::DispatchPhase::Bubble {
+                    moved.update(cx, |this, cx| this.on_mouse_move(ev, window, cx)).ok();
+                }
+            });
+            let released = this.clone();
+            window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
+                if phase == gpui::DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                    released.update(cx, |this, cx| this.on_mouse_up(ev, window, cx)).ok();
+                }
+            });
+        },
+    )
+    .absolute()
+    .size_0()
+}
+
 /// Clears `menu_dismissed` at the start of every press, before any menu's
 /// `on_mouse_down_out` (capture runs in paint order and this paints first). A window-level
 /// listener rather than the root's `capture_any_mouse_down`: that one only fires while the
@@ -3556,7 +3592,11 @@ fn reset_menu_dismissed(cx: &mut Context<Dirigent>) -> impl IntoElement {
             let this = this.clone();
             window.on_mouse_event(move |_: &gpui::MouseDownEvent, phase, _, cx| {
                 if phase == gpui::DispatchPhase::Capture {
-                    this.update(cx, |this, _| this.menu_dismissed = false).ok();
+                    this.update(cx, |this, _| {
+                        this.menu_dismissed = false;
+                        this.caption_press = false;
+                    })
+                    .ok();
                 }
             });
         },
@@ -3587,7 +3627,16 @@ impl Render for Dirigent {
         if bg.pattern != Pattern::Off && bg.reach == Reach::Full {
             fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE).round() as u32);
         }
-        let panel = div().flex_1().min_w_0().bg(rgba(fill)).overflow_hidden().flex().flex_col().child(main);
+        let panel = div()
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .bg(rgba(fill))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .when(titlebar::CUSTOM, |d| d.child(titlebar::strip(cx)))
+            .child(main);
         div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -3602,9 +3651,8 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::open_app_link))
             .child(reset_menu_dismissed(cx))
+            .child(track_mouse(cx))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .relative()
             .size_full()
             .flex()
@@ -3647,6 +3695,7 @@ impl Render for Dirigent {
                         .child(div().flex_1().min_w_0().child(m))
                 }))
             }))
+            .when(titlebar::CUSTOM, |d| d.child(titlebar::controls(window)))
     }
 }
 

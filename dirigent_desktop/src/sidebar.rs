@@ -17,6 +17,7 @@ use crate::menu::{self, Side};
 use crate::projects::{self, Group};
 use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
+use crate::titlebar;
 use dirigent_protocol::ThreadSummary;
 use gpui::{
     AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, Pixels, Render, SharedString, Stateful, Window,
@@ -112,6 +113,10 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .h_full()
         .w(u(if open { this.sidebar_width + 2. * theme::GUTTER } else { PEEK_ZONE }))
         .on_hover(cx.listener(|this, hovered, _, cx| this.set_peek(*hovered, cx)))
+        // Open, it hides the main pane's grab strip (`titlebar.rs`), which would otherwise
+        // take the presses on its title's buttons; its title drags the window instead. Only
+        // the whole copy can occlude: an occluding child would unhover it, and it would close.
+        .when(open, |d| d.occlude())
         .when(open, |d| {
             // `rounded_lg`, inside its border.
             let radius = u(8.) - px(1.);
@@ -142,10 +147,15 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .flex()
         .flex_row()
         .items_center()
-        .h(u(40.)) // same as `lists::header`, so the title aligns with the main pane's
+        .h(u(titlebar::HEIGHT)) // same as `lists::header`, so the title aligns with the main pane's
         .pl_4()
         .pr_2()
-        .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
+        // The title drags the window (`titlebar.rs`); the buttons beside it don't overlap it.
+        .child({
+            let label = div().flex_1().h_full().flex().items_center();
+            let label = if titlebar::CUSTOM { titlebar::grab(label, cx) } else { label };
+            label.font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent")
+        })
         // The folder opens the Projects page (lit while it's open); `+` a new thread.
         .child(
             theme::icon_button("projects", "folder", cx, |this, cx| this.show_projects(cx))
