@@ -550,7 +550,7 @@ impl TextInput {
         }
     }
 
-    fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
+    pub fn move_to(&mut self, offset: usize, window: &Window, cx: &mut Context<Self>) {
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         self.follow_cursor = true;

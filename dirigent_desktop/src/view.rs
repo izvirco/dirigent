@@ -598,6 +598,29 @@ fn answer_markdown<'a>(questions: impl Iterator<Item = &'a str>, answers: Option
         .join("\n\n")
 }
 
+/// An ask as a draft reply for the composer (the form's `Insert`): each question quoted,
+/// the answer so far under it (after a blank line, or markdown folds it into the quote).
+/// Returns the text and where the cursor goes: the first missing answer, else the end.
+pub fn draft_reply(questions: &[dirigent_protocol::Question], answers: &[Vec<String>]) -> (String, usize) {
+    let mut text = String::new();
+    let mut cursor = None;
+    for (i, q) in questions.iter().enumerate() {
+        if i > 0 {
+            text.push_str("\n\n");
+        }
+        let quoted: Vec<String> = q.text.lines().map(|l| format!("> {l}").trim_end().to_owned()).collect();
+        text.push_str(&quoted.join("\n"));
+        text.push_str("\n\n");
+        let answer = answers.get(i).map(|a| a.join(", ")).unwrap_or_default();
+        if answer.is_empty() {
+            cursor.get_or_insert(text.len());
+        }
+        text.push_str(&answer);
+    }
+    let end = text.len();
+    (text, cursor.unwrap_or(end))
+}
+
 /// One line for a finished `async_bash` job: `job cargo check · exit 1 · 12s`.
 fn job_text(details: Option<&Value>) -> Option<String> {
     let d = details?;
@@ -1017,6 +1040,17 @@ mod tests {
         );
         assert_eq!(iso_ms("1970-01-01T00:00:01Z"), Some(1000));
         assert_eq!(iso_ms("2000-03-01T00:00:00.000Z"), Some(951_868_800_000));
+    }
+
+    #[test]
+    fn draft_reply_quotes_questions_and_lands_on_the_first_gap() {
+        let q = |text: &str| dirigent_protocol::Question { text: text.into(), options: vec![], allow_custom: false, multi: false };
+        let (text, cursor) =
+            draft_reply(&[q("Db?"), q("Two\n\nlines?"), q("Fruit?")], &[vec!["pg".into()], vec![], vec!["Apple".into(), "Kiwi".into()]]);
+        assert_eq!(text, "> Db?\n\npg\n\n> Two\n>\n> lines?\n\n\n\n> Fruit?\n\nApple, Kiwi");
+        assert_eq!(&text[..cursor], "> Db?\n\npg\n\n> Two\n>\n> lines?\n\n");
+        let (text, cursor) = draft_reply(&[q("Db?")], &[vec!["pg".into()]]);
+        assert_eq!(cursor, text.len());
     }
 
     #[test]

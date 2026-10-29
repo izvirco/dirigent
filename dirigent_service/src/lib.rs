@@ -296,10 +296,14 @@ impl Service {
                 self.prompt(&thread_id, mode, &FirstPrompt { text, model, thinking_level, images, title, tools }).await?;
                 ServerMessage::Ok { reply_to: id }
             }
-            ClientMessage::Answer { id, thread_id, ask_id, answers } => {
+            ClientMessage::Answer { id, thread_id, ask_id, answers, silent } => {
                 // Taken before anything else so a second client answering the same ask is refused.
                 let ask = self.storage.lock().unwrap().take_ask(&thread_id, &ask_id)?.ok_or_else(|| anyhow!("already answered"))?;
-                info!(thread = %thread_id, dismissed = answers.is_none(), "ask answered");
+                info!(thread = %thread_id, dismissed = answers.is_none(), silent, "ask answered");
+                if silent {
+                    self.push_threads();
+                    return Ok(ServerMessage::Ok { reply_to: id });
+                }
                 // The answer starts a turn if the model is idle (and is queued if it isn't).
                 self.runtime.begin_run(&thread_id);
                 self.push_threads();
