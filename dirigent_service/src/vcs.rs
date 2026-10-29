@@ -1,14 +1,13 @@
 //! Version control on the host: which system a directory is under (jj wins over git, so a
 //! colocated repo is driven by jj), whether its working copy is dirty, and per-thread
 //! isolated workspaces (a git worktree or a jj workspace) under
-//! `$XDG_DATA_HOME/dirigent/workspaces/<name>`, where the name is also the git branch /
+//! `<data dir>/workspaces/<name>`, where the name is also the git branch /
 //! jj workspace name (`workspace_name`). Everything shells out to `git` / `jj`;
 //! nothing else about the repo is managed. Branches are never deleted.
 
 use anyhow::{Context, Result, anyhow};
 use dirigent_protocol::Vcs;
 use std::path::Path;
-use std::process::Command;
 
 /// Run a vcs command in `dir`, returning stdout on success and stderr as the error. A jj
 /// workspace goes *stale* when its commit is rewritten from another workspace (a rebase in
@@ -26,7 +25,7 @@ fn run(program: &str, dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 fn run_once(program: &str, dir: &Path, args: &[&str]) -> Result<String> {
-    let out = Command::new(program).current_dir(dir).args(args).output().with_context(|| format!("run {program}"))?;
+    let out = crate::platform::command(program).current_dir(dir).args(args).output().with_context(|| format!("run {program}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
         return Err(anyhow!("{program} {}: {}", args.join(" "), err.trim()));
@@ -171,6 +170,7 @@ pub fn remove_workspace(vcs: Vcs, repo: &Path, dest: &Path, thread_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn git_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();

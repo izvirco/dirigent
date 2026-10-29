@@ -69,8 +69,9 @@ pub fn group_key(host: &str, project: &Project, links: &Links) -> String {
         .unwrap_or_else(|| format!("{host}/{}", project.id))
 }
 
+/// A host's path's last part. Split at `\` too: the path may be a Windows host's.
 pub fn basename(path: &str) -> &str {
-    path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
+    path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path)
 }
 
 /// Groups by most recent activity (then name); plus orphan threads (most recent first).

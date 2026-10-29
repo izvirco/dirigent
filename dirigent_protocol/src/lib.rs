@@ -554,7 +554,7 @@ pub enum Setup {
     /// Its isolated workspace is being made (`CreateThread::workspace`).
     Workspace,
     /// Its session is capturing the project's nix dev shell (`nix develop`); prompts wait
-    /// for it. Every load of a session in a project with a `flake.nix` does this.
+    /// for it. Every load of a session in a project with a `flake.nix` does this (not on Windows).
     NixShell,
 }
 

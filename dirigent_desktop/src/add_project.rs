@@ -1,7 +1,7 @@
 //! The Add project modal, behind the Projects page's top-bar button. Two pages:
 //!
 //! - Browse: `<host ▾> <path>`, the path starting at `~/`, over the subdirectories of the
-//!   path's directory part (everything up to its last `/`, listed by the host:
+//!   path's directory part (everything up to its last `/` or `\`, listed by the host:
 //!   `ListDirs`) whose names start with the part after it. Up / Down move the selection,
 //!   Enter (or a click) goes into the selected directory, ctrl+Enter or `Add` adds the
 //!   path as typed.
@@ -55,9 +55,10 @@ pub struct Offer {
     pub candidates: Vec<(String, String)>,
 }
 
-/// `~/work/di` → (`~/work/`, `di`); no `/` at all → (``, the text).
+/// `~/work/di` → (`~/work/`, `di`); no `/` at all → (``, the text). `\` splits too: a
+/// Windows host takes either (`C:\work\di` → (`C:\work\`, `di`)).
 pub fn split(path: &str) -> (&str, &str) {
-    match path.rfind('/') {
+    match path.rfind(['/', '\\']) {
         Some(i) => path.split_at(i + 1),
         None => ("", path),
     }
@@ -156,7 +157,7 @@ fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Di
     let note = match &state.dirs {
         _ if state.error.is_some() => state.error.clone().map(|e| (e, true)),
         _ if !connected => Some((format!("{host} is not connected"), true)),
-        _ if dir.is_empty() => Some(("Start with / or ~/".to_owned(), false)),
+        _ if dir.is_empty() => Some(("Start with ~/ or an absolute path".to_owned(), false)),
         Some(Err(e)) if dir == state.dir => Some((e.clone(), true)),
         Some(Ok(_)) if dir == state.dir && visible.is_empty() => Some(("No matching directories".to_owned(), false)),
         Some(Ok(_)) if dir == state.dir => None,
@@ -275,6 +276,8 @@ mod tests {
         assert_eq!(split("~/"), ("~/", ""));
         assert_eq!(split("/"), ("/", ""));
         assert_eq!(split("~"), ("", "~"));
+        assert_eq!(split(r"C:\work\di"), (r"C:\work\", "di"));
+        assert_eq!(split("C:/"), ("C:/", ""));
     }
 
     #[test]

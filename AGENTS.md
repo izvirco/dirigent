@@ -32,6 +32,15 @@ Read `testing.md` (how to drive the UI) first.
 - **The `dirigent` tool is a ws client of the service** (`dirigent_runtime/src/client.ts`, url from `DIRIGENT_URL`; other hosts, from `ListHosts`, the same way, directly): add a capability as a protocol message + service handler, then a `Dirigent` helper; don't add a runtime→service side channel. Notices to a parent thread (a sub-agent ended) come from the service (`notify_thread`), never from the runtime, which may be restarted meanwhile.
 - **`cargo test -p dirigent_service` needs FTS5**: the bundled sqlite has it; a system sqlite may not.
 
+## Windows
+
+The desktop and service also build natively on Windows (MSVC: rustup + Visual Studio Build Tools with the C++ workload, whose Windows SDK has the `fxc.exe` gpui compiles its shaders with; bun on `PATH`; Git for Windows, whose bash runs agents' `bash` / `async_bash`). `bun install`, then `cargo build --release -p dirigent_desktop`; like on Linux the binary finds the runtime in its checkout. Config lives in `%APPDATA%\dirigent`, data and logs in `%LOCALAPPDATA%\dirigent` (dated log files only: no `desktop.log` symlink). A release build has no console, so it logs to the file alone.
+
+- What differs is in `dirigent_service/src/platform.rs` (default dirs, host name, `command()`) plus a few `cfg`s: fonts (`config.rs`, no fontconfig), the primary selection (`input::write_to_primary`), `async_bash`'s shell and kill (`tools.ts`), no nix shell (`sessions.ts`).
+- Start programs that also run on Windows through `platform::command`, not `Command::new`: it keeps them from flashing a console window there.
+- Paths from a host may be Windows paths (`C:\x\y`): the desktop splits them at `\` too (`projects::basename`, `add_project::split`).
+- `scripts/ui.sh` is Linux-only; Seb tests on Windows himself. You can still check that it compiles: `nix develop .#windows -c cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu`.
+
 ## Checks before you're done
 
-`cargo fmt --all`, `cargo clippy --workspace`, `cargo test --workspace`, `bun run typecheck`, `bun run lint`, `bun run fmt`.
+`cargo fmt --all`, `cargo clippy --workspace`, the Windows `cargo clippy` above when you touched platform code, `cargo test --workspace`, `bun run typecheck`, `bun run lint`, `bun run fmt`.

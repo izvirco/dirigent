@@ -1,6 +1,6 @@
 //! Logging for both binaries: `tracing` events go to stderr and to a daily file in
 //! `<data dir>/logs/` (`<name>.YYYY-MM-DD.log`, 30 days of them kept; `<name>.log` links
-//! today's). Times are UTC, as the files roll at UTC midnight.
+//! today's, except on Windows). Times are UTC, as the files roll at UTC midnight.
 //!
 //! By default dirigent's crates log at info and their dependencies (gpui's `log` records
 //! included) only warn. `DIRIGENT_LOG` adds directives on top, in `RUST_LOG` syntax:
@@ -27,13 +27,11 @@ pub fn init_logging(name: &str) {
     // The directory made first: the appender prunes old files before it makes it.
     let dir = crate::data_dir().join("logs");
     let _ = std::fs::create_dir_all(&dir);
-    let file = rolling::Builder::new()
-        .rotation(Rotation::DAILY)
-        .filename_prefix(name)
-        .filename_suffix("log")
-        .max_log_files(KEEP_FILES)
-        .latest_symlink(format!("{name}.log"))
-        .build(dir);
+    let file = rolling::Builder::new().rotation(Rotation::DAILY).filename_prefix(name).filename_suffix("log").max_log_files(KEEP_FILES);
+    // Not on Windows: a symlink needs developer mode there, and a failed one fails the file.
+    #[cfg(unix)]
+    let file = file.latest_symlink(format!("{name}.log"));
+    let file = file.build(dir);
     let (file, file_error) = match file {
         Ok(f) => (Some(fmt::layer().with_ansi(false).with_writer(f)), None),
         Err(e) => (None, Some(e)),

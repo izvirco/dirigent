@@ -312,7 +312,7 @@ pub fn archive_confirm(host: &str, id: &str, at: ArchiveAt, side: Side, this: &D
 /// A workspace's name is its directory's basename: the host names the directory, the git
 /// branch and the jj workspace alike (`dirigent-<last 8 of the thread id>`, see `vcs.rs`).
 fn workspace_name(dir: &str) -> String {
-    dir.rsplit('/').next().unwrap_or(dir).to_owned()
+    crate::projects::basename(dir).to_owned()
 }
 
 /// The thread's workspace directory is gone: nothing can run until it is recreated or

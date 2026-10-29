@@ -546,7 +546,7 @@ impl Dirigent {
             cx.subscribe(input, |this, _, _: &input::Changed, cx| this.schedule_apply(cx)).detach();
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
-        let (fonts, missing) = config.fonts.resolve();
+        let (fonts, missing) = config.fonts.resolve(cx);
         settings.missing_fonts = missing.clone();
         theme::set_text_size(config.fonts.size());
 
@@ -1934,7 +1934,7 @@ impl Dirigent {
         }
         let mut missing = vec![];
         if families_changed {
-            (self.fonts, missing) = self.config.fonts.resolve();
+            (self.fonts, missing) = self.config.fonts.resolve(cx);
             self.settings.missing_fonts = missing.clone();
         }
         // The transcript and log lists keep their items' measured heights.
@@ -3195,7 +3195,7 @@ impl Dirigent {
             self.selection.end_drag();
             // Primary selection (middle click), as any text widget on Linux.
             if let Some(text) = self.selected_text(cx) {
-                cx.write_to_primary(ClipboardItem::new_string(text));
+                input::write_to_primary(text, cx);
             }
             return;
         }

@@ -187,7 +187,7 @@ impl Runtime {
 
     /// One child lifetime: spawn, pump stdin/stdout, return when it exits.
     async fn run_child(&self, out: &mpsc::UnboundedSender<RuntimeMessage>) -> Result<std::process::ExitStatus> {
-        let mut child = Command::new(&self.cmd[0])
+        let mut child = Command::from(crate::platform::command(&self.cmd[0]))
             .args(&self.cmd[1..])
             .env("DIRIGENT_URL", &self.url)
             .env("DIRIGENT_DATA_DIR", crate::data_dir())

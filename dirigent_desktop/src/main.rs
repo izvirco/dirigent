@@ -1,5 +1,9 @@
 //! Dirigent desktop: gpui client for dirigent_service hosts.
 
+// A release build on Windows is a GUI app: no console window next to it (it logs to its
+// file). Debug builds keep theirs for the stderr log.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod add_project;
 mod ambient;
 mod app;
