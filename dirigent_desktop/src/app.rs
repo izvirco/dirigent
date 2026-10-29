@@ -1534,11 +1534,12 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The workspace menu's `Copy path`: the directory to the clipboard, with a toast.
-    pub fn copy_path(&mut self, path: String, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(path));
+    /// `text` to the clipboard, with a `toast` saying what was copied; closes any menu.
+    /// The workspace menu's `Copy path`, the thread header's copy-id button.
+    pub fn copy(&mut self, text: String, toast: &str, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.menu = None;
-        self.toast("Path copied", cx);
+        self.toast(toast, cx);
     }
 
     /// Archive a thread with a workspace, after `ConfirmArchive` decided its fate.
