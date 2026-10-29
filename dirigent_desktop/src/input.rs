@@ -3,7 +3,8 @@
 //! text with wrapping, grows with content up to a share of the window, then scrolls
 //! (wheel, and automatically to keep the cursor in view) and paints cursor/selection.
 //! Mouse selection (double click = word, triple = all) keeps following the mouse once it
-//! leaves the input, and every edit is undoable (typing a word is one step).
+//! leaves the input, and every edit is undoable (typing a word is one step). Ctrl+backspace /
+//! ctrl+delete delete a word (`word_boundary`).
 //! Adapted from zed's `gpui/examples/input.rs`, extended to multiple lines.
 
 use crate::select::{self, word_at};
@@ -23,6 +24,8 @@ actions!(
     [
         Backspace,
         Delete,
+        BackspaceWord,
+        DeleteWord,
         Left,
         Right,
         Up,
@@ -452,24 +455,32 @@ impl TextInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            let prev = self.previous_boundary(self.cursor_offset());
-            if self.cursor_offset() == prev {
-                return;
-            }
-            // Not `select_to`: that would end the undo group of a run of backspaces.
-            self.selected_range = prev..self.cursor_offset();
-        }
-        self.replace_text_in_range(None, "", window, cx)
+        self.delete_to(self.previous_boundary(self.cursor_offset()), window, cx)
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_to(self.next_boundary(self.cursor_offset()), window, cx)
+    }
+
+    fn backspace_word(&mut self, _: &BackspaceWord, window: &mut Window, cx: &mut Context<Self>) {
+        let c = self.cursor_offset();
+        self.delete_to(word_boundary(self.content[..c].grapheme_indices(true).rev(), c), window, cx)
+    }
+
+    fn delete_word(&mut self, _: &DeleteWord, window: &mut Window, cx: &mut Context<Self>) {
+        let c = self.cursor_offset();
+        self.delete_to(word_boundary(self.content[c..].grapheme_indices(true).map(|(i, g)| (c + i + g.len(), g)), c), window, cx)
+    }
+
+    /// Delete the selection, or with none, from the cursor to `to` (either side of it).
+    fn delete_to(&mut self, to: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
-            let next = self.next_boundary(self.cursor_offset());
-            if self.cursor_offset() == next {
+            let c = self.cursor_offset();
+            if c == to {
                 return;
             }
-            self.selected_range = self.cursor_offset()..next;
+            // Not `select_to`: that would end the undo group of a run of deletes.
+            self.selected_range = c.min(to)..c.max(to);
         }
         self.replace_text_in_range(None, "", window, cx)
     }
@@ -632,6 +643,40 @@ impl TextInput {
     fn next_boundary(&self, offset: usize) -> usize {
         self.content.grapheme_indices(true).find_map(|(idx, _)| (idx > offset).then_some(idx)).unwrap_or(self.content.len())
     }
+}
+
+/// How far a word delete reaches from `from`: over spaces, then over one run of word
+/// characters or of punctuation. A line break is a word of its own, and spaces before it
+/// stop there. `graphemes` walks away from `from` (backwards for ctrl+backspace), each with
+/// the offset the deletion reaches once it is included.
+fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: usize) -> usize {
+    #[derive(PartialEq, Clone, Copy)]
+    enum Class {
+        Space,
+        Break,
+        Word,
+        Punct,
+    }
+    let class = |g: &str| match g.chars().next() {
+        Some('\n' | '\r') => Class::Break,
+        Some(c) if c.is_whitespace() => Class::Space,
+        Some(c) if c.is_alphanumeric() || c == '_' => Class::Word,
+        _ => Class::Punct,
+    };
+    let mut to = from;
+    let mut run = None;
+    for (at, g) in graphemes {
+        let k = class(g);
+        match run {
+            None if k == Class::Space => {}
+            None if k == Class::Break && to != from => break,
+            None => run = Some(k),
+            Some(r) if r == k && k != Class::Break => {}
+            _ => break,
+        }
+        to = at;
+    }
+    to
 }
 
 impl EventEmitter<Submitted> for TextInput {}
@@ -945,6 +990,8 @@ impl Render for TextInput {
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
+            .on_action(cx.listener(Self::backspace_word))
+            .on_action(cx.listener(Self::delete_word))
             .on_action(cx.listener(Self::left))
             .on_action(cx.listener(Self::right))
             .on_action(cx.listener(Self::up))
@@ -984,6 +1031,8 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     vec![
         KeyBinding::new("backspace", Backspace, c),
         KeyBinding::new("delete", Delete, c),
+        KeyBinding::new("ctrl-backspace", BackspaceWord, c),
+        KeyBinding::new("ctrl-delete", DeleteWord, c),
         KeyBinding::new("left", Left, c),
         KeyBinding::new("right", Right, c),
         KeyBinding::new("up", Up, c),
@@ -1016,5 +1065,29 @@ mod tests {
         assert_eq!(found, ["[image-1]", "[image-23]"]);
         assert_eq!(image_numbers("[image-23] [image-1] [image-23]"), [1, 23]);
         assert_eq!(image_token(7), "[image-7]");
+    }
+
+    #[test]
+    fn word_boundaries() {
+        // What ctrl+backspace leaves of `text` with the cursor at its end, and ctrl+delete at its start.
+        let back = |text: &str| {
+            let to = word_boundary(text.grapheme_indices(true).rev(), text.len());
+            text[..to].to_string()
+        };
+        let fwd = |text: &str| {
+            let to = word_boundary(text.grapheme_indices(true).map(|(i, g)| (i + g.len(), g)), 0);
+            text[to..].to_string()
+        };
+        assert_eq!(back("hello world"), "hello ");
+        assert_eq!(back("hello world  "), "hello ");
+        assert_eq!(back("src/main.rs"), "src/main.");
+        assert_eq!(back("wait..."), "wait");
+        assert_eq!(back("snake_case"), "");
+        assert_eq!(back("line\n"), "line");
+        assert_eq!(back("line\n  "), "line\n");
+        assert_eq!(back(""), "");
+        assert_eq!(fwd("hello world"), " world");
+        assert_eq!(fwd("  hello world"), " world");
+        assert_eq!(fwd("\nline"), "line");
     }
 }
