@@ -33,8 +33,13 @@ can change in any release. What installs in the field rely on, and must stay com
 
 ## Making a release
 
-1. Bump `[workspace.package] version` in `Cargo.toml` (semver; a version is published once) and push to GitHub.
+1. Bump `[workspace.package] version` in `Cargo.toml` (semver; a version is published once per channel) and push to
+   GitHub.
 2. Actions › Release › Run workflow, pick the channel (`beta`), optionally notes.
+
+Channels are independent: each is a build of its own (the update url is baked in) with its own versions. Publishing
+0.2.0 to `beta` and later the same commit to `stable` gives both a 0.2.0. A machine only updates within its channel:
+moving one to another channel is installing that channel's installer by hand.
 
 The workflow (`.github/workflows/release.yml`) builds `Dirigent.exe` with the channel's update url baked in
 (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime, builds the installer
@@ -64,9 +69,10 @@ DIRIGENT_API_BIND=127.0.0.1:7790 dirigent_api serve
 It logs every update check with the client's version (`Dirigent/<version> (<platform>)`), which is the only
 usage signal there is.
 
-Bucket layout: `releases/<version>/<file>` (+ `.minisig`), never overwritten; `channels/<channel>/<platform>.json`,
-the channel's current release. `S3_PREFIX=test/` puts all of it under `test/`, for trying things out without
-touching real releases (`cargo run -p dirigent_api -- publish …` with the bucket keys and a signing key).
+Bucket layout: `releases/<channel>/<version>/<file>` (+ `.minisig`), never overwritten;
+`channels/<channel>/<platform>.json`, the channel's current release. `S3_PREFIX=test/` puts all of it under `test/`,
+for trying things out without touching real releases (`cargo run -p dirigent_api -- publish …` with the bucket keys
+and a signing key).
 
 On NixOS: import the flake's `nixosModules.dirigent_api` and set `services.dirigent-api` (`enable`, `s3.endpoint`,
 `s3.region`, `s3.bucket`; `bind` defaults to `127.0.0.1:7790`).
