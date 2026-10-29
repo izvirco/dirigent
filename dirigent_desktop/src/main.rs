@@ -1,5 +1,9 @@
 //! Dirigent desktop: gpui client for dirigent_service hosts.
 
+// A release build on Windows is a GUI app: no console window next to it (it logs to its
+// file). Debug builds keep theirs for the stderr log.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod add_project;
 mod ambient;
 mod app;
@@ -22,6 +26,7 @@ mod settings;
 mod sidebar;
 mod theme;
 mod thread;
+mod titlebar;
 mod usage;
 mod view;
 mod working;
@@ -85,7 +90,11 @@ fn main() {
                     window_background,
                     // app_id/title are what testing.md keys on to find this window.
                     app_id: Some("dirigent".into()),
-                    titlebar: Some(TitlebarOptions { title: Some("Dirigent".into()), ..Default::default() }),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Dirigent".into()),
+                        appears_transparent: titlebar::CUSTOM,
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Dirigent::new(cache, config, window, cx)),

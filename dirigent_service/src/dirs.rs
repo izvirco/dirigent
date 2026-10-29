@@ -5,12 +5,13 @@ use anyhow::{Context, Result, ensure};
 use dirigent_protocol::Dir;
 use std::path::{Path, PathBuf};
 
-/// `~` or `~/…` under `$HOME`; anything else must be absolute. Trailing slashes and `.`
-/// segments are dropped (`/a/b/` → `/a/b`).
+/// `~` or `~/…` under the home directory; anything else must be absolute (`C:/…` on
+/// Windows, which also takes `\`). Trailing slashes and `.` segments are dropped
+/// (`/a/b/` → `/a/b`), and Windows gets its own separators (`C:/a/` → `C:\a`).
 pub fn expand(path: &str) -> Result<PathBuf> {
     let path = path.trim();
-    let path = match path.strip_prefix('~').filter(|rest| rest.is_empty() || rest.starts_with('/')) {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME").context("HOME not set")?).join(rest.trim_start_matches('/')),
+    let path = match path.strip_prefix('~').filter(|rest| rest.is_empty() || rest.starts_with(std::path::is_separator)) {
+        Some(rest) => std::env::home_dir().context("no home directory")?.join(rest.trim_start_matches(std::path::is_separator)),
         None => PathBuf::from(path),
     };
     ensure!(path.is_absolute(), "path must be absolute or start with ~/");
@@ -37,10 +38,17 @@ mod tests {
 
     #[test]
     fn expands_home_and_normalizes() {
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let home = std::env::home_dir().unwrap();
         assert_eq!(expand("~").unwrap(), home);
         assert_eq!(expand("~/work/").unwrap(), home.join("work"));
+        #[cfg(unix)]
         assert_eq!(expand("/a/./b/").unwrap(), PathBuf::from("/a/b"));
+        #[cfg(windows)]
+        {
+            assert_eq!(expand("C:/a/./b/").unwrap(), PathBuf::from(r"C:\a\b"));
+            assert_eq!(expand(r"~\work").unwrap(), home.join("work"));
+            assert!(expand("/a").is_err());
+        }
         assert!(expand("~bob/x").is_err());
         assert!(expand("rel/path").is_err());
     }

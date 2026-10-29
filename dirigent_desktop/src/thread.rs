@@ -320,7 +320,7 @@ pub fn archive_confirm(host: &str, id: &str, at: ArchiveAt, side: Side, this: &D
 /// A workspace's name is its directory's basename: the host names the directory, the git
 /// branch and the jj workspace alike (`dirigent-<last 8 of the thread id>`, see `vcs.rs`).
 fn workspace_name(dir: &str) -> String {
-    dir.rsplit('/').next().unwrap_or(dir).to_owned()
+    crate::projects::basename(dir).to_owned()
 }
 
 /// The thread's workspace directory is gone: nothing can run until it is recreated or
@@ -1172,6 +1172,8 @@ pub fn preview(image: Arc<gpui::Image>, cx: &mut Context<Dirigent>) -> Stateful<
         .items_center()
         .justify_center()
         .bg(rgba(0x000000d0))
+        // Over the grab strip (`titlebar.rs`): a press at the top closes it too.
+        .occlude()
         .cursor_pointer()
         .on_click(cx.listener(|this, _, _, cx| this.set_preview(None, cx)))
         .child(img(image).max_w(relative(0.9)).max_h(relative(0.9)).rounded_md().object_fit(ObjectFit::Contain))

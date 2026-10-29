@@ -1,4 +1,4 @@
-//! `~/.config/dirigent/config.toml`: fonts, theme, background, telemetry, and how threads are named.
+//! `<config dir>/config.toml` (`~/.config/dirigent`, `%APPDATA%\dirigent` on Windows): fonts, theme, background, telemetry, and how threads are named.
 //! Edited by hand or from the Settings modal; the file is the truth. `Watch` notices hand
 //! edits (to it or to the theme dir) so they apply without a restart.
 //!
@@ -63,7 +63,7 @@ const OLD_TITLE_PROMPTS: &[&str] = &[
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// A theme name: built-in or `~/.config/dirigent/theme/<name>.toml`.
+    /// A theme name: built-in or `<config dir>/theme/<name>.toml`.
     pub theme: String,
     /// Not wired to anything yet.
     pub telemetry: bool,
@@ -143,7 +143,7 @@ impl Default for FontConfig {
     }
 }
 
-/// `~/.config/dirigent`.
+/// The config dir: `dirigent_service::config_dir`.
 pub fn dir() -> PathBuf {
     dirigent_service::config_dir()
 }
@@ -213,16 +213,16 @@ impl FontConfig {
     /// Installed family names for the three roles. A family that isn't installed falls
     /// back to the system's generic font (sans for ui / prose, monospace for code) and is
     /// reported in the returned list so the UI can say so.
-    pub fn resolve(&self) -> (Fonts, Vec<String>) {
+    pub fn resolve(&self, cx: &gpui::App) -> (Fonts, Vec<String>) {
         let mut missing: Vec<String> = vec![];
         let mut pick = |family: &str, generic: &str, fallback: &str| -> gpui::SharedString {
-            match resolve_family(family) {
+            match resolve_family(family, cx) {
                 Some(f) => f.into(),
                 None => {
                     if !missing.iter().any(|m| m == family) {
                         missing.push(family.to_owned());
                     }
-                    resolve_family(generic).unwrap_or_else(|| fallback.to_owned()).into()
+                    resolve_family(generic, cx).unwrap_or_else(|| fallback.to_owned()).into()
                 }
             }
         };
@@ -236,7 +236,8 @@ impl FontConfig {
 /// What fontconfig resolves `pattern` to, if that is a real match: the family itself, or
 /// anything at all for a generic like `monospace` (fc-match always answers something, so a
 /// concrete family only counts when it comes back as itself).
-fn resolve_family(pattern: &str) -> Option<String> {
+#[cfg(not(windows))]
+fn resolve_family(pattern: &str, _: &gpui::App) -> Option<String> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
         return None;
@@ -245,6 +246,18 @@ fn resolve_family(pattern: &str) -> Option<String> {
     let family = String::from_utf8(out.stdout).ok()?.trim().to_owned();
     let generic = matches!(pattern, "sans-serif" | "serif" | "monospace");
     (!family.is_empty() && (generic || family.eq_ignore_ascii_case(pattern))).then_some(family)
+}
+
+/// Windows has no fontconfig: a family counts if DirectWrite lists it, and the generics are
+/// the fonts every Windows has.
+#[cfg(windows)]
+fn resolve_family(pattern: &str, cx: &gpui::App) -> Option<String> {
+    match pattern.trim() {
+        "" => None,
+        "sans-serif" => Some("Segoe UI".into()),
+        "monospace" => Some("Consolas".into()),
+        family => cx.text_system().all_font_names().into_iter().find(|f| f.eq_ignore_ascii_case(family)),
+    }
 }
 
 /// Notices hand edits: polls the modification times of `config.toml` and the theme dir's

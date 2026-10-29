@@ -9,6 +9,7 @@ mod dirs;
 mod git;
 pub mod hosts;
 mod logging;
+pub mod platform;
 mod runtime;
 mod server;
 mod storage;
@@ -744,8 +745,9 @@ struct Dirs {
 
 static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
 
-pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent) \
-                         --config-dir DIR (config.toml, hosts.toml, themes; default $XDG_CONFIG_HOME/dirigent)";
+pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent, \
+                         %LOCALAPPDATA%\\dirigent on Windows) --config-dir DIR (config.toml, hosts.toml, themes; \
+                         default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows)";
 
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
 /// options. Call it first thing in `main`, before anything asks for a directory. A test
@@ -777,31 +779,16 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<Dirs> {
     Ok(dirs)
 }
 
-/// `--config-dir`, else `$XDG_CONFIG_HOME/dirigent` (else `~/.config/dirigent`): the
-/// desktop's `config.toml` and the machine's `hosts.toml`.
+/// `--config-dir`, else the platform's (`platform::config_dir`): the desktop's
+/// `config.toml` and the machine's `hosts.toml`.
 pub fn config_dir() -> PathBuf {
-    if let Some(dir) = DIRS.get().and_then(|d| d.config.clone()) {
-        return dir;
-    }
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .expect("HOME not set")
-        .join("dirigent")
+    DIRS.get().and_then(|d| d.config.clone()).unwrap_or_else(platform::config_dir)
 }
 
-/// `--data-dir`, else `$XDG_DATA_HOME/dirigent` (else `~/.local/share/dirigent`): the
-/// service's and the desktop's dbs, workspaces, job logs and logs. The runtime gets it as
-/// `DIRIGENT_DATA_DIR`.
+/// `--data-dir`, else the platform's (`platform::data_dir`): the service's and the
+/// desktop's dbs, workspaces, job logs and logs. The runtime gets it as `DIRIGENT_DATA_DIR`.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = DIRS.get().and_then(|d| d.data.clone()) {
-        return dir;
-    }
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .expect("HOME not set")
-        .join("dirigent")
+    DIRS.get().and_then(|d| d.data.clone()).unwrap_or_else(platform::data_dir)
 }
 
 /// `DIRIGENT_RUNTIME` or, in a dev checkout, `../../dirigent_runtime/src/index.ts` relative to the binary.
@@ -830,7 +817,7 @@ fn bind_addrs(port: u16) -> Vec<SocketAddr> {
 
 /// The tailnet addresses `tailscale ip` reports; none when tailscale isn't installed or up.
 fn tailscale_ips() -> Vec<IpAddr> {
-    std::process::Command::new("tailscale")
+    platform::command("tailscale")
         .arg("ip")
         .output()
         .ok()
@@ -847,7 +834,7 @@ pub async fn run(port: u16) -> Result<()> {
     // Bound before the runtime starts: a service that can't listen leaves no runtime behind
     // (the desktop retries its embedded one) and logs nothing more.
     let listeners = server::bind(&bind_addrs(port)).await?;
-    let host_name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "local".into());
+    let host_name = platform::host_name();
     info!(host = %host_name, data = %data_dir().display(), version = env!("CARGO_PKG_VERSION"), "service started");
     let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));
     let svc = Arc::new(Service {
@@ -901,8 +888,9 @@ mod tests {
     fn dir_flags() {
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(parse(&[]).unwrap(), Dirs::default());
-        let d = parse(&["--data-dir", "/tmp/d", "--config-dir=rel/c"]).unwrap();
-        assert_eq!(d.data, Some("/tmp/d".into()));
+        let abs = std::env::temp_dir().join("d");
+        let d = parse(&["--data-dir", abs.to_str().unwrap(), "--config-dir=rel/c"]).unwrap();
+        assert_eq!(d.data, Some(abs));
         assert_eq!(d.config, Some(cwd.join("rel/c")));
         assert!(parse(&["--data-dir"]).is_err());
         assert!(parse(&["--port", "1"]).is_err());

@@ -6,7 +6,7 @@
 //! per state, reused in the sidebar counts, list rows, and thread header.
 //!
 //! The palette is a `Theme` loaded from a toml file (`config.toml`'s `theme` names it):
-//! built-ins are embedded from `assets/themes/`, and `~/.config/dirigent/theme/<name>.toml`
+//! built-ins are embedded from `assets/themes/`, and `<config dir>/theme/<name>.toml`
 //! adds or overrides one. Read it anywhere with `theme::t()`.
 //!
 //! Sizes are design pixels (`u`): what they measure at the default text size, scaled with
@@ -158,7 +158,7 @@ pub fn parse(text: &str) -> Result<Theme> {
     Ok(toml::from_str(text)?)
 }
 
-/// `~/.config/dirigent/theme/`, where user themes live.
+/// `<config dir>/theme/`, where user themes live.
 pub fn dir() -> PathBuf {
     crate::config::dir().join("theme")
 }

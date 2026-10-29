@@ -6,7 +6,7 @@ use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::Group;
 use crate::theme::{self, Status, text, u};
-use crate::{projects, thread};
+use crate::{projects, thread, titlebar};
 use dirigent_protocol::ThreadSummary;
 use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, rgba, uniform_list};
 use std::ops::Range;
@@ -211,20 +211,23 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
         .into_any_element()
 }
 
-/// The main pane's top bar: a title on the left, optional actions on the right.
+/// The main pane's top bar: a title on the left, optional actions on the right. With our
+/// own title bar it lies over the grab strip, so the actions occlude it and the right end
+/// is left to the caption buttons (`titlebar.rs`).
 pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
     div()
         .flex()
         .flex_row()
         .items_center()
-        .h(u(40.))
+        .h(u(titlebar::HEIGHT))
         .flex_shrink_0()
         .px_4()
+        .when(titlebar::CUSTOM, |d| d.pr(u(titlebar::CONTROLS_WIDTH)))
         .border_b_1()
         .border_color(rgba(theme::t().line_soft))
         .font_weight(FontWeight::MEDIUM)
         .child(div().flex_1().min_w_0().flex().flex_row().items_center().gap_1p5().child(title))
-        .children(actions)
+        .children(actions.map(|a| div().flex_shrink_0().occlude().child(a)))
 }
 
 /// A sub-agent's parent, a segment of its breadcrumb.
@@ -261,7 +264,7 @@ pub fn breadcrumb(
         .map(|v| {
             let open = |id: &'static str| {
                 let (h, pid) = (v.host.clone(), v.id.clone());
-                div().id(id).cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
+                div().id(id).occlude().cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &pid, cx)))
             };
             (
                 open("crumb-parent-glyph").flex_shrink_0().child(v.status.glyph()),
@@ -285,6 +288,7 @@ pub fn breadcrumb(
         .children(project.map(|(key, name)| {
             div()
                 .id("crumb-project")
+                .occlude()
                 .flex_shrink_0()
                 .text_color(rgba(theme::t().fg_1))
                 .cursor_pointer()

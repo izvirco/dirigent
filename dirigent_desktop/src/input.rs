@@ -491,10 +491,10 @@ impl TextInput {
         self.drag(event.position, window, cx);
     }
 
-    /// Ends a drag; what it selected goes to the X11 / Wayland primary selection (middle click).
+    /// Ends a drag; what it selected goes to the primary selection.
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.drag_anchor.take().is_some() && !self.selected_range.is_empty() {
-            cx.write_to_primary(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
+            write_to_primary(self.content[self.selected_range.clone()].to_string(), cx);
         }
     }
 
@@ -920,6 +920,15 @@ impl Element for TextElement {
             input.last_bounds = Some(bounds);
         });
     }
+}
+
+/// Put `text` in the X11 / Wayland primary selection, which a middle click pastes. Other
+/// platforms have none.
+pub fn write_to_primary(text: String, cx: &mut App) {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    cx.write_to_primary(ClipboardItem::new_string(text));
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    let _ = (text, cx);
 }
 
 /// Text to shape, and whether it is the placeholder.

@@ -169,7 +169,8 @@ export class Sessions {
       this.send({ type: "event", thread_id: threadId, event: slim(event) });
       queueMicrotask(() => this.flushEntries(threadId, live));
     });
-    if (existsSync(join(cwd, "flake.nix"))) {
+    // Not on Windows: nix doesn't run there, so a flake is for other machines (or WSL).
+    if (process.platform !== "win32" && existsSync(join(cwd, "flake.nix"))) {
       // Prompts wait for it (`prompt`); clients show the thread activating it meanwhile.
       this.send({ type: "nix_shell", thread_id: threadId, active: true });
       live.nixEnv = captureNixEnv(cwd, threadId, this.send)

@@ -10,17 +10,20 @@
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
-import { constants as osConstants } from "node:os";
+import { homedir, constants as osConstants } from "node:os";
 import { join } from "node:path";
 import {
   type AgentSession,
   defineTool,
+  getShellConfig,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { Dirigent, describeThread, threadLink } from "./client";
 
 export const TOOL_NAMES = ["async_bash", "ask_user", "dirigent"] as const;
+
+const WINDOWS = process.platform === "win32";
 
 /** When a notice reaches the model: after the current tool batch, or once it is idle. */
 export type Notify = "asap" | "when_idle";
@@ -468,17 +471,24 @@ export function killJobs(host: ToolHost): void {
 }
 
 async function startJob(host: ToolHost, command: string, notify: Notify): Promise<string> {
+  // The shell pi's bash tool runs: bash, Git Bash on Windows (throws, saying how to get
+  // one, when there is none).
+  const shell = getShellConfig();
   const id = shortId();
   const dir = join(dataDir(), "jobs", host.threadId);
   mkdirSync(dir, { recursive: true });
   const log = join(dir, `${id}.log`);
   // One fd for both streams so their lines interleave in order; the child keeps its own copy.
   const fd = openSync(log, "w");
-  const child = spawn("bash", ["-c", command], {
+  const child = spawn(shell.shell, [...shell.args, command], {
     cwd: host.cwd,
     // PI_SESSION_ID as pi's bash tool sets it (scripts/ui.sh keys its default session on it).
     env: { ...process.env, ...host.env, PI_SESSION_ID: host.threadId },
-    detached: true,
+    // Its own process group, for `killJob`. Not on Windows: `taskkill /T` finds the tree
+    // anyway, and a detached child has no console there, so every console program it
+    // starts would open a window of its own.
+    detached: !WINDOWS,
+    windowsHide: true,
     stdio: ["ignore", fd, fd],
   });
   closeSync(fd);
@@ -557,7 +567,7 @@ function logTail(path: string): string {
   } catch {
     return "";
   }
-  const lines = text.trimEnd().split("\n").slice(-TAIL_LINES).join("\n");
+  const lines = text.trimEnd().split(/\r?\n/).slice(-TAIL_LINES).join("\n");
   return lines.length > TAIL_CHARS ? `…${lines.slice(-TAIL_CHARS)}` : lines;
 }
 
@@ -568,11 +578,24 @@ function getJob(host: ToolHost, id: string | undefined): Job {
   return job;
 }
 
-/** SIGTERM to the job's process group (`detached` made it one), SIGKILL if it lingers. */
+/**
+ * SIGTERM to the job's process group (`detached` made it one), SIGKILL if it lingers. On
+ * Windows `taskkill /T /F` ends the whole tree at once: console programs have no gentler
+ * stop to send them.
+ */
 function killJob(job: Job): void {
   const pid = job.pid;
   if (!pid) return;
   job.killed = true;
+  if (WINDOWS) {
+    // From System32, like pi does: not whatever `taskkill` the PATH has.
+    const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
+    spawn(taskkill, ["/T", "/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true }).on(
+      "error",
+      () => {},
+    );
+    return;
+  }
   const signal = (s: NodeJS.Signals) => {
     try {
       process.kill(-pid, s);
@@ -623,6 +646,8 @@ function duration(ms: number): string {
 /** The service's data dir (`DIRIGENT_DATA_DIR`, which it sets for us); run by hand, the default. */
 function dataDir(): string {
   if (process.env.DIRIGENT_DATA_DIR) return process.env.DIRIGENT_DATA_DIR;
-  const base = process.env.XDG_DATA_HOME || join(process.env.HOME ?? "/tmp", ".local/share");
+  const base = WINDOWS
+    ? process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local")
+    : process.env.XDG_DATA_HOME || join(homedir(), ".local/share");
   return join(base, "dirigent");
 }

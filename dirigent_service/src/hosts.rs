@@ -1,4 +1,4 @@
-//! Remote hosts live in `~/.config/dirigent/hosts.toml`, edited by hand or from the
+//! Remote hosts live in `<config dir>/hosts.toml`, edited by hand or from the
 //! desktop's Settings › Hosts. The file is the truth: the desktop rewrites it and then
 //! `Dirigent::sync_hosts` diffs it against the running connections. `local` is implicit and
 //! never in the file. The service reads the same file on its machine for `ListHosts`: the

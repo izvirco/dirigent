@@ -49,6 +49,7 @@ icons!(
     "settings",
     "sparkles",
     "square",
+    "square-outline",
     "trash-2",
     "triangle-alert",
     "x",
