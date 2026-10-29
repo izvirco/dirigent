@@ -111,8 +111,11 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
 ## Gotchas
 
 - Popups snap inside the window. A tall menu can end up under the next click target, so take a shot after opening one.
-- `DIRIGENT_DEBUG_KEYS=1 scripts/ui.sh start` logs every keystroke the app receives with its key-context stack to
-  `log` (fastest way to debug a binding). `start` passes your environment through to the app.
+- `log` shows dirigent at info and its dependencies at warn. `DIRIGENT_LOG` adds `RUST_LOG`-style directives
+  (`start` passes your environment through to the app): `DIRIGENT_LOG=dirigent_service=debug` adds every ws client
+  connecting, `dirigent_desktop=debug` every keystroke with its key-context stack (fastest way to debug a binding),
+  `dirigent=debug` both. Not a bare `debug`: that is thousands of lines of wgpu shader chatter. Keystrokes land in the
+  session's log file too (`data/logs/`), which `reset` wipes.
 - This runs gpui's **X11** backend with software Vulkan (lavapipe). Layout, input and behaviour match Wayland.
   Wayland-only details (IME, clipboard, window decorations) need a check on the real desktop by Seb. Xvfb has no
   compositor, so a translucent theme renders on black: leave that check to Seb too.

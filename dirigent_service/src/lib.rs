@@ -8,6 +8,7 @@ mod blobs;
 mod dirs;
 mod git;
 pub mod hosts;
+mod logging;
 mod runtime;
 mod server;
 mod storage;
@@ -24,6 +25,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::Storage;
 use tokio::sync::broadcast;
+use tracing::{error, info, warn};
+
+pub use logging::init_logging;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
 pub const DEFAULT_PORT: u16 = 7777;
@@ -74,7 +78,7 @@ impl Service {
     fn push_threads(&self) {
         match self.threads() {
             Ok(threads) => self.push(ServerMessage::Threads { reply_to: None, threads }),
-            Err(e) => eprintln!("[service] list threads: {e:#}"),
+            Err(e) => error!("list threads: {e:#}"),
         }
     }
 
@@ -94,6 +98,10 @@ impl Service {
             .collect();
         let changed = {
             let mut missing = self.missing.lock().unwrap();
+            // Explains a `Recreate` / `Back to project` banner after the fact.
+            for id in now.difference(&missing) {
+                warn!(thread = %id, "workspace missing");
+            }
             let changed = *missing != now;
             *missing = now;
             changed
@@ -106,7 +114,7 @@ impl Service {
     fn push_projects(&self) {
         match self.storage.lock().unwrap().list_projects() {
             Ok(projects) => self.push(ServerMessage::Projects { reply_to: None, projects }),
-            Err(e) => eprintln!("[service] list projects: {e:#}"),
+            Err(e) => error!("list projects: {e:#}"),
         }
     }
 
@@ -143,7 +151,10 @@ impl Service {
         };
         match self.try_handle(req).await {
             Ok(reply) => reply,
-            Err(e) => ServerMessage::Error { reply_to: Some(id), message: format!("{e:#}") },
+            Err(e) => {
+                warn!("request {id} failed: {e:#}");
+                ServerMessage::Error { reply_to: Some(id), message: format!("{e:#}") }
+            }
         }
     }
 
@@ -158,6 +169,7 @@ impl Service {
                 let origin = git::origin(&path);
                 let project_id = uuid::Uuid::now_v7().to_string();
                 let project = self.storage.lock().unwrap().add_project(&project_id, &path.to_string_lossy(), origin.as_deref(), now())?;
+                info!(project = %project_id, path = %path.display(), "project added");
                 self.push_projects();
                 ServerMessage::ProjectAdded { reply_to: id, project }
             }
@@ -168,6 +180,7 @@ impl Service {
             }
             ClientMessage::RemoveProject { id, project_id } => {
                 self.storage.lock().unwrap().remove_project(&project_id, now())?;
+                info!(project = %project_id, "project removed");
                 self.push_projects();
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
@@ -216,6 +229,13 @@ impl Service {
                     }
                     thread
                 };
+                info!(
+                    thread = %thread_id,
+                    project = %project_id,
+                    parent = parent.as_deref().map(tracing::field::display),
+                    workspace,
+                    "thread created"
+                );
                 if workspace {
                     // Clients see it making its workspace. Without a prompt there is no push:
                     // the creator's `Prompt` right after pushes it running.
@@ -279,6 +299,7 @@ impl Service {
             ClientMessage::Answer { id, thread_id, ask_id, answers } => {
                 // Taken before anything else so a second client answering the same ask is refused.
                 let ask = self.storage.lock().unwrap().take_ask(&thread_id, &ask_id)?.ok_or_else(|| anyhow!("already answered"))?;
+                info!(thread = %thread_id, dismissed = answers.is_none(), "ask answered");
                 // The answer starts a turn if the model is idle (and is queued if it isn't).
                 self.runtime.begin_run(&thread_id);
                 self.push_threads();
@@ -322,6 +343,7 @@ impl Service {
                 ServerMessage::Usage { reply_to: id, buckets: self.storage.lock().unwrap().usage(since, until, bucket_ms)? }
             }
             ClientMessage::Abort { id, thread_id } => {
+                info!(thread = %thread_id, "abort");
                 self.runtime.abort(&thread_id)?;
                 ServerMessage::Ok { reply_to: id }
             }
@@ -398,6 +420,7 @@ impl Service {
     /// caller settles the run.
     async fn deliver(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
         let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
+        info!(thread = %thread_id, ?mode, model = model.map(tracing::field::display), "prompt");
         if let Some(tools) = &p.tools {
             self.storage.lock().unwrap().set_tools(thread_id, tools)?;
         }
@@ -416,7 +439,7 @@ impl Service {
     /// the request's error.
     fn abandon(&self, thread_id: &str, e: anyhow::Error) -> anyhow::Error {
         if let Err(e) = self.delete_thread(thread_id) {
-            eprintln!("[service] delete unstarted thread {thread_id}: {e:#}");
+            error!(thread = %thread_id, "delete unstarted thread: {e:#}");
         }
         self.runtime.settle(thread_id);
         self.starting.lock().unwrap().remove(thread_id);
@@ -432,9 +455,10 @@ impl Service {
         if self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some()
             && let Err(e) = self.remove_workspace(thread_id, false)
         {
-            eprintln!("[service] remove workspace of {thread_id}: {e:#}");
+            error!(thread = %thread_id, "remove workspace: {e:#}");
         }
         self.storage.lock().unwrap().delete_thread(thread_id)?;
+        info!(thread = %thread_id, "thread deleted");
         // Its `async_bash` logs go with it.
         let _ = std::fs::remove_dir_all(data_dir().join("jobs").join(thread_id));
         self.push_threads();
@@ -488,8 +512,9 @@ impl Service {
             "thread_id": thread_id, "name": name, "reply": reply,
             "error": asks.is_empty() && reply.is_none(), "asking": !asks.is_empty(),
         });
+        info!(thread = %parent, child = %thread_id, "notifying parent of sub-agent");
         if let Err(e) = self.notify_thread(parent, "dirigent:child", &content, details, notify.as_str()).await {
-            eprintln!("[service] notify parent {parent} of {thread_id}: {e:#}");
+            error!(thread = %parent, child = %thread_id, "notify parent: {e:#}");
         }
     }
 
@@ -524,6 +549,7 @@ impl Service {
             std::fs::remove_dir_all(&dest)?;
         }
         vcs::add_workspace(vcs, &repo, &dest, thread_id, base)?;
+        info!(thread = %thread_id, path = %dest.display(), base = base.map(tracing::field::display), "workspace added");
         let dest = dest.to_string_lossy().into_owned();
         let kind = match vcs {
             Vcs::Git => "git worktree",
@@ -551,7 +577,9 @@ impl Service {
                 None => {}
             }
         }
-        self.relocate(thread_id, &repo, None, &format!("Working directory is now {repo} again; use paths under it from now on."))
+        self.relocate(thread_id, &repo, None, &format!("Working directory is now {repo} again; use paths under it from now on."))?;
+        info!(thread = %thread_id, path = %ws, detach, "workspace removed");
+        Ok(())
     }
 
     /// Point the thread at `cwd`, drop its live session, and leave `notice` for the model
@@ -613,26 +641,32 @@ impl Service {
     fn on_runtime(self: &Arc<Self>, msg: RuntimeMessage) {
         match msg {
             RuntimeMessage::Loaded { thread_id, model, header, .. } => {
-                eprintln!("[service] loaded {thread_id} model={}", model.as_deref().unwrap_or("?"));
+                info!(thread = %thread_id, model = model.as_deref().map(tracing::field::display), "session loaded");
                 if let Err(e) = self.storage.lock().unwrap().set_header(&thread_id, &header) {
-                    eprintln!("[service] set header: {e:#}");
+                    error!(thread = %thread_id, "set header: {e:#}");
                 }
             }
             RuntimeMessage::Entry { thread_id, entry } => {
                 match self.storage.lock().unwrap().append_entry(&thread_id, entry, now()) {
                     Ok(entry) => self.push(ServerMessage::Entry { thread_id, entry }),
-                    Err(e) => eprintln!("[service] append entry: {e:#}"),
+                    Err(e) => error!(thread = %thread_id, "append entry: {e:#}"),
                 }
                 self.push_threads();
             }
             RuntimeMessage::Event { thread_id, event } => {
                 let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
                 let lifecycle = matches!(kind, "agent_start" | "agent_settled");
-                if kind == "agent_settled"
-                    && let Some(ms) = self.runtime.settle(&thread_id)
-                    && let Err(e) = self.storage.lock().unwrap().set_last_run(&thread_id, ms)
-                {
-                    eprintln!("[service] set last run: {e:#}");
+                if kind == "agent_start" {
+                    info!(thread = %thread_id, "agent started");
+                }
+                if kind == "agent_settled" {
+                    let ms = self.runtime.settle(&thread_id);
+                    info!(thread = %thread_id, secs = ms.map(|ms| ms / 1000), "agent settled");
+                    if let Some(ms) = ms
+                        && let Err(e) = self.storage.lock().unwrap().set_last_run(&thread_id, ms)
+                    {
+                        error!(thread = %thread_id, "set last run: {e:#}");
+                    }
                 }
                 // A sub-agent settled: its parent is about to be woken (`on_child_settled`), so
                 // it counts as running from now, in the same `Threads` push that settles the
@@ -653,18 +687,19 @@ impl Service {
                 }
             }
             RuntimeMessage::Warning { thread_id, message } => {
-                eprintln!("[service] warning {thread_id}: {message}");
+                warn!(thread = %thread_id, "{message}");
                 self.push(ServerMessage::Event { thread_id, event: json!({ "type": "warning", "message": message }) });
             }
             RuntimeMessage::Ask { thread_id, ask } => {
+                info!(thread = %thread_id, "asking the user");
                 if let Err(e) = self.storage.lock().unwrap().add_ask(&thread_id, &ask, now()) {
-                    eprintln!("[service] add ask: {e:#}");
+                    error!(thread = %thread_id, "add ask: {e:#}");
                 }
                 self.push_threads();
             }
             RuntimeMessage::Jobs { .. } | RuntimeMessage::NixShell { .. } => self.push_threads(),
             RuntimeMessage::Error { thread_id, message } => {
-                eprintln!("[service] runtime error {thread_id:?}: {message}");
+                warn!(thread = thread_id.as_deref().map(tracing::field::display), "runtime error: {message}");
                 // A prompt that failed before pi started (unknown model, nix shell) never settles.
                 // A thread still starting is deleted next (`abandon`): its push is the one.
                 if let Some(t) = &thread_id
@@ -705,7 +740,7 @@ struct Dirs {
 
 static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
 
-pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs; default $XDG_DATA_HOME/dirigent) \
+pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent) \
                          --config-dir DIR (config.toml, hosts.toml, themes; default $XDG_CONFIG_HOME/dirigent)";
 
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
@@ -752,7 +787,7 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// `--data-dir`, else `$XDG_DATA_HOME/dirigent` (else `~/.local/share/dirigent`): the
-/// service's and the desktop's dbs, workspaces, job logs. The runtime gets it as
+/// service's and the desktop's dbs, workspaces, job logs and logs. The runtime gets it as
 /// `DIRIGENT_DATA_DIR`.
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = DIRS.get().and_then(|d| d.data.clone()) {
@@ -805,8 +840,12 @@ fn tailscale_ips() -> Vec<IpAddr> {
 pub async fn run(port: u16) -> Result<()> {
     let storage = Storage::open(&data_dir().join("service.db"))?;
     let cmd = runtime_cmd()?;
-    let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));
+    // Bound before the runtime starts: a service that can't listen leaves no runtime behind
+    // (the desktop retries its embedded one) and logs nothing more.
+    let listeners = server::bind(&bind_addrs(port)).await?;
     let host_name = std::fs::read_to_string("/etc/hostname").map(|s| s.trim().to_owned()).unwrap_or_else(|_| "local".into());
+    info!(host = %host_name, data = %data_dir().display(), version = env!("CARGO_PKG_VERSION"), "service started");
+    let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));
     let svc = Arc::new(Service {
         storage: Mutex::new(storage),
         runtime,
@@ -834,7 +873,7 @@ pub async fn run(port: u16) -> Result<()> {
                 n += 1;
                 if n.is_multiple_of(6) {
                     for id in svc.runtime.idle_threads(IDLE_UNLOAD) {
-                        eprintln!("[service] unloading idle {id}");
+                        info!(thread = %id, "unloading idle session");
                         let _ = svc.runtime.unload(&id);
                     }
                 }
@@ -843,7 +882,7 @@ pub async fn run(port: u16) -> Result<()> {
         }
     });
 
-    server::serve(svc, &bind_addrs(port)).await
+    server::serve(svc, listeners).await
 }
 
 #[cfg(test)]

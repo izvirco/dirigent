@@ -163,7 +163,7 @@ pub fn load() -> Result<Config> {
             if upgrade(&mut config)
                 && let Err(e) = save(&config)
             {
-                eprintln!("[desktop] {e:#}");
+                tracing::warn!("{e:#}");
             }
             Ok(config)
         }

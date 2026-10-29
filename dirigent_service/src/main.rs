@@ -4,5 +4,10 @@
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dirigent_service::init_dirs()?;
-    dirigent_service::run(dirigent_service::port()).await
+    dirigent_service::init_logging("service");
+    if let Err(e) = dirigent_service::run(dirigent_service::port()).await {
+        tracing::error!("{e:#}");
+        std::process::exit(1);
+    }
+    Ok(())
 }

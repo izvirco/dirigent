@@ -535,7 +535,7 @@ function reportJobs(host: ToolHost): void {
 function finish(job: Job, code: number, error?: string): number {
   job.exit = code;
   job.ended = Date.now();
-  if (error) console.error(`[runtime] job ${job.id} failed to spawn: ${error}`);
+  if (error) console.error(`job ${job.id} failed to spawn: ${error}`);
   return code;
 }
 

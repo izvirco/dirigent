@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
+use tracing::{error, info, warn};
 
 /// Request id used by the connection task itself for the refresh requests on (re)connect.
 pub const CONNECT_LIST_ID: u64 = 0;
@@ -82,6 +83,7 @@ impl Net {
     }
 
     pub fn add(&mut self, name: String, url: String) {
+        info!(host = %name, %url, "host added");
         let (tx, rx) = mpsc::unbounded_channel();
         self.hosts.insert(name.clone(), tx);
         let _ = self.control.send(Control::Add { name, url, rx });
@@ -89,6 +91,7 @@ impl Net {
 
     /// Drops the connection; the UI gets no final status for it.
     pub fn remove(&mut self, name: &str) {
+        info!(host = %name, "host removed");
         self.hosts.remove(name);
         let _ = self.control.send(Control::Remove(name.to_owned()));
     }
@@ -106,12 +109,15 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
     };
     let mut backoff = Duration::from_millis(300);
     let mut embedded: Option<tokio::task::JoinHandle<()>> = None;
+    // A host that stays unreachable is logged once, not on every retry.
+    let mut failing = false;
     loop {
         status(HostStatus::Connecting);
         let config = WebSocketConfig::default().max_frame_size(Some(MAX_MESSAGE)).max_message_size(Some(MAX_MESSAGE));
         match tokio_tungstenite::connect_async_with_config(&url, Some(config), false).await {
             Ok((ws, _)) => {
                 backoff = Duration::from_millis(300);
+                failing = false;
                 status(HostStatus::Connected);
                 let (mut sink, mut stream) = ws.split();
                 // Refresh everything we cache for this host.
@@ -127,23 +133,27 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                         Some(req) = rx.recv() => {
                             let text = serde_json::to_string(&req).unwrap();
                             if let Err(e) = sink.send(Message::Text(text.into())).await {
-                                eprintln!("[net] {name}: send: {e}");
+                                warn!(host = %name, "send: {e}");
                                 break;
                             }
                         }
                         item = stream.next() => match item {
                             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                                 Ok(msg) => {
+                                    // The service's first message; its version explains a remote host lagging behind.
+                                    if let ServerMessage::Hello { host_name, version } = &msg {
+                                        info!(host = %name, machine = %host_name, %version, "connected");
+                                    }
                                     if let Err(e) = update_cache(&cache, &name, &msg) {
-                                        eprintln!("[net] cache: {e:#}");
+                                        error!(host = %name, "cache: {e:#}");
                                     }
                                     let _ = ui.unbounded_send(Incoming::Message { host: name.clone(), msg: Box::new(msg) });
                                 }
-                                Err(e) => eprintln!("[net] {name}: bad message ({e}): {}", &text[..text.len().min(200)]),
+                                Err(e) => warn!(host = %name, "bad message ({e}): {}", &text[..text.floor_char_boundary(200)]),
                             },
                             Some(Ok(_)) => {}
                             Some(Err(e)) => {
-                                eprintln!("[net] {name}: read: {e}");
+                                warn!(host = %name, "read: {e}");
                                 break;
                             }
                             None => break,
@@ -153,21 +163,28 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                 // What was sent meanwhile is dropped too, not sent on the reconnect: the UI
                 // gives back what it had pending once it sees `Disconnected`.
                 while rx.try_recv().is_ok() {}
+                info!(host = %name, "disconnected");
                 status(HostStatus::Disconnected);
             }
             Err(e) => {
                 // `local` refusing before we ever started the service is the normal start-up,
                 // not worth a line in the log.
-                if !(name == LOCAL && embedded.is_none()) {
-                    eprintln!("[net] {name}: connect {url}: {e}");
+                if !(name == LOCAL && embedded.is_none()) && !std::mem::replace(&mut failing, true) {
+                    warn!(host = %name, "connect {url}: {e} (retrying)");
                 }
                 // Nothing listening locally: run the service in-process. It lives and dies
-                // with the desktop. If it exits (e.g. bind failed), the next refusal retries.
+                // with the desktop. If it exits (e.g. bind failed), the next refusal retries,
+                // quietly: a service that keeps failing is logged once, like the connect.
                 if name == LOCAL && embedded.as_ref().is_none_or(|h| h.is_finished()) {
-                    eprintln!("[net] starting embedded service on :{}", dirigent_service::port());
-                    embedded = Some(tokio::spawn(async {
-                        if let Err(e) = dirigent_service::run(dirigent_service::port()).await {
-                            eprintln!("[net] embedded service stopped: {e:#}");
+                    let quiet = failing;
+                    if !quiet {
+                        info!("starting embedded service on :{}", dirigent_service::port());
+                    }
+                    embedded = Some(tokio::spawn(async move {
+                        if let Err(e) = dirigent_service::run(dirigent_service::port()).await
+                            && !quiet
+                        {
+                            error!("embedded service stopped: {e:#}");
                         }
                     }));
                 }

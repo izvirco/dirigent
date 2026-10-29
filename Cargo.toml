@@ -13,6 +13,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 anyhow = "1"
+tracing = "0.1"
 
 # Shrinking a pasted screenshot (`dirigent_desktop` `images.rs`) takes seconds unoptimized:
 # keep debug builds (the UI harness, tests) close to release there.
