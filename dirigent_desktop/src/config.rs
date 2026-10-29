@@ -112,7 +112,7 @@ impl ToolsConfig {
 }
 
 /// Font families as the user wrote them (`resolve` maps them to installed fonts) and the
-/// text size.
+/// text size. Lilex, the default, is built in (`LILEX`).
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FontConfig {
@@ -139,7 +139,7 @@ impl Default for Config {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { size: crate::theme::DESIGN_SIZE, ui: "Lilex".into(), prose: "Lilex".into(), code: "Lilex".into() }
+        Self { size: crate::theme::DESIGN_SIZE, ui: BUNDLED_FAMILY.into(), prose: BUNDLED_FAMILY.into(), code: BUNDLED_FAMILY.into() }
     }
 }
 
@@ -216,7 +216,9 @@ impl FontConfig {
     pub fn resolve(&self, cx: &gpui::App) -> (Fonts, Vec<String>) {
         let mut missing: Vec<String> = vec![];
         let mut pick = |family: &str, generic: &str, fallback: &str| -> gpui::SharedString {
-            match resolve_family(family, cx) {
+            // Ours is always there (`add_bundled_fonts`), whatever fontconfig knows.
+            let bundled = family.trim().eq_ignore_ascii_case(BUNDLED_FAMILY).then(|| BUNDLED_FAMILY.to_owned());
+            match bundled.or_else(|| resolve_family(family, cx)) {
                 Some(f) => f.into(),
                 None => {
                     if !missing.iter().any(|m| m == family) {
@@ -230,6 +232,19 @@ impl FontConfig {
         let prose = pick(&self.prose, "sans-serif", "DejaVu Sans");
         let mono = pick(&self.code, "monospace", "DejaVu Sans Mono");
         (Fonts { ui, prose, mono }, missing)
+    }
+}
+
+// `LILEX`: the faces `build.rs` fetched, embedded.
+include!(concat!(env!("OUT_DIR"), "/lilex.rs"));
+
+/// The family of the embedded faces, the default for every role.
+const BUNDLED_FAMILY: &str = "Lilex";
+
+/// Hand gpui the embedded Lilex faces, before anything resolves or draws text.
+pub fn add_bundled_fonts(cx: &gpui::App) {
+    if let Err(e) = cx.text_system().add_fonts(LILEX.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect()) {
+        tracing::warn!("add the bundled fonts: {e:#}");
     }
 }
 

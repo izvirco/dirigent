@@ -22,6 +22,7 @@ icons!(
     "chevron-left",
     "chevron-right",
     "chevron-up",
+    "circle-arrow-down",
     "circle-check",
     "circle-help",
     "circle-x",

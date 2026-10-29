@@ -750,19 +750,32 @@ pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; d
                          default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows)";
 
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
-/// options. Call it first thing in `main`, before anything asks for a directory. A test
-/// instance points both elsewhere so it never touches the real dbs or config (and, unlike
-/// overriding `XDG_*`, nothing it spawns sees a changed environment).
-pub fn init_dirs() -> Result<()> {
-    let dirs = parse_dirs(std::env::args().skip(1))?;
+/// options, and return the operands (the desktop takes a folder to open; the service none).
+/// Call it first thing in `main`, before anything asks for a directory. A test instance
+/// points both elsewhere so it never touches the real dbs or config (and, unlike overriding
+/// `XDG_*`, nothing it spawns sees a changed environment).
+pub fn init_dirs() -> Result<Vec<String>> {
+    let (dirs, operands) = parse_dirs(std::env::args().skip(1))?;
     let _ = DIRS.set(dirs);
-    Ok(())
+    Ok(operands)
 }
 
-fn parse_dirs(args: impl Iterator<Item = String>) -> Result<Dirs> {
+/// The options `init_dirs` took, as arguments again: what a restarted instance gets.
+pub fn dir_args() -> Vec<String> {
+    let Some(dirs) = DIRS.get() else { return vec![] };
+    let flag = |name: &str, dir: &Option<PathBuf>| dir.iter().flat_map(|d| [name.to_owned(), d.display().to_string()]).collect::<Vec<_>>();
+    [flag("--data-dir", &dirs.data), flag("--config-dir", &dirs.config)].concat()
+}
+
+fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)> {
     let mut dirs = Dirs::default();
+    let mut operands = vec![];
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
+        if !arg.starts_with("--") {
+            operands.push(arg);
+            continue;
+        }
         let (flag, value) = match arg.split_once('=') {
             Some((f, v)) => (f.to_owned(), Some(v.to_owned())),
             None => (arg, None),
@@ -776,7 +789,7 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<Dirs> {
         // Absolute, so it means the same to the runtime (`DIRIGENT_DATA_DIR`) whatever its cwd.
         *slot = Some(std::path::absolute(&value)?);
     }
-    Ok(dirs)
+    Ok((dirs, operands))
 }
 
 /// `--config-dir`, else the platform's (`platform::config_dir`): the desktop's
@@ -791,12 +804,17 @@ pub fn data_dir() -> PathBuf {
     DIRS.get().and_then(|d| d.data.clone()).unwrap_or_else(platform::data_dir)
 }
 
-/// `DIRIGENT_RUNTIME` or, in a dev checkout, `../../dirigent_runtime/src/index.ts` relative to the binary.
+/// How to start the runtime: `bun run $DIRIGENT_RUNTIME` if set; the compiled runtime an
+/// install ships next to the binary (`runtime/dirigent_runtime`, built by
+/// `dirigent_runtime/build.ts`); else, in a dev checkout, `bun run` its source
+/// (`../../dirigent_runtime/src/index.ts` from the binary).
 fn runtime_cmd() -> Result<Vec<String>> {
+    let exe = std::env::current_exe()?;
+    let compiled = exe.with_file_name("runtime").join(format!("dirigent_runtime{}", std::env::consts::EXE_SUFFIX));
     let path = match std::env::var("DIRIGENT_RUNTIME") {
         Ok(p) => PathBuf::from(p),
+        Err(_) if compiled.exists() => return Ok(vec![compiled.to_string_lossy().into_owned()]),
         Err(_) => {
-            let exe = std::env::current_exe()?;
             let candidate = exe.ancestors().nth(3).map(|root| root.join("dirigent_runtime/src/index.ts"));
             candidate.filter(|p| p.exists()).ok_or_else(|| anyhow!("set DIRIGENT_RUNTIME to the runtime entry point"))?
         }
@@ -881,7 +899,9 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Result<Dirs> {
-        parse_dirs(args.iter().map(|s| s.to_string()))
+        let (dirs, operands) = parse_dirs(args.iter().map(|s| s.to_string()))?;
+        assert!(operands.is_empty());
+        Ok(dirs)
     }
 
     #[test]
@@ -894,5 +914,8 @@ mod tests {
         assert_eq!(d.config, Some(cwd.join("rel/c")));
         assert!(parse(&["--data-dir"]).is_err());
         assert!(parse(&["--port", "1"]).is_err());
+        // The desktop's folder to open.
+        let (_, operands) = parse_dirs(["--data-dir=d", "/some/dir"].map(String::from).into_iter()).unwrap();
+        assert_eq!(operands, ["/some/dir"]);
     }
 }

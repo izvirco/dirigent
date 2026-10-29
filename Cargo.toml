@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["dirigent_desktop", "dirigent_protocol", "dirigent_service"]
+members = ["dirigent_api", "dirigent_desktop", "dirigent_protocol", "dirigent_service"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
 
 [workspace.dependencies]
@@ -14,6 +14,9 @@ tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 anyhow = "1"
 tracing = "0.1"
+# HTTP for the update check and `dirigent_api` (rustls; no system TLS to link against).
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+semver = "1"
 
 # Shrinking a pasted screenshot (`dirigent_desktop` `images.rs`) takes seconds unoptimized:
 # keep debug builds (the UI harness, tests) close to release there.

@@ -62,16 +62,9 @@
             # Software Vulkan (lavapipe): Xvfb has no GPU presentation. scripts/ui.sh sets
             # VK_ICD_FILENAMES to this for the test app only.
             DIRIGENT_UI_VK_ICD = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
-            # The system fonts plus Lilex, the default UI font, for machines (and the test
-            # display) that don't have it installed.
-            FONTCONFIG_FILE = pkgs.writeText "fonts.conf" ''
-              <?xml version="1.0"?>
-              <!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
-              <fontconfig>
-                <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
-                <dir>${pkgs.lilex}/share/fonts</dir>
-              </fontconfig>
-            '';
+            # Lilex, the default font, is built into the desktop (`dirigent_desktop/build.rs`):
+            # from here, rather than downloaded, so builds work offline.
+            DIRIGENT_LILEX_DIR = "${pkgs.lilex}/share/fonts/truetype";
           };
         };
 
@@ -82,6 +75,7 @@
             (rustToolchain.override { targets = [ "x86_64-pc-windows-gnu" ]; })
             pkgs.pkgsCross.mingwW64.stdenv.cc
           ];
+          env.DIRIGENT_LILEX_DIR = "${pkgs.lilex}/share/fonts/truetype";
         };
       };
     };
