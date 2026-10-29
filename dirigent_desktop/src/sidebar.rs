@@ -474,6 +474,8 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
     // Run time and the buttons are stacked so swapping them on hover doesn't shift layout.
     let actions = this.snoozable(host, t).then(|| {
         let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
+        // Asking with sub-agents still at it: snoozable, but not at rest, so no archive.
+        let at_rest = this.at_rest(host, t);
         div()
             .absolute()
             .top(u(-4.))
@@ -484,16 +486,18 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
             .opacity(if asking { 1. } else { 0. })
             .group_hover("card", |d| d.opacity(1.))
             .child(button(format!("snooze/{h}/{id}"), "moon", Box::new(move |this, cx| this.set_snoozed(&h1, &id1, true, cx))))
-            .child(
-                button(
-                    format!("archive/{h}/{id}"),
-                    "archive",
-                    Box::new(move |this, cx| this.set_archived(&h2, &id2, true, ArchiveAt::Sidebar, cx)),
+            .when(at_rest, |d| {
+                d.child(
+                    button(
+                        format!("archive/{h}/{id}"),
+                        "archive",
+                        Box::new(move |this, cx| this.set_archived(&h2, &id2, true, ArchiveAt::Sidebar, cx)),
+                    )
+                    .relative()
+                    .when(asking, |d| d.bg(rgba(theme::t().line)))
+                    .children(archive_confirm),
                 )
-                .relative()
-                .when(asking, |d| d.bg(rgba(theme::t().line)))
-                .children(archive_confirm),
-            )
+            })
     });
     let (h1, id1) = (h.clone(), id.clone());
     div()

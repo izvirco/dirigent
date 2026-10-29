@@ -120,13 +120,16 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .child(theme::tinted_icon_button("hdr-pin", "pin", if pinned { theme::t().warn } else { theme::t().fg_1 }, cx, move |this, cx| {
             this.set_pinned(&h4, &i4, !pinned, cx)
         }))
-        .child(
-            theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
-                this.set_archived(&h1, &i1, !archived, ArchiveAt::Header, cx)
-            })
-            .when(archive_open, |d| d.bg(rgba(theme::t().hover)))
-            .children(archive_confirm),
-        )
+        // Archive (only at rest: nothing working, sub-agents included) or restore.
+        .when(archived || summary.as_ref().is_some_and(|s| this.at_rest(&host, s)), |d| {
+            d.child(
+                theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
+                    this.set_archived(&h1, &i1, !archived, ArchiveAt::Header, cx)
+                })
+                .when(archive_open, |d| d.bg(rgba(theme::t().hover)))
+                .children(archive_confirm),
+            )
+        })
         .child(
             theme::icon_button("hdr-delete", "trash-2", cx, |this, cx| this.toggle_menu(Menu::ConfirmDelete, cx))
                 .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
