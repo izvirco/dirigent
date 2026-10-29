@@ -17,18 +17,47 @@ under "Show more options"). User data stays where it always was (`%LOCALAPPDATA%
 and survives uninstalling. Agents' shell commands need Git for Windows; the installer says so when it can't find
 its bash.
 
+## What an install is (Linux)
+
+`dirigent-<version>-linux-x86_64.tar.gz` holds one directory, `dirigent/`:
+
+```
+dirigent              dirigent_desktop, with Lilex built in (build.rs)
+runtime/              the compiled runtime, as on Windows
+install.sh            linux/install.sh
+dirigent.png          the icon
+licenses/Lilex-OFL.txt
+```
+
+Installing, on any distro, per user and without root:
+
+```sh
+d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/stable/linux-x86_64 | tar xz -C "$d" && "$d/dirigent/install.sh"
+```
+
+`install.sh` copies `dirigent/` to `~/.local/lib/dirigent`, links `~/.local/bin/dirigent` to the binary and
+writes `~/.local/share/applications/dirigent.desktop` (the app menu entry; with `MimeType=inode/directory`, file
+managers offer it in "Open with" on folders). Built on Ubuntu 22.04, so it needs glibc 2.35 or newer, plus a Vulkan
+driver and `libxkbcommon-x11` (which a pure Wayland setup may lack). Uninstalling is removing those three. User data is where it always was (`~/.local/share/dirigent`,
+`~/.config/dirigent`).
+
 ## Updates
 
 Release builds check `https://dirigent.sebba.dev/api/v0/updates/<channel>/<platform>` every 5 minutes
-(`dirigent_desktop/src/update.rs`), download a newer installer and its minisign signature, verify both, and then
-show the update button in the sidebar. Restarting runs that installer silently (`/UPDATE /WAITPID=<pid>`): it
-waits for Dirigent to exit, installs, and starts it again.
+(`dirigent_desktop/src/update.rs`), download a newer installer (Linux: the tarball) and its minisign signature,
+verify both, and then show the update button in the sidebar. Restarting starts that installer and quits; it waits
+for Dirigent to exit, installs, and starts it again:
+
+- Windows: the setup exe, silently (`/UPDATE /WAITPID=<pid>`).
+- Linux: the tarball, unpacked in `<data dir>/updates/`, then its `dirigent/install.sh --update <pid> <app args>`,
+  which swaps the new `dirigent/` in for the old one. Its output goes to `<data dir>/logs/install.log`.
 
 The new version's installer always does the installing, and the update code ships inside every version, so both
 can change in any release. What installs in the field rely on, and must stay compatible:
 
 - the update url and the `Release` JSON (`dirigent_protocol/src/release.rs`; add fields, don't change them),
 - the installer's `AppId` and the flags `update.rs` passes it,
+- the tarball's layout (`dirigent/install.sh` at its root) and `install.sh --update`'s arguments,
 - the signing keys (`release::KEYS`; rotate by shipping the new key next to the old one first).
 
 ## Making a release
@@ -41,12 +70,12 @@ Channels are independent: each is a build of its own (the update url is baked in
 0.2.0 to `beta` and later the same commit to `stable` gives both a 0.2.0. A machine only updates within its channel:
 moving one to another channel is installing that channel's installer by hand.
 
-The workflow (`.github/workflows/release.yml`) builds `Dirigent.exe` with the channel's update url baked in
-(`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime, builds the installer
-and runs `dirigent_api publish`, which signs it and uploads it to the bucket, the channel file last. Testers
-download the latest from `https://dirigent.sebba.dev/api/v0/download/beta/windows-x86_64`. Unsigned by
-Authenticode for now: SmartScreen asks once ("More info", "Run anyway"); updates aren't downloaded by a browser,
-so they don't ask.
+The workflow (`.github/workflows/release.yml`) has a job per platform. Each builds the desktop with the channel's
+update url baked in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime,
+builds the installer (Windows) or the tarball (Linux) and runs `dirigent_api publish`, which signs it and uploads
+it to the bucket, the channel file last. If one job fails, re-run it alone. Testers download the latest from
+`https://dirigent.sebba.dev/api/v0/download/<channel>/<windows-x86_64|linux-x86_64>`. Unsigned by Authenticode for
+now: SmartScreen asks once ("More info", "Run anyway"); updates aren't downloaded by a browser, so they don't ask.
 
 Repository settings: variables `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`; secrets `S3_ACCESS_KEY_ID`,
 `S3_SECRET_ACCESS_KEY` and `DIRIGENT_SIGNING_KEY` (the text of the secret key file below).
@@ -90,14 +119,8 @@ Two hashes in `flake.nix` follow the lockfiles: `cargoDeps` (Cargo.lock) and `no
 changing a lockfile, set the hash to `lib.fakeHash` and run `nix build .#dirigent_service`, which needs both but
 doesn't build gpui; it prints the right hash.
 
-## Linux (not built yet)
-
-Planned to fit the same pieces: a tarball (`dirigent_desktop` + `runtime/`, built by `dirigent_runtime/build.ts`
-for `bun-linux-x64`) with an install script for `~/.local`, a `.desktop` file with `MimeType=inode/directory` so
-file managers offer it for folders, and hicolor icons from `dirigent_desktop/assets/dirigent.png`. `update.rs`
-then gets a Linux `apply`: unpack the new version next to the old, swap, restart (Linux lets a running binary be
-replaced, so no installer is needed). The release workflow gains a `linux-x86_64` job publishing to the same
-channels; the standalone `dirigent_service` for remote hosts can ship the same way.
+Not built yet: the standalone `dirigent_service` for remote hosts could ship as a tarball the same way; an AUR
+package could repackage the Linux tarball (pacman would then update it, so its installs shouldn't self-update).
 
 ## The icon
 

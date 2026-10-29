@@ -77,9 +77,7 @@ fn main() {
     // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
     let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
 
-    // A restart (`update.rs`) starts the same binary on the same dirs.
-    let restart_args = dirigent_service::dir_args().into_iter().map(Into::into).collect();
-    application().with_assets(icons::Assets).with_restart_arguments(restart_args).run(move |cx: &mut App| {
+    application().with_assets(icons::Assets).run(move |cx: &mut App| {
         config::add_bundled_fonts(cx);
         cx.bind_keys(input::key_bindings());
         cx.bind_keys([

@@ -3,15 +3,17 @@
 //! against its minisign signature, and only then offered: the sidebar's update button
 //! (`sidebar.rs`), whose menu restarts into it now, or once no local agent is working.
 //!
-//! Restarting runs the downloaded installer (Windows, `packaging/windows/dirigent.iss`): it
-//! waits for this process to exit, replaces the install and starts Dirigent again. So each
-//! update is installed by the new version's own installer, and this file ships with every
-//! version too: both the app and its updater can change in any release. What must stay put
-//! for installs in the field: the api's url and `Release`, the installer flags in `apply`,
-//! and the signing keys (`release::KEYS`).
+//! Restarting runs the downloaded installer (`start_installer`): on Windows the setup exe
+//! (`packaging/windows/dirigent.iss`), on Linux the tarball's `install.sh`
+//! (`packaging/linux/install.sh`). It waits for this process to exit, replaces the install
+//! and starts Dirigent again. So each update is installed by the new version's own
+//! installer, and this file ships with every version too: both the app and its updater can
+//! change in any release. What must stay put for installs in the field: the api's url and
+//! `Release`, how `start_installer` runs an installer, and the signing keys
+//! (`release::KEYS`).
 //!
-//! Dev builds have no update url and never check. Tests point `DIRIGENT_UPDATE_URL` at a
-//! test api (`dirigent_api serve` with an `S3_PREFIX`) and, in debug builds,
+//! Dev and nix builds have no update url and never check. Tests point `DIRIGENT_UPDATE_URL`
+//! at a test api (`dirigent_api serve` with an `S3_PREFIX`) and, in debug builds,
 //! `DIRIGENT_UPDATE_KEY` at their own signing key.
 
 use crate::app::Dirigent;
@@ -33,6 +35,7 @@ const IDLE_FOR: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub struct Ready {
     pub version: String,
+    /// In `<data dir>/updates/`: the setup exe (Windows) or the tarball (Linux).
     pub installer: PathBuf,
 }
 
@@ -169,14 +172,57 @@ fn verify(file: &Path, signature: &str, version: &str, platform: &str, keys: &[S
     bail!("{} isn't signed by a release key", file.display())
 }
 
-/// Remove what earlier checks left in `dir`: everything but `keep`.
+/// Remove what earlier checks and updates left in `dir` (downloads, an unpacked tarball):
+/// everything but `keep`.
 fn clean(dir: &Path, keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        if keep != Some(entry.path().as_path()) {
-            let _ = std::fs::remove_file(entry.path());
+        let path = entry.path();
+        if keep != Some(path.as_path()) {
+            let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
         }
     }
+}
+
+/// Start the installer, which waits for this process to exit, installs and starts Dirigent
+/// again. Windows: the setup exe, silent; `/UPDATE` makes it relaunch the app.
+#[cfg(windows)]
+fn start_installer(installer: &Path) -> Result<()> {
+    std::process::Command::new(installer)
+        .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"])
+        .arg(format!("/WAITPID={}", std::process::id()))
+        .spawn()
+        .with_context(|| format!("start {}", installer.display()))?;
+    Ok(())
+}
+
+/// Linux: unpack the tarball next to it and run its `dirigent/install.sh --update <pid>`,
+/// with this app's `--data-dir` / `--config-dir` to start it again on. Its output goes to
+/// `<data dir>/logs/install.log`.
+#[cfg(unix)]
+fn start_installer(installer: &Path) -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let dir = installer.with_file_name("unpacked");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir)?;
+    let tar = std::process::Command::new("tar").arg("-xzf").arg(installer).arg("-C").arg(&dir).output().context("run tar")?;
+    if !tar.status.success() {
+        bail!("unpack {}: {}", installer.display(), String::from_utf8_lossy(&tar.stderr).trim());
+    }
+    let log = std::fs::File::create(dirigent_service::data_dir().join("logs").join("install.log"))?;
+    std::process::Command::new("sh")
+        .arg(dir.join("dirigent").join("install.sh"))
+        .arg("--update")
+        .arg(std::process::id().to_string())
+        .args(dirigent_service::dir_args())
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        // A process group of its own: it outlives this app.
+        .process_group(0)
+        .spawn()
+        .context("start install.sh")?;
+    Ok(())
 }
 
 impl Dirigent {
@@ -218,32 +264,30 @@ impl Dirigent {
         }
     }
 
-    /// Install the ready update and start again. Windows: the installer waits for this
-    /// process to exit (`/WAITPID`), installs silently (`/UPDATE` relaunches the app). No
-    /// installer elsewhere yet: a plain restart, which is also how the flow is tested.
+    /// Install the ready update and start again: start the installer (`start_installer`),
+    /// which waits for this process to exit, then quit. Taken from `ready` meanwhile, so a
+    /// second restart can't start another installer over the first one.
     fn apply_update(&mut self, cx: &mut Context<Self>) {
-        let Some(ready) = self.updater.ready.clone() else { return };
+        let Some(ready) = self.updater.ready.take() else { return };
         info!(version = %ready.version, "restarting to update");
-        if cfg!(windows) {
-            // Spawned outside the app's borrow, as gpui's own restart does: on Windows
-            // starting a process can pump window messages, which would re-enter the app.
-            cx.spawn(async move |this, cx| {
-                let started = std::process::Command::new(&ready.installer)
-                    .args(["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/UPDATE"])
-                    .arg(format!("/WAITPID={}", std::process::id()))
-                    .spawn();
-                match started {
-                    Ok(_) => cx.update(|cx| cx.quit()),
-                    Err(e) => {
-                        error!("start {}: {e}", ready.installer.display());
-                        this.update(cx, |this, cx| this.toast(format!("Couldn't start the update: {e}"), cx)).ok();
-                    }
+        // Off the app's borrow and thread: unpacking takes a moment, and on Windows starting
+        // a process can pump window messages, which would re-enter the app.
+        cx.spawn(async move |this, cx| {
+            let installer = ready.installer.clone();
+            let started = cx.background_executor().spawn(async move { start_installer(&installer) }).await;
+            match started {
+                Ok(()) => cx.update(|cx| cx.quit()),
+                Err(e) => {
+                    error!("start the update: {e:#}");
+                    this.update(cx, |this, cx| {
+                        this.updater.ready = Some(ready);
+                        this.toast(format!("Couldn't start the update: {e:#}"), cx);
+                    })
+                    .ok();
                 }
-            })
-            .detach();
-        } else {
-            cx.restart();
-        }
+            }
+        })
+        .detach();
     }
 }
 
