@@ -68,6 +68,22 @@ Bucket layout: `releases/<version>/<file>` (+ `.minisig`), never overwritten; `c
 the channel's current release. `S3_PREFIX=test/` puts all of it under `test/`, for trying things out without
 touching real releases (`cargo run -p dirigent_api -- publish …` with the bucket keys and a signing key).
 
+On NixOS: import the flake's `nixosModules.dirigent_api` and set `services.dirigent-api` (`enable`, `s3.endpoint`,
+`s3.region`, `s3.bucket`; `bind` defaults to `127.0.0.1:7790`).
+
+## Nix (x86_64-linux)
+
+`flake.nix` packages all three: `dirigent_desktop` (the default), `dirigent_service` for remote hosts, and
+`dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The desktop
+and service are laid out like an install: the binary in `libexec/dirigent/` next to the compiled `runtime/`,
+symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
+driver: on NixOS `hardware.graphics.enable`; elsewhere nix's vulkan-loader may not find the system's drivers
+(nixGL).
+
+Two hashes in `flake.nix` follow the lockfiles: `cargoDeps` (Cargo.lock) and `nodeModules` (bun.lock). After
+changing a lockfile, set the hash to `lib.fakeHash` and run `nix build .#dirigent_service`, which needs both but
+doesn't build gpui; it prints the right hash.
+
 ## Linux (not built yet)
 
 Planned to fit the same pieces: a tarball (`dirigent_desktop` + `runtime/`, built by `dirigent_runtime/build.ts`
