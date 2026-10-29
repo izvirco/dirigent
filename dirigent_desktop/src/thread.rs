@@ -73,6 +73,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (h1, i1) = (host.clone(), id.clone());
     let (h3, i3) = (host.clone(), id.clone());
     let (h4, i4) = (host.clone(), id.clone());
+    let copy_id = id.clone();
     let snoozed = status == Status::Snoozed;
     let pinned = this.pinned(&host, &id);
     let panel_open = this.panel_open();
@@ -99,6 +100,11 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .items_center()
         .gap_1()
         .font_weight(FontWeight::NORMAL)
+        // The thread's id (its full uuid), e.g. to point an agent at it.
+        .child(
+            theme::icon_button("hdr-copy-id", "copy", cx, move |this, cx| this.copy(copy_id.clone(), "Thread id copied", cx))
+                .tooltip(theme::tooltip("Copy thread id")),
+        )
         .when(summary.as_ref().is_some_and(|s| this.snoozable(&host, s)), |d| {
             // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
             d.child(theme::tinted_icon_button(
@@ -563,7 +569,7 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                         let path = w.clone();
                         let items = vec![
                             menu::header(if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." }),
-                            menu::item("ws-copy", "Copy path", "", false, move |this, cx| this.copy_path(path.clone(), cx), cx),
+                            menu::item("ws-copy", "Copy path", "", false, move |this, cx| this.copy(path.clone(), "Path copied", cx), cx),
                             menu::separator(),
                             menu::danger(
                                 "ws-rm",
