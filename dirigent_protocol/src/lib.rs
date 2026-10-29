@@ -126,12 +126,16 @@ pub enum ClientMessage {
     },
     /// The user's answers to an `ask_user` call (see `ThreadSummary::asks`): one list per
     /// question with the picked options and / or typed text, or `None` when dismissed.
-    /// The host hands them to the model, starting a turn if it is idle.
+    /// The host hands them to the model, starting a turn if it is idle. `silent` only drops
+    /// the ask and tells the model nothing: the user answers in a message of their own (the
+    /// form's `Insert`).
     Answer {
         id: u64,
         thread_id: String,
         ask_id: String,
         answers: Option<Vec<Vec<String>>>,
+        #[serde(default)]
+        silent: bool,
     },
     /// Name `text` the way a thread's first prompt would be named (Settings › Thread titles' `Test`).
     GenerateTitle {
@@ -689,7 +693,9 @@ mod tests {
             thread_id: "t".into(),
             ask_id: "a1".into(),
             answers: Some(vec![vec!["postgres".into()], vec![]]),
+            silent: false,
         });
+        roundtrip(ClientMessage::Answer { id: 14, thread_id: "t".into(), ask_id: "a2".into(), answers: None, silent: true });
         roundtrip(ClientMessage::GenerateTitle {
             id: 12,
             title: TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() },

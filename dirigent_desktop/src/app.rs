@@ -99,6 +99,9 @@ pub struct OpenThread {
     center_on: Option<(usize, u8)>,
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
+    /// The ask stack's height as last painted (`set_ask_height`): the transcript's tail
+    /// gets as much extra room, so it scrolls clear of the stack that covers it.
+    pub ask_h: Pixels,
     /// The right panel (lineage over the work log): the user's choice from the header
     /// button, or `None` for the default (open while there is something to show; see
     /// `panel_open`). Clicking a work line resets it to the default; closing it from a
@@ -1353,6 +1356,7 @@ impl Dirigent {
             stats_hover: false,
             center_on: None,
             asks: vec![],
+            ask_h: px(0.),
             panel: None,
             fetching: None,
         }));
@@ -2265,6 +2269,43 @@ impl Dirigent {
         self.send_ask(ask_id, false, cx);
     }
 
+    /// `Insert`: the questions, with the answers so far, go into the composer as a draft
+    /// reply (`view::draft_reply`, after what it holds), and the ask goes without a word
+    /// to the model: the message the user sends is the reply.
+    pub fn insert_ask(&mut self, ask_id: &str, window: &Window, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let Some(form) = t.asks.iter_mut().find(|f| f.ask.id == ask_id && !f.sent) else { return };
+        form.sent = true;
+        let (draft, cursor) = view::draft_reply(&form.ask.questions, &form.answers(cx));
+        let (host, thread_id) = (t.host.clone(), t.id.clone());
+        self.net.send(&host, ClientMessage::Answer { id, thread_id, ask_id: ask_id.to_owned(), answers: None, silent: true });
+        self.composer.update(cx, |input, cx| {
+            let before = input.text().trim_end();
+            let before = if before.is_empty() { String::new() } else { format!("{before}\n\n") };
+            input.set_text(&format!("{before}{draft}"), window, cx);
+            input.move_to(before.len() + cursor, window, cx);
+        });
+        self.save_draft(cx);
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// The ask stack painted at `h` (0 without asks): give the transcript's tail as much
+    /// room. A list following the tail stays at the bottom, so the last text moves above
+    /// the stack.
+    pub fn set_ask_height(&mut self, h: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        if (t.ask_h - h).abs() < px(0.5) {
+            return;
+        }
+        t.ask_h = h;
+        let tail = t.timeline.items.len();
+        t.list.remeasure_items(tail..tail + 1);
+        // Measured while painting: re-render once this frame is done.
+        cx.defer_in(window, |_, _, cx| cx.notify());
+    }
+
     /// Also echoes the answers as a pending steer in the tail (see `Streaming::answers`).
     fn send_ask(&mut self, ask_id: &str, answer: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
@@ -2276,7 +2317,7 @@ impl Dirigent {
         let tail = t.timeline.items.len();
         t.list.remeasure_items(tail..tail + 1);
         let (host, thread_id) = (t.host.clone(), t.id.clone());
-        self.net.send(&host, ClientMessage::Answer { id, thread_id, ask_id: ask_id.to_owned(), answers });
+        self.net.send(&host, ClientMessage::Answer { id, thread_id, ask_id: ask_id.to_owned(), answers, silent: false });
         self.focus_composer(cx);
         cx.notify();
     }

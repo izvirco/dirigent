@@ -29,8 +29,8 @@ use crate::view::{Item, Stats, Step, ToolCall, Work};
 use crate::working;
 use dirigent_protocol::{PromptMode, Setup};
 use gpui::{
-    Anchor, AnyElement, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, SharedString, Stateful, Window, anchored,
-    deferred, div, img, list, point, prelude::*, px, relative, rgba,
+    Anchor, AnyElement, Bounds, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, SharedString, Stateful,
+    Window, anchored, deferred, div, img, list, point, prelude::*, px, relative, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -154,6 +154,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .child(
             // The ask stack is a zero-height layer at the composer's top edge that grows
             // upward (`justify_end`), so it covers the transcript instead of pushing it.
+            // Its height pads the transcript's tail (`set_ask_height`) so the end can be
+            // scrolled out from under it.
             div()
                 .relative()
                 .w_full()
@@ -176,6 +178,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                         .items_center()
                         .justify_end()
                         .gap_2()
+                        .on_children_prepainted(cx.processor(|this, cards: Vec<Bounds<Pixels>>, window, cx| {
+                            let top = cards.iter().map(|b| b.top()).min();
+                            let bottom = cards.iter().map(|b| b.bottom()).max();
+                            let h = top.zip(bottom).map_or(px(0.), |(top, bottom)| bottom - top);
+                            this.set_ask_height(h, window, cx);
+                        }))
                         .children(asks),
                 )
                 .children(banner)
@@ -829,7 +837,8 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 /// answered ones above the card with a check and their answer, the rest below it, each
 /// a step further in and fainter, like a pile of notifications. Clicking a row opens it.
 /// `Next` (Enter in the field too) opens the next unanswered question; once every one
-/// has an answer `Answer` takes its place. `Dismiss` is always there, in the header.
+/// has an answer `Answer` takes its place. `Insert`, left of it, moves the questions to
+/// the composer instead. `Dismiss` is always there, in the header.
 /// Goes grey once sent, until the host confirms and the card leaves.
 fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
@@ -947,6 +956,22 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
             .child(if complete { "Answer" } else { "Next" })
             .when(!complete, |d| d.child(icon("chevron-right", t.fg).size(u(11.))))
     });
+    // `Insert`: answer in a message of your own instead (`insert_ask`).
+    let insert_id = ask_id.clone();
+    let insert = div()
+        .id(ElementId::Name(format!("ask-insert/{ask_id}").into()))
+        .h(u(24.))
+        .px_2p5()
+        .flex()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_size(text::sm())
+        .text_color(rgba(t.fg_1))
+        .hover(move |d| d.bg(rgba(t.hover)).text_color(rgba(t.fg)))
+        .tooltip(theme::tooltip("Put the questions in the composer to answer in your own message"))
+        .on_click(cx.listener(move |this, _, window, cx| this.insert_ask(&insert_id, window, cx)))
+        .child("Insert");
     let card = div()
         .flex()
         .flex_col()
@@ -969,6 +994,8 @@ fn ask_card(form: &AskForm, cx: &mut Context<Dirigent>) -> Div {
                 .justify_end()
                 .child(div().text_size(text::xs()).text_color(rgba(t.fg_2)).child(format!("{} of {}", qi + 1, form.ask.questions.len())))
                 .child(div().flex_1())
+                .gap_1()
+                .child(insert)
                 .children(action),
         );
 
@@ -1264,7 +1291,9 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     if ix == 0 {
         col = col.pt_4();
     }
-    div().w_full().flex().flex_col().items_center().px_6().child(col).into_any()
+    // Room under the tail for the ask stack that covers the transcript's end (`set_ask_height`).
+    let overscroll = if ix == t.timeline.items.len() { t.ask_h } else { px(0.) };
+    div().w_full().flex().flex_col().items_center().px_6().pb(overscroll).child(col).into_any()
 }
 
 fn now_ms() -> i64 {
