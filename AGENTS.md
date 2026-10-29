@@ -9,6 +9,7 @@ Read `testing.md` (how to drive the UI) first.
 - `dirigent_service` is a lib + bin. The desktop embeds the lib and runs the local service in-process; the binary is only for remote hosts.
 - Seb's data is live: an existing `service.db` / `desktop.db` must open with the new code. Schema changes are additive and self-applying (`CREATE TABLE IF NOT EXISTS`, `ensure_column` in `storage.rs`); new wire fields get `#[serde(default)]`. No version bumps. Test dbs can be wiped freely (`scripts/ui.sh reset`). `--data-dir` / `--config-dir` (both binaries) point an instance away from the real dirs.
 - no component library, hand-rolled gpui.
+- Log with `tracing` (`info!` for lifecycle events, `warn!` / `error!` for failures, `debug!` for chatter), never `eprintln!` (except where there is no logger yet: `init_dirs` failing, `init_logging` itself). Both binaries log to stderr and `<data dir>/logs/<desktop|service>.log` (`logging.rs`); `DIRIGENT_LOG` adds filter directives. Nothing per streamed event at info.
 
 ## Gotchas that cost time
 

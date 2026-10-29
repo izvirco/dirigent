@@ -20,19 +20,28 @@ const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
 ws.onopen = () => ws.send(JSON.stringify({ ...req, id }));
 ws.onerror = () => fail(`no service on :${port} (is the session started?)`);
 ws.onclose = () => fail(`the service on :${port} closed the connection (did the app exit?)`);
+// Closed properly once answered, so the service doesn't log a dropped connection per call.
+const done = (code: number) => {
+  ws.onclose = () => process.exit(code);
+  ws.close();
+};
 // Pushes (and the `hello`) carry no `reply_to`.
 ws.onmessage = (e) => {
   const r = JSON.parse(String(e.data));
   if (r.reply_to !== id) return;
-  if (r.type === "error") fail(r.message);
+  if (r.type === "error") {
+    console.error(r.message);
+    return done(1);
+  }
   let v = r;
   try {
     if (expr) v = new Function("r", `return (${expr})`)(r);
   } catch (err) {
-    fail(`EXPR failed: ${err}`);
+    console.error(`EXPR failed: ${err}`);
+    return done(1);
   }
   const line = (x: unknown) => (typeof x === "string" ? x : JSON.stringify(x));
   console.log(Array.isArray(v) ? v.map(line).join("\n") : line(v));
-  process.exit(0);
+  done(0);
 };
 setTimeout(() => fail(`no reply to ${req.type} within 30s`), 30_000);

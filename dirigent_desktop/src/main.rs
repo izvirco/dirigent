@@ -39,15 +39,22 @@ fn main() {
         eprintln!("{e:#}");
         std::process::exit(2);
     }
+    dirigent_service::init_logging("desktop");
+    tracing::info!(
+        version = env!("CARGO_PKG_VERSION"),
+        data = %dirigent_service::data_dir().display(),
+        config = %dirigent_service::config_dir().display(),
+        "desktop starting"
+    );
     let cache = Cache::open(&dirigent_service::data_dir().join("desktop.db")).expect("open cache");
     // A broken config.toml still starts the app (on defaults); the watcher picks up the fix.
     let config = config::load().unwrap_or_else(|e| {
-        eprintln!("[desktop] {e:#}");
+        tracing::warn!("{e:#}");
         config::Config::default()
     });
     // Before the config watcher takes its first stamp, so the write isn't seen as an edit.
     if let Err(e) = theme::write_example() {
-        eprintln!("[desktop] {e:#}");
+        tracing::warn!("{e:#}");
     }
     // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
     let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
@@ -84,9 +91,9 @@ fn main() {
                 |window, cx| cx.new(|cx| Dirigent::new(cache, config, window, cx)),
             )
             .unwrap();
-        if std::env::var_os("DIRIGENT_DEBUG_KEYS").is_some() {
-            cx.observe_keystrokes(|ev, _, _| eprintln!("[keys] {} ctx={:?}", ev.keystroke.unparse(), ev.context_stack)).detach();
-        }
+        // Every keystroke with its key-context stack, at debug (`DIRIGENT_LOG=dirigent_desktop=debug`):
+        // the fastest way to debug a binding.
+        cx.observe_keystrokes(|ev, _, _| tracing::debug!("key {} ctx={:?}", ev.keystroke.unparse(), ev.context_stack)).detach();
         // Focus the root so the global key context (ctrl+n, esc, ...) is active immediately.
         window.update(cx, |view, window, cx| window.focus(&view.focus_handle(cx), cx)).unwrap();
         cx.activate(true);

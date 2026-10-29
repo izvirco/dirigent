@@ -1,5 +1,6 @@
 // dirigent runtime: newline-framed JSON on stdin/stdout, one pi session per thread.
-// stdout is protocol only; logs go to stderr. EOF on stdin = shutdown.
+// stdout is protocol only; stderr is for failures (the service logs each line as a
+// warning). EOF on stdin = shutdown.
 
 import { Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
@@ -105,7 +106,7 @@ for await (const chunk of Bun.stdin.stream()) {
     }
     handle(msg).catch((e) => {
       const threadId = "thread_id" in msg ? msg.thread_id : undefined;
-      console.error(`[runtime] ${msg.type} ${threadId ?? ""} failed:`, e);
+      console.error(`${msg.type} ${threadId ?? ""} failed:`, e);
       send({ type: "error", thread_id: threadId, message: (e as Error).message ?? String(e) });
     });
   }

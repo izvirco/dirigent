@@ -864,8 +864,11 @@ impl Dirigent {
         self.models().iter().find(|m| m.key() == key)
     }
 
+    /// Show `message` for a while. Logged too: toasts are how most failures reach the user.
     pub fn toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        self.toasts.push((message.into(), Instant::now()));
+        let message = message.into();
+        tracing::info!("toast: {message}");
+        self.toasts.push((message, Instant::now()));
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(TOAST_TTL).await;
             this.update(cx, |this, cx| {
@@ -1045,7 +1048,7 @@ impl Dirigent {
                     if let Some(to) = stale
                         && let Err(e) = self.cache.lock().unwrap().remove_entries(&host, &thread_id, end, to)
                     {
-                        eprintln!("[cache] {e:#}");
+                        tracing::error!("cache: {e:#}");
                     }
                     let (kept, fresh) = merge_snapshot(entries, std::mem::take(&mut t.entries), stale);
                     t.timeline = Timeline::from_entries(kept.iter().map(|e| &e.json));

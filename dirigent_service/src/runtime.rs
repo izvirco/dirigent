@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
+use tracing::{error, info, warn};
 
 const LOAD_TIMEOUT: Duration = Duration::from_secs(60);
 const RESPAWN_DELAY: Duration = Duration::from_secs(1);
@@ -175,8 +176,8 @@ impl Runtime {
     async fn supervise(self: Arc<Self>, out: mpsc::UnboundedSender<RuntimeMessage>) {
         loop {
             match self.run_child(&out).await {
-                Ok(status) => eprintln!("[runtime] exited: {status}"),
-                Err(e) => eprintln!("[runtime] failed: {e:#}"),
+                Ok(status) => error!("runtime exited: {status}"),
+                Err(e) => error!("runtime failed: {e:#}"),
             }
             self.on_crash();
             let _ = out.send(RuntimeMessage::Crashed);
@@ -192,10 +193,19 @@ impl Runtime {
             .env("DIRIGENT_DATA_DIR", crate::data_dir())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| anyhow!("spawn {:?}: {e}", self.cmd))?;
-        eprintln!("[runtime] started pid {:?}", child.id());
+        info!(pid = child.id(), "runtime started");
+
+        // Its stderr (failures it reports, bun's own complaints) goes to our log.
+        let mut stderr = BufReader::new(child.stderr.take().unwrap()).lines();
+        tokio::spawn(async move {
+            while let Ok(Some(line)) = stderr.next_line().await {
+                warn!("runtime stderr: {line}");
+            }
+        });
 
         let mut stdin = child.stdin.take().unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
@@ -215,7 +225,7 @@ impl Runtime {
                     self.observe(&msg);
                     let _ = out.send(msg);
                 }
-                Err(e) => eprintln!("[runtime] bad line ({e}): {}", &line[..line.len().min(200)]),
+                Err(e) => warn!("bad line from the runtime ({e}): {}", &line[..line.floor_char_boundary(200)]),
             }
         }
         Ok(child.wait().await?)
