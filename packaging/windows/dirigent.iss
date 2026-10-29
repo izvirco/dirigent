@@ -98,9 +98,15 @@ function WaitForSingleObject(Handle: Cardinal; Milliseconds: Cardinal): Cardinal
 function CloseHandle(Handle: Cardinal): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
 
+{ The bare /UPDATE switch. Not a param constant: those only read /NAME=value. }
 function IsUpdate(): Boolean;
+var
+  I: Integer;
 begin
-  Result := ExpandConstant('{param:UPDATE|0}') <> '0';
+  Result := False;
+  for I := 1 to ParamCount do
+    if CompareText(ParamStr(I), '/UPDATE') = 0 then
+      Result := True;
 end;
 
 { Where pi looks for bash: Git for Windows in Program Files, else a bash.exe on PATH that

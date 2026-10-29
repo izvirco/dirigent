@@ -1,6 +1,6 @@
 //! `dirigent_api publish`: sign an installer, upload it with its signature, then point the
 //! channel at it. The channel file goes last, so no client ever sees a release whose files
-//! aren't there yet. A version is published once: its files are never overwritten.
+//! aren't there yet. A version is published once per channel: its files are never overwritten.
 
 use crate::bucket::{self, Bucket};
 use anyhow::{Context, Result, bail};
@@ -49,7 +49,7 @@ pub fn run(bucket: &Bucket, args: Args) -> Result<()> {
     let data = std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
     let signature = sign(&data, &args.version, &args.platform)?;
     let name = args.file.file_name().and_then(|n| n.to_str()).context("the file needs a name")?;
-    let path = format!("releases/{}/{name}", args.version);
+    let path = bucket::release_path(&args.channel, &args.version, name);
     if bucket.exists(&creds, &path)? {
         bail!("{path} is already published: bump the version");
     }

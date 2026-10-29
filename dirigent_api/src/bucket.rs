@@ -1,10 +1,13 @@
 //! The release bucket, and where things live in it (all under `S3_PREFIX`):
 //!
 //! ```text
-//! releases/{version}/{file}             an installer, never overwritten
-//! releases/{version}/{file}.minisig     its signature
-//! channels/{channel}/{platform}.json    the channel's current `Release`, written last
+//! releases/{channel}/{version}/{file}             an installer, never overwritten
+//! releases/{channel}/{version}/{file}.minisig     its signature
+//! channels/{channel}/{platform}.json              the channel's current `Release`, written last
 //! ```
+//!
+//! Channels are independent: each is its own build (the release workflow bakes the
+//! channel's update url in) with its own versions, so beta and stable can both have a 0.2.0.
 //!
 //! The bucket is public: objects are read with plain GETs and their urls go to clients as
 //! they are. Writes are signed with the S3 keys (`rusty-s3` signs, `ureq` sends).
@@ -65,6 +68,11 @@ impl Bucket {
             .map_err(|e| anyhow!("PUT {key}: {e}"))?;
         Ok(())
     }
+}
+
+/// `releases/{channel}/{version}/{file}`.
+pub fn release_path(channel: &str, version: &str, file: &str) -> String {
+    format!("releases/{channel}/{version}/{file}")
 }
 
 /// `channels/{channel}/{platform}.json`.

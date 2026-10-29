@@ -1,6 +1,7 @@
 # Builds the Windows installer and publishes it to a channel. Run by hand (Actions › Release ›
 # Run workflow) after bumping `[workspace.package] version` in Cargo.toml: a version is
-# published once (`dirigent_api publish` refuses to overwrite it).
+# published once per channel (`dirigent_api publish` refuses to overwrite it). Channels are
+# independent builds with their own versions.
 #
 # Repository settings it needs:
 #   variables  S3_ENDPOINT (https://fsn1.your-objectstorage.com), S3_REGION, S3_BUCKET
