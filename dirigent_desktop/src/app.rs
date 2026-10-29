@@ -397,7 +397,8 @@ pub struct Dirigent {
     menu_dismissed: bool,
     /// The current left press is on a title-bar grab area (`titlebar::grab`): it moves the
     /// window, so the root's `on_mouse_down` leaves the selection and a rename alone. Reset
-    /// at the start of every press (`reset_menu_dismissed`), as the root may not see it.
+    /// at the start of every press (`reset_menu_dismissed`), in case a listener stops the
+    /// press before the root's sees it.
     pub caption_press: bool,
     /// Sidebar: user-dragged width (design pixels, `theme::u`), hidden with `[`, and "peek"
     /// when hidden but the mouse rests on the window's left edge.
@@ -3551,16 +3552,24 @@ fn decode_blob(mime: &str, data: &str) -> Option<Blob> {
     blob_from(mime, base64::engine::general_purpose::STANDARD.decode(data).ok()?)
 }
 
-/// The root's mouse moves and left releases (resizing, dragging a selection or a project),
-/// at window level for the reason `reset_menu_dismissed` is: the root's own `on_mouse_move` / `on_mouse_up`
-/// only fire while it's hovered, and an occluder under the mouse (a header's actions, the
-/// open sidebar peek, a modal's dim) would leave a drag running after the release.
-/// Bubble phase, painted first, so they run last, as the root's did.
+/// The root's left presses, mouse moves and left releases (dropping the selection, saving a
+/// rename; resizing, dragging a selection or a project), at window level for the reason
+/// `reset_menu_dismissed` is: a root listener only fires while the root is hovered, and an
+/// occluder under the mouse (a header's actions, the open sidebar peek, the image preview,
+/// a modal's dim) would keep a press from saving a rename, or leave a drag running after
+/// the release. Bubble phase, painted first, so they run last, as the root's did: after a
+/// text block marks its press as a selection drag, and only if the rename field didn't stop it.
 fn track_mouse(cx: &mut Context<Dirigent>) -> impl IntoElement {
     let this = cx.entity().downgrade();
     gpui::canvas(
         |_, _, _| {},
         move |_, _, window, _| {
+            let pressed = this.clone();
+            window.on_mouse_event(move |ev: &gpui::MouseDownEvent, phase, window, cx| {
+                if phase == gpui::DispatchPhase::Bubble && ev.button == MouseButton::Left {
+                    pressed.update(cx, |this, cx| this.on_mouse_down(ev, window, cx)).ok();
+                }
+            });
             let moved = this.clone();
             window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
                 if phase == gpui::DispatchPhase::Bubble {
@@ -3652,7 +3661,6 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::open_app_link))
             .child(reset_menu_dismissed(cx))
             .child(track_mouse(cx))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .relative()
             .size_full()
             .flex()
