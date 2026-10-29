@@ -2,8 +2,14 @@
 // stdout is protocol only; stderr is for failures (the service logs each line as a
 // warning). EOF on stdin = shutdown.
 
+import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
+
+// pi loads its OAuth flows (Anthropic, Codex, Copilot sign-ins) through a variable import
+// that `bun build --compile` can't follow, so the compiled runtime would lack them. Register
+// them statically, as pi's own binary does (`pi-coding-agent/dist/bun/runtime-setup.js`).
+registerBunOAuthFlows();
 
 type Inbound =
   | {
