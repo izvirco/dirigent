@@ -251,9 +251,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "ask_user",
     label: "Ask the user",
     description:
-      "Ask the user one or more questions, shown as a form. Use it when you're blocked on decisions only the user " +
-      "can make: several questions at once, or a choice between concrete options. Don't use it for a single yes/no " +
-      'or a follow-up offer ("Want me to fix it?"): ask that in your reply and end your turn.',
+      "Ask the user questions. Use it when you're blocked, or have any open questions on a plan or design " +
+      "(anything you'd otherwise list as questions in your reply). Tool runs async, so use it before your final " +
+      "reply, don't repeat questions in prose. Not for offers to do more (Want me to fix it?), ask those in your reply.",
     promptSnippet:
       "Ask the user questions in a form, when you're blocked on their decisions (several questions, or a choice between options)",
     parameters: askUserParams,
