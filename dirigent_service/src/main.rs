@@ -3,7 +3,9 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dirigent_service::init_dirs()?;
+    if let Some(arg) = dirigent_service::init_dirs()?.first() {
+        anyhow::bail!("unknown argument {arg}\n{}", dirigent_service::USAGE);
+    }
     dirigent_service::init_logging("service");
     if let Err(e) = dirigent_service::run(dirigent_service::port()).await {
         tracing::error!("{e:#}");

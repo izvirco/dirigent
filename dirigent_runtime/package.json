@@ -4,6 +4,7 @@
   "type": "module",
   "module": "src/index.ts",
   "scripts": {
+    "build": "bun build.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -35,3 +35,14 @@ image = { version = "0.25", default-features = false, features = [
 chrono = "0.4"
 # A new thread's id, picked here so its draft can open it before the host replies.
 uuid = { version = "1", features = ["v7"] }
+# Self-update (`update.rs`): the check and download, and the releases' signatures.
+ureq.workspace = true
+semver.workspace = true
+minisign-verify = "0.3"
+
+[build-dependencies]
+# `build.rs`: checks and unpacks Lilex (fetched with curl: no TLS stack to build for the
+# build script), and on Windows compiles the icon and version info into the exe.
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+embed-resource = "3"

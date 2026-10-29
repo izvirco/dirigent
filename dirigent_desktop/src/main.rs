@@ -12,6 +12,7 @@ mod config;
 mod icons;
 mod images;
 mod input;
+mod instance;
 mod lists;
 mod markdown;
 mod menu;
@@ -27,6 +28,7 @@ mod sidebar;
 mod theme;
 mod thread;
 mod titlebar;
+mod update;
 mod usage;
 mod view;
 mod working;
@@ -39,12 +41,23 @@ use gpui_platform::application;
 
 fn main() {
     // `--data-dir` / `--config-dir`: shared with the embedded service, which keeps its db,
-    // workspaces and jobs next to `desktop.db`.
-    if let Err(e) = dirigent_service::init_dirs() {
-        eprintln!("{e:#}");
-        std::process::exit(2);
-    }
+    // workspaces and jobs next to `desktop.db`. An operand is a folder to open (Explorer's
+    // "Open in Dirigent", `dirigent_desktop <dir>`).
+    let operands = match dirigent_service::init_dirs() {
+        Ok(operands) => operands,
+        Err(e) => {
+            eprintln!("{e:#}");
+            std::process::exit(2);
+        }
+    };
     dirigent_service::init_logging("desktop");
+    // Absolute: the desktop that opens it may be another process, in another directory.
+    let open = operands.first().map(|p| std::path::absolute(p).map_or_else(|_| p.clone(), |a| a.display().to_string()));
+    if instance::hand_off(open.as_deref()) {
+        tracing::info!(?open, "handed over to the running desktop");
+        return;
+    }
+    let launches = instance::listen();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         data = %dirigent_service::data_dir().display(),
@@ -64,7 +77,10 @@ fn main() {
     // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
     let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
 
-    application().with_assets(icons::Assets).run(move |cx: &mut App| {
+    // A restart (`update.rs`) starts the same binary on the same dirs.
+    let restart_args = dirigent_service::dir_args().into_iter().map(Into::into).collect();
+    application().with_assets(icons::Assets).with_restart_arguments(restart_args).run(move |cx: &mut App| {
+        config::add_bundled_fonts(cx);
         cx.bind_keys(input::key_bindings());
         cx.bind_keys([
             KeyBinding::new("ctrl-n", NewThread, Some(app::KEY_CONTEXT)),
@@ -104,7 +120,12 @@ fn main() {
         // the fastest way to debug a binding.
         cx.observe_keystrokes(|ev, _, _| tracing::debug!("key {} ctx={:?}", ev.keystroke.unparse(), ev.context_stack)).detach();
         // Focus the root so the global key context (ctrl+n, esc, ...) is active immediately.
-        window.update(cx, |view, window, cx| window.focus(&view.focus_handle(cx), cx)).unwrap();
+        window
+            .update(cx, |view, window, cx| {
+                window.focus(&view.focus_handle(cx), cx);
+                view.serve_launches(open, launches, cx);
+            })
+            .unwrap();
         cx.activate(true);
     });
 }

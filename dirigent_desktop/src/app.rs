@@ -12,7 +12,7 @@ use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
-use crate::{config, hosts, images, settings};
+use crate::{config, hosts, images, instance, settings, update};
 use crate::{lists, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
@@ -261,6 +261,12 @@ struct PendingDraft {
     thread: ThreadSummary,
 }
 
+/// A folder to open (`Dirigent::open_folder`); `request`: the `AddProject` adding it.
+struct OpenFolder {
+    path: String,
+    request: Option<u64>,
+}
+
 /// An image an entry references by blob id (see `Dirigent::blobs`), or a pasted one.
 #[derive(Clone)]
 pub struct Blob {
@@ -350,6 +356,8 @@ pub enum Menu {
     Background,
     TitleModel,
     TitleEffort,
+    /// Sidebar: the update button's restart menu (`update.rs`).
+    Update,
 }
 
 /// The modals opened from the sidebar's bottom bar; they float over whatever pane is open
@@ -481,6 +489,12 @@ pub struct Dirigent {
     /// Version control state by `(host, path)`, as last reported (`request_vcs`): the
     /// draft's project directory, an open thread's project, a workspace before removal.
     pub vcs: HashMap<(String, String), VcsInfo>,
+    /// A downloaded update and the restart into it (`update.rs`).
+    pub updater: update::State,
+    /// A folder to open from another launch ("Open in Dirigent", `instance.rs`), until the
+    /// local host lists it as a project: added if it isn't one (`request`, our
+    /// `AddProject`), then opened on a new-thread draft (`resume_open_folder`).
+    open_folder: Option<OpenFolder>,
     net: Net,
     cache: Arc<Mutex<Cache>>,
     next_id: u64,
@@ -615,6 +629,8 @@ impl Dirigent {
             isolate,
             base: None,
             vcs: HashMap::new(),
+            updater: update::State::default(),
+            open_folder: None,
             net,
             cache,
             next_id: 1,
@@ -628,6 +644,7 @@ impl Dirigent {
         }
         this.restore_pane(cx);
         this.tick(cx);
+        update::start(cx);
         if let Some(e) = hosts_error {
             this.toast(e, cx);
         }
@@ -953,6 +970,8 @@ impl Dirigent {
             }
             Incoming::Message { host, msg } => self.on_server_message(host, *msg, cx),
         }
+        // The local host connected, or listed its projects: a folder to open may be ready.
+        self.resume_open_folder(cx);
         cx.notify();
     }
 
@@ -969,6 +988,10 @@ impl Dirigent {
                     && !h.projects.iter().any(|p| p.id == project.id)
                 {
                     h.projects.push(project.clone());
+                }
+                // The folder to open, added: its path as the host wrote it (`resume_open_folder`).
+                if let Some(f) = self.open_folder.as_mut().filter(|f| host == hosts::LOCAL && f.request == Some(reply_to)) {
+                    f.path = project.path.clone();
                 }
                 // The modal's add: on to the link page if it has one to offer, else closed,
                 // back on the Projects page with the new row. Not pinned: the user's call.
@@ -1151,6 +1174,11 @@ impl Dirigent {
                         };
                         s.dirs = Some(Err(message));
                     }
+                    return;
+                }
+                // The folder to open can't be added: nothing more to do with it.
+                if let Some(f) = self.open_folder.take_if(|f| host == hosts::LOCAL && reply_to.is_some() && f.request == reply_to) {
+                    self.toast(format!("Can't open {}: {message}", f.path), cx);
                     return;
                 }
                 // The Add project modal shows its own add failures.
@@ -1581,6 +1609,7 @@ impl Dirigent {
                         this.reload_config(cx);
                     }
                     this.titling.retain(|_, since| since.elapsed() < TITLING_TTL);
+                    this.tick_update(cx);
                     this.redraw_field(this.ticks.is_multiple_of(ambient::CLOCK_SECS), cx);
                     // The repo changes under us (commits, rebases in a terminal): keep what the
                     // draft page and the workspace menus show fresh while they are on screen.
@@ -1720,6 +1749,61 @@ impl Dirigent {
     }
 
     // ---- projects ----
+
+    /// Take later launches of the app (`instance.rs`), and open `open`, this launch's folder.
+    pub fn serve_launches(
+        &mut self,
+        open: Option<String>,
+        launches: Option<futures::channel::mpsc::UnboundedReceiver<instance::Launch>>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(path) = open {
+            self.open_folder = Some(OpenFolder { path, request: None });
+            self.resume_open_folder(cx);
+        }
+        let Some(mut launches) = launches else { return };
+        cx.spawn(async move |this, cx| {
+            while let Some(launch) = launches.next().await {
+                if this.update(cx, |this, cx| this.on_launch(launch, cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Another launch: to the front, opening its folder if it has one.
+    fn on_launch(&mut self, launch: instance::Launch, cx: &mut Context<Self>) {
+        self.window.update(cx, |_, window, _| window.activate_window()).ok();
+        if let Some(path) = launch.open {
+            self.open_folder = Some(OpenFolder { path, request: None });
+            self.resume_open_folder(cx);
+        }
+        cx.notify();
+    }
+
+    /// Open the folder from "Open in Dirigent" on a new-thread draft once the local host
+    /// lists it as a project, asking it to add the folder first if it isn't one. Called again
+    /// on everything the hosts send, so it goes on as soon as the host is up or has replied.
+    fn resume_open_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(f) = &self.open_folder else { return };
+        let Some(local) = self.host(hosts::LOCAL) else { return };
+        if let Some(project) = local.projects.iter().find(|p| projects::same_local_path(&p.path, &f.path)) {
+            let target = Target { host: hosts::LOCAL.to_owned(), project_id: project.id.clone() };
+            self.open_folder = None;
+            // Over whatever is open: the user asked for this folder.
+            self.modal = None;
+            self.add_project = None;
+            self.new_draft(Some(target), cx);
+        } else if f.request.is_none() && local.status == HostStatus::Connected {
+            let path = f.path.clone();
+            let id = self.next_id();
+            self.net.send(hosts::LOCAL, ClientMessage::AddProject { id, path });
+            if let Some(f) = &mut self.open_folder {
+                f.request = Some(id);
+            }
+        }
+    }
 
     /// The sidebar's folder: the Projects page. With no project yet, the Add project modal
     /// opens over it.

@@ -74,6 +74,17 @@ pub fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path)
 }
 
+/// Whether two paths on this machine name the same directory: trailing separators aside,
+/// and on Windows case and `/` vs `\` too.
+pub fn same_local_path(a: &str, b: &str) -> bool {
+    // e.g. `C:\Work\x\` and `c:/work/x` on Windows, `/home/x/` and `/home/x` everywhere.
+    let norm = |p: &str| {
+        let p = p.trim_end_matches(['/', '\\']);
+        if cfg!(windows) { p.replace('/', "\\").to_lowercase() } else { p.to_owned() }
+    };
+    norm(a) == norm(b)
+}
+
 /// Groups by most recent activity (then name); plus orphan threads (most recent first).
 pub fn groups(hosts: &[HostState], links: &Links, names: &Names) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
     let mut by_key: HashMap<String, Group> = HashMap::new();

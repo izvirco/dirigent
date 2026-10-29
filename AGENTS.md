@@ -7,6 +7,10 @@ Read `testing.md` (how to drive the UI) first.
 - Seb dogfoods a `target/release/dirigent_desktop` with its service on :7777. Never kill or touch either. Test the UI only through `scripts/ui.sh`: it runs a debug build on its own invisible display, port and data dir, so you can't disturb Seb's desktop or data (see `testing.md`).
 - Never `pkill -f <string>` from a shell whose own command line contains `<string>` — you kill your shell. Anchor patterns with `^/abs/path`.
 - `dirigent_service` is a lib + bin. The desktop embeds the lib and runs the local service in-process; the binary is only for remote hosts.
+- `dirigent_api` is the update api on Seb's server and the release workflow's `publish`; `packaging/` has the Windows installer. How releases and updates work, and what must stay compatible for installs in the field: `packaging/README.md`. The version is `[workspace.package] version`; releases run by hand (`.github/workflows/release.yml`).
+- One desktop per data dir: a second launch hands its folder to the running one and exits (`instance.rs`, keyed on `<data dir>/desktop.port`). Always pass `--data-dir` to a desktop you start by hand, or it hands off to Seb's.
+- `flake.nix` also packages the three binaries for nix (`packaging/README.md`). Changing `Cargo.lock` or `bun.lock` changes a hash there: bump it (`lib.fakeHash`, then `nix build .#dirigent_service` prints the right one).
+- Never set `DIRIGENT_BUILD_UPDATE_URL` outside the release workflow: it bakes the update url into the binary. Tests use `DIRIGENT_UPDATE_URL` at run time.
 - Seb's data is live: an existing `service.db` / `desktop.db` must open with the new code. Schema changes are additive and self-applying (`CREATE TABLE IF NOT EXISTS`, `ensure_column` in `storage.rs`); new wire fields get `#[serde(default)]`. No version bumps. Test dbs can be wiped freely (`scripts/ui.sh reset`). `--data-dir` / `--config-dir` (both binaries) point an instance away from the real dirs.
 - no component library, hand-rolled gpui.
 - Log with `tracing` (`info!` for lifecycle events, `warn!` / `error!` for failures, `debug!` for chatter), never `eprintln!` (except where there is no logger yet: `init_dirs` failing, `init_logging` itself). Both binaries log to stderr and `<data dir>/logs/<desktop|service>.log` (`logging.rs`); `DIRIGENT_LOG` adds filter directives. Nothing per streamed event at info.
@@ -34,11 +38,12 @@ Read `testing.md` (how to drive the UI) first.
 
 ## Windows
 
-The desktop and service also build natively on Windows (MSVC: rustup + Visual Studio Build Tools with the C++ workload, whose Windows SDK has the `fxc.exe` gpui compiles its shaders with; bun on `PATH`; Git for Windows, whose bash runs agents' `bash` / `async_bash`). `bun install`, then `cargo build --release -p dirigent_desktop`; like on Linux the binary finds the runtime in its checkout. Config lives in `%APPDATA%\dirigent`, data and logs in `%LOCALAPPDATA%\dirigent` (dated log files only: no `desktop.log` symlink). A release build has no console, so it logs to the file alone.
+The desktop and service also build natively on Windows (MSVC: rustup + Visual Studio Build Tools with the C++ workload, whose Windows SDK has the `fxc.exe` gpui compiles its shaders with; bun on `PATH`; Git for Windows, whose bash runs agents' `bash` / `async_bash`). `bun install`, then `cargo build --release -p dirigent_desktop`; like on Linux the binary finds the runtime in its checkout. An install has it compiled next to the binary instead (`runtime/dirigent_runtime.exe`, `runtime_cmd`). Config lives in `%APPDATA%\dirigent`, data and logs in `%LOCALAPPDATA%\dirigent` (dated log files only: no `desktop.log` symlink). A release build has no console, so it logs to the file alone.
 
 - What differs is in `dirigent_service/src/platform.rs` (default dirs, host name, `command()`) plus a few `cfg`s: fonts (`config.rs`, no fontconfig), the primary selection (`input::write_to_primary`), `async_bash`'s shell and kill (`tools.ts`), no nix shell (`sessions.ts`).
 - Start programs that also run on Windows through `platform::command`, not `Command::new`: it keeps them from flashing a console window there.
 - Paths from a host may be Windows paths (`C:\x\y`): the desktop splits them at `\` too (`projects::basename`, `add_project::split`).
+- `build.rs` downloads Lilex (embedded in the binary) unless `DIRIGENT_LILEX_DIR` points at its TTFs; the dev shells set it, so builds there work offline. On a Windows target it also compiles the icon and version info into the exe (resource 1 is also gpui's window icon).
 - `scripts/ui.sh` is Linux-only; Seb tests on Windows himself. You can still check that it compiles: `nix develop .#windows -c cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu`.
 
 ## Checks before you're done

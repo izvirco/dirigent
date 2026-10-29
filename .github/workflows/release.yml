@@ -1,0 +1,98 @@
+# Builds the Windows installer and publishes it to a channel. Run by hand (Actions › Release ›
+# Run workflow) after bumping `[workspace.package] version` in Cargo.toml: a version is
+# published once (`dirigent_api publish` refuses to overwrite it).
+#
+# Repository settings it needs:
+#   variables  S3_ENDPOINT (https://fsn1.your-objectstorage.com), S3_REGION, S3_BUCKET
+#   secrets    S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY: write access to the bucket
+#              DIRIGENT_SIGNING_KEY: the minisign secret key (`dirigent_api keygen`), whose
+#              public half is in dirigent_protocol/src/release.rs
+#
+# One Windows job: gpui's release build compiles its shaders with the Windows SDK's fxc.
+# The secrets are only given to the publish step.
+
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Channel to publish to
+        default: beta
+        required: true
+      notes:
+        description: Release notes (optional)
+        default: ""
+
+concurrency: release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        shell: bash
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      # The update endpoint is baked in: dev builds have none and never check.
+      - name: Build the desktop
+        env:
+          DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
+        run: cargo build --release --locked -p dirigent_desktop
+
+      - name: Build the runtime
+        working-directory: dirigent_runtime
+        run: bun run build
+
+      - name: Stage the install
+        shell: bash
+        run: |
+          cp target/release/dirigent_desktop.exe dist/Dirigent.exe
+          mkdir -p dist/licenses
+          # Lilex (embedded in Dirigent.exe by dirigent_desktop/build.rs) is under the OFL,
+          # which goes along with it.
+          curl -fsSL -o dist/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
+          echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/licenses/Lilex-OFL.txt" | sha256sum -c
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=${{ steps.version.outputs.version }}" "/DDist=$PWD\dist" packaging\windows\dirigent.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Dirigent-Setup-${{ steps.version.outputs.version }}
+          path: dist/Dirigent-Setup-${{ steps.version.outputs.version }}.exe
+
+      - name: Publish
+        shell: bash
+        env:
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          S3_REGION: ${{ vars.S3_REGION }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
+          CHANNEL: ${{ inputs.channel }}
+          NOTES: ${{ inputs.notes }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform windows-x86_64 \
+            --version "$VERSION" --notes "$NOTES" "dist/Dirigent-Setup-$VERSION.exe"
+          echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/windows-x86_64" >> "$GITHUB_STEP_SUMMARY"

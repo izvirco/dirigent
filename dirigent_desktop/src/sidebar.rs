@@ -10,7 +10,7 @@
 //! behind the sidebar only, draws its own), floating it has its own copy.
 
 use crate::ambient::Reach;
-use crate::app::{ArchiveAt, Dirigent, Pane, Resize, Section, Target};
+use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Resize, Section, Target};
 use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -218,7 +218,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         cards("workpool-cards", Section::Workpool, working, false, now, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
 
     // Bottom bar: hide / show the sidebar on the left, the Usage and Settings modals on the
-    // right (the chart and the gear, side by side like the title row's folder and `+`).
+    // right (the chart and the gear, side by side like the title row's folder and `+`),
+    // with the update button before them while an update waits.
     let hidden = this.sidebar_hidden;
     let panel_icon = if hidden { "panel-left-open" } else { "panel-left-close" };
     let bottom = div()
@@ -237,6 +238,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
             div()
                 .flex()
                 .flex_row()
+                .children(update_button(this, cx))
                 .child(theme::icon_button("usage", "chart-no-axes-combined", cx, |this, cx| this.open_usage(cx)))
                 .child(theme::icon_button("settings", "settings", cx, |this, cx| this.open_settings(cx))),
         );
@@ -254,6 +256,29 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .child(working_cards)
         .when(n_working > 0, |d| d.child(working_header))
         .child(bottom.flex_shrink_0())
+}
+
+/// The update button, while a downloaded update waits (`update.rs`), and its menu: restart
+/// into the update, or with local agents at work, restart once they're done. Armed, it
+/// shows an hourglass and the menu cancels.
+fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+    let ready = this.updater.ready.as_ref()?;
+    let armed = this.updater.when_idle;
+    let menu = (this.menu == Some(Menu::Update)).then(|| {
+        let busy = this.local_busy();
+        let action = if armed {
+            menu::item("update-cancel", "Cancel restart", "waiting for agents", false, |this, cx| this.cancel_restart(cx), cx)
+        } else if busy > 0 {
+            let detail = if busy == 1 { "1 agent working".to_owned() } else { format!("{busy} agents working") };
+            menu::item("update-idle", "Restart when idle", detail, false, |this, cx| this.restart_to_update(cx), cx)
+        } else {
+            menu::item("update-now", "Restart to update", "", false, |this, cx| this.restart_to_update(cx), cx)
+        };
+        menu::popup(Side::Above, vec![menu::header(format!("Dirigent {} is ready", ready.version)), action], cx)
+    });
+    let icon = if armed { "hourglass" } else { "circle-arrow-down" };
+    let button = theme::tinted_icon_button("update", icon, theme::t().accent_ink, cx, |this, cx| this.toggle_menu(Menu::Update, cx));
+    Some(button.children(menu).into_any_element())
 }
 
 /// A selectable sidebar row (`ROW` tall). `selected` lifts the background. It has no right

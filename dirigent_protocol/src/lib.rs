@@ -2,6 +2,9 @@
 //!
 //! Requests carry an `id`, replies carry `reply_to`, pushes have neither.
 //! Pi entries and events stay opaque `serde_json::Value`s so this crate is pi-version-agnostic.
+//! `release` is the other wire: the update api's.
+
+pub mod release;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -127,12 +127,26 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
   `DISPLAY` for you: `scripts/ui.sh run xdotool mousedown 1` (e.g. to shoot a drag halfway), `scripts/ui.sh run import …`.
 - The app is launched with `VK_ICD_FILENAMES=$DIRIGENT_UI_VK_ICD` (lavapipe; Xvfb can't present GPU frames),
   `--data-dir <session>/data --config-dir <session>/config`, `DIRIGENT_PORT=<port>`, `DIRIGENT_BIND=127.0.0.1` (the
-  embedded service stays off the tailnet), and `DIRIGENT_RUNTIME` (this checkout's runtime), in its own process group (`setsid`). The
-  dev shell's `FONTCONFIG_FILE` adds Lilex, the default font, to the system fonts.
+  embedded service stays off the tailnet), and `DIRIGENT_RUNTIME` (this checkout's runtime), in its own process group (`setsid`).
+  Lilex, the default font, is built into the binary. An app that restarted itself (an update) has a new pid and
+  group: `ui.sh` finds it by its command line (binary + session data dir), so `stop` and friends still work.
 - The tool paths from `nix develop` are cached in `/tmp/dirigent-ui/devenv-<hash>.sh`, keyed by `flake.nix` +
   `flake.lock`, so calls take well under a second. `start` still builds through `nix develop` (unless you're in a dev
   shell already).
 - `ui.sh rpc` is `scripts/ui-rpc.ts` (bun); `wait-idle` and `setup` are built on it.
+
+## Launches and updates
+
+- **Open in Dirigent** / a second launch: run the binary on the session's dirs with a folder,
+  `target/debug/dirigent_desktop --data-dir <session>/data --config-dir <session>/config /some/dir`. It hands the
+  folder to the session's app and exits at once (`instance.rs`); the app adds it as a local project if it isn't
+  one and opens a new-thread draft in it. Never without `--data-dir`: that would hand off to Seb's desktop.
+- **The update button** needs an update api with a newer release for `linux-x86_64`: `dirigent_api serve` with
+  `S3_PREFIX=test/` (releases published there with `dirigent_api publish`, see `packaging/README.md`), then
+  `DIRIGENT_UPDATE_URL=http://127.0.0.1:<api port>/api/v0/updates/<channel> scripts/ui.sh start` (and `setup`, which
+  relaunches). Checked at launch; the download lands in `<session>/data/updates/`. Linux has no installer yet, so
+  "Restart" just restarts the app; "Restart when idle" shows with a local agent working (a prompt with `sleep 20`).
+  Signed with your own key in a debug build: `DIRIGENT_UPDATE_KEY=<its public key>`.
 
 ## Non-UI crates
 
@@ -142,4 +156,7 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
   `{"type":"list_threads","id":1}`, `{"type":"add_project","id":2,"path":"/tmp/x"}`, `{"type":"create_thread","id":3,"project_id":"..."}`, `{"type":"prompt","id":4,"thread_id":"...","text":"hi","mode":"prompt"}`.
   Use `DIRIGENT_PORT=7778 cargo run -p dirigent_service -- --data-dir /tmp/somewhere --config-dir /tmp/somewhere-config`
   to keep a test instance away from the real one.
+- `dirigent_runtime` compiled, as installs run it: `cd dirigent_runtime && bun run build` writes `dist/runtime/`;
+  feed `dist/runtime/dirigent_runtime` the same JSONL.
+- `dirigent_api`: see `packaging/README.md` and the top of `dirigent_api/src/main.rs`.
 - Unit tests: `cargo test --workspace` (protocol round-trips, storage, view parsing). `bun run typecheck`, `bun run lint`, `bun run fmt:check` for the runtime.

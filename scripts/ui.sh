@@ -26,7 +26,7 @@ CALLER=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Tools (Xvfb, xdotool, imagemagick, sqlite, xclip, lavapipe, Lilex) and the app's runtime libs
+# Tools (Xvfb, xdotool, imagemagick, sqlite, xclip, lavapipe; Lilex for the build) and the app's runtime libs
 # come from the dev shell. `nix develop` costs seconds per call, so its environment is cached
 # until flake.nix / flake.lock change. Always sourced: a shell the caller entered before the
 # flake last changed may lack newer tools.
@@ -37,7 +37,7 @@ ENV=/tmp/dirigent-ui/devenv-$(cat flake.nix flake.lock | sha256sum | cut -c1-16)
 if [ ! -s "$ENV" ]; then
   mkdir -p /tmp/dirigent-ui
   # shellcheck disable=SC2016
-  "${NIX[@]}" bash -c 'printf "export PATH=%q LD_LIBRARY_PATH=%q DIRIGENT_UI_VK_ICD=%q FONTCONFIG_FILE=%q\n" "$PATH" "$LD_LIBRARY_PATH" "$DIRIGENT_UI_VK_ICD" "$FONTCONFIG_FILE"' >"$ENV.tmp"
+  "${NIX[@]}" bash -c 'printf "export PATH=%q LD_LIBRARY_PATH=%q DIRIGENT_UI_VK_ICD=%q DIRIGENT_LILEX_DIR=%q\n" "$PATH" "$LD_LIBRARY_PATH" "$DIRIGENT_UI_VK_ICD" "$DIRIGENT_LILEX_DIR"' >"$ENV.tmp"
   mv "$ENV.tmp" "$ENV"
 fi
 # shellcheck disable=SC1090
@@ -58,14 +58,23 @@ DIR=/tmp/dirigent-ui/$SESSION
 BIN=$ROOT/target/debug/dirigent_desktop
 mkdir -p "$DIR"
 
-alive() { [ -f "$DIR/$1.pid" ] && kill -0 "$(cat "$DIR/$1.pid")" 2>/dev/null; }
+# The session's app by its command line (absolute binary, then the session's data dir): an
+# app that restarted itself (`update.rs`) has a new pid and process group.
+APP_CMD="^$BIN --data-dir $DIR/data( |$)"
+alive() {
+  [ -f "$DIR/$1.pid" ] && kill -0 "$(cat "$DIR/$1.pid")" 2>/dev/null && return
+  [ "$1" = app ] && pgrep -f "$APP_CMD" >/dev/null
+}
 # Both processes are started with setsid, so pid == process group: this also takes down
-# the app's embedded service and pi runtime, and nothing outside the session.
+# the app's embedded service and pi runtime, and nothing outside the session. A restarted
+# app is signalled by its command line; its runtime follows it out (stdin closes).
 kill_group() {
   if alive "$1"; then
-    kill -TERM -- "-$(cat "$DIR/$1.pid")" 2>/dev/null || true
+    [ -f "$DIR/$1.pid" ] && { kill -TERM -- "-$(cat "$DIR/$1.pid")" 2>/dev/null || true; }
+    [ "$1" = app ] && { pkill -TERM -f "$APP_CMD" || true; }
     for _ in $(seq 1 30); do alive "$1" || break; sleep 0.1; done
-    alive "$1" && { kill -KILL -- "-$(cat "$DIR/$1.pid")" 2>/dev/null || true; }
+    [ -f "$DIR/$1.pid" ] && { kill -KILL -- "-$(cat "$DIR/$1.pid")" 2>/dev/null || true; }
+    [ "$1" = app ] && { pkill -KILL -f "$APP_CMD" || true; }
   fi
   rm -f "$DIR/$1.pid"
 }
