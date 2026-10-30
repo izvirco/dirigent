@@ -690,6 +690,26 @@ pub fn text_of(content: Option<&Value>) -> String {
     }
 }
 
+/// A user message's text without the `[image-N]: <path>` lines its host appended to tell
+/// the model which file each attached image is (`sessions.ts` `linkAttachments`), and the
+/// `N`s of those lines: one per image of the message, in order. Empty for a message
+/// without images, or one sent before hosts saved them. Pi puts its own notes for the
+/// model after them when it resized, converted or dropped an image (`[Image: original …]`);
+/// those go too.
+pub fn split_image_refs(text: &str) -> (&str, Vec<u32>) {
+    let mut end = text.len();
+    while let Some(at) = text[..end].rfind("\n\n") {
+        let para = &text[at + 2..end];
+        let ns: Option<Vec<u32>> = para.lines().map(|l| l.strip_prefix("[image-")?.split_once("]: ")?.0.parse().ok()).collect();
+        match ns {
+            Some(ns) if !ns.is_empty() => return (&text[..at], ns),
+            _ if para.lines().all(|l| l.starts_with("[Image")) => end = at,
+            _ => break,
+        }
+    }
+    (text, vec![])
+}
+
 /// Blob ids of the image blocks in a content field, in order.
 pub fn images_of(content: Option<&Value>) -> Vec<String> {
     let Some(Value::Array(blocks)) = content else { return vec![] };
@@ -838,11 +858,13 @@ impl Streaming {
             }
             // Pi's queues are the truth for steers and follow-ups (it emits this before
             // delivering one, and after a cancel). A prompt pi had to queue (sent as the run
-            // started) shows up here as a follow-up, so its prompt echo goes too.
+            // started) shows up here as a follow-up, so its prompt echo goes too (pi's text
+            // has the image links the echo lacks: `split_image_refs`). Pi's texts are kept
+            // whole: a steer is cancelled by its text.
             "queue_update" => {
                 let list = |k| event.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
                 let (steering, follow_up): (Vec<_>, Vec<_>) = (list("steering").collect(), list("followUp").collect());
-                self.echo.retain(|(t, m)| *m == PromptMode::Prompt && !follow_up.contains(&t.as_str()));
+                self.echo.retain(|(t, m)| *m == PromptMode::Prompt && !follow_up.iter().any(|f| split_image_refs(f).0 == t));
                 self.echo.extend(steering.into_iter().map(|t| (t.to_owned(), PromptMode::Steer)));
                 self.echo.extend(follow_up.into_iter().map(|t| (t.to_owned(), PromptMode::FollowUp)));
                 true
@@ -994,6 +1016,10 @@ mod tests {
         s.echo.push(("late".into(), PromptMode::Prompt));
         s.apply(&json!({"type":"queue_update","steering":[],"followUp":["late"]}), 0);
         assert_eq!(s.echo, vec![("late".into(), PromptMode::FollowUp)]);
+        // Also when the host linked its images to files.
+        s.echo = vec![("see [image-1]".into(), PromptMode::Prompt)];
+        s.apply(&json!({"type":"queue_update","steering":[],"followUp":["see [image-1]\n\n[image-1]: /a.png"]}), 0);
+        assert_eq!(s.echo, vec![("see [image-1]\n\n[image-1]: /a.png".into(), PromptMode::FollowUp)]);
         s.apply(&json!({"type":"agent_settled"}), 0);
         assert!(s.echo.is_empty());
     }
@@ -1142,6 +1168,19 @@ mod tests {
             {"type":"text","text":"see [image-1]"},{"type":"image","mimeType":"image/png","blob":"abc"}]}});
         let t = Timeline::from_entries([&e]);
         assert_eq!(t.items[0], Item::User { text: "see [image-1]".into(), images: vec!["abc".into()], at: 1 });
+    }
+
+    #[test]
+    fn image_refs_split_off() {
+        let text = "see [image-2] and [image-1]\n\nfoo\n\n[image-1]: /d/a.png\n[image-2]: <C:\\My Docs\\b.png>";
+        assert_eq!(split_image_refs(text), ("see [image-2] and [image-1]\n\nfoo", vec![1, 2]));
+        // A last paragraph that isn't all definitions is the user's.
+        let typed = "x\n\n[image-1]: mine\nand more";
+        assert_eq!(split_image_refs(typed), (typed, vec![]));
+        // Pi's notes on a resized image come after the links.
+        let resized = "see [image-1]\n\n[image-1]: /a.png\n\n[Image: original 4000x3000, displayed at 2000x1500.]";
+        assert_eq!(split_image_refs(resized), ("see [image-1]", vec![1]));
+        assert_eq!(split_image_refs("plain"), ("plain", vec![]));
     }
 
     #[test]

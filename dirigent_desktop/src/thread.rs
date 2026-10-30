@@ -25,7 +25,7 @@ use crate::picker;
 use crate::ruler;
 use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
-use crate::view::{Item, Stats, Step, ToolCall, Work};
+use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
 use crate::working;
 use dirigent_protocol::{PromptMode, Setup};
 use gpui::{
@@ -1463,19 +1463,21 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirige
 }
 
 /// A sent message's `[image-N]` tokens as links to the images they name
-/// (`dirigent://image/<blob id>`, see `Dirigent::open_app_link`). The images went out in
-/// paste order, which is N ascending, and only those whose token was in the text
-/// (`Dirigent::attachments`), so the k-th distinct N names the k-th image. A token typed
-/// by hand, with no image of its own, can shift that; nothing records the true pairing.
-fn image_links(text: &str, images: &[String]) -> Vec<(String, SharedString)> {
-    let ns = crate::input::image_numbers(text);
+/// (`dirigent://image/<blob id>`, see `Dirigent::open_app_link`). `refs` is the `N` of each
+/// image, in order, as its host recorded them (`view::split_image_refs`). An older message
+/// has none: its images went out in paste order, which is N ascending, and only those
+/// whose token was in the text (`Dirigent::attachments`), so the k-th distinct N names the
+/// k-th image, unless a token typed by hand, with no image of its own, shifts that.
+fn image_links(text: &str, refs: &[u32], images: &[String]) -> Vec<(String, SharedString)> {
+    let ns = if refs.is_empty() { crate::input::image_numbers(text) } else { refs.to_vec() };
     ns.into_iter().zip(images).map(|(n, id)| (crate::input::image_token(n), format!("dirigent://image/{id}").into())).collect()
 }
 
 /// The bubble bleeds past the column by its own padding, so its text lines up with
 /// replies and work lines instead of being inset. Attached images go under the text as
 /// thumbnails (a blank box while the bytes are on their way); click one, or its
-/// `[image-N]` in the text, to see it.
+/// `[image-N]` in the text, to see it. The text's image file links are the model's: they
+/// don't show, nor go with a copy.
 /// `ix` is the bubble's timeline index: thumbnail ids must be unique across the thread,
 /// since gpui shares click state between same-id elements and drops clicks on the others.
 #[allow(clippy::too_many_arguments)]
@@ -1490,6 +1492,7 @@ fn user_bubble(
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
+    let (body, refs) = split_image_refs(text);
     let thumbs = (!images.is_empty()).then(|| {
         div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, id)| {
             let blob = blobs.get(id);
@@ -1521,10 +1524,10 @@ fn user_bubble(
         .font_family(fonts.prose.clone())
         .text_size(text::lg())
         .line_height(u(22.))
-        .child(markdown::render(text, &fonts.mono, keys, None, &image_links(text, images)))
+        .child(markdown::render(body, &fonts.mono, keys, None, &image_links(body, &refs, images)))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
-        .children(corner_buttons(ix, text, t, cx).map(|b| b.top_2().right_2()))
+        .children(corner_buttons(ix, body, t, cx).map(|b| b.top_2().right_2()))
 }
 
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,
@@ -1604,7 +1607,7 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &
         .text_size(text::lg())
         .line_height(u(22.))
         .child(label)
-        .child(markdown::render(text, &fonts.mono, keys, None, &[]))
+        .child(markdown::render(split_image_refs(text).0, &fonts.mono, keys, None, &[]))
 }
 
 /// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
@@ -1636,7 +1639,7 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys
         .text_size(text::sm())
         .line_height(u(19.))
         .child(div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).child("steer"))
-        .child(div().flex_1().min_w_0().text_color(rgba(theme::t().fg_1)).child(keys.plain(text.to_owned())))
+        .child(div().flex_1().min_w_0().text_color(rgba(theme::t().fg_1)).child(keys.plain(split_image_refs(text).0.to_owned())))
         // `cancel` sits left of `queued` so `queued` stays flush right while it's invisible.
         .children(cancel)
         .when(queued, |d| d.child(div().flex_shrink_0().text_color(rgba(theme::t().fg_2)).child("queued")))

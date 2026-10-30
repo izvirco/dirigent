@@ -283,7 +283,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
 /// floated to the right of the mark over the transcript (or composer).
 fn preview_card(i: usize, m: &Mark, t: &OpenThread, grid: &Grid, n: usize) -> AnyElement {
     let text = match &t.timeline.items[m.item] {
-        Item::User { text, .. } | Item::Assistant(text) => text.as_str(),
+        Item::User { text, .. } => crate::view::split_image_refs(text).0,
+        Item::Assistant(text) => text.as_str(),
         _ => "",
     };
     let mut preview: String = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(PREVIEW_CHARS).collect();

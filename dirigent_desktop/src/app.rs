@@ -3825,6 +3825,7 @@ fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
         .map(|a| ImageAttachment {
             mime_type: a.blob.image.format.mime_type().to_owned(),
             data: base64::engine::general_purpose::STANDARD.encode(&a.blob.image.bytes),
+            n: Some(a.n),
         })
         .collect()
 }

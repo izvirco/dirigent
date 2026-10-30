@@ -5,7 +5,8 @@
 // every session event we diff the manager's entry count against what we have
 // already forwarded and emit the new tail as `entry` messages.
 
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   getSupportedThinkingLevels,
@@ -29,6 +30,7 @@ import {
 import {
   type Ask,
   createTools,
+  dataDir,
   deliverAnswers,
   deliverNotice,
   killJobs,
@@ -65,16 +67,55 @@ export interface TitleResult {
   duration_ms: number;
 }
 
+/** An image sent with a prompt (`ImageAttachment`): base64 bytes, and the `N` of the
+ *  `[image-N]` token naming it in the text (missing from older desktops). */
+export interface Attachment {
+  mime_type: string;
+  data: string;
+  n?: number | null;
+}
+
+/** File extensions of the image types whose mime subtype isn't one. */
+const EXTENSIONS: Record<string, string> = { "image/jpeg": "jpg", "image/svg+xml": "svg" };
+
+/**
+ * Save each attachment as `<data dir>/attachments/<sha256>.<ext>` and return `text` with a
+ * markdown reference definition per image, in the images' order: `[image-N]: /path`. The
+ * model sees which file each `[image-N]` is and can use it (upload it, edit it, ...). The
+ * desktop splits the definitions off for display and pairs images with tokens through
+ * them (`view::split_image_refs`). Without `n` (an older desktop) a token is paired by
+ * order, as that desktop shows them.
+ */
+function linkAttachments(text: string, attachments: Attachment[]): string {
+  const dir = join(dataDir(), "attachments");
+  mkdirSync(dir, { recursive: true });
+  const tokens = [...new Set([...text.matchAll(/\[image-(\d+)\]/g)].map((m) => Number(m[1])))].sort(
+    (a, b) => a - b,
+  );
+  const refs = attachments.map((a, i) => {
+    const bytes = Buffer.from(a.data, "base64");
+    const ext = EXTENSIONS[a.mime_type] ?? a.mime_type.split("/")[1] ?? "bin";
+    const path = join(dir, `${createHash("sha256").update(bytes).digest("hex")}.${ext}`);
+    // Rewritten even if it exists: same name, same bytes, and a half-written one heals.
+    writeFileSync(path, bytes);
+    // A destination with spaces or parens (a Windows user dir) must be in <>.
+    return `[image-${a.n ?? tokens[i] ?? i + 1}]: ${/[\s()]/.test(path) ? `<${path}>` : path}`;
+  });
+  return `${text}\n\n${refs.join("\n")}`;
+}
+
 /** Tried in order when the configured title model has no credentials here. */
 const TITLE_FALLBACKS = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"];
 
 /**
  * Appended to pi's system prompt. The service reads the linked file into its blobs and
  * rewrites the link to `blob:<id>` when it persists the reply (`blobs.rs`); the desktop
- * renders those inline.
+ * renders those inline. The last paragraph explains `linkAttachments`.
  */
 const IMAGES_PROMPT = `## Showing images
-Your replies are rendered as markdown in a desktop app. To show the user an image file on this machine (a screenshot you took, a chart you rendered), put it in your reply as a markdown image with its path: \`![what it shows](/absolute/path.png)\`. It appears inline in the reply. png, jpg, gif, webp and bmp work; a relative path is taken from the working directory.`;
+Your replies are rendered as markdown in a desktop app. To show the user an image file on this machine (a screenshot you took, a chart you rendered), put it in your reply as a markdown image with its path: \`![what it shows](/absolute/path.png)\`. It appears inline in the reply. png, jpg, gif, webp and bmp work; a relative path is taken from the working directory.
+
+Images the user attaches to a message are also saved as files on this machine: the \`[image-N]: /path\` lines at the end of the message give the file of each \`[image-N]\`, for when you need the image itself (to upload, edit or attach it).`;
 
 export type Outbound =
   | { type: "loaded"; thread_id: string; model?: string; thinking_level: string; header: unknown }
@@ -237,7 +278,8 @@ export class Sessions {
    * Send a prompt, first switching the session to `model` ("provider/id") and
    * `thinkingLevel` if they differ from its current ones. Pi persists the switch
    * as entries, so it survives reloads. `attachments` are base64 images; pi resizes
-   * them to the model's limits before persisting. `title` (a desktop thread's first
+   * them to the model's limits before persisting, and the text links them to files
+   * (`linkAttachments`). `title` (a desktop thread's first
    * prompt; sub-agents are named by their spawner) names the thread from `text`
    * alongside the run: pi persists the name as a `session_info` entry, which is how
    * the service and clients learn it. `tools`, when given, is the dirigent tool set
@@ -249,7 +291,7 @@ export class Sessions {
     mode: "prompt" | "steer" | "follow_up",
     model?: string,
     thinkingLevel?: string,
-    attachments: { mime_type: string; data: string }[] = [],
+    attachments: Attachment[] = [],
     title?: TitleGen,
     tools?: string[],
   ): Promise<void> {
@@ -280,6 +322,18 @@ export class Sessions {
       data: a.data,
       mimeType: a.mime_type,
     }));
+    // After the title started: it is named from the text as typed.
+    if (attachments.length > 0) {
+      try {
+        text = linkAttachments(text, attachments);
+      } catch (e) {
+        this.send({
+          type: "warning",
+          thread_id: threadId,
+          message: `saving attached images failed: ${(e as Error).message}`,
+        });
+      }
+    }
     if (mode === "steer") {
       // The model is meant to see it now, not after a `wait` times out. (The user's, or a
       // parent's `dirigent send`: hence no who.)
@@ -300,7 +354,9 @@ export class Sessions {
     const { session } = live;
     const { steering, followUp } = session.clearQueue();
     const drop = (list: string[]) => {
-      const i = list.indexOf(text);
+      // The desktop's echo of a steer lacks the image links pi's text has until pi's
+      // `queue_update` replaces it (`linkAttachments`).
+      const i = list.findIndex((t) => t === text || t.startsWith(`${text}\n\n[image-`));
       if (i !== -1) list.splice(i, 1);
       return i !== -1;
     };

@@ -469,11 +469,15 @@ pub struct FirstPrompt {
     pub tools: Option<Vec<String>>,
 }
 
-/// An image sent with a prompt: base64 bytes and their mime type (`image/png`, ...).
+/// An image sent with a prompt: base64 bytes and their mime type (`image/png`, ...). `n` is
+/// the `N` of the `[image-N]` token that names it in the text. The host saves the image
+/// as a file and links the token to it, so the model can use the file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ImageAttachment {
     pub mime_type: String,
     pub data: String,
+    #[serde(default)]
+    pub n: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -680,7 +684,7 @@ mod tests {
                 text: "hi".into(),
                 model: Some("a/b".into()),
                 thinking_level: Some("low".into()),
-                images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into() }],
+                images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into(), n: Some(1) }],
                 title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
                 tools: None,
             }),
@@ -704,7 +708,7 @@ mod tests {
             mode: PromptMode::FollowUp,
             model: Some("a/b".into()),
             thinking_level: None,
-            images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into() }],
+            images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into(), n: None }],
             title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
             tools: Some(vec!["async_bash".into()]),
         });
