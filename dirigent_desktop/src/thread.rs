@@ -230,8 +230,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
 }
 
 /// The right panel, split off the pane by a hairline, `log_width` wide, with a drag
-/// handle on its left edge: the thread's family (`orchestra::tree`, at most a third of
-/// the height, scrolling past that) over the work log (`log_body`), each only when there
+/// handle on its left edge: the thread's family (`orchestra::tree`, at most half the
+/// height, scrolling past that) over the work log (`log_body`), each only when there
 /// is one; a word about sub-agents when there is neither. Untitled: the header's button
 /// shows its state. `panel_open` decides whether it is on screen.
 fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
@@ -255,7 +255,7 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         div()
             .id("orchestra")
             .flex_shrink_0()
-            .max_h(relative(1. / 3.))
+            .max_h(relative(0.5))
             .overflow_y_scroll()
             .px_2()
             .pb_2()

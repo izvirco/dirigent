@@ -387,6 +387,8 @@ pub enum ArchiveAt {
     Header,
     Sidebar,
     List,
+    /// A row of the agent tree (`orchestra::tree`).
+    Tree,
 }
 
 pub struct Dirigent {
@@ -409,6 +411,8 @@ pub struct Dirigent {
     pub dragging: Option<String>,
     /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
     pub hovered_card: Option<(String, String)>,
+    /// Threads whose archived sub-agents are unfolded in the agent tree (`orchestra::lineage`).
+    pub unfolded: HashSet<String>,
     pub pane: Pane,
     /// Settings or Usage, over the pane (the Add project modal is `add_project`).
     pub modal: Option<Modal>,
@@ -597,6 +601,7 @@ impl Dirigent {
             dir_requests: HashSet::new(),
             dragging: None,
             hovered_card: None,
+            unfolded: HashSet::new(),
             pane: Pane::Inbox,
             modal: None,
             menu: None,
@@ -864,7 +869,15 @@ impl Dirigent {
     /// The family of a thread on `host`, for the orchestra panel (`orchestra::lineage`).
     pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
         let Some(h) = self.host(host) else { return vec![] };
-        orchestra::lineage(&h.threads, id)
+        orchestra::lineage(&h.threads, id, &self.unfolded)
+    }
+
+    /// Unfold or fold `parent`'s archived sub-agents in the agent tree.
+    pub fn toggle_unfolded(&mut self, parent: &str, cx: &mut Context<Self>) {
+        if !self.unfolded.remove(parent) {
+            self.unfolded.insert(parent.to_owned());
+        }
+        cx.notify();
     }
 
     /// Group key of a project, if the host still lists it.
