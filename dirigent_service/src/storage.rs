@@ -107,6 +107,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "spend_input", "INTEGER NOT NULL DEFAULT 0"),
     ("threads", "spend_output", "INTEGER NOT NULL DEFAULT 0"),
     ("threads", "spend_cached", "INTEGER NOT NULL DEFAULT 0"),
+    // Named by hand or by a retitle (`set_name`): a first prompt's title landing after
+    // that doesn't replace the name.
+    ("threads", "renamed", "INTEGER NOT NULL DEFAULT 0"),
 ];
 
 /// The searchable text of a message entry: user and assistant text blocks. Used both to
@@ -409,6 +412,14 @@ impl Storage {
         Ok(())
     }
 
+    /// A name given by hand or by a retitle. It sticks: a first prompt's title, which comes
+    /// as an entry (`append_entry`) and may still be on its way, no longer applies.
+    pub fn set_name(&self, id: &str, name: &str) -> Result<()> {
+        let n = self.conn.execute("UPDATE threads SET name = ?2, renamed = 1 WHERE id = ?1", params![id, name])?;
+        anyhow::ensure!(n == 1, "no such thread");
+        Ok(())
+    }
+
     pub fn set_message_pin(&self, thread_id: &str, entry_id: &str, pinned: bool) -> Result<()> {
         anyhow::ensure!(self.thread_cwd(thread_id)?.is_some(), "no such thread");
         let sql = if pinned {
@@ -492,16 +503,35 @@ impl Storage {
         )?;
         let json: Option<String> = stmt.query_row([thread_id], |r| r.get(0)).optional()?;
         let Some(json) = json else { return Ok(None) };
-        let v: Value = serde_json::from_str(&json)?;
-        let text = v.pointer("/message/content").and_then(Value::as_array).map(|blocks| {
-            blocks
-                .iter()
-                .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-                .filter_map(|b| b.get("text").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
-        Ok(text.filter(|t| !t.trim().is_empty()))
+        Ok(Some(message_text(&serde_json::from_str(&json)?)).filter(|t| !t.trim().is_empty()))
+    }
+
+    /// What a retitle reads (`title::digest`): the text of the thread's user messages,
+    /// oldest first, and of its latest final reply (whether or not a run came after it).
+    pub fn conversation(&self, thread_id: &str) -> Result<(Vec<String>, Option<String>)> {
+        let texts = |sql: &str| -> Result<Vec<String>> {
+            let mut stmt = self.conn.prepare(sql)?;
+            let rows = stmt.query_map([thread_id], |r| r.get::<_, String>(0))?;
+            let mut texts = vec![];
+            for json in rows {
+                let text = message_text(&serde_json::from_str(&json?)?);
+                if !text.trim().is_empty() {
+                    texts.push(text);
+                }
+            }
+            Ok(texts)
+        };
+        let prompts = texts(
+            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
+               AND json_extract(json, '$.message.role') = 'user' ORDER BY seq",
+        )?;
+        let reply = texts(
+            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
+               AND json_extract(json, '$.message.role') = 'assistant'
+               AND json_extract(json, '$.message.stopReason') IN ('stop', 'length')
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        Ok((prompts, reply.into_iter().next()))
     }
 
     /// Full-text search: the best-matching passage per thread, best thread first. Every
@@ -669,10 +699,11 @@ impl Storage {
                     self.conn.execute("UPDATE threads SET thinking_level = ?2 WHERE id = ?1", params![thread_id, l])?;
                 }
             }
-            // An explicit name: how the runtime's generated title arrives.
+            // An explicit name: how the runtime's generated title arrives. A name set since
+            // (`set_name`) wins.
             "session_info" => {
                 if let Some(name) = j.get("name").and_then(Value::as_str) {
-                    self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1", params![thread_id, name])?;
+                    self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1 AND renamed = 0", params![thread_id, name])?;
                 }
             }
             _ => {}
@@ -715,6 +746,21 @@ impl Storage {
         for e in entries {
             crate::blobs::inflate(e, &mut |id| self.blob(id).ok().flatten().map(|(_, bytes)| bytes));
         }
+    }
+}
+
+/// The text of a pi message entry: its string content, or its text blocks (images and tool
+/// calls left out) a line apart.
+fn message_text(entry: &Value) -> String {
+    match entry.pointer("/message/content") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -901,6 +947,16 @@ mod tests {
         // A new prompt without a reply yet (or aborted): no reply to report.
         s.append_entry("root", json!({"type":"message","id":"u2","message":{"role":"user","content":"and again"}}), 54).unwrap();
         assert_eq!(s.last_reply("root").unwrap(), None);
+        // A retitle reads every user message and the latest final reply, a run after it or not.
+        let (prompts, reply) = s.conversation("root").unwrap();
+        assert_eq!(prompts, ["find the sqlite bug", "and again"]);
+        assert_eq!(reply.as_deref(), Some("The bug is a missing index on usage.at"));
+        s.set_name("root", "Missing usage index").unwrap();
+        assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
+        // A first title landing after it doesn't replace it.
+        s.append_entry("root", json!({"type":"session_info","id":"n","name":"Sqlite bug"}), 55).unwrap();
+        assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
+        assert!(s.set_name("nope", "x").is_err());
         let hits = s.search("sqlite", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].thread_id, "root");

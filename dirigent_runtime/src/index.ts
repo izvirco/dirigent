@@ -45,7 +45,7 @@ type Inbound =
   | { type: "abort"; thread_id: string }
   | { type: "cancel_queued"; thread_id: string; text: string }
   | { type: "list_models" }
-  | { type: "generate_title"; title: TitleGen; text: string };
+  | { type: "generate_title"; id: number; title: TitleGen; text: string };
 
 const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
 const sessions = new Sessions(send);
@@ -84,10 +84,16 @@ async function handle(msg: Inbound): Promise<void> {
       return sessions.cancelQueued(msg.thread_id, msg.text);
     case "list_models":
       return sessions.listModels();
+    // Answered by `id`: titles are generated side by side and finish in any order.
     case "generate_title":
-      return sessions.generateTitle(msg.title, msg.text).then((r) => {
-        send({ type: "title", ...r });
-      });
+      return sessions.generateTitle(msg.title, msg.text).then(
+        (r) => {
+          send({ type: "title", id: msg.id, ...r });
+        },
+        (e) => {
+          send({ type: "title_failed", id: msg.id, message: (e as Error).message ?? String(e) });
+        },
+      );
     default:
       throw new Error(`unknown message type: ${(msg as { type: string }).type}`);
   }

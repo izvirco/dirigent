@@ -93,6 +93,8 @@ new-thread `+` (217); drag one onto another row's y to reorder. Nothing is pinne
 isn't either (its pin toggle on the Projects page). The Inbox and Workpool rows only show once they have a thread: Inbox right under
 the pins (at (35, 53) with none) with its cards below it; the Workpool row sits above the bottom bar (its cards stack
 up on it; folded by default, the chevron at x = 217 on a hovered nav row folds / unfolds, remembered across restarts).
+Right click a card: `Rename thread` (its title turns into a field, Enter or a click elsewhere saves, Esc cancels) and
+`Regenerate title`, at the click.
 Projects page (folder): a row per project, pin toggle at x ≈ 333 (first row y = 81, rows 40 px apart), hover-revealed
 `⋯` at x ≈ 1006 (rename: the name turns into a field, Enter or a click elsewhere saves, Esc cancels, empty = the directory name; link / unlink / remove); Esc goes back. `Add project` (1020, 19) in its top bar (opened by itself with no
 project yet) is a centered modal: host chip (305, 243), path field (starts at `~/`) and `Add` (790, 243), the host's subdirectories

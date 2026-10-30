@@ -59,8 +59,17 @@ pub enum RuntimeMessage {
     Models {
         models: Vec<ModelInfo>,
     },
-    /// Reply to `generate_title`.
-    Title(TitleResult),
+    /// Replies to `generate_title`, by its `id`: titles are generated side by side and
+    /// finish in any order.
+    Title {
+        id: u64,
+        #[serde(flatten)]
+        result: TitleResult,
+    },
+    TitleFailed {
+        id: u64,
+        message: String,
+    },
     /// Synthesized by the supervisor when the child exits; all loaded state is gone.
     #[serde(skip)]
     Crashed,
@@ -109,6 +118,7 @@ enum Command_<'a> {
         notify: &'a str,
     },
     GenerateTitle {
+        id: u64,
         title: &'a TitleGen,
         text: &'a str,
     },
@@ -131,6 +141,21 @@ pub struct TitleResult {
     pub output: u64,
     pub cost: f64,
     pub duration_ms: i64,
+}
+
+impl TitleResult {
+    /// The reply to the request `id` that asked for it.
+    pub fn reply(self, id: u64) -> dirigent_protocol::ServerMessage {
+        dirigent_protocol::ServerMessage::Title {
+            reply_to: id,
+            title: self.title,
+            model: self.model,
+            input: self.input,
+            output: self.output,
+            cost: self.cost,
+            duration_ms: self.duration_ms,
+        }
+    }
 }
 
 pub struct Runtime {
@@ -158,9 +183,9 @@ struct Inner {
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
     pending_models: Vec<oneshot::Sender<Vec<ModelInfo>>>,
-    /// Callers waiting on a `title` reply, FIFO like `pending_models`. A failed generation
-    /// comes back as an `error` without a thread id, which answers the oldest waiter.
-    pending_titles: Vec<oneshot::Sender<Result<TitleResult, String>>>,
+    /// Callers waiting on a `title` / `title_failed` reply, by the id `generate_title` sent.
+    pending_titles: HashMap<u64, oneshot::Sender<Result<TitleResult, String>>>,
+    next_title: u64,
     last_activity: HashMap<String, Instant>,
 }
 
@@ -247,19 +272,19 @@ impl Runtime {
                     let _ = w.send(models.clone());
                 }
             }
-            RuntimeMessage::Title(result) => {
-                if !inner.pending_titles.is_empty() {
-                    let _ = inner.pending_titles.remove(0).send(Ok(result.clone()));
+            RuntimeMessage::Title { id, result } => {
+                if let Some(w) = inner.pending_titles.remove(id) {
+                    let _ = w.send(Ok(result.clone()));
+                }
+            }
+            RuntimeMessage::TitleFailed { id, message } => {
+                if let Some(w) = inner.pending_titles.remove(id) {
+                    let _ = w.send(Err(message.clone()));
                 }
             }
             RuntimeMessage::Error { thread_id: Some(thread_id), message } => {
                 for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
                     let _ = w.send(Err(message.clone()));
-                }
-            }
-            RuntimeMessage::Error { thread_id: None, message } => {
-                if !inner.pending_titles.is_empty() {
-                    let _ = inner.pending_titles.remove(0).send(Err(message.clone()));
                 }
             }
             RuntimeMessage::Event { thread_id, event } => {
@@ -417,12 +442,23 @@ impl Runtime {
 
     pub async fn generate_title(&self, title: &TitleGen, text: &str) -> Result<TitleResult> {
         let (tx, rx) = oneshot::channel();
-        self.inner.lock().unwrap().pending_titles.push(tx);
-        self.send(&Command_::GenerateTitle { title, text })?;
-        match tokio::time::timeout(LOAD_TIMEOUT, rx).await {
-            Ok(Ok(Ok(result))) => Ok(result),
-            Ok(Ok(Err(message))) => Err(anyhow!("{message}")),
-            _ => Err(anyhow!("runtime did not answer generate_title")),
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.next_title += 1;
+            let id = inner.next_title;
+            inner.pending_titles.insert(id, tx);
+            id
+        };
+        let answer = match self.send(&Command_::GenerateTitle { id, title, text }) {
+            Ok(()) => tokio::time::timeout(LOAD_TIMEOUT, rx).await.ok().and_then(Result::ok),
+            Err(e) => Some(Err(format!("{e:#}"))),
+        };
+        // Answered or not, the waiter is done: an answer coming late finds none.
+        self.inner.lock().unwrap().pending_titles.remove(&id);
+        match answer {
+            Some(Ok(result)) => Ok(result),
+            Some(Err(message)) => Err(anyhow!("{message}")),
+            None => Err(anyhow!("runtime did not answer generate_title")),
         }
     }
 
@@ -467,4 +503,19 @@ pub fn now() -> i64 {
 /// Now as pi writes entry timestamps: `2026-01-02T03:04:05.678Z`.
 pub fn iso_now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A title reply is the runtime's `TitleResult` with the request's id beside it.
+    #[test]
+    fn title_replies_carry_their_id() {
+        let line = r#"{"type":"title","id":7,"title":"Fix it","model":"a/b","input":1,"output":2,"cost":0.5,"duration_ms":9}"#;
+        let Ok(RuntimeMessage::Title { id: 7, result }) = serde_json::from_str(line) else { panic!("{line}") };
+        assert_eq!(result.title, "Fix it");
+        let line = r#"{"type":"title_failed","id":8,"message":"no credentials"}"#;
+        assert!(matches!(serde_json::from_str(line), Ok(RuntimeMessage::TitleFailed { id: 8, .. })));
+    }
 }

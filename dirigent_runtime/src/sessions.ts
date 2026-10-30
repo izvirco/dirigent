@@ -79,7 +79,8 @@ Your replies are rendered as markdown in a desktop app. To show the user an imag
 export type Outbound =
   | { type: "loaded"; thread_id: string; model?: string; thinking_level: string; header: unknown }
   | { type: "models"; models: ModelInfo[] }
-  | ({ type: "title" } & TitleResult)
+  | ({ type: "title"; id: number } & TitleResult)
+  | { type: "title_failed"; id: number; message: string }
   | { type: "entry"; thread_id: string; entry: unknown }
   | { type: "event"; thread_id: string; event: unknown }
   | { type: "ask"; thread_id: string; ask: Ask }
