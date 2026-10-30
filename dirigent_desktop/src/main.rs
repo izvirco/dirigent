@@ -126,4 +126,5 @@ fn main() {
             .unwrap();
         cx.activate(true);
     });
+    tracing::info!("desktop exited");
 }

@@ -276,7 +276,10 @@ impl Dirigent {
             let installer = ready.installer.clone();
             let started = cx.background_executor().spawn(async move { start_installer(&installer) }).await;
             match started {
-                Ok(()) => cx.update(|cx| cx.quit()),
+                Ok(()) => {
+                    info!("installer started, quitting");
+                    cx.update(|cx| cx.quit())
+                }
                 Err(e) => {
                     error!("start the update: {e:#}");
                     this.update(cx, |this, cx| {
