@@ -58,7 +58,8 @@ const LOG_MAX: f32 = 800.;
 const COPIED_TTL: Duration = Duration::from_millis(1200);
 /// How often the Usage modal re-asks the hosts while it shows a window that ends now.
 const USAGE_REFRESH_SECS: u64 = 30;
-/// A thread's title shows as generating for at most this long after its first prompt.
+/// A thread's title shows as generating for at most this long after its first prompt (or a
+/// `Regenerate title`).
 const TITLING_TTL: Duration = Duration::from_secs(60);
 
 /// Which edge the mouse is dragging.
@@ -369,6 +370,22 @@ pub enum Menu {
     TitleEffort,
     /// Sidebar: the update button's restart menu (`update.rs`).
     Update,
+    /// Sidebar: a thread card's right-click menu (rename, regenerate title), at the click
+    /// (window position).
+    ThreadActions {
+        host: String,
+        id: String,
+        at: Point<Pixels>,
+    },
+}
+
+/// What the rename field (`Dirigent::rename_input`) is naming.
+#[derive(Clone, PartialEq)]
+pub enum Renaming {
+    /// A Projects page row, by group key: a name on this desktop only.
+    Project(String),
+    /// A sidebar thread card: the name its host keeps, every client's.
+    Thread { host: String, id: String },
 }
 
 /// The modals opened from the sidebar's bottom bar; they float over whatever pane is open
@@ -394,8 +411,8 @@ pub struct Dirigent {
     pub links: Links,
     /// Names the user gave project groups (`projects::Names`).
     pub names: projects::Names,
-    /// The Projects page row being renamed (group key), its name field `rename_input`.
-    pub renaming: Option<String>,
+    /// The project or thread being renamed, its name field `rename_input`.
+    pub renaming: Option<Renaming>,
     pub rename_input: Entity<TextInput>,
     /// The project group keys pinned to the sidebar, in its order (`projects::pinned`).
     pub pinned_projects: Vec<String>,
@@ -475,8 +492,12 @@ pub struct Dirigent {
     config_edit: u64,
     /// The Settings modal's tab, inputs and title test.
     pub settings: settings::State,
-    /// Threads whose title is being generated (since their first prompt), with when it started.
+    /// Threads whose title is being generated (since their first prompt, or a `Regenerate
+    /// title`), with when it started.
     titling: HashMap<(String, String), Instant>,
+    /// `RetitleThread` requests not answered yet: (host, thread id) by request id. Their
+    /// reply ends the thread's `titling`.
+    retitles: HashMap<u64, (String, String)>,
     /// Images pasted into the composer, in paste order. Only those whose `[image-N]` token
     /// is still in the text count (`attachments()`); the rest are pruned on send.
     /// Like the text, they belong to the thread (or draft) in view: `set_pane` saves them to
@@ -559,7 +580,7 @@ impl Dirigent {
             .detach();
         cx.subscribe(&path_input, |this, _, _: &input::Changed, cx| this.project_path_changed(cx)).detach();
         cx.subscribe(&path_input, |this, _, a: &Arrow, cx| this.move_dir_selection(a.0, cx)).detach();
-        let rename_input = cx.new(|cx| TextInput::new(cx, "project name", true));
+        let rename_input = cx.new(|cx| TextInput::new(cx, "name", true));
         cx.subscribe(&rename_input, |this, _, _: &Submitted, cx| this.finish_rename(true, cx)).detach();
         let host_name_input = cx.new(|cx| TextInput::new(cx, "name", true));
         let host_url_input = cx.new(|cx| TextInput::new(cx, "host:7777 or ws://host:7777/ws", true));
@@ -633,6 +654,7 @@ impl Dirigent {
             config_edit: 0,
             settings,
             titling: HashMap::new(),
+            retitles: HashMap::new(),
             attachments: vec![],
             fitting: 0,
             preview: None,
@@ -827,6 +849,31 @@ impl Dirigent {
     /// The Workpool: threads with an agent at it, directly or through sub-agents.
     pub fn busy_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         self.threads_where(|s| s.busy())
+    }
+
+    /// The sidebar has a card for the thread: it is on the Inbox or the Workpool, unfolded.
+    fn on_sidebar(&self, host: &str, id: &str) -> bool {
+        let shown = |section, rows: Vec<(&str, &ThreadSummary)>| {
+            !self.collapsed.contains(&section) && rows.iter().any(|(h, t)| *h == host && t.id == id)
+        };
+        shown(Section::Inbox, self.inbox_threads()) || shown(Section::Workpool, self.busy_threads())
+    }
+
+    /// After a push: a card's menu or rename goes with its card when the thread left the
+    /// sidebar (archived, snoozed or deleted elsewhere). Nothing else would close them:
+    /// they're drawn by the card.
+    fn drop_gone_card(&mut self, cx: &mut Context<Self>) {
+        if let Some(Menu::ThreadActions { host, id, .. }) = &self.menu
+            && !self.on_sidebar(host, id)
+        {
+            self.menu = None;
+        }
+        if let Some(Renaming::Thread { host, id }) = &self.renaming
+            && !self.on_sidebar(host, id)
+        {
+            self.renaming = None;
+            self.focus(self.focus_handle.clone(), cx);
+        }
     }
 
     /// The user is looking at this thread: whatever it has now is read, on every device.
@@ -1083,6 +1130,7 @@ impl Dirigent {
                         self.show(Pane::Inbox, cx);
                     }
                 }
+                self.drop_gone_card(cx);
             }
             ServerMessage::Thread { reply_to, thread_id, entries, .. } => {
                 if let Pane::Thread(t) = &mut self.pane
@@ -1126,6 +1174,10 @@ impl Dirigent {
             ServerMessage::Title { reply_to, title, model, input, output, cost, duration_ms } => {
                 if self.settings.test_request.take_if(|(id, _)| *id == reply_to).is_some() {
                     self.settings.test_result = Some(Ok(settings::TitleResult { title, model, input, output, cost, duration_ms }));
+                }
+                // A retitle: the name itself comes with the host's `Threads` push.
+                if let Some(thread) = self.retitles.remove(&reply_to) {
+                    self.titling.remove(&thread);
                 }
             }
             ServerMessage::Blob { blob_id, mime_type, data, .. } => {
@@ -1182,6 +1234,10 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
+                // A failed retitle keeps the name it had (and says why, below).
+                if let Some(thread) = reply_to.and_then(|id| self.retitles.remove(&id)) {
+                    self.titling.remove(&thread);
+                }
                 // A listing failure is the modal's, shown in its list if it is the current
                 // listing, else dropped (an earlier directory's; the modal closed).
                 if let Some(id) = reply_to.filter(|id| self.dir_requests.remove(id)) {
@@ -1212,11 +1268,19 @@ impl Dirigent {
                 if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.target.host == host) {
                     self.unsend_draft(p, cx);
                 }
+                // A request newer than the host's service (rename, retitle, ...): serde's
+                // list of every variant it does know says little.
+                let message = if message.starts_with("bad request: unknown variant") {
+                    "its service is too old for that; update it".to_owned()
+                } else {
+                    message
+                };
                 self.toast(format!("{host}: {message}"), cx)
             }
             ServerMessage::Entry { thread_id, entry } => {
-                // The generated name arrives as pi's `session_info` entry.
-                if entry.kind == "session_info" {
+                // The generated name arrives as pi's `session_info` entry (a retitle's with
+                // its reply).
+                if entry.kind == "session_info" && !self.retitling(&host, &thread_id) {
                     self.titling.remove(&(host.clone(), thread_id.clone()));
                 }
                 if let Pane::Thread(t) = &mut self.pane
@@ -1299,8 +1363,9 @@ impl Dirigent {
     /// restores its own (`composer_key`). Other panes don't show the composer and leave it
     /// alone. Leaving a thread keeps how its log was left (`stash_log`).
     fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        // Both belong to the Projects page: leaving it drops them.
-        self.renaming = None;
+        // Both belong to the Projects page: leaving it drops them. (A sidebar card's rename
+        // stays: the sidebar does.)
+        self.renaming.take_if(|r| matches!(r, Renaming::Project(_)));
         self.add_project = None;
         let (from, to) = (composer_key(&self.pane), composer_key(&pane));
         let (leaving, entering) = (from != to && from.is_some(), from != to && to.is_some());
@@ -1632,6 +1697,9 @@ impl Dirigent {
                         this.reload_config(cx);
                     }
                     this.titling.retain(|_, since| since.elapsed() < TITLING_TTL);
+                    // A retitle its host never answered (it went away) is given up with it.
+                    let titling = &this.titling;
+                    this.retitles.retain(|_, thread| titling.contains_key(thread));
                     this.tick_update(cx);
                     this.redraw_field(this.ticks.is_multiple_of(ambient::CLOCK_SECS), cx);
                     // The repo changes under us (commits, rebases in a terminal): keep what the
@@ -2499,8 +2567,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The thread's title is still being generated (its first prompt was sent recently and
-    /// no name has come back yet).
+    /// The thread's title is still being generated (its first prompt or a `Regenerate title`
+    /// was sent recently and no name has come back yet).
     pub fn titling(&self, host: &str, id: &str) -> bool {
         self.titling.contains_key(&(host.to_owned(), id.to_owned()))
     }
@@ -2638,7 +2706,19 @@ impl Dirigent {
     /// Esc cancels).
     pub fn start_rename(&mut self, group_key: &str, cx: &mut Context<Self>) {
         let name = self.groups().0.into_iter().find(|g| g.key == group_key).map(|g| g.name).unwrap_or_default();
-        self.renaming = Some(group_key.to_owned());
+        self.begin_rename(Renaming::Project(group_key.to_owned()), name, cx);
+    }
+
+    /// `Rename thread` in a sidebar card's menu: its title turns into a field, as a
+    /// project's name does.
+    pub fn start_thread_rename(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
+        let name = self.summary(host, id).and_then(|t| t.name.clone()).unwrap_or_default();
+        self.begin_rename(Renaming::Thread { host: host.to_owned(), id: id.to_owned() }, name, cx);
+    }
+
+    /// Put `name` in the rename field and focus it, for `target`.
+    fn begin_rename(&mut self, target: Renaming, name: String, cx: &mut Context<Self>) {
+        self.renaming = Some(target);
         self.menu = None;
         let (window, input) = (self.window, self.rename_input.clone());
         cx.defer(move |cx| {
@@ -2649,17 +2729,69 @@ impl Dirigent {
     }
 
     /// Enter in the rename field (`refocus`: the focus goes back to the root), or a press
-    /// elsewhere (it keeps whatever focus the press gives): the group shows that name from
-    /// now on; an empty one (or the directory's own name) goes back to the directory's name.
+    /// elsewhere (it keeps whatever focus the press gives). A project group shows that name
+    /// from now on; an empty one (or the directory's own name) goes back to the directory's
+    /// name. A thread is renamed on its host, unless the name is empty or unchanged.
     fn finish_rename(&mut self, refocus: bool, cx: &mut Context<Self>) {
-        let Some(key) = self.renaming.take() else { return };
+        let Some(target) = self.renaming.take() else { return };
         let name = self.rename_input.read(cx).text().trim().to_owned();
-        let dir_name = self.groups().0.into_iter().find(|g| g.key == key).map(|g| g.dir_name);
-        let name = Some(name).filter(|n| !n.is_empty() && Some(n) != dir_name.as_ref());
-        self.set_name(&key, name);
+        match target {
+            Renaming::Project(key) => {
+                let dir_name = self.groups().0.into_iter().find(|g| g.key == key).map(|g| g.dir_name);
+                let name = Some(name).filter(|n| !n.is_empty() && Some(n) != dir_name.as_ref());
+                self.set_name(&key, name);
+            }
+            Renaming::Thread { host, id } => self.rename_thread(&host, &id, name),
+        }
         if refocus {
             self.focus(self.focus_handle.clone(), cx);
         }
+        cx.notify();
+    }
+
+    /// Name the thread on its host: shown at once, the host's push confirms it. A first
+    /// title still being generated no longer applies (the host keeps this name), so the
+    /// title stops breathing.
+    fn rename_thread(&mut self, host: &str, thread_id: &str, name: String) {
+        let Some(t) = self.summary_mut(host, thread_id) else { return };
+        if name.is_empty() || t.name.as_ref() == Some(&name) {
+            return;
+        }
+        t.name = Some(name.clone());
+        self.titling.remove(&(host.to_owned(), thread_id.to_owned()));
+        let id = self.next_id();
+        self.net.send(host, ClientMessage::RenameThread { id, thread_id: thread_id.to_owned(), name });
+    }
+
+    /// Right click on a sidebar card: its menu, at the click. It opens even when the press
+    /// just closed another menu (`open_menu` wouldn't), as context menus do. A rename in
+    /// progress is saved first, as a left press would.
+    pub fn show_thread_menu(&mut self, host: &str, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
+        self.finish_rename(false, cx);
+        self.menu = Some(Menu::ThreadActions { host: host.to_owned(), id: id.to_owned(), at });
+        cx.notify();
+    }
+
+    /// A `Regenerate title` of the thread is waiting on its host. Its card's menu offers
+    /// nothing meanwhile: a rename or another retitle would race it.
+    pub fn retitling(&self, host: &str, thread_id: &str) -> bool {
+        self.retitles.values().any(|(h, t)| h == host && t == thread_id)
+    }
+
+    /// `Regenerate title` in a sidebar card's menu: the thread's host titles it again from
+    /// its whole conversation (`RetitleThread`) with the `[title]` model and reasoning. The
+    /// title breathes until the reply.
+    pub fn retitle(&mut self, host: &str, thread_id: &str, cx: &mut Context<Self>) {
+        self.menu = None;
+        if self.retitling(host, thread_id) {
+            return cx.notify();
+        }
+        let id = self.next_id();
+        let TitleGen { model, reasoning, .. } = self.config.title.clone();
+        self.net.send(host, ClientMessage::RetitleThread { id, thread_id: thread_id.to_owned(), model, reasoning });
+        let thread = (host.to_owned(), thread_id.to_owned());
+        self.titling.insert(thread.clone(), Instant::now());
+        self.retitles.insert(id, thread);
         cx.notify();
     }
 

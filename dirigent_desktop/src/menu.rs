@@ -1,11 +1,12 @@
 //! Tiny popup menu: a floating list anchored to its trigger. Only one is open at a
-//! time (`Dirigent::menu`); clicking outside closes it (and that click opens no other menu).
+//! time (`Dirigent::menu`); clicking outside closes it (and that click opens no other menu,
+//! but a right click opens its context menu).
 
 use crate::app::Dirigent;
 use crate::theme::{self, text, u};
 use gpui::{
-    Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, SharedString, Stateful, anchored, canvas, div, point, prelude::*, px,
-    rgba, size,
+    Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, Pixels, Point, SharedString, Stateful, anchored, canvas, div, point,
+    prelude::*, px, rgba, size,
 };
 
 /// Gap between trigger and popup.
@@ -27,52 +28,63 @@ pub enum Side {
     BelowRight(f32),
     /// Floats to the right of the trigger, top-aligned (sidebar card specs).
     Right,
+    /// Its top-left corner at a window position (a right click's), wherever the trigger is.
+    At(Point<Pixels>),
 }
 
 /// Wrap a popup so it floats over everything else. Put it as a child of a `relative()` trigger.
 pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> AnyElement {
     // `right`: the canvas is pinned to the trigger's top-right corner instead of top-left.
-    let (anchor, dx, dy, right) = match side {
-        Side::Above => (Anchor::BottomLeft, 0., -GAP, false),
-        Side::Below(h) => (Anchor::TopLeft, 0., h + GAP, false),
-        Side::BelowRight(h) => (Anchor::TopRight, 0., h + GAP, true),
-        Side::Right => (Anchor::TopLeft, GAP, 0., true),
+    // `at`: the popup goes there instead, in window coordinates.
+    let (anchor, dx, dy, right, at) = match side {
+        Side::Above => (Anchor::BottomLeft, 0., -GAP, false, None),
+        Side::Below(h) => (Anchor::TopLeft, 0., h + GAP, false, None),
+        Side::BelowRight(h) => (Anchor::TopRight, 0., h + GAP, true, None),
+        Side::Right => (Anchor::TopLeft, GAP, 0., true, None),
+        Side::At(p) => (Anchor::TopLeft, 0., 0., false, Some(p)),
     };
     let dismiss = cx.listener(|this, _, _, cx| this.dismiss_menu(cx));
     // A zero-size canvas pinned to a corner of the trigger (without the absolute pin it would
     // take the flex "static position", e.g. centered). Its prepaint knows the trigger's window
     // position, so it caps the popup's height to the room on its side (the popup stays put and
     // scrolls instead of sliding over the trigger), then lays it out and defers it so it draws
-    // above everything else.
+    // above everything else. A popup at a position (`Side::At`) has no trigger to keep clear: it gets the
+    // window's height, and snapping lifts it from a click near the bottom.
     canvas(
         move |bounds, window, cx| {
+            let height = window.viewport_size().height;
             let y = bounds.origin.y + u(dy);
-            let room = if dy < 0. { y } else { window.viewport_size().height - y } - u(MARGIN);
-            let mut popup = anchored()
-                .anchor(anchor)
-                .offset(point(u(dx), u(dy)))
-                .snap_to_window_with_margin(u(MARGIN))
-                .child(
-                    div()
-                        .id("menu")
-                        // Swallow mouse events so triggers under the popup don't fire too.
-                        .occlude()
-                        .flex()
-                        .flex_col()
-                        .max_w(u(520.))
-                        .max_h(room.clamp(u(60.), u(MAX_H)))
-                        .overflow_y_scroll()
-                        .p_1()
-                        .rounded_lg()
-                        .bg(rgba(theme::t().popup))
-                        .border_1()
-                        .border_color(rgba(theme::t().line))
-                        .shadow_lg()
-                        .text_color(rgba(theme::t().fg))
-                        .on_mouse_down_out(dismiss)
-                        .children(items),
-                )
-                .into_any();
+            let room = match at {
+                Some(_) => height - u(MARGIN) * 2.,
+                None if dy < 0. => y - u(MARGIN),
+                None => height - y - u(MARGIN),
+            };
+            let anchored = anchored().anchor(anchor).offset(point(u(dx), u(dy))).snap_to_window_with_margin(u(MARGIN));
+            let mut popup = match at {
+                Some(p) => anchored.position(p),
+                None => anchored,
+            }
+            .child(
+                div()
+                    .id("menu")
+                    // Swallow mouse events so triggers under the popup don't fire too.
+                    .occlude()
+                    .flex()
+                    .flex_col()
+                    .max_w(u(520.))
+                    .max_h(room.clamp(u(60.), u(MAX_H)))
+                    .overflow_y_scroll()
+                    .p_1()
+                    .rounded_lg()
+                    .bg(rgba(theme::t().popup))
+                    .border_1()
+                    .border_color(rgba(theme::t().line))
+                    .shadow_lg()
+                    .text_color(rgba(theme::t().fg))
+                    .on_mouse_down_out(dismiss)
+                    .children(items),
+            )
+            .into_any();
             popup.layout_as_root(size(AvailableSpace::MaxContent, AvailableSpace::MaxContent), window, cx);
             window.defer_draw(popup, bounds.origin, 1, None);
         },

@@ -10,7 +10,7 @@
 //! behind the sidebar only, draws its own), floating it has its own copy.
 
 use crate::ambient::Reach;
-use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Resize, Section, Target};
+use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Renaming, Resize, Section, Target};
 use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -20,8 +20,8 @@ use crate::thread::{self, duration, elapsed};
 use crate::titlebar;
 use dirigent_protocol::ThreadSummary;
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, Pixels, Render, SharedString, Stateful, Window,
-    canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
+    AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Render, SharedString,
+    Stateful, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
 };
 
 /// Default width; the user can drag it between `app::SIDEBAR_MIN` and `SIDEBAR_MAX`.
@@ -104,7 +104,10 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 /// The copy is on the canvas colour made solid, so the pane under it never shows through
 /// (a translucent theme's canvas would let it).
 pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
-    let open = this.sidebar_peek;
+    // A card's right-click menu or rename holds it open: the menu floats past its edge
+    // (taking the hover from it), a rename waits on the keyboard.
+    let held = matches!(this.menu, Some(Menu::ThreadActions { .. })) || matches!(this.renaming, Some(Renaming::Thread { .. }));
+    let open = this.sidebar_peek || held;
     div()
         .id("sidebar-peek")
         .absolute()
@@ -434,11 +437,15 @@ fn cards(
 /// model's lab. Hovering a `snoozable` thread swaps
 /// its run time for snooze (drops it from the sidebar until its next run) and archive
 /// buttons (archiving a workspace thread asks under the button, `thread::archive_confirm`);
-/// hovering any card opens `specs` to its right, unless a menu is open.
+/// hovering any card opens `specs` to its right, unless a menu is open or it is being
+/// renamed. A right click opens its menu at the click: `Rename thread` turns the title
+/// into a field (`Renaming::Thread`), `Regenerate title` titles it from its whole
+/// conversation (`Dirigent::retitle`).
 fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
-    let hovered = this.menu.is_none() && this.hovered_card.as_ref().is_some_and(|(hh, i)| hh == host && *i == t.id);
+    let renaming = this.renaming == Some(Renaming::Thread { host: h.clone(), id: id.clone() });
+    let hovered = this.menu.is_none() && !renaming && this.hovered_card.as_ref().is_some_and(|(hh, i)| hh == host && *i == t.id);
     let unread = this.unread(host, t);
     let pinned = t.pinned;
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
@@ -499,7 +506,38 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
                 )
             })
     });
-    let (h1, id1) = (h.clone(), id.clone());
+    let context_menu = match &this.menu {
+        Some(Menu::ThreadActions { host: mh, id: mid, at }) if mh == host && *mid == t.id => {
+            let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
+            let items = if this.retitling(host, &t.id) {
+                vec![menu::header("Regenerating the title…")]
+            } else {
+                vec![
+                    menu::item("rename", "Rename thread", "", false, move |this, cx| this.start_thread_rename(&h1, &id1, cx), cx),
+                    menu::item("retitle", "Regenerate title", "", false, move |this, cx| this.retitle(&h2, &id2, cx), cx),
+                ]
+            };
+            Some(menu::popup(Side::At(*at), items, cx))
+        }
+        _ => None,
+    };
+    // While renaming, the title is a field: pulled out by its padding and border so the text
+    // stays put, and no taller than the title (the card's height is fixed). Presses in it
+    // don't open the thread.
+    let title_line = if renaming {
+        div()
+            .mx(u(-4.) - px(1.))
+            .my(px(-1.))
+            .px(u(4.))
+            .rounded_sm()
+            .border_1()
+            .border_color(rgba(theme::t().accent_line))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(this.rename_input.clone())
+    } else {
+        div().child(theme::title_text(title_id, title, titling))
+    };
+    let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
     div()
         .id(SharedString::from(format!("card/{h}/{id}")))
         .group("card")
@@ -516,6 +554,10 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         .when(selected, |d| d.bg(rgba(theme::t().hover)))
         .hover(|d| d.bg(rgba(theme::t().hover)))
         .on_click(cx.listener(move |this, _, _, cx| this.select_thread(&h, &id, cx)))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, ev: &MouseDownEvent, _, cx| this.show_thread_menu(&h2, &id2, ev.position, cx)),
+        )
         .on_hover(cx.listener(move |this, over, _, cx| {
             let me = (h1.clone(), id1.clone());
             if *over {
@@ -554,13 +596,14 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
                 .text_color(rgba(this.title_color(host, t)))
                 .when(unread || t.asking(), |d| d.font_weight(FontWeight::MEDIUM))
                 .children(pinned.then(theme::pin_mark))
-                .child(div().flex_1().min_w_0().child(theme::title_text(title_id, title, titling)))
+                .child(title_line.flex_1().min_w_0())
                 .when(vcs.is_empty(), |d| d.children(marks().map(|m| m.ml_0p5()))),
         )
         .when(!vcs.is_empty(), |d| {
             d.child(div().flex().flex_row().items_center().gap_1p5().child(small(vcs.clone(), theme::t().fg_2).flex_1()).children(marks()))
         })
         .children(hovered.then(|| menu::popup(Side::Right, specs(host, t, vcs, elapsed, this), cx)))
+        .children(context_menu)
 }
 
 /// The thread's place in version control: its workspace name (also its git branch / jj

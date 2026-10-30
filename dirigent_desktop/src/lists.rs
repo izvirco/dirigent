@@ -1,7 +1,7 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
 //! 40px header bar and the Projects page (every project, pins).
 
-use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Target};
+use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Renaming, Target};
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::Group;
@@ -187,7 +187,7 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
     hosts.dedup(); // members come sorted by host
     let hosts = hosts.join(", ");
     // While renaming, the name is a field; presses in it don't open the project.
-    let name = if this.renaming.as_deref() == Some(key.as_str()) {
+    let name = if this.renaming == Some(Renaming::Project(key.clone())) {
         // Pulled left by its padding + border so the text stays where the name was.
         div()
             .ml(u(-7.))

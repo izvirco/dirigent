@@ -13,10 +13,11 @@ pub mod platform;
 mod runtime;
 mod server;
 mod storage;
+mod title;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, Vcs};
+use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -137,6 +138,8 @@ impl Service {
             | ClientMessage::Abort { id, .. }
             | ClientMessage::CancelQueued { id, .. }
             | ClientMessage::ArchiveThread { id, .. }
+            | ClientMessage::RenameThread { id, .. }
+            | ClientMessage::RetitleThread { id, .. }
             | ClientMessage::SnoozeThread { id, .. }
             | ClientMessage::PinThread { id, .. }
             | ClientMessage::PinMessage { id, .. }
@@ -325,17 +328,16 @@ impl Service {
             ClientMessage::ListHosts { id } => {
                 ServerMessage::Hosts { reply_to: id, hosts: hosts::load()?.into_iter().map(|(name, url)| HostInfo { name, url }).collect() }
             }
-            ClientMessage::GenerateTitle { id, title, text } => {
-                let r = self.runtime.generate_title(&title, &text).await?;
-                ServerMessage::Title {
-                    reply_to: id,
-                    title: r.title,
-                    model: r.model,
-                    input: r.input,
-                    output: r.output,
-                    cost: r.cost,
-                    duration_ms: r.duration_ms,
-                }
+            ClientMessage::GenerateTitle { id, title, text } => self.runtime.generate_title(&title, &text).await?.reply(id),
+            ClientMessage::RetitleThread { id, thread_id, model, reasoning } => {
+                let (prompts, reply) = self.storage.lock().unwrap().conversation(&thread_id)?;
+                anyhow::ensure!(!prompts.is_empty(), "the thread has no messages to name it from");
+                let settings = TitleGen { model, reasoning, prompt: title::PROMPT.into() };
+                let r = self.runtime.generate_title(&settings, &title::digest(&prompts, reply.as_deref())).await?;
+                self.storage.lock().unwrap().set_name(&thread_id, &r.title)?;
+                info!(thread = %thread_id, "thread retitled");
+                self.push_threads();
+                r.reply(id)
             }
             ClientMessage::GetBlob { id, blob_id } => {
                 let (mime_type, bytes) = self.storage.lock().unwrap().blob(&blob_id)?.ok_or_else(|| anyhow!("no such blob"))?;
@@ -371,6 +373,14 @@ impl Service {
                     }
                     storage.set_archived(&thread_id, archived, now())?;
                 }
+                self.push_threads();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::RenameThread { id, thread_id, name } => {
+                let name = name.trim();
+                anyhow::ensure!(!name.is_empty(), "a thread's name can't be empty");
+                self.storage.lock().unwrap().set_name(&thread_id, name)?;
+                info!(thread = %thread_id, "thread renamed");
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
             }
@@ -745,7 +755,7 @@ impl Service {
                 };
                 self.push(ServerMessage::Error { reply_to: None, message });
             }
-            RuntimeMessage::Models { .. } | RuntimeMessage::Title(_) => {}
+            RuntimeMessage::Models { .. } | RuntimeMessage::Title { .. } | RuntimeMessage::TitleFailed { .. } => {}
             RuntimeMessage::Crashed => {
                 self.push(ServerMessage::Error { reply_to: None, message: "runtime restarted".into() });
                 self.push_threads();

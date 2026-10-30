@@ -162,6 +162,21 @@ pub enum ClientMessage {
         thread_id: String,
         archived: bool,
     },
+    /// Name the thread by hand. Every client sees it, as it does a generated title.
+    RenameThread {
+        id: u64,
+        thread_id: String,
+        name: String,
+    },
+    /// Title the thread again from what it has become: its user messages and latest reply,
+    /// not just its first prompt. `model` (`provider/id`) and `reasoning` are the `[title]`
+    /// settings; the host has the prompt. Replies `Title`; every client sees the new name.
+    RetitleThread {
+        id: u64,
+        thread_id: String,
+        model: String,
+        reasoning: String,
+    },
     /// Snooze: out of the sidebar until the thread's next run (or until woken by hand).
     SnoozeThread {
         id: u64,
@@ -312,7 +327,7 @@ pub enum ServerMessage {
         #[serde(default)]
         refs: Vec<String>,
     },
-    /// Reply to `GenerateTitle`: the title and what producing it cost.
+    /// Reply to `GenerateTitle` and `RetitleThread`: the title and what producing it cost.
     Title {
         reply_to: u64,
         title: String,
@@ -672,6 +687,8 @@ mod tests {
         });
         roundtrip(ClientMessage::ListHosts { id: 20 });
         roundtrip(ClientMessage::SnoozeThread { id: 17, thread_id: "t".into(), snoozed: true });
+        roundtrip(ClientMessage::RenameThread { id: 24, thread_id: "t".into(), name: "Fix it".into() });
+        roundtrip(ClientMessage::RetitleThread { id: 25, thread_id: "t".into(), model: "a/c".into(), reasoning: "low".into() });
         roundtrip(ClientMessage::PinThread { id: 21, thread_id: "t".into(), pinned: true });
         roundtrip(ClientMessage::PinMessage { id: 22, thread_id: "t".into(), entry_id: "e".into(), pinned: false });
         roundtrip(ClientMessage::MarkSeen { id: 23, thread_id: "t".into(), updated_at: 5 });
