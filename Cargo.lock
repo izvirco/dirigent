@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "dirigent_api"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1336,7 +1336,7 @@ dependencies = [
 
 [[package]]
 name = "dirigent_desktop"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1367,7 +1367,7 @@ dependencies = [
 
 [[package]]
 name = "dirigent_protocol"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "dirigent_service"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "anyhow",
  "axum",
