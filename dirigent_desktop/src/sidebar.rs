@@ -152,9 +152,11 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .pr_2()
         // The title drags the window (`titlebar.rs`); the buttons beside it don't overlap it.
         .child({
-            let label = div().flex_1().h_full().flex().items_center();
+            let label = div().flex_1().h_full().flex().items_center().gap_1p5();
             let label = if titlebar::CUSTOM { titlebar::grab(label, cx) } else { label };
-            label.font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent")
+            label
+                .child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
+                .child(div().text_color(rgba(theme::t().fg_2)).child(env!("CARGO_PKG_VERSION")))
         })
         // The folder opens the Projects page (lit while it's open); `+` a new thread.
         .child(
