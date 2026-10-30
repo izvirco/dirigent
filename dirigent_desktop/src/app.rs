@@ -9,6 +9,7 @@ use crate::input::{self, Arrow, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
+use crate::providers;
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
@@ -468,11 +469,13 @@ pub enum Menu {
     Base,
     /// Usage modal: what a series is (model / provider / everything).
     UsageGroup,
-    /// Settings modal: theme, background pattern, title model, title reasoning level.
+    /// Settings modal: theme, background pattern, title model, title reasoning level, the
+    /// host whose providers show.
     Theme,
     Background,
     TitleModel,
     TitleEffort,
+    ProvidersHost,
     /// Sidebar: the update button's restart menu (`update.rs`).
     Update,
     /// Sidebar: a thread card's right-click menu (rename, regenerate title), at the click
@@ -617,6 +620,8 @@ pub struct Dirigent {
     config_edit: u64,
     /// The Settings modal's tab, inputs and title test.
     pub settings: settings::State,
+    /// Settings › Providers: a host's providers, and a login in progress.
+    pub providers: providers::State,
     /// Threads whose title is being generated (since their first prompt, or a `Regenerate
     /// title`), with when it started.
     titling: HashMap<(String, String), Instant>,
@@ -745,6 +750,7 @@ impl Dirigent {
             cx.subscribe(input, |this, _, _: &input::Changed, cx| this.schedule_apply(cx)).detach();
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
+        let providers = providers::State::new(cx);
         let (fonts, missing) = config.fonts.resolve(cx);
         settings.missing_fonts = missing.clone();
         theme::set_text_size(config.fonts.size());
@@ -799,6 +805,7 @@ impl Dirigent {
             watch: config::Watch::new(),
             config_edit: 0,
             settings,
+            providers,
             titling: HashMap::new(),
             retitles: HashMap::new(),
             attachments: vec![],
@@ -843,6 +850,22 @@ impl Dirigent {
     fn next_id(&mut self) -> u64 {
         self.next_id += 1;
         self.next_id
+    }
+
+    /// Send `host` the request `make` builds around a fresh id, and return the id. Dropped
+    /// while the host is offline: callers that wait on the reply check it is connected.
+    pub fn request(&mut self, host: &str, make: impl FnOnce(u64) -> ClientMessage) -> u64 {
+        let id = self.next_id();
+        self.net.send(host, make(id));
+        id
+    }
+
+    /// Put `text` in `input` (deferred: listeners and spawned tasks lack the window).
+    pub fn set_input(&self, input: &Entity<TextInput>, text: &str, cx: &mut Context<Self>) {
+        let (window, input, text) = (self.window, input.clone(), text.to_owned());
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, cx| input.update(cx, |i, cx| i.set_text(&text, window, cx))).ok();
+        });
     }
 
     fn host_mut(&mut self, name: &str) -> Option<&mut HostState> {
@@ -1097,7 +1120,7 @@ impl Dirigent {
     }
 
     /// Host of whatever the composer currently targets: the draft's project, else the open thread.
-    fn composer_host(&self) -> Option<&str> {
+    pub fn composer_host(&self) -> Option<&str> {
         match &self.pane {
             Pane::Draft { target: Some(t) } => Some(&t.host),
             Pane::Thread(t) => Some(&t.host),
@@ -1177,6 +1200,7 @@ impl Dirigent {
                 if status == HostStatus::Connected && self.modal == Some(Modal::Usage) {
                     self.request_usage(cx);
                 }
+                self.providers_status(&host, status);
                 // The connection dropped under a sent draft: its request may never have
                 // arrived (a host that got it still runs the thread), so the draft comes back.
                 if status == HostStatus::Disconnected
@@ -1221,7 +1245,12 @@ impl Dirigent {
 
     fn on_server_message(&mut self, host: String, msg: ServerMessage, cx: &mut Context<Self>) {
         match msg {
-            ServerMessage::Hello { .. } | ServerMessage::Ok { .. } => {}
+            ServerMessage::Hello { .. } => {}
+            ServerMessage::Ok { reply_to } => {
+                self.on_providers_reply(&host, reply_to, Ok(()), cx);
+            }
+            ServerMessage::Providers { reply_to, providers, auth_path } => self.on_providers(&host, reply_to, providers, auth_path),
+            ServerMessage::LoginStep { login, step } => self.on_login_step(&host, login, step, cx),
             ServerMessage::Projects { projects, .. } => {
                 if let Some(h) = self.host_mut(&host) {
                     h.projects = projects;
@@ -1423,6 +1452,12 @@ impl Dirigent {
             ServerMessage::Error { reply_to, message } => {
                 if self.settings.test_request.take_if(|(id, _)| Some(*id) == reply_to).is_some() {
                     self.settings.test_result = Some(Err(message));
+                    return;
+                }
+                // Settings › Providers shows its own failures.
+                if let Some(id) = reply_to
+                    && self.on_providers_reply(&host, id, Err(message.clone()), cx)
+                {
                     return;
                 }
                 // A failed retitle keeps the name it had (and says why, below).
@@ -1913,8 +1948,13 @@ impl Dirigent {
         self.focus(self.composer.focus_handle(cx), cx);
     }
 
+    /// Focus the app itself, no input: its keys (Esc) work then.
+    pub fn focus_root(&self, cx: &mut Context<Self>) {
+        self.focus(self.focus_handle.clone(), cx);
+    }
+
     /// Focus `handle`; deferred because callers may not have the window at hand.
-    fn focus(&self, handle: FocusHandle, cx: &mut Context<Self>) {
+    pub fn focus(&self, handle: FocusHandle, cx: &mut Context<Self>) {
         let window = self.window;
         cx.defer(move |cx| {
             window.update(cx, |_, window, cx| window.focus(&handle, cx)).ok();
@@ -2302,6 +2342,14 @@ impl Dirigent {
         if tab == settings::Tab::Hosts {
             self.sync_hosts(cx);
             self.focus(self.host_name_input.focus_handle(cx), cx);
+        } else if tab == settings::Tab::Providers {
+            // A host since removed shows `local` instead.
+            if self.host(&self.providers.host).is_none() {
+                self.providers.host = hosts::LOCAL.to_owned();
+                self.providers.list = None;
+            }
+            self.request_providers();
+            self.focus_providers(cx);
         } else {
             self.focus(self.focus_handle.clone(), cx);
         }
@@ -2326,9 +2374,11 @@ impl Dirigent {
     }
 
     /// Esc or a press on the dim: back to the pane, with the composer focused if it has one.
+    /// A login in Settings › Providers is cancelled: nobody would see its questions.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         self.menu = None;
+        self.cancel_login(cx);
         // The chart's hover-out never fires once it's gone; a reopen would show a stale readout.
         self.usage.hover = None;
         // The changelog's (any other went with the press that opened the modal).

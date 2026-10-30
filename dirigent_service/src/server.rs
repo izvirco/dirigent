@@ -12,6 +12,7 @@ use dirigent_protocol::{ClientMessage, ServerMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
@@ -57,6 +58,14 @@ fn tune(_: &mut TcpStream) {}
 /// axum's 16 MiB frame default would cut off big requests far below its message limit.
 const MAX_MESSAGE: usize = 64 << 20;
 
+/// The connection a request came in on: what a login sends its steps to, and is cancelled
+/// with (`Service::disconnected`).
+#[derive(Clone)]
+pub struct Conn {
+    pub id: u64,
+    pub out: mpsc::UnboundedSender<ServerMessage>,
+}
+
 async fn upgrade(ws: WebSocketUpgrade, State(svc): State<Arc<Service>>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
     ws.max_frame_size(MAX_MESSAGE).max_message_size(MAX_MESSAGE).on_upgrade(move |socket| connection(socket, svc, peer))
 }
@@ -66,6 +75,8 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
     debug!(%peer, "client connected");
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let conn = Conn { id: NEXT.fetch_add(1, Ordering::Relaxed), out: out.clone() };
     // Images (`Blob` replies) have a queue of their own, sent from only when nothing else
     // waits: opening a thread asks for all its images at once, possibly hundreds of MB,
     // minutes over a slow link, and every reply and push would wait behind them.
@@ -119,10 +130,10 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         };
         match serde_json::from_str::<ClientMessage>(&text) {
             Ok(req) => {
-                let (svc, out, blobs) = (svc.clone(), out.clone(), blobs.clone());
+                let (svc, conn, blobs) = (svc.clone(), conn.clone(), blobs.clone());
                 tokio::spawn(async move {
-                    let reply = svc.handle(req).await;
-                    let queue = if matches!(reply, ServerMessage::Blob { .. }) { &blobs } else { &out };
+                    let reply = svc.handle(req, &conn).await;
+                    let queue = if matches!(reply, ServerMessage::Blob { .. }) { &blobs } else { &conn.out };
                     let _ = queue.send(reply);
                 });
             }
@@ -136,6 +147,7 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         }
     }
     writer.abort();
+    svc.disconnected(conn.id);
     match error {
         Some(e) => warn!(%peer, "connection dropped: {e}"),
         None => debug!(%peer, "client disconnected"),

@@ -2,7 +2,8 @@
 //! The runtime is stateless, so a crash just means "nothing is loaded anymore".
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{Ask, ImageAttachment, ModelInfo, PromptMode, TitleGen};
+use dirigent_protocol::{Ask, AuthMethod, ImageAttachment, LoginStep, ModelInfo, PromptMode, ProviderInfo, TitleGen};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -56,19 +57,19 @@ pub enum RuntimeMessage {
         thread_id: Option<String>,
         message: String,
     },
-    Models {
-        models: Vec<ModelInfo>,
-    },
-    /// Replies to `generate_title`, by its `id`: titles are generated side by side and
-    /// finish in any order.
-    Title {
+    /// The outcome of the request `id` (`Runtime::request`): what it gives, or why it failed.
+    Reply {
         id: u64,
-        #[serde(flatten)]
-        result: TitleResult,
+        value: Value,
     },
-    TitleFailed {
+    Failed {
         id: u64,
         message: String,
+    },
+    /// A step of the login started by request `id`, for whoever started it.
+    LoginStep {
+        id: u64,
+        step: LoginStep,
     },
     /// Synthesized by the supervisor when the child exits; all loaded state is gone.
     #[serde(skip)]
@@ -133,7 +134,40 @@ enum Command_<'a> {
         thread_id: &'a str,
         text: &'a str,
     },
-    ListModels,
+    ListModels {
+        id: u64,
+    },
+    ListProviders {
+        id: u64,
+    },
+    Login {
+        id: u64,
+        provider: &'a str,
+        method: AuthMethod,
+    },
+    LoginAnswer {
+        id: u64,
+        n: u32,
+        value: &'a str,
+    },
+    LoginCancel {
+        id: u64,
+    },
+    Logout {
+        id: u64,
+        provider: &'a str,
+    },
+}
+
+/// Where a login's steps go while it runs (`Runtime::login`). Called with the runtime's
+/// state locked, so it must not call back into `Runtime`.
+pub type Steps = Box<dyn Fn(LoginStep) + Send>;
+
+/// What `ListProviders` gives.
+#[derive(Deserialize)]
+pub struct Providers {
+    pub providers: Vec<ProviderInfo>,
+    pub auth_path: String,
 }
 
 /// A generated title and what it cost (see `ServerMessage::Title`).
@@ -188,11 +222,11 @@ struct Inner {
     compacting: HashMap<String, i64>,
     /// Callers waiting on a `loaded` reply, per thread.
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
-    /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
-    pending_models: Vec<oneshot::Sender<Vec<ModelInfo>>>,
-    /// Callers waiting on a `title` / `title_failed` reply, by the id `generate_title` sent.
-    pending_titles: HashMap<u64, oneshot::Sender<Result<TitleResult, String>>>,
-    next_title: u64,
+    /// Callers waiting on a `reply` / `failed`, by the request's id (`request`).
+    pending: HashMap<u64, oneshot::Sender<Result<Value, String>>>,
+    /// Where the steps of the logins in progress go, by their request id.
+    login_steps: HashMap<u64, Steps>,
+    next_request: u64,
     last_activity: HashMap<String, Instant>,
 }
 
@@ -274,19 +308,20 @@ impl Runtime {
                     let _ = w.send(Ok(()));
                 }
             }
-            RuntimeMessage::Models { models } => {
-                for w in inner.pending_models.drain(..) {
-                    let _ = w.send(models.clone());
+            RuntimeMessage::Reply { id, value } => {
+                if let Some(w) = inner.pending.remove(id) {
+                    let _ = w.send(Ok(value.clone()));
                 }
             }
-            RuntimeMessage::Title { id, result } => {
-                if let Some(w) = inner.pending_titles.remove(id) {
-                    let _ = w.send(Ok(result.clone()));
-                }
-            }
-            RuntimeMessage::TitleFailed { id, message } => {
-                if let Some(w) = inner.pending_titles.remove(id) {
+            RuntimeMessage::Failed { id, message } => {
+                if let Some(w) = inner.pending.remove(id) {
                     let _ = w.send(Err(message.clone()));
+                }
+            }
+            // Handed on here, in stdout order: the reply that ends the login comes after.
+            RuntimeMessage::LoginStep { id, step } => {
+                if let Some(steps) = inner.login_steps.get(id) {
+                    steps(step.clone());
                 }
             }
             RuntimeMessage::Error { thread_id: Some(thread_id), message } => {
@@ -351,8 +386,10 @@ impl Runtime {
                 let _ = w.send(Err("runtime exited".into()));
             }
         }
-        inner.pending_models.clear();
-        inner.pending_titles.clear();
+        for (_, w) in inner.pending.drain() {
+            let _ = w.send(Err("runtime exited".into()));
+        }
+        inner.login_steps.clear();
     }
 
     fn send(&self, cmd: &Command_) -> Result<()> {
@@ -473,36 +510,71 @@ impl Runtime {
         self.send(&Command_::Notify { thread_id, custom_type, content, details, notify })
     }
 
-    pub async fn generate_title(&self, title: &TitleGen, text: &str) -> Result<TitleResult> {
+    /// A fresh request id: what `request` sends a command under, and a login is known by.
+    pub fn next_id(&self) -> u64 {
+        let mut inner = self.inner.lock().unwrap();
+        inner.next_request += 1;
+        inner.next_request
+    }
+
+    /// Send `cmd` (made with request `id`) and wait for its `reply` or `failed`: at most
+    /// `timeout`, or as long as it takes (a login waits on the user). Requests run side by
+    /// side in the runtime and finish in any order.
+    async fn request<T: DeserializeOwned>(&self, id: u64, timeout: Option<Duration>, cmd: Command_<'_>) -> Result<T> {
         let (tx, rx) = oneshot::channel();
-        let id = {
-            let mut inner = self.inner.lock().unwrap();
-            inner.next_title += 1;
-            let id = inner.next_title;
-            inner.pending_titles.insert(id, tx);
-            id
-        };
-        let answer = match self.send(&Command_::GenerateTitle { id, title, text }) {
-            Ok(()) => tokio::time::timeout(LOAD_TIMEOUT, rx).await.ok().and_then(Result::ok),
+        self.inner.lock().unwrap().pending.insert(id, tx);
+        let answer = match self.send(&cmd) {
+            Ok(()) => match timeout {
+                Some(t) => tokio::time::timeout(t, rx).await.ok().and_then(Result::ok),
+                None => rx.await.ok(),
+            },
             Err(e) => Some(Err(format!("{e:#}"))),
         };
         // Answered or not, the waiter is done: an answer coming late finds none.
-        self.inner.lock().unwrap().pending_titles.remove(&id);
+        self.inner.lock().unwrap().pending.remove(&id);
         match answer {
-            Some(Ok(result)) => Ok(result),
+            Some(Ok(value)) => Ok(serde_json::from_value(value)?),
             Some(Err(message)) => Err(anyhow!("{message}")),
-            None => Err(anyhow!("runtime did not answer generate_title")),
+            None => Err(anyhow!("the runtime did not answer")),
         }
     }
 
+    pub async fn generate_title(&self, title: &TitleGen, text: &str) -> Result<TitleResult> {
+        let id = self.next_id();
+        self.request(id, Some(LOAD_TIMEOUT), Command_::GenerateTitle { id, title, text }).await
+    }
+
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let (tx, rx) = oneshot::channel();
-        self.inner.lock().unwrap().pending_models.push(tx);
-        self.send(&Command_::ListModels)?;
-        match tokio::time::timeout(LOAD_TIMEOUT, rx).await {
-            Ok(Ok(models)) => Ok(models),
-            _ => Err(anyhow!("runtime did not answer list_models")),
-        }
+        let id = self.next_id();
+        self.request(id, Some(LOAD_TIMEOUT), Command_::ListModels { id }).await
+    }
+
+    pub async fn list_providers(&self) -> Result<Providers> {
+        let id = self.next_id();
+        self.request(id, Some(LOAD_TIMEOUT), Command_::ListProviders { id }).await
+    }
+
+    /// Run login `id` (from `next_id`) to its end, handing its steps to `steps` meanwhile.
+    /// No timeout: it waits on the user (`login_cancel` ends it).
+    pub async fn login(&self, id: u64, provider: &str, method: AuthMethod, steps: Steps) -> Result<()> {
+        self.inner.lock().unwrap().login_steps.insert(id, steps);
+        let result = self.request::<Value>(id, None, Command_::Login { id, provider, method }).await;
+        self.inner.lock().unwrap().login_steps.remove(&id);
+        result.map(drop)
+    }
+
+    /// Answer prompt `n` of login `id`.
+    pub fn login_answer(&self, id: u64, n: u32, value: &str) -> Result<()> {
+        self.send(&Command_::LoginAnswer { id, n, value })
+    }
+
+    pub fn login_cancel(&self, id: u64) -> Result<()> {
+        self.send(&Command_::LoginCancel { id })
+    }
+
+    pub async fn logout(&self, provider: &str) -> Result<()> {
+        let id = self.next_id();
+        self.request::<Value>(id, Some(LOAD_TIMEOUT), Command_::Logout { id, provider }).await.map(drop)
     }
 
     pub fn abort(&self, thread_id: &str) -> Result<()> {
@@ -542,13 +614,13 @@ pub fn iso_now() -> String {
 mod tests {
     use super::*;
 
-    /// A title reply is the runtime's `TitleResult` with the request's id beside it.
+    /// A request's outcome comes back under its id: what it gives, or why it failed.
     #[test]
-    fn title_replies_carry_their_id() {
-        let line = r#"{"type":"title","id":7,"title":"Fix it","model":"a/b","input":1,"output":2,"cost":0.5,"duration_ms":9}"#;
-        let Ok(RuntimeMessage::Title { id: 7, result }) = serde_json::from_str(line) else { panic!("{line}") };
-        assert_eq!(result.title, "Fix it");
-        let line = r#"{"type":"title_failed","id":8,"message":"no credentials"}"#;
-        assert!(matches!(serde_json::from_str(line), Ok(RuntimeMessage::TitleFailed { id: 8, .. })));
+    fn replies_carry_their_id() {
+        let line = r#"{"type":"reply","id":7,"value":{"title":"Fix it","model":"a/b","input":1,"output":2,"cost":0.5,"duration_ms":9}}"#;
+        let Ok(RuntimeMessage::Reply { id: 7, value }) = serde_json::from_str(line) else { panic!("{line}") };
+        assert_eq!(serde_json::from_value::<TitleResult>(value).unwrap().title, "Fix it");
+        let line = r#"{"type":"failed","id":8,"message":"no credentials"}"#;
+        assert!(matches!(serde_json::from_str(line), Ok(RuntimeMessage::Failed { id: 8, .. })));
     }
 }

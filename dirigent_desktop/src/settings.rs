@@ -1,6 +1,7 @@
 //! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
 //! sections on the right. General, Thread titles and Agent tools are the UI over
-//! `config.toml` (`config.rs`), Hosts over `hosts.toml`. Everything saves as it is
+//! `config.toml` (`config.rs`), Hosts over `hosts.toml`, Providers over a host's pi
+//! credentials (`providers.rs`, which has its own flow). Everything else saves as it is
 //! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
 //! warning mark on a font field whose family isn't installed; theme, text size, background,
 //! title model, reasoning, the agent tools and telemetry are chips, a stepper and switches
@@ -30,17 +31,19 @@ const NAV_W: f32 = 180.;
 pub enum Tab {
     #[default]
     General,
+    Providers,
     Titles,
     Tools,
     Hosts,
 }
 
 impl Tab {
-    const ALL: [Tab; 4] = [Tab::General, Tab::Titles, Tab::Tools, Tab::Hosts];
+    const ALL: [Tab; 5] = [Tab::General, Tab::Providers, Tab::Titles, Tab::Tools, Tab::Hosts];
 
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
+            Tab::Providers => "Providers",
             Tab::Titles => "Thread titles",
             Tab::Tools => "Agent tools",
             Tab::Hosts => "Hosts",
@@ -142,6 +145,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .children(Tab::ALL.map(|tab| nav_item(tab, tab == open, cx)));
     let sections = match open {
         Tab::General => vec![appearance(this, cx), telemetry(this, cx), saved_to(&config::path())],
+        Tab::Providers => crate::providers::render(this, cx),
         Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
         Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
         Tab::Hosts => vec![hosts(this, cx), saved_to(&hosts::path())],
@@ -170,12 +174,12 @@ fn nav_item(tab: Tab, on: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 }
 
 /// A section: title over its content.
-fn section(title: &'static str, body: impl IntoElement) -> Div {
+pub fn section(title: &'static str, body: impl IntoElement) -> Div {
     div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
 }
 
 /// The file a tab's settings live in (also editable by hand), in small print at its bottom.
-fn saved_to(path: &Path) -> Div {
+pub fn saved_to(path: &Path) -> Div {
     div().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(format!("Saved to {}", path.display()))
 }
 
@@ -193,7 +197,7 @@ fn row(label: &'static str, control: impl IntoElement) -> Div {
 }
 
 /// A bordered text field.
-fn field(input: Entity<TextInput>) -> Div {
+pub fn field(input: Entity<TextInput>) -> Div {
     let t = theme::t();
     div().w_full().px_3().py_1p5().rounded_md().bg(rgba(t.raised)).border_1().border_color(rgba(t.line)).text_size(text::sm()).child(input)
 }
@@ -291,7 +295,12 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             })
             .collect();
         if items.is_empty() {
-            items.push(menu::header("No models yet: the local host is still connecting"));
+            let up = this.host(hosts::LOCAL).is_some_and(|h| h.status == HostStatus::Connected);
+            items.push(menu::header(if up {
+                "No models: sign in to a provider first (Providers)"
+            } else {
+                "No models yet: the local host is still connecting"
+            }));
         }
         menu::popup(Side::BelowRight(26.), items, cx)
     });
