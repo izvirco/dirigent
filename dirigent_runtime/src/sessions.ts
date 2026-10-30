@@ -37,6 +37,7 @@ import {
   requeueNotices,
   TOOL_NAMES,
   type ToolHost,
+  wake,
 } from "./tools";
 
 export interface ModelInfo {
@@ -131,6 +132,8 @@ export class Sessions {
       forwarded: entries.filter((e) => e.type !== "session").length,
       jobs: new Map(),
       notices: new Map(),
+      waiters: new Set(),
+      dirigentCalls: new Set(),
       onAsk: (ask: Ask) => this.send({ type: "ask", thread_id: threadId, ask }),
       onJobs: (running: number) => this.send({ type: "jobs", thread_id: threadId, running }),
     } as Live;
@@ -276,8 +279,11 @@ export class Sessions {
       data: a.data,
       mimeType: a.mime_type,
     }));
-    if (mode === "steer") await session.steer(text, images);
-    else if (mode === "follow_up") await session.followUp(text, images);
+    if (mode === "steer") {
+      // The model is meant to see it now, not after a `wait` times out. (The user's, or a
+      // parent's `dirigent send`: hence no who.)
+      if ((await session.steer(text, images)) === "queued") wake(live, "a message came in");
+    } else if (mode === "follow_up") await session.followUp(text, images);
     else await session.prompt(text, { images, streamingBehavior: "followUp" });
   }
 

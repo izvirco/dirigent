@@ -6,7 +6,8 @@
 // reaches the model later as a custom message through pi's steer / follow-up queues, which
 // also wakes an idle agent for a new turn. A job picks how it interrupts (`notify`); the
 // user's answers are user input and always steer; a sub-agent ending is delivered by the
-// service (`deliverNotice`).
+// service (`deliverNotice`). `async_bash wait` is the one call that blocks: until one of
+// those notices or a user steer comes in, so models stop doing `sleep 60; cat log`.
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
@@ -69,6 +70,14 @@ export interface ToolHost {
   jobs: Map<string, Job>;
   /** Notices queued in pi that it has not delivered yet, by job / ask id (see `requeueNotices`). */
   notices: Map<string, Notice>;
+  /** Running `async_bash wait` calls; `wake` ends them with what came in. */
+  waiters: Set<(why: string) => void>;
+  /**
+   * `dirigent` calls in flight, settling when they end. `wait` lets them settle before it
+   * asks the service what runs: pi runs a tool batch in parallel, and a sub-agent spawned
+   * (or messaged) in the same batch must count.
+   */
+  dirigentCalls: Set<Promise<void>>;
   onAsk: (ask: Ask) => void;
   /** Tell the host how many jobs are running (`reportJobs`). */
   onJobs: (running: number) => void;
@@ -85,6 +94,8 @@ interface Notice {
 const GRACE_MS = 2000;
 const TAIL_LINES = 30;
 const TAIL_CHARS = 4000;
+/** How long `wait` blocks when the model gives no `timeout`. */
+const WAIT_S = 600;
 
 const notifyParam = Type.Optional(
   Type.Union([Type.Literal("asap"), Type.Literal("when_idle")], {
@@ -95,14 +106,21 @@ const notifyParam = Type.Optional(
 
 const asyncBashParams = Type.Object({
   action: Type.Optional(
-    Type.Union([Type.Literal("start"), Type.Literal("status"), Type.Literal("kill")], {
-      description:
-        '"start" (default) runs `command`; "status" reports on `job_id` (or all jobs); "kill" stops `job_id`.',
-    }),
+    Type.Union(
+      [Type.Literal("start"), Type.Literal("status"), Type.Literal("kill"), Type.Literal("wait")],
+      {
+        description:
+          '"start" (default) runs `command`; "status" reports on `job_id` (or all jobs); "kill" stops `job_id`; ' +
+          '"wait" blocks until one of your jobs or sub-agents ends (whatever its `notify`) or a message comes in, then says what woke it (in full in the next message).',
+      },
+    ),
   ),
   command: Type.Optional(Type.String({ description: "Bash command to run in the background." })),
   job_id: Type.Optional(Type.String({ description: "The job to report on or kill." })),
   notify: notifyParam,
+  timeout: Type.Optional(
+    Type.Number({ description: `wait: give up after this many seconds (default ${WAIT_S}).` }),
+  ),
 });
 
 const askUserParams = Type.Object({
@@ -226,16 +244,21 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     label: "Background command",
     description:
       "Run a long command in the background (builds, test suites, servers) and keep working; a message tells you " +
-      "when it ends. Use `bash` when you'd only wait for the output.",
+      "when it ends. Use `bash` when you'd only wait for the output. When you have nothing left to do but wait for " +
+      "jobs or sub-agents, use `wait`; never `sleep` or poll `status`.",
+    promptGuidelines: [
+      "To wait for async_bash jobs or sub-agents, call async_bash `wait` instead of `sleep` / polling: it returns the moment one ends.",
+    ],
     promptSnippet:
       "Run long commands (builds, tests, servers) in the background while you keep working",
     parameters: asyncBashParams,
-    async execute(_id, params) {
+    async execute(_id, params, signal) {
       const action = params.action ?? "start";
       if (action === "start") {
         if (!params.command?.trim()) throw new Error("`command` is required to start a job");
         return text(await startJob(host, params.command, params.notify ?? "asap"));
       }
+      if (action === "wait") return text(await wait(host, params.timeout ?? WAIT_S, signal));
       if (action === "kill") {
         const job = getJob(host, params.job_id);
         if (job.exit !== undefined)
@@ -291,6 +314,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
       const listing = (r: { found: Parameters<typeof describeThread>[0][]; failed: string[] }) =>
         (r.found.length ? r.found.map((f) => describeThread(f)).join("\n") : "No threads.") +
         (r.failed.length ? `\nNot reached: ${r.failed.join("; ")}` : "");
+      let settle = () => {};
+      const call = new Promise<void>((r) => (settle = r));
+      host.dirigentCalls.add(call);
       try {
         switch (p.action) {
           case "spawn": {
@@ -414,6 +440,8 @@ export function createTools(host: ToolHost): ToolDefinition[] {
         }
       } finally {
         d.close();
+        host.dirigentCalls.delete(call);
+        settle();
       }
     },
   });
@@ -528,7 +556,83 @@ async function startJob(host: ToolHost, command: string, notify: Notify): Promis
       notify,
     });
   });
-  return `job ${id} started: \`${command}\`\nlog: ${log}\nYou will be told when it ends.`;
+  return `job ${id} started: \`${command}\`\nlog: ${log}\nYou will be told when it ends; \`wait\` if you have nothing else to do.`;
+}
+
+/**
+ * `async_bash wait`: block until something reaches the model (`wake`: a notice from a job,
+ * sub-agent or ask, or a steer), `timeoutS` passes or the run is stopped. Says what woke
+ * it; the notice itself is queued as a steer and follows the tool result. Returns at once
+ * when a notice or steer is already queued, or when nothing could ever wake it.
+ */
+async function wait(host: ToolHost, timeoutS: number, signal?: AbortSignal): Promise<string> {
+  // Registered before any await, so whatever comes in during the checks below is upgraded
+  // by `deliver` and found queued. `why` undefined: timed out or stopped.
+  let done: (why?: string) => void = () => {};
+  const woken = new Promise<string | undefined>((resolve) => (done = resolve));
+  const stop = () => done();
+  const timer = setTimeout(stop, timeoutS * 1000);
+  host.waiters.add(done);
+  signal?.addEventListener("abort", stop, { once: true });
+  if (signal?.aborted) stop();
+  const started = Date.now();
+  try {
+    await Promise.all(host.dirigentCalls);
+    const busy = runningJobs(host).length > 0 || (await subAgentsBusy(host.threadId));
+    const now: string[] = [];
+    const later: string[] = [];
+    for (const n of host.notices.values())
+      (n.notify === "asap" ? now : later).push(firstLine(n.content));
+    if (host.session.getSteeringMessages().length) now.push("a message came in");
+    if (now.length || later.length) {
+      const out = [];
+      if (now.length) out.push("Already queued for you (in full in the next message):", ...now);
+      if (later.length) out.push("Queued for when your turn ends (end it to get them):", ...later);
+      return out.join("\n");
+    }
+    if (!busy) return "Nothing to wait for: no jobs or sub-agents running.";
+
+    const why = await woken;
+    const waited = duration(Date.now() - started);
+    if (signal?.aborted) return `wait stopped after ${waited}`;
+    if (why !== undefined)
+      return `Woke after ${waited} on this (in full in the next message):\n${why}`;
+    const running = runningJobs(host);
+    return (
+      `Nothing came in ${waited}.` +
+      (running.length
+        ? ` Still running:\n${running.map((j) => describe(j, false)).join("\n")}`
+        : "")
+    );
+  } finally {
+    host.waiters.delete(done);
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", stop);
+  }
+}
+
+/** End every running `wait` (see `ToolHost.waiters`): `why` reached the model's queue. */
+export function wake(host: ToolHost, why: string): void {
+  for (const w of host.waiters) w(why);
+}
+
+function runningJobs(host: ToolHost): Job[] {
+  return [...host.jobs.values()].filter((j) => j.exit === undefined && !j.killed);
+}
+
+/** Whether one of the thread's sub-agents runs or has jobs. True when the service can't say: wait then. */
+async function subAgentsBusy(threadId: string): Promise<boolean> {
+  let d: Dirigent | undefined;
+  try {
+    d = new Dirigent({ threadId, tools: [] });
+    return (await d.threads()).some(
+      (t) => t.parent_id === threadId && (t.running_since !== null || t.jobs > 0),
+    );
+  } catch {
+    return true;
+  } finally {
+    d?.close();
+  }
 }
 
 /**
@@ -610,14 +714,23 @@ function killJob(job: Job): void {
 /**
  * Hand a notice to the model: queued as a steer or follow-up while it works (and, with
  * `steeringMode = "all"`, delivered with every other one waiting), else a new turn.
- * Remembered until pi delivers it, in case the queue is cleared meanwhile.
+ * Remembered until pi delivers it, in case the queue is cleared meanwhile. A model that
+ * `wait`s has no work to interrupt, so then every notice steers and wakes it.
  */
 async function deliver(host: ToolHost, key: string, n: Notice): Promise<void> {
+  if (host.waiters.size) n = { ...n, notify: "asap" };
   host.notices.set(key, n);
   await host.session.sendCustomMessage(
     { customType: n.customType, content: n.content, display: true, details: { ...n.details, key } },
     { triggerTurn: true, deliverAs: n.notify === "asap" ? "steer" : "followUp" },
   );
+  if (n.notify === "asap") wake(host, firstLine(n.content));
+}
+
+/** A notice's first line, for `wait` to say what woke it. */
+function firstLine(s: string): string {
+  const line = s.split("\n", 1)[0] ?? "";
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
 /** Pi started delivering a custom message: forget it (see `deliver`). */
