@@ -84,7 +84,7 @@ pub struct OpenThread {
     /// The work whose full log the right panel's log section shows (item index,
     /// `thread::TAIL` for a live work that has no persisted item yet); `None` = no log.
     pub log: Option<usize>,
-    /// The log panel's steps, one item each; follows the tail while it shows a live work.
+    /// The log panel's steps, one item each; follows the end unless the user scrolled up.
     pub log_list: ListState,
     /// The item whose copy button was just clicked (it shows a check for a moment).
     pub copied: Option<usize>,
@@ -109,6 +109,17 @@ pub struct OpenThread {
     pub panel: Option<bool>,
     /// Its latest `GetThread` and the last entry it held when asking (see `fetch_open`).
     fetching: Option<(u64, Option<u64>)>,
+}
+
+/// How the user left a thread's log, kept in memory (`Dirigent::logs`) so coming back to the
+/// thread puts them where they were: `stash_log` fills it, `select_thread` and `show_log` read it.
+#[derive(Default)]
+struct LogMemory {
+    /// Per work key, where its log was left scrolled up from its end. A work not in here
+    /// opens at its end and follows it.
+    tops: HashMap<usize, ListOffset>,
+    /// The tool calls left open (`OpenThread::expanded`).
+    expanded: HashSet<(usize, usize)>,
 }
 
 impl OpenThread {
@@ -427,6 +438,8 @@ pub struct Dirigent {
     /// latest work (`latest_work`). Set by opening a log by hand (a work line, the panel
     /// button), cleared by closing the panel.
     pub log_on: bool,
+    /// Per thread id, how the user left its log (in memory only).
+    logs: HashMap<String, LogMemory>,
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
@@ -597,6 +610,7 @@ impl Dirigent {
             workpool_scroll: ScrollHandle::new(),
             log_width,
             log_on: false,
+            logs: HashMap::new(),
             resizing: None,
             composer,
             path_input,
@@ -1283,7 +1297,7 @@ impl Dirigent {
     /// Every pane change goes through here: the composer belongs to the thread (or draft)
     /// in view, so leaving one saves its text, selection and images and entering another
     /// restores its own (`composer_key`). Other panes don't show the composer and leave it
-    /// alone.
+    /// alone. Leaving a thread keeps how its log was left (`stash_log`).
     fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
         // Both belong to the Projects page: leaving it drops them.
         self.renaming = None;
@@ -1293,6 +1307,7 @@ impl Dirigent {
         if leaving {
             self.save_draft(cx);
         }
+        self.stash_log();
         self.pane = pane;
         if entering {
             self.load_composer(cx);
@@ -1371,6 +1386,8 @@ impl Dirigent {
 
     /// Show cached entries immediately, then ask the host for the full thread.
     pub fn select_thread(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
+        // Before `logs` is read below: the thread may be the one open (its own card clicked).
+        self.stash_log();
         let entries = self.cache.lock().unwrap().entries(host, id).unwrap_or_default();
         let timeline = Timeline::from_entries(entries.iter().map(|e| &e.json));
         let list = ListState::new(timeline.items.len() + 1, ListAlignment::Top, px(300.));
@@ -1387,7 +1404,7 @@ impl Dirigent {
             timeline,
             streaming: Streaming::default(),
             list,
-            expanded: HashSet::new(),
+            expanded: self.logs.get(id).map(|m| m.expanded.clone()).unwrap_or_default(),
             log: None,
             log_list: ListState::new(0, ListAlignment::Top, px(300.)),
             copied: None,
@@ -2214,8 +2231,9 @@ impl Dirigent {
     }
 
     /// Close the right panel and drop its log, so no work line stays tinted and the next
-    /// open starts from the latest work.
+    /// open starts from the latest work (where the user left it, see `stash_log`).
     fn close_panel(&mut self) {
+        self.stash_log();
         if let Pane::Thread(t) = &mut self.pane {
             t.panel = Some(false);
             t.log = None;
@@ -3170,18 +3188,19 @@ impl Dirigent {
     /// Show a sent message in the open thread's tail until the host's persisted entry
     /// replaces it.
     fn echo(&mut self, host: &str, thread_id: &str, text: String, mode: PromptMode) {
-        if let Pane::Thread(t) = &mut self.pane
-            && t.host == host
-            && t.id == thread_id
-        {
-            t.streaming.echo.push((text, mode));
-            let tail = t.timeline.items.len();
-            t.list.remeasure_items(tail..tail + 1);
-            // An open log follows the new run.
-            if t.log.is_some() {
-                t.log = Some(t.timeline.open_work().unwrap_or(thread::TAIL));
-                t.log_list.set_follow_mode(FollowMode::Tail);
-            }
+        let Pane::Thread(t) = &mut self.pane else { return };
+        if t.host != host || t.id != thread_id {
+            return;
+        }
+        t.streaming.echo.push((text, mode));
+        let tail = t.timeline.items.len();
+        t.list.remeasure_items(tail..tail + 1);
+        // An open log follows the new run; the one it showed keeps where the user left it.
+        if t.log.is_some() {
+            self.stash_log();
+            let Pane::Thread(t) = &mut self.pane else { return };
+            t.log = Some(t.timeline.open_work().unwrap_or(thread::TAIL));
+            t.log_list.set_follow_mode(FollowMode::Tail);
         }
     }
 
@@ -3564,14 +3583,40 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Point the panel's log section at a work: a finished one opens at the top, a live
-    /// one follows its latest step. `log_panel` fills the list in at the next render.
+    /// Point the panel's log section at a work: where the user left it (`stash_log`), else
+    /// at its end, following it as it grows. Scrolling back down to the end follows again.
     fn show_log(&mut self, key: usize) {
-        if let Pane::Thread(t) = &mut self.pane {
-            let live = t.timeline.open_work().map_or(key == thread::TAIL, |i| i == key);
-            t.log = Some(key);
-            t.log_list.reset(0);
-            t.log_list.set_follow_mode(if live { FollowMode::Tail } else { FollowMode::Normal });
+        self.stash_log();
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.log = Some(key);
+        let top = self.logs.get(&t.id).and_then(|m| m.tops.get(&key)).copied();
+        // The list gets its steps now (`log_body` keeps the count in step after), or
+        // `scroll_to` has no item to land on.
+        let n = thread::shown_work(self).map_or(0, |(w, _)| w.steps.len().max(1));
+        let Pane::Thread(t) = &self.pane else { return };
+        t.log_list.reset(n);
+        t.log_list.set_follow_mode(FollowMode::Tail);
+        if let Some(top) = top {
+            t.log_list.scroll_to(top);
+        }
+    }
+
+    /// Remember how the open thread's log is left: which tool calls are open, and where
+    /// the shown work is scrolled to if the user scrolled up from its end (forgotten once
+    /// they scroll back down). Called before the log or the pane changes. The live tail
+    /// (`thread::TAIL`) isn't kept: its key moves on to the next run.
+    fn stash_log(&mut self) {
+        let Pane::Thread(t) = &self.pane else { return };
+        let m = self.logs.entry(t.id.clone()).or_default();
+        m.expanded = t.expanded.iter().filter(|(ix, _)| *ix != thread::TAIL).copied().collect();
+        match t.log.filter(|&key| key != thread::TAIL) {
+            Some(key) if t.log_list.is_following_tail() => {
+                m.tops.remove(&key);
+            }
+            Some(key) => {
+                m.tops.insert(key, t.log_list.logical_scroll_top());
+            }
+            None => {}
         }
     }
 

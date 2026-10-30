@@ -1690,10 +1690,10 @@ pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
 
 /// The right panel's log section: the full log of the work `t.log` points at as a lazy
 /// `list()` of its steps (`render_step`), one mono size; tool rows open to their arguments
-/// and output. Showing the run in progress it follows the latest step unless the user
-/// scrolled up (`FollowMode::Tail`). The list's item count is reconciled here, so every
-/// path that changes the steps (events, entries, a new prompt) is covered; those paths
-/// remeasure the items.
+/// and output. It opens where the user left it (`Dirigent::show_log`), else at its end, and
+/// follows the end (`FollowMode::Tail`) unless they scroll up. The list's item count is
+/// reconciled here, so every path that changes the steps (events, entries, a new prompt)
+/// is covered; those paths remeasure the items.
 fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let Pane::Thread(t) = &this.pane else { return None };
     t.log?;
