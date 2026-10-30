@@ -13,7 +13,9 @@ serde_json.workspace = true
 tokio.workspace = true
 rusqlite.workspace = true
 gpui = { git = "https://github.com/zed-industries/zed", branch = "main" }
+# font-kit: macOS's text system (without it gpui_macos draws no text); the others, Linux's.
 gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main", features = [
+  "font-kit",
   "wayland",
   "x11",
 ] }

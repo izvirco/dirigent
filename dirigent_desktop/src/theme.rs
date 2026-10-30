@@ -519,7 +519,7 @@ pub fn labeled_chip(
 }
 
 /// Centered empty state with a one-line hint.
-pub fn empty(title: &'static str, hint: &'static str) -> Div {
+pub fn empty(title: &'static str, hint: impl Into<SharedString>) -> Div {
     div()
         .flex_1()
         .flex()
@@ -528,7 +528,7 @@ pub fn empty(title: &'static str, hint: &'static str) -> Div {
         .justify_center()
         .gap_1()
         .child(div().text_color(rgba(t().fg_1)).child(title))
-        .child(div().text_size(text::sm()).text_color(rgba(t().fg_2)).child(hint))
+        .child(div().text_size(text::sm()).text_color(rgba(t().fg_2)).child(hint.into()))
 }
 
 /// "now", "5m", "3h", "2d" for a millisecond age.

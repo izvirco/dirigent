@@ -41,6 +41,28 @@ managers offer it in "Open with" on folders). Built on Ubuntu 22.04, so it needs
 driver and `libxkbcommon-x11` (which a pure Wayland setup may lack). Uninstalling is removing those three. User data is where it always was (`~/.local/share/dirigent`,
 `~/.config/dirigent`).
 
+## What an install is (macOS)
+
+Apple silicon only, and the Linux install as is, minus the app menu entry and the icon:
+`dirigent-<version>-macos-aarch64.tar.gz` holds the same `dirigent/` (built on `macos-15`), and the same
+`install.sh` (it skips the `.desktop` file on macOS) puts it in `~/.local/lib/dirigent` and links
+`~/.local/bin/dirigent`, which isn't on a Mac's default PATH. User data is in the Linux places too
+(`~/.local/share/dirigent`, `~/.config/dirigent`), as developer tools on macOS mostly do.
+
+```sh
+d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/beta/macos-aarch64 | tar xz -C "$d" && "$d/dirigent/install.sh"
+```
+
+There's no `.app` yet: it starts from a terminal (`dirigent`), and quits with it.
+
+Without an Apple developer account nothing is signed or notarized, and it doesn't need to be: Apple silicon
+runs any binary with an ad-hoc signature (`codesign --sign -`, which the release job makes sure of), and
+Gatekeeper only checks files marked as quarantined, which browsers do and curl, tar and the app's own updates
+don't. A tarball downloaded with a browser does get marked: `xattr -dr com.apple.quarantine <dir>` before
+installing, or use the curl line.
+
+None of it is tested by us (no Mac): CI only proves it builds.
+
 ## Updates
 
 Release builds check `https://dirigent.sebba.dev/api/v0/updates/<channel>/<platform>` every 5 minutes
@@ -49,8 +71,9 @@ verify both, and then show the update button in the sidebar. Restarting starts t
 for Dirigent to exit, installs, and starts it again:
 
 - Windows: the setup exe, silently (`/UPDATE /WAITPID=<pid>`).
-- Linux: the tarball, unpacked in `<data dir>/updates/`, then its `dirigent/install.sh --update <pid> <app args>`,
-  which swaps the new `dirigent/` in for the old one. Its output goes to `<data dir>/logs/install.log`.
+- Linux and macOS: the tarball, unpacked in `<data dir>/updates/`, then its
+  `dirigent/install.sh --update <pid> <app args>`, which swaps the new `dirigent/` in for the old one. Its output
+  goes to `<data dir>/logs/install.log`.
 
 The new version's installer always does the installing, and the update code ships inside every version, so both
 can change in any release. What installs in the field rely on, and must stay compatible:
@@ -72,9 +95,9 @@ moving one to another channel is installing that channel's installer by hand.
 
 The workflow (`.github/workflows/release.yml`) has a job per platform. Each builds the desktop with the channel's
 update url baked in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime,
-builds the installer (Windows) or the tarball (Linux) and runs `dirigent_api publish`, which signs it and uploads
-it to the bucket, the channel file last. If one job fails, re-run it alone. Testers download the latest from
-`https://dirigent.sebba.dev/api/v0/download/<channel>/<windows-x86_64|linux-x86_64>`. Unsigned by Authenticode for
+builds the installer (Windows) or the tarball (Linux, macOS) and runs `dirigent_api publish`, which signs it and
+uploads it to the bucket, the channel file last. If one job fails, re-run it alone. Testers download the latest from
+`https://dirigent.sebba.dev/api/v0/download/<channel>/<windows-x86_64|linux-x86_64|macos-aarch64>`. Unsigned by Authenticode for
 now: SmartScreen asks once ("More info", "Run anyway"); updates aren't downloaded by a browser, so they don't ask.
 
 Repository settings: variables `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`; secrets `S3_ACCESS_KEY_ID`,

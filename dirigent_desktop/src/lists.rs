@@ -25,7 +25,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         Pane::Workpool => {
             let rows = this.busy_threads();
             pane.child(header(div().child("Workpool"), None)).child(if rows.is_empty() {
-                theme::empty("No agents working", "Start one with ctrl n.").into_any_element()
+                theme::empty("No agents working", format!("Start one with {} n.", crate::input::MOD)).into_any_element()
             } else {
                 thread_list("workpool", rows.into_iter().map(Item::row).collect(), true, cx).into_any_element()
             })

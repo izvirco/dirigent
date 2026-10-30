@@ -251,7 +251,7 @@ pub fn add_bundled_fonts(cx: &gpui::App) {
 /// What fontconfig resolves `pattern` to, if that is a real match: the family itself, or
 /// anything at all for a generic like `monospace` (fc-match always answers something, so a
 /// concrete family only counts when it comes back as itself).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn resolve_family(pattern: &str, _: &gpui::App) -> Option<String> {
     let pattern = pattern.trim();
     if pattern.is_empty() {
@@ -263,14 +263,16 @@ fn resolve_family(pattern: &str, _: &gpui::App) -> Option<String> {
     (!family.is_empty() && (generic || family.eq_ignore_ascii_case(pattern))).then_some(family)
 }
 
-/// Windows has no fontconfig: a family counts if DirectWrite lists it, and the generics are
-/// the fonts every Windows has.
-#[cfg(windows)]
+/// Windows and macOS have no fontconfig: a family counts if the system lists it
+/// (DirectWrite, Core Text), and the generics are fonts every install has (`.SystemUIFont`
+/// is gpui's name for San Francisco).
+#[cfg(any(windows, target_os = "macos"))]
 fn resolve_family(pattern: &str, cx: &gpui::App) -> Option<String> {
+    let mac = cfg!(target_os = "macos");
     match pattern.trim() {
         "" => None,
-        "sans-serif" => Some("Segoe UI".into()),
-        "monospace" => Some("Consolas".into()),
+        "sans-serif" => Some(if mac { ".SystemUIFont" } else { "Segoe UI" }.into()),
+        "monospace" => Some(if mac { "Menlo" } else { "Consolas" }.into()),
         family => cx.text_system().all_font_names().into_iter().find(|f| f.eq_ignore_ascii_case(family)),
     }
 }

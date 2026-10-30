@@ -1,6 +1,7 @@
-//! What differs on Windows: where config and data live by default, this machine's name, and
-//! how helper programs start. Everything else is the same code on every OS (Windows takes
-//! `/` in paths too, and `std::env::home_dir` is `%USERPROFILE%` there).
+//! What differs between OSes: where config and data live by default, this machine's name,
+//! and how helper programs start. Everything else is the same code on every OS (Windows takes
+//! `/` in paths too, and `std::env::home_dir` is `%USERPROFILE%` there). macOS uses the same
+//! dirs as Linux, as developer tools there mostly do.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -26,9 +27,16 @@ fn app_dir(var: &str, fallback: &str) -> PathBuf {
 }
 
 /// This machine's name, which the service introduces itself with (`Hello`): `/etc/hostname`,
-/// `%COMPUTERNAME%` on Windows, else `local`.
+/// `%COMPUTERNAME%` on Windows, on macOS (no `/etc/hostname` there) the local host name from
+/// Sharing settings (`Sebs-MacBook-Pro`), else `local`.
 pub fn host_name() -> String {
-    let name = if cfg!(windows) { std::env::var("COMPUTERNAME").ok() } else { std::fs::read_to_string("/etc/hostname").ok() };
+    let name = if cfg!(windows) {
+        std::env::var("COMPUTERNAME").ok()
+    } else if cfg!(target_os = "macos") {
+        command("scutil").args(["--get", "LocalHostName"]).output().ok().and_then(|out| String::from_utf8(out.stdout).ok())
+    } else {
+        std::fs::read_to_string("/etc/hostname").ok()
+    };
     name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| "local".into())
 }
 

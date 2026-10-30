@@ -1,10 +1,15 @@
 #!/bin/sh
 # Installs Dirigent for this user, without root, from an unpacked release tarball
-# (dirigent-<version>-linux-x86_64.tar.gz, built by .github/workflows/release.yml):
+# (dirigent-<version>-<linux-x86_64|macos-aarch64>.tar.gz, built by
+# .github/workflows/release.yml):
 #
 #   ~/.local/lib/dirigent/                        the tarball's dirigent/: the binary, runtime/, this script
 #   ~/.local/bin/dirigent                         a link to the binary
-#   ~/.local/share/applications/dirigent.desktop  the app menu entry, also offered for folders
+#   ~/.local/share/applications/dirigent.desktop  the app menu entry, also offered for folders (not on macOS)
+#
+# On macOS that's all there is: no .app, it starts from a terminal. Nothing it installs is
+# quarantined (curl and the app's own download don't mark files), so Gatekeeper never asks,
+# and the binaries' ad-hoc signatures (release.yml) are all Apple silicon wants.
 #
 # DIRIGENT_PREFIX puts all of it under another directory than ~/.local. Meant for tests
 # (scripts/ui.sh): an update only installs there if the app has it in its environment too,
@@ -35,7 +40,10 @@ if [ "${1:-}" = --update ]; then
   trap '"$dest/dirigent" "$@" >/dev/null 2>&1 </dev/null &' EXIT
 fi
 
-mkdir -p "$prefix/lib" "$prefix/bin" "$apps"
+mac=
+if [ "$(uname -s)" = Darwin ]; then mac=1; fi
+
+mkdir -p "$prefix/lib" "$prefix/bin"
 # Copied in next to the old install, then swapped for it: a failed copy leaves the old one
 # as it was.
 rm -rf "$dest.new" "$dest.old"
@@ -45,8 +53,10 @@ mv "$dest.new" "$dest"
 rm -rf "$dest.old"
 ln -sfn "$dest/dirigent" "$prefix/bin/dirigent"
 
-# %f: a folder from the file manager's "Open with", which the app opens as a project.
-cat >"$apps/dirigent.desktop" <<EOF
+if [ -z "$mac" ]; then
+  mkdir -p "$apps"
+  # %f: a folder from the file manager's "Open with", which the app opens as a project.
+  cat >"$apps/dirigent.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Dirigent
@@ -57,11 +67,16 @@ Categories=Development;
 MimeType=inode/directory;
 StartupWMClass=dirigent
 EOF
-# The cache file managers look folder handlers up in.
-update-desktop-database -q "$apps" 2>/dev/null || true
+  # The cache file managers look folder handlers up in.
+  update-desktop-database -q "$apps" 2>/dev/null || true
+fi
 
 if [ -z "$update" ]; then
-  echo "Installed Dirigent in $dest: start it from the app menu, or as $prefix/bin/dirigent."
+  if [ -n "$mac" ]; then
+    echo "Installed Dirigent in $dest: start it from a terminal as $prefix/bin/dirigent."
+  else
+    echo "Installed Dirigent in $dest: start it from the app menu, or as $prefix/bin/dirigent."
+  fi
   case ":$PATH:" in
     *":$prefix/bin:"*) ;;
     *) echo "($prefix/bin isn't on your PATH: add it to start Dirigent as \`dirigent\`.)" ;;

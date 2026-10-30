@@ -36,7 +36,7 @@ mod working;
 use app::{Dirigent, Dismiss, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
 use cache::Cache;
 use dirigent_service::hosts;
-use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, QuitMode, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_platform::application;
 
 fn main() {
@@ -77,23 +77,26 @@ fn main() {
     // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
     let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
 
-    application().with_assets(icons::Assets).run(move |cx: &mut App| {
+    // Closing the window quits, on macOS too: gpui's default there keeps a windowless app
+    // running, which every later launch would hand its folder to (`instance.rs`) and vanish.
+    application().with_assets(icons::Assets).with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut App| {
         config::add_bundled_fonts(cx);
         cx.bind_keys(input::key_bindings());
+        // `secondary-`: cmd on macOS, ctrl elsewhere.
         cx.bind_keys([
-            KeyBinding::new("ctrl-n", NewThread, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary-n", NewThread, Some(app::KEY_CONTEXT)),
             KeyBinding::new("escape", Dismiss, Some(app::KEY_CONTEXT)),
             // `[` reaches the handler even from inside an input; see `Dirigent::toggle_sidebar`.
             KeyBinding::new("[", ToggleSidebar, Some(app::KEY_CONTEXT)),
             KeyBinding::new("]", ToggleLog, Some(app::KEY_CONTEXT)),
-            KeyBinding::new("ctrl-q", Quit, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary-q", Quit, Some(app::KEY_CONTEXT)),
             // Copies the transcript selection; an input with its own selection handles it first.
-            KeyBinding::new("ctrl-c", input::Copy, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary-c", input::Copy, Some(app::KEY_CONTEXT)),
             // The text size (`[fonts] size`), like zoom in a browser; `+` is shift-= on most layouts.
-            KeyBinding::new("ctrl-=", TextBigger, Some(app::KEY_CONTEXT)),
-            KeyBinding::new("ctrl-+", TextBigger, Some(app::KEY_CONTEXT)),
-            KeyBinding::new("ctrl--", TextSmaller, Some(app::KEY_CONTEXT)),
-            KeyBinding::new("ctrl-0", TextReset, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary-=", TextBigger, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary-+", TextBigger, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary--", TextSmaller, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("secondary-0", TextReset, Some(app::KEY_CONTEXT)),
         ]);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
@@ -117,7 +120,7 @@ fn main() {
         // Every keystroke with its key-context stack, at debug (`DIRIGENT_LOG=dirigent_desktop=debug`):
         // the fastest way to debug a binding.
         cx.observe_keystrokes(|ev, _, _| tracing::debug!("key {} ctx={:?}", ev.keystroke.unparse(), ev.context_stack)).detach();
-        // Focus the root so the global key context (ctrl+n, esc, ...) is active immediately.
+        // Focus the root so the global key context (new thread, esc, ...) is active immediately.
         window
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle(cx), cx);
