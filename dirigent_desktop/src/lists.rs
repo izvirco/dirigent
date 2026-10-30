@@ -402,7 +402,7 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
 
 /// A thread row: status glyph, title (amber while asking, accent while unread, an amber pin before it while pinned),
 /// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
-/// moon glyph) and archive.
+/// moon glyph) and archive (threads at rest) or restore.
 fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
@@ -454,13 +454,16 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
         } else {
             div().size(u(24.)).flex_shrink_0().into_any_element()
         })
-        .child(
+        .child(if archived || this.at_rest(host, t) {
             row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, archive_confirm.is_some(), cx, move |this, cx| {
                 this.set_archived(&h2, &id2, !archived, ArchiveAt::List, cx)
             })
             .relative()
-            .children(archive_confirm),
-        )
+            .children(archive_confirm)
+            .into_any_element()
+        } else {
+            div().size(u(24.)).flex_shrink_0().into_any_element()
+        })
 }
 
 // A thread row's optional columns, design px wide.

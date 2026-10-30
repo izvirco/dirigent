@@ -712,6 +712,12 @@ impl Dirigent {
         self.status(host, t).finished() && !t.running()
     }
 
+    /// Nothing going on: neither it nor a sub-agent runs or has jobs going. Only such a
+    /// thread can be archived (the host refuses the rest); a message or run brings it back.
+    pub fn at_rest(&self, host: &str, t: &ThreadSummary) -> bool {
+        !t.running() && t.jobs == 0 && !self.has_busy_children(host, &t.id)
+    }
+
     /// A thread's title colour in the sidebar and lists: amber while the model waits on an
     /// answer, accent while unread, else `fg`.
     pub fn title_color(&self, host: &str, t: &ThreadSummary) -> u32 {
@@ -1715,8 +1721,11 @@ impl Dirigent {
 
     /// Archive / restore a thread. Archiving one that owns a workspace instead asks what to
     /// do with it (`thread::archive_confirm`, under the button `at`); `archive_with_workspace`
-    /// comes back here once decided.
+    /// comes back here once decided. Only a thread at rest is archived (`at_rest`).
     pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, at: ArchiveAt, cx: &mut Context<Self>) {
+        if archived && !self.summary(host, thread_id).is_some_and(|t| self.at_rest(host, t)) {
+            return;
+        }
         let asking = matches!(&self.menu, Some(Menu::ConfirmArchive { host: h, id, .. }) if h == host && id == thread_id);
         if archived && !asking && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) {
             if self.open_menu(Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned(), at }, cx) {

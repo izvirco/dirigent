@@ -384,6 +384,13 @@ impl Storage {
         Ok(())
     }
 
+    /// Restore the thread if it is archived; false when it wasn't (nothing to push). Archive
+    /// holds threads at rest: a message or a run brings one back, for good.
+    pub fn unarchive(&self, id: &str) -> Result<bool> {
+        let n = self.conn.execute("UPDATE threads SET archived_at = NULL WHERE id = ?1 AND archived_at IS NOT NULL", [id])?;
+        Ok(n == 1)
+    }
+
     /// Snooze as of the thread's current `updated_at` (its next run wakes it), or wake it.
     pub fn set_snoozed(&self, id: &str, snoozed: bool) -> Result<()> {
         let sql = if snoozed {
@@ -448,6 +455,14 @@ impl Storage {
             s.and_then(|s| serde_json::from_value(Value::String(s)).ok()).unwrap_or_default()
         }
         Ok((parse(report), parse(notify)))
+    }
+
+    /// The thread and its sub-agents, at any depth.
+    pub fn family(&self, id: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "WITH RECURSIVE f(id) AS (SELECT ?1 UNION SELECT t.id FROM threads t JOIN f ON t.parent_id = f.id) SELECT id FROM f",
+        )?;
+        Ok(stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
 
     /// How many ancestors the thread has (0 for a root).
@@ -819,6 +834,11 @@ mod tests {
         assert!(s.list_threads().unwrap()[0].archived);
         s.set_archived("t1", false, 15).unwrap();
         assert!(!s.list_threads().unwrap()[0].archived);
+        // A message to an archived thread restores it.
+        assert!(!s.unarchive("t1").unwrap());
+        s.set_archived("t1", true, 16).unwrap();
+        assert!(s.unarchive("t1").unwrap());
+        assert!(!s.list_threads().unwrap()[0].archived);
         s.delete_thread("t1").unwrap();
         assert!(s.list_threads().unwrap().is_empty());
         assert!(s.get_thread("t1").unwrap().is_none());
@@ -834,6 +854,10 @@ mod tests {
         assert_eq!(s.depth("root").unwrap(), 0);
         assert_eq!(s.depth("grandkid").unwrap(), 2);
         assert_eq!(s.thread_parent("kid").unwrap().as_deref(), Some("root"));
+        let mut family = s.family("root").unwrap();
+        family.sort();
+        assert_eq!(family, ["grandkid", "kid", "root"]);
+        assert_eq!(s.family("grandkid").unwrap(), ["grandkid"]);
         let by_id = |s: &Storage, id: &str| s.list_threads().unwrap().into_iter().find(|t| t.id == id).unwrap();
 
         // Snoozed until the thread's next entry moves `updated_at`.

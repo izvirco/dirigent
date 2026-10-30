@@ -305,6 +305,8 @@ impl Service {
                     self.push_threads();
                     return Ok(ServerMessage::Ok { reply_to: id });
                 }
+                // An answer is a message: an archived thread comes back for it.
+                self.storage.lock().unwrap().unarchive(&thread_id)?;
                 // The answer starts a turn if the model is idle (and is queued if it isn't).
                 self.runtime.begin_run(&thread_id);
                 self.push_threads();
@@ -357,7 +359,18 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ArchiveThread { id, thread_id, archived } => {
-                self.storage.lock().unwrap().set_archived(&thread_id, archived, now())?;
+                {
+                    let storage = self.storage.lock().unwrap();
+                    // Archive holds threads at rest: nothing runs or has jobs going, the
+                    // thread itself nor its sub-agents. A message or run brings it back
+                    // (`unarchive`); it doesn't go back by itself.
+                    if archived {
+                        let busy =
+                            storage.family(&thread_id)?.iter().any(|t| self.runtime.running_since(t).is_some() || self.runtime.jobs(t) > 0);
+                        anyhow::ensure!(!busy, "the thread or one of its sub-agents is still working; archive it once they are done");
+                    }
+                    storage.set_archived(&thread_id, archived, now())?;
+                }
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
             }
@@ -404,6 +417,8 @@ impl Service {
     /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
     /// `Prompt`'s fields.
     async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
+        // A message brings an archived thread back.
+        let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
         // The run starts now, not at pi's `agent_start`: loading the session (and a nix
         // dev shell) can take seconds, and clients should see the thread working with
         // the model it will use for all of it. A new turn is a new task, too
@@ -412,6 +427,8 @@ impl Service {
         if mode == PromptMode::Prompt {
             self.storage.lock().unwrap().set_prompted(thread_id, &p.text, p.model.as_deref(), p.thinking_level.as_deref(), now())?;
             self.runtime.begin_run(thread_id);
+        }
+        if mode == PromptMode::Prompt || unarchived {
             self.push_threads();
         }
         let sent = self.deliver(thread_id, mode, p).await;
@@ -663,6 +680,11 @@ impl Service {
                 let lifecycle = matches!(kind, "agent_start" | "agent_settled");
                 if kind == "agent_start" {
                     info!(thread = %thread_id, "agent started");
+                    // Whatever woke it (a message does that earlier, a job's notice only
+                    // here), a working thread isn't archived. The lifecycle push below shows it.
+                    if let Err(e) = self.storage.lock().unwrap().unarchive(&thread_id) {
+                        error!(thread = %thread_id, "unarchive: {e:#}");
+                    }
                 }
                 if kind == "agent_settled" {
                     let ms = self.runtime.settle(&thread_id);
@@ -682,6 +704,10 @@ impl Service {
                     _ => None,
                 };
                 if let Some(parent) = parent {
+                    // The notice is a message: an archived parent comes back for it.
+                    if let Err(e) = self.storage.lock().unwrap().unarchive(&parent) {
+                        error!(thread = %parent, "unarchive: {e:#}");
+                    }
                     self.runtime.begin_run(&parent);
                     let (this, id) = (self.clone(), thread_id.clone());
                     tokio::spawn(async move { this.on_child_settled(&id, &parent).await });
