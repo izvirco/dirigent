@@ -1,4 +1,4 @@
-## 0.0.3 (draft)
+## 0.0.3
 
 Edit and fork threads, a macOS build, and better handling of images.
 
