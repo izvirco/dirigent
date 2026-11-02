@@ -86,7 +86,7 @@ can change in any release. What installs in the field rely on, and must stay com
 ## Making a release
 
 1. Bump `[workspace.package] version` in `Cargo.toml` (semver; a version is published once per channel), make its
-   `CHANGELOG.md` section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
+   `changelog.md` section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
    refuses a version without a final section; the app shows the changelog after updating
    (`dirigent_desktop/src/changelog.rs`). Each section is a one-line summary, then a glanceable list: a short line
    per change, ending in a link to its forge change (`([#101])`, with `[#101]: <change url>` under the section's
