@@ -10,7 +10,10 @@
 //! grows. While a run goes on, the model's latest prose streams below its work line a line
 //! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
 //! over the column's left edge, transcript and composer: one mark per message, hover to preview, click to jump.
-//! Messages can be pinned (the button next to `copy`); pins colour their marks.
+//! Messages can be pinned (the button next to `copy`); pins colour their marks. Any message
+//! can start a fork (a new thread with the history up to there), and a user message can be
+//! edited in place: its bubble takes the composer (`edit_bubble`), and sending runs the
+//! thread again from there, on a new branch of its pi session (only the current one shows).
 //! Questions the model asked (`ask_user`) float above the composer (`ask_card`), out of the
 //! transcript's flow, until they are answered or dismissed. Steers (typed, or the answers
 //! to an ask) are user bubbles: `steer · pending` below the work line while pi holds them,
@@ -94,12 +97,22 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     });
     let archive_confirm = archive_confirm(&host, &id, ArchiveAt::Header, Side::BelowRight(26.), this, cx);
     let archive_open = archive_confirm.is_some();
+    // A fork: its source, a click away (gone with a deleted source).
+    let fork_source = summary.as_ref().and_then(|s| s.forked_from.clone()).and_then(|from| {
+        let name = this.summary(&host, &from.thread_id)?.name.clone().unwrap_or_else(|| "Untitled".into());
+        let host = host.clone();
+        Some(
+            theme::icon_button("hdr-fork", "git-fork", cx, move |this, cx| this.open_fork_source(&host, &from, cx))
+                .tooltip(theme::tooltip(format!("Forked from {name}"))),
+        )
+    });
     let actions = div()
         .flex()
         .flex_row()
         .items_center()
         .gap_1()
         .font_weight(FontWeight::NORMAL)
+        .children(fork_source)
         // The thread's id (its full uuid), e.g. to point an agent at it.
         .child(
             theme::icon_button("hdr-copy-id", "copy", cx, move |this, cx| this.copy(copy_id.clone(), "Thread id copied", cx))
@@ -677,17 +690,14 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
     menu::popup(Side::Above, vec![body], cx)
 }
 
-/// The composer card: text on top, chips (model / effort / context) and the send or stop
-/// button in the footer. Sized by its parent (reading column or draft page).
-fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let running = this.is_running();
-    let has_text = !this.composer.read(cx).text().trim().is_empty();
-    let drafting = matches!(this.pane, Pane::Draft { .. });
+/// The model and effort chips with their menus. These open above the chips, or under them
+/// (`below`) in an edit bubble, which may sit at the top of the transcript.
+fn model_chips(this: &Dirigent, below: bool, cx: &mut Context<Dirigent>) -> (Stateful<Div>, Stateful<Div>) {
+    let side = || if below { Side::Below(24.) } else { Side::Above };
     let no_target = matches!(this.pane, Pane::Draft { target: None });
-
     let model_label = this.model.as_deref().map(|m| theme::short_model(m).to_owned()).unwrap_or_else(|| "Model".into());
     let model_open = matches!(this.menu, Some(Menu::Model | Menu::AllModels));
-    let model_menu = model_open.then(|| picker::menu(this, no_target, cx));
+    let model_menu = model_open.then(|| picker::menu(this, no_target, side(), cx));
     let effort_label = this.effort.clone().unwrap_or_else(|| "Effort".into());
     let effort_open = this.menu == Some(Menu::Effort);
     let effort_menu = effort_open.then(|| {
@@ -701,8 +711,63 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         if items.is_empty() {
             items.push(menu::header("Pick a model first"));
         }
-        menu::popup(Side::Above, items, cx)
+        menu::popup(side(), items, cx)
     });
+    let model = theme::chip("model-chip", model_label, this.model.is_none(), model_open)
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
+        .children(model_menu);
+    let effort = theme::chip("effort-chip", effort_label, this.effort.is_none(), effort_open)
+        .flex_shrink_0()
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Effort, cx)))
+        .children(effort_menu);
+    (model, effort)
+}
+
+/// The round send button: accent when `ready`. It submits the composer, wherever it is.
+fn send_button(id: &'static str, ready: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(u(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .cursor_pointer()
+        .bg(rgba(if ready { theme::t().accent } else { theme::t().hover }))
+        .hover(|d| d.bg(rgba(if ready { theme::t().accent_active } else { theme::t().line })))
+        .on_click(cx.listener(|this, _, window, cx| {
+            this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted { queued: false, ctrl: true }));
+            window.focus(&this.composer.focus_handle(cx), cx);
+        }))
+        .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))
+}
+
+/// In the composer's place while a bubble holds it (`edit_bubble`).
+fn editing_note() -> Div {
+    div()
+        .w_full()
+        .max_w(u(theme::COMPOSER))
+        .h(u(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_size(text::sm())
+        .text_color(rgba(theme::t().fg_2))
+        .child("Editing a message above \u{b7} Esc to cancel")
+}
+
+/// The composer card: text on top, chips (model / effort / context) and the send or stop
+/// button in the footer. Sized by its parent (reading column or draft page). While an edit
+/// bubble holds the composer, a note in its place.
+fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    if this.open().is_some_and(|t| t.editing.is_some()) {
+        return editing_note();
+    }
+    let running = this.is_running();
+    let has_text = !this.composer.read(cx).text().trim().is_empty();
+    let drafting = matches!(this.pane, Pane::Draft { .. });
+    let no_target = matches!(this.pane, Pane::Draft { target: None });
+    let (model_chip, effort_chip) = model_chips(this, false, cx);
 
     // The context chip: tokens in the model's window right now; hovering it shows what the
     // whole thread has cost so far (`stats_card`).
@@ -749,22 +814,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
             .child(icon("square", theme::t().danger_ink).size(u(11.)))
     } else {
-        let ready = has_text && this.model.is_some() && !no_target && !blocked;
-        div()
-            .id("send")
-            .size(u(28.))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .cursor_pointer()
-            .bg(rgba(if ready { theme::t().accent } else { theme::t().hover }))
-            .hover(|d| d.bg(rgba(if ready { theme::t().accent_active } else { theme::t().line })))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted { queued: false, ctrl: true }));
-                window.focus(&this.composer.focus_handle(cx), cx);
-            }))
-            .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))
+        send_button("send", has_text && this.model.is_some() && !no_target && !blocked, cx)
     };
 
     div()
@@ -815,17 +865,8 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                                 .gap_1()
                                 // Where the work happens comes first, then what does it.
                                 .children(workspace_chip(this, cx))
-                                .child(
-                                    theme::chip("model-chip", model_label, this.model.is_none(), model_open)
-                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
-                                        .children(model_menu),
-                                )
-                                .child(
-                                    theme::chip("effort-chip", effort_label, this.effort.is_none(), effort_open)
-                                        .flex_shrink_0()
-                                        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Effort, cx)))
-                                        .children(effort_menu),
-                                ),
+                                .child(model_chip)
+                                .child(effort_chip),
                         )
                         .children(usage),
                 )
@@ -1199,9 +1240,11 @@ fn glow() -> impl Iterator<Item = Div> {
     })
 }
 
-/// Context tokens as pi computes them: usage of the last non-error assistant message.
+/// Context tokens as pi computes them: usage of the last non-error assistant message on
+/// the current branch.
 fn context_usage(t: &OpenThread) -> Option<u64> {
-    t.entries.iter().rev().find_map(|e| {
+    let branch = t.entries.last().map(|last| dirigent_protocol::branch(&t.entries, &last.id)).unwrap_or_default();
+    branch.into_iter().rev().find_map(|e| {
         let msg = e.json.get("message")?;
         if msg.get("role")?.as_str()? != "assistant" || matches!(msg.get("stopReason").and_then(Value::as_str), Some("error" | "aborted")) {
             return None;
@@ -1266,16 +1309,23 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     let archived = this.summary(&t.host, &t.id).is_some_and(|s| s.archived);
     let setup = this.summary(&t.host, &t.id).and_then(|s| s.setup);
     let bubble = if archived { theme::t().hover } else { theme::t().bubble };
+    // Messages can be edited while nothing runs and no edit is on its way.
+    let idle = !this.is_running() && t.rewound.is_none();
     let mut col = div().w_full().max_w(u(theme::COLUMN)).flex().flex_col();
     if ix < t.timeline.items.len() {
         if live.as_ref().is_none_or(|(k, _)| *k != ix) {
-            col = col.child(render_timeline_item(&t.timeline.items[ix], ix, t, bubble, blobs, now, &fonts, keys, cx));
+            let editing = t.editing.as_ref().is_some_and(|e| t.timeline.entry_id(ix) == Some(e.entry_id.as_str()));
+            col = col.child(if editing {
+                edit_bubble(this, bubble, &fonts, cx).into_any()
+            } else {
+                render_timeline_item(&t.timeline.items[ix], ix, t, bubble, idle, blobs, now, &fonts, keys, cx)
+            });
         }
     } else {
         // Echoes show their text only; the thumbnails come with the persisted entry.
         let echo = |mode| t.streaming.echo.iter().filter(move |(_, m)| *m == mode).map(|(text, _)| text.as_str()).collect::<Vec<_>>();
         for text in echo(PromptMode::Prompt) {
-            col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, &fonts, keys, cx));
+            col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, false, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
             col = col.child(work_block(&work, key, true, setup, t, bubble, blobs, now, &fonts, keys, cx));
@@ -1289,7 +1339,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             }
         }
         for text in echo(PromptMode::FollowUp) {
-            col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, &fonts, keys, cx));
+            col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, false, &fonts, keys, cx));
         }
         col = col.pb_6();
     }
@@ -1347,6 +1397,7 @@ fn render_timeline_item(
     ix: usize,
     t: &OpenThread,
     bubble: u32,
+    idle: bool,
     blobs: &HashMap<String, Blob>,
     now: i64,
     fonts: &Fonts,
@@ -1354,7 +1405,7 @@ fn render_timeline_item(
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
     match item {
-        Item::User { text, images, .. } => user_bubble(text, images, blobs, ix, t, bubble, fonts, keys, cx).into_any(),
+        Item::User { text, images, .. } => user_bubble(text, images, blobs, ix, t, bubble, idle, fonts, keys, cx).into_any(),
         Item::Work(w) => work_block(w, ix, false, None, t, bubble, blobs, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
@@ -1419,7 +1470,7 @@ fn reply_block(
         .line_height(u(22.))
         .child(body)
         .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP))
-        .children(corner_buttons(ix, text, t, cx))
+        .children(corner_buttons(ix, text, t, true, false, cx))
 }
 
 /// How far left of a message's box its pin bar sits.
@@ -1431,11 +1482,12 @@ fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
     t.is_pinned(ix).then(|| div().absolute().left(u(-left)).top_1().bottom_1().w(u(2.)).rounded_full().bg(rgba(theme::t().warn)))
 }
 
-/// `pin` and `copy` in a message's top right corner, revealed on hover. Copy puts the
-/// message's markdown on the clipboard and shows a check for a moment; pin marks the
-/// message in the ruler and with a bar in the margin (the pin is amber while pinned).
-/// Not for the live tail (`TAIL`).
-fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
+/// A message's buttons in its top right corner, revealed on hover: `edit` (a user message
+/// it may rewrite, `Dirigent::start_edit`), `fork` (`Dirigent::fork_at`), pin and copy.
+/// Copy puts the message's markdown on the clipboard and shows a check for a moment; pin
+/// marks the message in the ruler and with a bar in the margin (the pin is amber while
+/// pinned). Not for the live tail (`TAIL`).
+fn corner_buttons(ix: usize, text: &str, t: &OpenThread, fork: bool, edit: bool, cx: &mut Context<Dirigent>) -> Option<Div> {
     if ix == TAIL {
         return None;
     }
@@ -1443,6 +1495,13 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirige
     let text = text.to_owned();
     let button = |b: Stateful<Div>| b.bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line));
     let tint = if pinned { theme::t().warn } else { theme::t().fg_1 };
+    let edit = edit.then(|| {
+        button(theme::icon_button(("edit", ix), "pencil", cx, move |this, cx| this.start_edit(ix, cx)))
+            .tooltip(theme::tooltip("Edit and send again from here"))
+    });
+    let fork = fork.then(|| {
+        button(theme::icon_button(("fork", ix), "git-fork", cx, move |this, _| this.fork_at(ix))).tooltip(theme::tooltip("Fork from here"))
+    });
     let pin = button(theme::tinted_icon_button(("pin", ix), "pin", tint, cx, move |this, cx| this.toggle_pin(ix, cx)));
     let copy = button(theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| {
         this.copy_item(ix, text.clone(), cx)
@@ -1457,6 +1516,8 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, cx: &mut Context<Dirige
             .gap_1()
             .opacity(if copied { 1. } else { 0. })
             .group_hover("msg", |d| d.opacity(1.))
+            .children(edit)
+            .children(fork)
             .child(pin)
             .child(copy),
     )
@@ -1509,10 +1570,15 @@ fn user_bubble(
     ix: usize,
     t: &OpenThread,
     bubble: u32,
+    idle: bool,
     fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
+    // A message the user typed can be edited while the thread is idle, and forked from
+    // unless nothing comes before it.
+    let typed = if ix == TAIL { None } else { t.typed_message(ix) };
+    let (edit, fork) = (typed.is_some() && idle, typed.is_some_and(|e| e.parent_id.is_some()));
     let (body, refs) = split_image_refs(text);
     let thumbs = thumbs(images, blobs, |i| ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64), cx);
     div()
@@ -1533,7 +1599,61 @@ fn user_bubble(
         .child(markdown::render(body, &fonts.mono, keys, None, &image_links(body, &refs, images)))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
-        .children(corner_buttons(ix, body, t, cx).map(|b| b.top_2().right_2()))
+        .children(corner_buttons(ix, body, t, fork, edit, cx).map(|b| b.top_2().right_2()))
+}
+
+/// The user bubble being edited (`Dirigent::start_edit`): it holds the composer, the
+/// edited message's images under it, then the model and effort chips, `Cancel` and send
+/// (ctrl+Enter sends too, Esc cancels). Sending rewrites the message and runs from there.
+fn edit_bubble(this: &Dirigent, bubble: u32, fonts: &Fonts, cx: &mut Context<Dirigent>) -> Div {
+    let (model, effort) = model_chips(this, true, cx);
+    let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some());
+    let ready = !this.composer.read(cx).text().trim().is_empty() && this.model.is_some() && !this.is_running() && !blocked;
+    let cancel = div()
+        .id("edit-cancel")
+        .h(u(24.))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_md()
+        .cursor_pointer()
+        .text_color(rgba(theme::t().fg_1))
+        .hover(|d| d.bg(rgba(theme::t().hover)).text_color(rgba(theme::t().fg)))
+        .on_click(cx.listener(|this, _, _, cx| this.cancel_edit(cx)))
+        .child("Cancel");
+    div()
+        .mx(u(-BUBBLE_PAD))
+        .mt_4()
+        .mb_3()
+        .flex()
+        .flex_col()
+        .rounded_lg()
+        .bg(rgba(bubble))
+        .border_1()
+        .border_color(rgba(theme::t().accent))
+        .child(
+            div()
+                .px(u(BUBBLE_PAD))
+                .pt_3()
+                .pb_2()
+                .font_family(fonts.prose.clone())
+                .text_size(text::lg())
+                .line_height(u(22.))
+                .child(this.composer.clone()),
+        )
+        .children(attachment_strip(this, cx))
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .pb_2()
+                .child(div().flex_1().min_w_0().flex().flex_row().items_center().gap_1().child(model).child(effort))
+                .child(cancel.flex_shrink_0())
+                .child(send_button("edit-send", ready, cx).flex_shrink_0()),
+        )
 }
 
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,

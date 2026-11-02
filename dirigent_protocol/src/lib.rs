@@ -127,6 +127,36 @@ pub enum ClientMessage {
         #[serde(default)]
         tools: Option<Vec<String>>,
     },
+    /// Rewrite one of the thread's user messages (`entry_id`, a pi `message` entry with role
+    /// `user`) and run from there: the conversation goes back to just before it and `text`
+    /// is sent in its place, as a `Prompt` in mode `prompt` with these fields would be. The
+    /// old message and everything after it stay in the thread's history, on a branch of
+    /// pi's session tree no client shows (see `Entry`). Refused while the thread runs. Not a
+    /// field of `Prompt`: a host from before this refuses it instead of appending the text.
+    EditMessage {
+        id: u64,
+        thread_id: String,
+        entry_id: String,
+        text: String,
+        model: Option<String>,
+        thinking_level: Option<String>,
+        #[serde(default)]
+        images: Vec<ImageAttachment>,
+        #[serde(default)]
+        tools: Option<Vec<String>>,
+    },
+    /// Start a new thread from the thread's history up to and including `entry_id` (that
+    /// entry and its ancestors: the branch it is on). The fork is a top-level thread in
+    /// the same project and directory, sharing its source's workspace without owning it,
+    /// as a sub-agent does; it remembers where it came from (`ThreadSummary::forked_from`).
+    /// `fork_id` is the new thread's id, as `CreateThread::thread_id`. Replies `ThreadCreated`.
+    ForkThread {
+        id: u64,
+        thread_id: String,
+        entry_id: String,
+        #[serde(default)]
+        fork_id: Option<String>,
+    },
     /// The user's answers to an `ask_user` call (see `ThreadSummary::asks`): one list per
     /// question with the picked options and / or typed text, or `None` when dismissed.
     /// The host hands them to the model, starting a turn if it is idle. `silent` only drops
@@ -564,13 +594,26 @@ pub struct ThreadSummary {
     /// whose turn ended with jobs running is waiting on them (they wake it when they end).
     #[serde(default)]
     pub jobs: u32,
-    /// What the thread's own agent has consumed so far (its sub-agents not included).
+    /// What the thread's own agent has consumed so far (its sub-agents not included, nor,
+    /// in a fork, what its source spent on the history it copied).
     #[serde(default)]
     pub spend: Spend,
+    /// The thread this one was forked from (`ClientMessage::ForkThread`), and the entry it
+    /// was forked at, if it is a fork.
+    #[serde(default)]
+    pub forked_from: Option<ForkedFrom>,
     /// The step its host is setting it up with, before it can take a message. Runtime
     /// state, never stored.
     #[serde(default)]
     pub setup: Option<Setup>,
+}
+
+/// Where a fork came from (`ThreadSummary::forked_from`): its source thread and the last
+/// entry it copied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ForkedFrom {
+    pub thread_id: String,
+    pub entry_id: String,
 }
 
 /// A step in setting a thread up (`ThreadSummary::setup`).
@@ -632,6 +675,10 @@ pub fn prompt_title(text: &str) -> Option<String> {
     Some(line.chars().take(80).collect())
 }
 
+/// One pi session entry. A session is a tree: each entry is a child of the one before it
+/// (`parent_id`), except where an `EditMessage` branched off an earlier entry. The branch
+/// that counts, what the model sees and clients show, is the last entry's and its
+/// ancestors (pi's leaf); older branches stay in the history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
     /// Append order within the thread, starting at 0.
@@ -650,6 +697,28 @@ impl Entry {
         let s = |k: &str| json.get(k).and_then(Value::as_str).map(str::to_owned);
         Self { seq, id: s("id").unwrap_or_default(), parent_id: s("parentId"), kind: s("type").unwrap_or_default(), json }
     }
+}
+
+/// The branch of `entries` (a thread's, in `seq` order) that ends at the entry `leaf`: it
+/// and its ancestors, oldest first; empty without such an entry. With the last entry as
+/// `leaf`, the thread's current branch: all of it, unless an edit branched it.
+pub fn branch<'a>(entries: &'a [Entry], leaf: &str) -> Vec<&'a Entry> {
+    let Some(end) = entries.iter().rposition(|e| e.id == leaf) else { return vec![] };
+    // A parent is appended before its children, so nothing past `leaf` is on its branch.
+    let entries = &entries[..=end];
+    // No edit up to there: each entry is the child of the one before.
+    if entries.windows(2).all(|w| w[1].parent_id.as_deref() == Some(w[0].id.as_str())) {
+        return entries.iter().collect();
+    }
+    let by_id: std::collections::HashMap<&str, &Entry> = entries.iter().map(|e| (e.id.as_str(), e)).collect();
+    let mut branch = vec![&entries[end]];
+    while let Some(parent) = branch[branch.len() - 1].parent_id.as_deref().and_then(|p| by_id.get(p))
+        && branch.len() <= entries.len()
+    {
+        branch.push(parent);
+    }
+    branch.reverse();
+    branch
 }
 
 #[cfg(test)]
@@ -725,6 +794,17 @@ mod tests {
             title: TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() },
             text: "hi".into(),
         });
+        roundtrip(ClientMessage::EditMessage {
+            id: 26,
+            thread_id: "t".into(),
+            entry_id: "e".into(),
+            text: "hi again".into(),
+            model: Some("a/b".into()),
+            thinking_level: Some("low".into()),
+            images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into(), n: Some(1) }],
+            tools: Some(vec![]),
+        });
+        roundtrip(ClientMessage::ForkThread { id: 27, thread_id: "t".into(), entry_id: "e".into(), fork_id: Some("f".into()) });
         roundtrip(ClientMessage::Abort { id: 5, thread_id: "t".into() });
         roundtrip(ClientMessage::CancelQueued { id: 9, thread_id: "t".into(), text: "x".into() });
         roundtrip(ClientMessage::ArchiveThread { id: 7, thread_id: "t".into(), archived: true });
@@ -784,6 +864,7 @@ mod tests {
         assert_eq!(t.jobs, 0);
         assert_eq!(t.spend, Spend::default());
         assert_eq!(t.setup, None);
+        assert_eq!(t.forked_from, None);
         assert!(!t.pinned && t.seen_at.is_none() && t.pinned_entries.is_empty());
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
@@ -818,6 +899,7 @@ mod tests {
             prompted_at: Some(4),
             jobs: 2,
             spend: Spend { input: 10, output: 2, cached: 8, cost: 0.5 },
+            forked_from: Some(ForkedFrom { thread_id: "t1".into(), entry_id: "e1".into() }),
             setup: Some(Setup::NixShell),
         };
         assert!(t.asking());
@@ -882,5 +964,17 @@ mod tests {
                 messages: 1,
             }],
         });
+    }
+
+    #[test]
+    fn branches_follow_parent_links() {
+        let e = |seq, id: &str, parent: Option<&str>| Entry::from_pi(seq, json!({"type":"message","id":id,"parentId":parent}));
+        let ids = |b: Vec<&Entry>| b.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
+        // a ← b ← c, then an edit of c: d is b's child too, e follows d.
+        let entries = [e(0, "a", None), e(1, "b", Some("a")), e(2, "c", Some("b")), e(3, "d", Some("b")), e(4, "e", Some("d"))];
+        assert_eq!(ids(branch(&entries, "e")), ["a", "b", "d", "e"]);
+        assert_eq!(ids(branch(&entries, "c")), ["a", "b", "c"]);
+        assert_eq!(ids(branch(&entries[..3], "c")), ["a", "b", "c"]);
+        assert!(branch(&entries, "x").is_empty());
     }
 }

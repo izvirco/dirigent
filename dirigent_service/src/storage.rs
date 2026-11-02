@@ -14,7 +14,7 @@
 //! `workflow_steps` tables and `threads.run_id`, unused and harmless.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, Notify, Project, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title};
+use dirigent_protocol::{Ask, Entry, ForkedFrom, Notify, Project, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -110,6 +110,9 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     // Named by hand or by a retitle (`set_name`): a first prompt's title landing after
     // that doesn't replace the name.
     ("threads", "renamed", "INTEGER NOT NULL DEFAULT 0"),
+    // A fork's source thread and the last entry it copied (`fork_thread`).
+    ("threads", "forked_from", "TEXT"),
+    ("threads", "forked_at", "TEXT"),
 ];
 
 /// The searchable text of a message entry: user and assistant text blocks. Used both to
@@ -284,7 +287,7 @@ impl Storage {
             "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
                     (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
                     t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at, t.pinned, t.seen_at,
-                    t.spend_cost, t.spend_input, t.spend_output, t.spend_cached
+                    t.spend_cost, t.spend_input, t.spend_output, t.spend_cached, t.forked_from, t.forked_at
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
@@ -318,6 +321,10 @@ impl Storage {
                     output: r.get::<_, i64>(19)? as u64,
                     cached: r.get::<_, i64>(20)? as u64,
                 },
+                forked_from: r
+                    .get::<_, Option<String>>(21)?
+                    .zip(r.get::<_, Option<String>>(22)?)
+                    .map(|(thread_id, entry_id)| ForkedFrom { thread_id, entry_id }),
                 setup: None,
             })
         })?;
@@ -506,32 +513,24 @@ impl Storage {
         Ok(Some(message_text(&serde_json::from_str(&json)?)).filter(|t| !t.trim().is_empty()))
     }
 
-    /// What a retitle reads (`title::digest`): the text of the thread's user messages,
-    /// oldest first, and of its latest final reply (whether or not a run came after it).
+    /// What a retitle reads (`title::digest`): the text of the user messages on the
+    /// thread's current branch (an edited one's old messages are gone from it), oldest
+    /// first, and of its latest final reply (whether or not a run came after it).
     pub fn conversation(&self, thread_id: &str) -> Result<(Vec<String>, Option<String>)> {
-        let texts = |sql: &str| -> Result<Vec<String>> {
-            let mut stmt = self.conn.prepare(sql)?;
-            let rows = stmt.query_map([thread_id], |r| r.get::<_, String>(0))?;
-            let mut texts = vec![];
-            for json in rows {
-                let text = message_text(&serde_json::from_str(&json?)?);
-                if !text.trim().is_empty() {
-                    texts.push(text);
-                }
-            }
-            Ok(texts)
-        };
-        let prompts = texts(
-            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
-               AND json_extract(json, '$.message.role') = 'user' ORDER BY seq",
-        )?;
-        let reply = texts(
-            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
-               AND json_extract(json, '$.message.role') = 'assistant'
-               AND json_extract(json, '$.message.stopReason') IN ('stop', 'length')
-             ORDER BY seq DESC LIMIT 1",
-        )?;
-        Ok((prompts, reply.into_iter().next()))
+        let (_, entries) = self.get_thread(thread_id)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
+        let branch = entries.last().map(|last| dirigent_protocol::branch(&entries, &last.id)).unwrap_or_default();
+        let role = |e: &Entry| e.json.pointer("/message/role").and_then(Value::as_str).filter(|_| e.kind == "message").map(str::to_owned);
+        let text = |e: &Entry| Some(message_text(&e.json)).filter(|t| !t.trim().is_empty());
+        let prompts = branch.iter().filter(|e| role(e).as_deref() == Some("user")).filter_map(|e| text(e)).collect();
+        let reply = branch
+            .iter()
+            .rev()
+            .find(|e| {
+                role(e).as_deref() == Some("assistant")
+                    && matches!(e.json.pointer("/message/stopReason").and_then(Value::as_str), Some("stop" | "length"))
+            })
+            .and_then(|e| text(e));
+        Ok((prompts, reply))
     }
 
     /// Full-text search: the best-matching passage per thread, best thread first. Every
@@ -611,8 +610,51 @@ impl Storage {
             prompted_at: None,
             jobs: 0,
             spend: Spend::default(),
+            forked_from: None,
             setup: None,
         })
+    }
+
+    /// Start thread `id` as a fork of `src`: a top-level thread with `src`'s project,
+    /// directory (not its workspace: that stays `src`'s), name and tools, and a copy of the
+    /// branch ending at `entry_id`. The copy is history, not activity: it counts toward
+    /// neither usage nor the fork's spend, but search finds it. Pi's header is left out:
+    /// the fork's first load makes one with its own id. Returns the fork's summary as
+    /// `list_threads` has it.
+    pub fn fork_thread(&self, src: &str, entry_id: &str, id: &str, now: i64) -> Result<ThreadSummary> {
+        let (_, entries) = self.get_thread(src)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
+        let branch = dirigent_protocol::branch(&entries, entry_id);
+        anyhow::ensure!(!branch.is_empty(), "no such entry in the thread");
+        // The model and thinking level it was at, as `append_entry` tracks them.
+        let latest = |kind: &str| branch.iter().rev().find(|e| e.kind == kind).map(|e| &e.json);
+        let s = |j: &Value, k: &str| j.get(k).and_then(Value::as_str).map(str::to_owned);
+        let model = latest("model_change").and_then(|j| Some(format!("{}/{}", s(j, "provider")?, s(j, "modelId")?)));
+        let thinking_level = latest("thinking_level_change").and_then(|j| s(j, "thinkingLevel"));
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO threads (id, project_id, cwd, name, model, thinking_level, tools, created_at, updated_at, forked_from, forked_at)
+             SELECT ?1, project_id, cwd, name, ?2, ?3, tools, ?4, ?4, id, ?5 FROM threads WHERE id = ?6",
+            params![id, model, thinking_level, now, entry_id, src],
+        )?;
+        for (seq, e) in branch.iter().enumerate() {
+            tx.execute(
+                "INSERT INTO entries (thread_id, seq, id, parent_id, kind, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, seq as i64, e.id, e.parent_id, e.kind, e.json.to_string()],
+            )?;
+        }
+        tx.execute(&format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES} AND thread_id = ?1"), [id])?;
+        tx.commit()?;
+        self.list_threads()?.into_iter().find(|t| t.id == id).ok_or_else(|| anyhow::anyhow!("fork vanished"))
+    }
+
+    /// The entry is a message the user typed in the thread: what `EditMessage` rewrites.
+    pub fn is_user_message(&self, thread_id: &str, entry_id: &str) -> Result<bool> {
+        Ok(self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM entries WHERE thread_id = ?1 AND id = ?2 AND kind = 'message'
+                              AND json_extract(json, '$.message.role') = 'user')",
+            params![thread_id, entry_id],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn thread_cwd(&self, id: &str) -> Result<Option<String>> {
@@ -891,6 +933,36 @@ mod tests {
         assert!(s.delete_thread("t1").is_err());
     }
 
+    /// A fork copies the branch up to its entry, and counts none of the copied spend.
+    #[test]
+    fn fork_copies_a_branch() {
+        let s = Storage::in_memory().unwrap();
+        s.create_thread("src", "p", "/ws/src", None, Some("Bug hunt"), 1).unwrap();
+        s.set_tools("src", &["ask_user".into()]).unwrap();
+        let user = |id: &str, parent: &str, text: &str| json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":text}});
+        let reply = |id: &str, parent: &str| json!({"type":"message","id":id,"parentId":parent,"message":{"role":"assistant","stopReason":"stop","timestamp":4,"content":[{"type":"text","text":"found it"}],"usage":{"input":5,"output":1,"cost":{"total":0.5}}}});
+        s.append_entry("src", json!({"type":"model_change","id":"m","parentId":null,"provider":"a","modelId":"x"}), 2).unwrap();
+        s.append_entry("src", user("u1", "m", "find the bug"), 3).unwrap();
+        s.append_entry("src", reply("r1", "u1"), 4).unwrap();
+        // An edit of u1: u2 branches off m; r2 is the current branch's reply.
+        s.append_entry("src", user("u2", "m", "find the other bug"), 5).unwrap();
+        s.append_entry("src", reply("r2", "u2"), 6).unwrap();
+        assert!(s.is_user_message("src", "u1").unwrap() && !s.is_user_message("src", "r1").unwrap());
+
+        let fork = s.fork_thread("src", "r1", "f", 10).unwrap();
+        assert_eq!(fork.forked_from, Some(ForkedFrom { thread_id: "src".into(), entry_id: "r1".into() }));
+        assert_eq!((fork.cwd.as_str(), fork.name.as_deref(), fork.model.as_deref()), ("/ws/src", Some("Bug hunt"), Some("a/x")));
+        assert_eq!((fork.parent_id, fork.workspace, fork.updated_at), (None, None, 10));
+        assert_eq!(fork.spend, Spend::default());
+        assert_eq!(s.thread_tools("f").unwrap(), ["ask_user"]);
+        let (header, entries) = s.get_thread("f").unwrap().unwrap();
+        assert!(header.is_null());
+        assert_eq!(entries.iter().map(|e| (e.seq, e.id.as_str())).collect::<Vec<_>>(), [(0, "m"), (1, "u1"), (2, "r1")]);
+        assert_eq!(s.search("find bug", 10).unwrap().len(), 2);
+        assert_eq!(s.usage(0, 100, 100).unwrap()[0].messages, 2);
+        assert!(s.fork_thread("src", "nope", "g", 10).is_err());
+    }
+
     #[test]
     fn lineage_snooze_and_search() {
         let s = Storage::in_memory().unwrap();
@@ -909,7 +981,12 @@ mod tests {
         // Snoozed until the thread's next entry moves `updated_at`.
         s.set_snoozed("root", true).unwrap();
         assert!(by_id(&s, "root").snoozed);
-        s.append_entry("root", json!({"type":"message","id":"u","message":{"role":"user","content":"find the sqlite bug"}}), 50).unwrap();
+        s.append_entry(
+            "root",
+            json!({"type":"message","id":"u","parentId":null,"message":{"role":"user","content":"find the sqlite bug"}}),
+            50,
+        )
+        .unwrap();
         assert!(!by_id(&s, "root").snoozed);
         s.set_snoozed("root", true).unwrap();
         s.set_snoozed("root", false).unwrap();
@@ -929,9 +1006,9 @@ mod tests {
         assert!(by_id(&s, "root").pinned_entries.is_empty());
 
         // Search covers user and assistant text; the last final reply is what a parent reads.
-        let assistant = |id: &str, stop: &str, text: &str| json!({"type":"message","id":id,"message":{"role":"assistant","stopReason":stop,"content":[{"type":"text","text":text}]}});
-        s.append_entry("root", assistant("a1", "toolUse", "looking at storage.rs"), 51).unwrap();
-        s.append_entry("root", assistant("a2", "stop", "The bug is a missing index on usage.at"), 52).unwrap();
+        let assistant = |id: &str, parent: &str, stop: &str, text: &str| json!({"type":"message","id":id,"parentId":parent,"message":{"role":"assistant","stopReason":stop,"content":[{"type":"text","text":text}]}});
+        s.append_entry("root", assistant("a1", "u", "toolUse", "looking at storage.rs"), 51).unwrap();
+        s.append_entry("root", assistant("a2", "a1", "stop", "The bug is a missing index on usage.at"), 52).unwrap();
         s.append_entry(
             "kid",
             json!({"type":"message","id":"k","message":{"role":"user","content":[{"type":"text","text":"write docs"}]}}),
@@ -945,12 +1022,17 @@ mod tests {
         assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
         assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
         // A new prompt without a reply yet (or aborted): no reply to report.
-        s.append_entry("root", json!({"type":"message","id":"u2","message":{"role":"user","content":"and again"}}), 54).unwrap();
+        s.append_entry("root", json!({"type":"message","id":"u2","parentId":"a2","message":{"role":"user","content":"and again"}}), 54)
+            .unwrap();
         assert_eq!(s.last_reply("root").unwrap(), None);
         // A retitle reads every user message and the latest final reply, a run after it or not.
         let (prompts, reply) = s.conversation("root").unwrap();
         assert_eq!(prompts, ["find the sqlite bug", "and again"]);
         assert_eq!(reply.as_deref(), Some("The bug is a missing index on usage.at"));
+        // An edit of u2 drops it from the branch a retitle reads.
+        s.append_entry("root", json!({"type":"message","id":"u3","parentId":"a2","message":{"role":"user","content":"once more"}}), 54)
+            .unwrap();
+        assert_eq!(s.conversation("root").unwrap().0, ["find the sqlite bug", "once more"]);
         s.set_name("root", "Missing usage index").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
         // A first title landing after it doesn't replace it.

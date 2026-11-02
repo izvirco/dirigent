@@ -43,6 +43,7 @@ icons!(
     "panel-left-open",
     "panel-right-close",
     "panel-right-open",
+    "pencil",
     "pin",
     "play",
     "plus",

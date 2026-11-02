@@ -16,8 +16,8 @@ use crate::{config, hosts, images, instance, settings, update};
 use crate::{lists, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
-    Ask, ClientMessage, Entry, FirstPrompt, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs,
-    prompt_title,
+    Ask, ClientMessage, Entry, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary,
+    TitleGen, Vcs, prompt_title,
 };
 use futures::StreamExt;
 use gpui::EntityInputHandler;
@@ -73,8 +73,10 @@ pub enum Resize {
 pub struct OpenThread {
     pub host: String,
     pub id: String,
+    /// Every entry, old branches included (see `Entry`).
     pub entries: Vec<Entry>,
-    /// What the pane renders, folded from `entries` as they arrive.
+    /// What the pane renders, folded from the current branch's entries as they arrive
+    /// (`timeline_of`).
     pub timeline: Timeline,
     pub streaming: Streaming,
     /// `timeline.items.len() + 1` items: the last one is the live tail (echoed messages, work in progress).
@@ -110,6 +112,38 @@ pub struct OpenThread {
     pub panel: Option<bool>,
     /// Its latest `GetThread` and the last entry it held when asking (see `fetch_open`).
     fetching: Option<(u64, Option<u64>)>,
+    /// A user message being edited in place: its bubble holds the composer.
+    pub editing: Option<Editing>,
+    /// An edit on its way (`Dirigent::send_edit`).
+    pub rewound: Option<Rewound>,
+    /// The entry to scroll to once the host's entries are in (`Dirigent::open_fork_source`).
+    jump_entry: Option<String>,
+}
+
+/// An edit in progress (`Dirigent::start_edit`): the user message (pi entry id) whose
+/// bubble holds the composer, and what the composer held before, the thread's draft,
+/// which it gets back when the edit is sent or cancelled.
+pub struct Editing {
+    pub entry_id: String,
+    stash: input::Content,
+    images: Vec<Attachment>,
+}
+
+/// A sent edit: the transcript shows the branch up to the edited message's parent, the
+/// new text echoed below, until the host's first entry on the new branch replaces that
+/// view (`OpenThread::fold`). If the edit fails (`Dirigent::unrewind`) the old branch
+/// comes back, the edit open again in its bubble.
+pub struct Rewound {
+    request: u64,
+    entry_id: String,
+    text: String,
+    images: Vec<Attachment>,
+}
+
+/// The timeline of `entries`' current branch (`dirigent_protocol::branch`).
+fn timeline_of(entries: &[Entry]) -> Timeline {
+    let branch = entries.last().map(|last| dirigent_protocol::branch(entries, &last.id)).unwrap_or_default();
+    Timeline::from_entries(branch.into_iter().map(|e| &e.json))
 }
 
 /// How the user left a thread's log, kept in memory (`Dirigent::logs`) so coming back to the
@@ -124,6 +158,37 @@ struct LogMemory {
 }
 
 impl OpenThread {
+    /// The thread `id` on `host` as `entries` (from the cache) show it, before anything else
+    /// is known about it.
+    fn new(host: &str, id: &str, entries: Vec<Entry>) -> Self {
+        let timeline = timeline_of(&entries);
+        let list = ListState::new(timeline.items.len() + 1, ListAlignment::Top, px(300.));
+        list.set_follow_mode(FollowMode::Tail);
+        Self {
+            host: host.to_owned(),
+            id: id.to_owned(),
+            entries,
+            timeline,
+            streaming: Streaming::default(),
+            list,
+            expanded: HashSet::new(),
+            log: None,
+            log_list: ListState::new(0, ListAlignment::Top, px(300.)),
+            copied: None,
+            pins: HashSet::new(),
+            ruler: Default::default(),
+            stats_hover: false,
+            center_on: None,
+            asks: vec![],
+            ask_h: px(0.),
+            panel: None,
+            fetching: None,
+            editing: None,
+            rewound: None,
+            jump_entry: None,
+        }
+    }
+
     /// Timeline item `ix` is a pinned message.
     pub fn is_pinned(&self, ix: usize) -> bool {
         self.timeline.entry_id(ix).is_some_and(|id| self.pins.contains(id))
@@ -132,7 +197,9 @@ impl OpenThread {
     /// Fold a persisted entry in, from its push or from a snapshot, for a push that overtook
     /// it or one this client never got (never both, see `ServerMessage::Entry`): the message
     /// it persists supersedes what was streamed or echoed for it. Returns the item count
-    /// before and the first item it changed (`Timeline::push`).
+    /// before and the first item it changed (`Timeline::push`): item 0 when the entry starts
+    /// a new branch (an edit), whose timeline replaces the old one; none for an entry kept
+    /// out of a sent edit's view (`Rewound`).
     fn fold(&mut self, entry: Entry) -> (usize, Option<usize>) {
         match entry.json.pointer("/message/role").and_then(|r| r.as_str()) {
             Some("assistant") => self.streaming.steps.clear(),
@@ -145,9 +212,39 @@ impl OpenThread {
             self.streaming.confirm_answer(&entry.json);
         }
         let n = self.timeline.items.len();
-        let changed = self.timeline.push(&entry.json);
+        // An edit branched off an earlier entry: the timeline is the new branch's from here.
+        let branched = self.entries.last().is_some_and(|last| entry.parent_id.as_deref() != Some(last.id.as_str()));
         self.entries.push(entry);
+        if branched {
+            self.rewound = None;
+            self.timeline = timeline_of(&self.entries);
+            return (n, Some(0));
+        }
+        // A sent edit's view holds until the new branch starts: entries still on the old
+        // one (a job's notice landing meanwhile) stay out of it.
+        if self.rewound.is_some() {
+            return (n, None);
+        }
+        let changed = self.timeline.push(&self.entries[self.entries.len() - 1].json);
         (n, changed)
+    }
+
+    /// The message behind timeline item `ix` if the user typed it: a pi `message` entry
+    /// (not the answers to an ask, which also show as a user bubble). What an edit
+    /// rewrites, and what a fork from its bubble starts before.
+    pub fn typed_message(&self, ix: usize) -> Option<&Entry> {
+        if !matches!(self.timeline.items.get(ix), Some(Item::User { .. })) {
+            return None;
+        }
+        let id = self.timeline.entry_id(ix)?;
+        self.entries.iter().rev().find(|e| e.id == id).filter(|e| e.kind == "message")
+    }
+
+    /// The timeline item to show for entry `id`: the last one made by it or an entry
+    /// before it on its branch. `None` before the entries are in.
+    fn item_at(&self, id: &str) -> Option<usize> {
+        let branch: HashSet<&str> = dirigent_protocol::branch(&self.entries, id).into_iter().map(|e| e.id.as_str()).collect();
+        (0..self.timeline.items.len()).rev().find(|&ix| self.timeline.entry_id(ix).is_some_and(|e| branch.contains(e)))
     }
 }
 
@@ -259,6 +356,9 @@ pub struct Attachment {
     pub n: u32,
     pub blob: Blob,
 }
+
+/// A message to put in the composer: its text and the images its tokens name.
+type Draft = (String, Vec<Attachment>);
 
 /// A sent draft waiting for its `ThreadCreated`: the request, where it went, the message,
 /// which goes back into the draft if the thread can't be created and prompted, and the
@@ -523,6 +623,9 @@ pub struct Dirigent {
     blob_requests: HashMap<String, HashSet<String>>,
     /// A draft was sent (`CreateThread` with its first prompt), not yet confirmed.
     pending: Option<PendingDraft>,
+    /// `ForkThread` requests not answered yet, by request id: the host, and the draft the
+    /// fork opens with (a fork from a user message gets that message).
+    forks: HashMap<u64, (String, Option<Draft>)>,
     /// Draft: start the thread in its own workspace (the composer's `isolated` chip), and
     /// from where (`None` = the vcs default; reset with every draft).
     pub isolate: bool,
@@ -670,6 +773,7 @@ impl Dirigent {
             blobs: HashMap::new(),
             blob_requests: HashMap::new(),
             pending: None,
+            forks: HashMap::new(),
             isolate,
             base: None,
             vcs: HashMap::new(),
@@ -998,9 +1102,15 @@ impl Dirigent {
                 if let Some(h) = self.host_mut(&host) {
                     h.status = status;
                 }
-                // Images asked for and not in yet won't come over a dropped connection.
+                // Images asked for and not in yet won't come over a dropped connection, nor
+                // forks or an edit (which, if its host got it, comes back with the thread's
+                // fetch on reconnect; the reopened edit then ends, `end_stale_edit`).
                 if status == HostStatus::Disconnected {
                     self.blob_requests.remove(&host);
+                    self.forks.retain(|_, (h, _)| *h != host);
+                    if self.open().is_some_and(|t| t.host == host) {
+                        self.unrewind(cx);
+                    }
                 }
                 // The open thread is fetched once its host connects (`fetch_open` doesn't ask
                 // while it's offline).
@@ -1141,6 +1251,11 @@ impl Dirigent {
                                 }
                             }
                         }
+                        // An edit's run ended before its branch started: it failed in the
+                        // runtime (which says why in its own error).
+                        if died {
+                            self.unrewind(cx);
+                        }
                         self.mark_seen(&host, &id);
                         self.sync_asks(cx);
                         // The run ended, or the thread moved: the repo state may have changed.
@@ -1171,7 +1286,7 @@ impl Dirigent {
                         tracing::error!("cache: {e:#}");
                     }
                     let (kept, fresh) = merge_snapshot(entries, std::mem::take(&mut t.entries), stale);
-                    t.timeline = Timeline::from_entries(kept.iter().map(|e| &e.json));
+                    t.timeline = timeline_of(&kept);
                     t.entries = kept;
                     // Their pushes are still on the way and will be skipped (see `Entry`):
                     // they are folded in now, as if pushed.
@@ -1179,8 +1294,14 @@ impl Dirigent {
                         t.fold(e);
                     }
                     t.list.reset(t.timeline.items.len() + 1);
+                    self.end_stale_edit(cx);
+                    let Pane::Thread(t) = &mut self.pane else { return };
+                    // A fork's source opens at the message it was forked at.
+                    if let Some(ix) = t.jump_entry.take().and_then(|e| t.item_at(&e)) {
+                        self.jump_to(ix, cx);
+                    }
                     // The cache may have lagged: the log follows the latest work again.
-                    if t.log.is_some() {
+                    if self.open().is_some_and(|t| t.log.is_some()) {
                         self.show_latest_log();
                     }
                     self.fetch_blobs();
@@ -1228,6 +1349,14 @@ impl Dirigent {
                     && !h.threads.iter().any(|t| t.id == thread.id)
                 {
                     h.threads.insert(0, (*thread).clone());
+                }
+                // Our fork: it opens, with its draft (if any) in the composer.
+                if let Some((_, draft)) = self.forks.remove(&reply_to).filter(|(h, _)| *h == host) {
+                    if let Some((text, images)) = draft {
+                        let content = input::Content { selection: text.len()..text.len(), text, reversed: false };
+                        let _ = self.cache.lock().unwrap().set_draft(&host, &thread.id, &content, &image_rows(&images));
+                    }
+                    self.select_thread(&host, &thread.id, cx);
                 }
                 // Our draft's thread, open since it was sent: its host has it now, prompted
                 // (`CreateThread::prompt`), and it is fetched if open, as entries made while it
@@ -1290,6 +1419,13 @@ impl Dirigent {
                 if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.target.host == host) {
                     self.unsend_draft(p, cx);
                 }
+                // So does a refused edit; a refused fork just never opens.
+                if self.open().and_then(|t| t.rewound.as_ref()).is_some_and(|r| Some(r.request) == reply_to) {
+                    self.unrewind(cx);
+                }
+                if let Some(id) = reply_to {
+                    self.forks.remove(&id);
+                }
                 // A request newer than the host's service (rename, retitle, ...): serde's
                 // list of every variant it does know says little.
                 let message = if message.starts_with("bad request: unknown variant") {
@@ -1346,6 +1482,7 @@ impl Dirigent {
                     if t.log.is_some() {
                         t.log_list.remeasure();
                     }
+                    self.end_stale_edit(cx);
                     self.fetch_blobs();
                 }
             }
@@ -1391,8 +1528,12 @@ impl Dirigent {
         self.add_project = None;
         let (from, to) = (composer_key(&self.pane), composer_key(&pane));
         let (leaving, entering) = (from != to && from.is_some(), from != to && to.is_some());
+        // An edit ends with its pane. Leaving, its stash is the draft saved (`save_draft`);
+        // staying (the open thread opened again), the composer gets the stash back.
         if leaving {
             self.save_draft(cx);
+        } else {
+            self.end_edit(cx);
         }
         self.stash_log();
         self.pane = pane;
@@ -1476,35 +1617,15 @@ impl Dirigent {
         // Before `logs` is read below: the thread may be the one open (its own card clicked).
         self.stash_log();
         let entries = self.cache.lock().unwrap().entries(host, id).unwrap_or_default();
-        let timeline = Timeline::from_entries(entries.iter().map(|e| &e.json));
-        let list = ListState::new(timeline.items.len() + 1, ListAlignment::Top, px(300.));
-        list.set_follow_mode(FollowMode::Tail);
         // The thread's own model if it has one, else whatever we used last.
         if let Some((m, e)) = self.summary(host, id).filter(|s| s.model.is_some()).map(|s| (s.model.clone(), s.thinking_level.clone())) {
             self.model = m;
             self.effort = e;
         }
-        let pane = Pane::Thread(Box::new(OpenThread {
-            host: host.to_owned(),
-            id: id.to_owned(),
-            entries,
-            timeline,
-            streaming: Streaming::default(),
-            list,
-            expanded: self.logs.get(id).map(|m| m.expanded.clone()).unwrap_or_default(),
-            log: None,
-            log_list: ListState::new(0, ListAlignment::Top, px(300.)),
-            copied: None,
-            pins: self.summary(host, id).map(|s| s.pinned_entries.iter().cloned().collect()).unwrap_or_default(),
-            ruler: Default::default(),
-            stats_hover: false,
-            center_on: None,
-            asks: vec![],
-            ask_h: px(0.),
-            panel: None,
-            fetching: None,
-        }));
-        self.set_pane(pane, cx);
+        let mut thread = OpenThread::new(host, id, entries);
+        thread.expanded = self.logs.get(id).map(|m| m.expanded.clone()).unwrap_or_default();
+        thread.pins = self.summary(host, id).map(|s| s.pinned_entries.iter().cloned().collect()).unwrap_or_default();
+        self.set_pane(Pane::Thread(Box::new(thread)), cx);
         if self.log_on {
             self.show_latest_log();
         }
@@ -3100,14 +3221,18 @@ impl Dirigent {
     /// that was deleted under us).
     fn save_draft(&self, cx: &App) {
         let Some((host, id)) = composer_key(&self.pane) else { return };
-        let content = self.composer.read(cx).content();
+        // Mid-edit the composer holds the message being edited; the draft is its stash.
+        let (content, images) = match self.open().and_then(|t| t.editing.as_ref()) {
+            Some(e) => (e.stash.clone(), &e.images),
+            None => (self.composer.read(cx).content(), &self.attachments),
+        };
         let gone = (host, id) != DRAFT_KEY && self.summary(host, id).is_none();
         let mut cache = self.cache.lock().unwrap();
         if gone || content.text.trim().is_empty() {
             let _ = cache.remove_draft(host, id);
         } else {
             // Images are kept while their token is in the text; `attachments()` prunes the rest.
-            let _ = cache.set_draft(host, id, &content, &image_rows(&self.attachments));
+            let _ = cache.set_draft(host, id, &content, &image_rows(images));
         }
     }
 
@@ -3145,6 +3270,11 @@ impl Dirigent {
         let (content, images) = self.cache.lock().unwrap().draft(host, id).unwrap_or_default();
         self.attachments =
             images.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, blob: blob_from(&mime, bytes)? })).collect();
+        self.set_composer(content, cx);
+    }
+
+    /// Put `content` in the composer, deferred: `set_content` needs the window.
+    fn set_composer(&self, content: input::Content, cx: &mut Context<Self>) {
         let (window, composer) = (self.window, self.composer.clone());
         cx.defer(move |cx| {
             window.update(cx, |_, window, cx| composer.update(cx, |input, cx| input.set_content(content, window, cx))).ok();
@@ -3196,6 +3326,9 @@ impl Dirigent {
             return;
         }
         let images = self.attachments(cx);
+        if self.open().is_some_and(|t| t.editing.is_some()) {
+            return self.send_edit(text, images, window, cx);
+        }
         if let Pane::Draft { target } = &self.pane {
             let Some(target) = target.clone() else {
                 self.toast("Pick a project first", cx);
@@ -3380,6 +3513,9 @@ impl Dirigent {
         }
         if self.renaming.take().is_some() {
             self.focus(self.focus_handle.clone(), cx);
+            return cx.notify();
+        }
+        if self.end_edit(cx) {
             return cx.notify();
         }
         if self.selection.clear() {
@@ -3652,6 +3788,174 @@ impl Dirigent {
         }
         self.net.send(&host, ClientMessage::PinMessage { id, thread_id, entry_id, pinned });
         cx.notify();
+    }
+
+    // ---- edit and fork ----
+
+    /// A user bubble's message as a composer draft: its text without the image links its
+    /// host appended (`view::split_image_refs`), and its images under the `[image-N]` they
+    /// had (as `thread::image_links` pairs them). An image not loaded yet is left out.
+    fn bubble_draft(&self, text: &str, images: &[String]) -> Draft {
+        let (body, refs) = view::split_image_refs(text);
+        let ns = if refs.is_empty() { input::image_numbers(body) } else { refs };
+        let images = ns.into_iter().zip(images).filter_map(|(n, id)| Some(Attachment { n, blob: self.blobs.get(id)?.clone() })).collect();
+        (body.to_owned(), images)
+    }
+
+    /// A user bubble's edit button: the bubble takes the composer, filled with its message,
+    /// model and effort chips and all (`thread::edit_bubble`); the composer's own text and
+    /// images wait in the stash. Not while the thread runs: its host refuses edits then.
+    pub fn start_edit(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if self.is_running() {
+            return self.toast("The thread is running; stop it first", cx);
+        }
+        let Some(t) = self.open().filter(|t| t.rewound.is_none()) else { return };
+        let Some(entry_id) = t.typed_message(ix).map(|e| e.id.clone()) else { return };
+        let Some(Item::User { text, images, .. }) = t.timeline.items.get(ix) else { return };
+        let (text, images) = self.bubble_draft(text, images);
+        // Moving from another bubble's edit, that one's stash is still the draft.
+        let (stash, stash_images) = match t.editing.as_ref() {
+            Some(e) => (e.stash.clone(), e.images.clone()),
+            None => (self.composer.read(cx).content(), self.attachments.clone()),
+        };
+        self.attachments = images;
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.editing = Some(Editing { entry_id, stash, images: stash_images });
+        self.menu = None;
+        self.set_composer(input::Content { selection: text.len()..text.len(), text, reversed: false }, cx);
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// The edit bubble's `Cancel`.
+    pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        if self.end_edit(cx) {
+            self.focus_composer(cx);
+            cx.notify();
+        }
+    }
+
+    /// Leave an edit without sending it (Esc, `Cancel`, the pane changing): the composer
+    /// gets its own text and images back. False when no edit was going on.
+    fn end_edit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Pane::Thread(t) = &mut self.pane else { return false };
+        let Some(e) = t.editing.take() else { return false };
+        self.attachments = e.images;
+        self.set_composer(e.stash, cx);
+        true
+    }
+
+    /// Send the edit: `EditMessage` with the composer's text, images, model and effort.
+    /// The transcript drops the message and all after it at once, the new text echoed in
+    /// its place (`Rewound`), and the composer gets its own text back.
+    fn send_edit(&mut self, text: String, images: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.is_none() {
+            self.toast("Pick a model first", cx);
+            self.menu = Some(Menu::Model);
+            return;
+        }
+        if self.is_running() {
+            return self.toast("The thread is running; stop it first", cx);
+        }
+        let Some(t) = self.open() else { return };
+        if self.summary(&t.host, &t.id).is_some_and(|s| s.workspace_missing) {
+            return self.toast("The thread's workspace is gone; recreate it or move the thread back first", cx);
+        }
+        if let Some(why) = self.not_ready(&t.host, &t.id) {
+            return self.toast(why, cx);
+        }
+        // A request to an offline host is dropped: the edit stays open instead.
+        if self.host(&t.host).is_none_or(|h| h.status != HostStatus::Connected) {
+            return self.toast(format!("{} is offline", t.host), cx);
+        }
+        let id = self.next_id();
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let Some(e) = t.editing.take() else { return };
+        let timeline = {
+            let branch = t.entries.last().map(|last| dirigent_protocol::branch(&t.entries, &last.id)).unwrap_or_default();
+            Timeline::from_entries(branch.into_iter().take_while(|x| x.id != e.entry_id).map(|x| &x.json))
+        };
+        t.timeline = timeline;
+        t.list.reset(t.timeline.items.len() + 1);
+        t.rewound = Some(Rewound { request: id, entry_id: e.entry_id.clone(), text: text.clone(), images: images.clone() });
+        let (host, thread_id) = (t.host.clone(), t.id.clone());
+        self.net.send(
+            &host,
+            ClientMessage::EditMessage {
+                id,
+                thread_id: thread_id.clone(),
+                entry_id: e.entry_id,
+                text: text.clone(),
+                model: self.model.clone(),
+                thinking_level: self.effort.clone(),
+                images: wire_images(&images),
+                tools: Some(self.config.tools.enabled()),
+            },
+        );
+        self.attachments = e.images;
+        self.composer.update(cx, |input, cx| input.set_content(e.stash, window, cx));
+        self.remember_model();
+        self.echo(&host, &thread_id, text, PromptMode::Prompt);
+        cx.notify();
+    }
+
+    /// A sent edit failed (its host refused it, or its run ended before the new branch
+    /// started): the transcript shows the thread as it is again, and the edit is back in
+    /// its bubble as it was sent, to try again or cancel.
+    fn unrewind(&mut self, cx: &mut Context<Self>) {
+        if self.open().is_none_or(|t| t.rewound.is_none()) {
+            return;
+        }
+        let (stash, stash_images) = (self.composer.read(cx).content(), self.attachments.clone());
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let Some(r) = t.rewound.take() else { return };
+        t.timeline = timeline_of(&t.entries);
+        t.streaming.echo.retain(|(text, mode)| !(*mode == PromptMode::Prompt && *text == r.text));
+        t.list.reset(t.timeline.items.len() + 1);
+        t.editing = Some(Editing { entry_id: r.entry_id, stash, images: stash_images });
+        self.attachments = r.images;
+        self.set_composer(input::Content { selection: r.text.len()..r.text.len(), text: r.text, reversed: false }, cx);
+        cx.notify();
+    }
+
+    /// An edit whose message has left the transcript (another client's edit branched the
+    /// thread before it) ends: there is no bubble to hold the composer any more.
+    fn end_stale_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(t) = self.open() else { return };
+        let Some(e) = &t.editing else { return };
+        if !(0..t.timeline.items.len()).any(|ix| t.timeline.entry_id(ix) == Some(e.entry_id.as_str())) {
+            self.end_edit(cx);
+        }
+    }
+
+    /// A message's fork button: a new thread with the history up to here (`ForkThread`),
+    /// opened once its host has made it. From a reply: up to and with the reply. From a
+    /// user message: up to just before it, the message in the fork's composer to send as
+    /// it was or changed.
+    pub fn fork_at(&mut self, ix: usize) {
+        let Some((host, thread_id, entry_id, draft)) = self.open().and_then(|t| {
+            let (entry_id, draft) = match (t.typed_message(ix), t.timeline.items.get(ix)) {
+                (Some(e), Some(Item::User { text, images, .. })) => (e.parent_id.clone()?, Some(self.bubble_draft(text, images))),
+                _ => (t.timeline.entry_id(ix).filter(|e| !e.is_empty())?.to_owned(), None),
+            };
+            Some((t.host.clone(), t.id.clone(), entry_id, draft))
+        }) else {
+            return;
+        };
+        let id = self.next_id();
+        self.forks.insert(id, (host.clone(), draft));
+        self.net.send(&host, ClientMessage::ForkThread { id, thread_id, entry_id, fork_id: None });
+    }
+
+    /// The header's fork button: open the thread this one was forked from, at the message
+    /// it was forked at: now if the cache has its entries, and again once the host's are in.
+    pub fn open_fork_source(&mut self, host: &str, from: &ForkedFrom, cx: &mut Context<Self>) {
+        self.select_thread(host, &from.thread_id, cx);
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.jump_entry = Some(from.entry_id.clone());
+        if let Some(ix) = t.item_at(&from.entry_id) {
+            self.jump_to(ix, cx);
+        }
     }
 
     /// Drop a queued steer / follow-up the model hasn't seen yet. Pi confirms with a
@@ -4072,5 +4376,50 @@ mod tests {
         assert_eq!(merge(range(0, 2), range(0, 4), Some(2)), (vec![0, 1, 3], vec![]));
         // A gap in what we had (a cache that missed pushes) is filled.
         assert_eq!(merge(range(0, 4), vec![entry(0), entry(3)], None), (vec![0, 1, 2, 3], vec![]));
+    }
+
+    /// An edit's first entry branches the transcript; while a sent edit waits for it,
+    /// entries still on the old branch stay out of view.
+    #[test]
+    fn edits_branch_the_timeline() {
+        let pi = |seq, id: &str, parent: Option<&str>, message: serde_json::Value| {
+            Entry::from_pi(seq, serde_json::json!({"type":"message","id":id,"parentId":parent,"message":message}))
+        };
+        let user = |seq, id, parent, text: &str| pi(seq, id, parent, serde_json::json!({"role":"user","content":text}));
+        let reply = |seq, id, parent, text: &str| {
+            pi(seq, id, parent, serde_json::json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":text}]}))
+        };
+        let mut t = OpenThread::new("h", "t", vec![]);
+        let texts = |t: &OpenThread| {
+            t.timeline
+                .items
+                .iter()
+                .map(|i| match i {
+                    Item::User { text, .. } | Item::Assistant(text) => text.clone(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        t.fold(user(0, "u1", None, "hi"));
+        t.fold(reply(1, "r1", Some("u1"), "hello"));
+        assert_eq!(texts(&t), ["hi", "hello"]);
+        assert_eq!(t.typed_message(0).map(|e| e.id.as_str()), Some("u1"));
+        assert!(t.typed_message(1).is_none());
+        // u1 rewritten: u2 is a second root, and the transcript is its branch alone.
+        assert_eq!(t.fold(user(2, "u2", None, "hey")), (2, Some(0)));
+        assert_eq!(texts(&t), ["hey"]);
+        t.fold(reply(3, "r2", Some("u2"), "howdy"));
+        assert_eq!(texts(&t), ["hey", "howdy"]);
+        assert_eq!(t.item_at("r2"), Some(1));
+        assert_eq!(t.item_at("r1"), None);
+        // An edit of u2 on its way: the old branch's next entry stays out, the new one's
+        // first entry ends the wait.
+        t.timeline = Timeline::default();
+        t.rewound = Some(Rewound { request: 1, entry_id: "u2".into(), text: "yo".into(), images: vec![] });
+        assert_eq!(t.fold(reply(4, "r3", Some("r2"), "still here")), (0, None));
+        assert!(texts(&t).is_empty());
+        t.fold(user(5, "u3", None, "yo"));
+        assert!(t.rewound.is_none());
+        assert_eq!(texts(&t), ["yo"]);
     }
 }

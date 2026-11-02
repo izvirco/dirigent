@@ -65,6 +65,8 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "pinned_entries", "TEXT"),
     // `ThreadSummary::spend` as JSON.
     ("threads", "spend", "TEXT"),
+    // `ThreadSummary::forked_from` as JSON.
+    ("threads", "forked_from", "TEXT"),
 ];
 
 /// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
@@ -167,7 +169,7 @@ impl Cache {
     pub fn threads(&self, host: &str) -> Result<Vec<ThreadSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace,
-                    parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries, spend
+                    parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries, spend, forked_from
              FROM threads WHERE host = ?1 ORDER BY updated_at DESC",
         )?;
         let rows = stmt.query_map([host], |r| {
@@ -195,6 +197,7 @@ impl Cache {
                 prompted_at: r.get(14)?,
                 jobs: 0,
                 spend: r.get::<_, Option<String>>(18)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                forked_from: r.get::<_, Option<String>>(19)?.and_then(|s| serde_json::from_str(&s).ok()),
                 setup: None,
             })
         })?;
@@ -208,9 +211,9 @@ impl Cache {
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
         for t in threads {
             tx.execute(
-                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries, spend)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)",
-                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.snoozed, t.prompted_at, t.pinned, t.seen_at, serde_json::to_string(&t.pinned_entries)?, serde_json::to_string(&t.spend)?],
+                "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries, spend, forked_from)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
+                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.snoozed, t.prompted_at, t.pinned, t.seen_at, serde_json::to_string(&t.pinned_entries)?, serde_json::to_string(&t.spend)?, t.forked_from.as_ref().map(serde_json::to_string).transpose()?],
             )?;
         }
         for table in PER_THREAD {
@@ -422,6 +425,7 @@ mod tests {
             prompted_at: None,
             jobs: 0,
             spend: Default::default(),
+            forked_from: None,
             setup: None,
         }
     }
@@ -455,7 +459,7 @@ mod tests {
         assert!(cache.take_legacy_seen("h").unwrap().is_empty());
     }
 
-    /// What the host reports about pins, seen marks and spend survives the cache round trip.
+    /// What the host reports about pins, seen marks, spend and forks survives the cache round trip.
     #[test]
     fn thread_state_round_trips() {
         let mut cache = Cache::in_memory().unwrap();
@@ -464,6 +468,7 @@ mod tests {
         t.seen_at = Some(3);
         t.pinned_entries = vec!["e1".into(), "e2".into()];
         t.spend = dirigent_protocol::Spend { input: 1200, output: 30, cached: 900, cost: 0.25 };
+        t.forked_from = Some(dirigent_protocol::ForkedFrom { thread_id: "s".into(), entry_id: "e1".into() });
         cache.set_threads("h", std::slice::from_ref(&t)).unwrap();
         assert_eq!(cache.threads("h").unwrap(), vec![t]);
     }
