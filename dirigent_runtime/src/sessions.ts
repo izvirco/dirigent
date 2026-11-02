@@ -9,11 +9,14 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
+  contentText,
   getSupportedThinkingLevels,
   type Api,
   type ImageContent,
+  type Message,
   type Model,
   type ThinkingLevel,
+  type UserMessage,
 } from "@earendil-works/pi-ai";
 import {
   type AgentSession,
@@ -347,22 +350,24 @@ export class Sessions {
   }
 
   /** Drop one queued steer or follow-up by text. Pi only clears whole queues, so
-   *  take both, remove the first match, and queue the rest again in order. */
+   *  take both, remove the first match, and queue the rest again in order, images and
+   *  all. */
   async cancelQueued(threadId: string, text: string): Promise<void> {
     const live = this.live.get(threadId);
     if (!live) return;
     const { session } = live;
-    const { steering, followUp } = session.clearQueue();
-    const drop = (list: string[]) => {
+    const { steering, followUp } = queuedMessages(session);
+    session.clearQueue();
+    const drop = (list: Queued[]) => {
       // The desktop's echo of a steer lacks the image links pi's text has until pi's
       // `queue_update` replaces it (`linkAttachments`).
-      const i = list.findIndex((t) => t === text || t.startsWith(`${text}\n\n[image-`));
+      const i = list.findIndex((m) => m.text === text || m.text.startsWith(`${text}\n\n[image-`));
       if (i !== -1) list.splice(i, 1);
       return i !== -1;
     };
     if (!drop(steering)) drop(followUp);
-    for (const t of steering) await session.steer(t);
-    for (const t of followUp) await session.followUp(t);
+    for (const m of steering) await session.steer(m.text, m.images);
+    for (const m of followUp) await session.followUp(m.text, m.images);
     await requeueNotices(live);
   }
 
@@ -465,6 +470,41 @@ function applyTools(session: AgentSession, tools: string[]): void {
   if (wanted.length !== current.length || wanted.some((n) => !current.includes(n))) {
     session.setActiveToolsByName(wanted);
   }
+}
+
+/** A queued steer / follow-up: its text as pi lists it (`queue_update`), and its images. */
+interface Queued {
+  text: string;
+  images: ImageContent[];
+}
+
+/**
+ * The user messages pi has queued and not yet handed to the model, for `cancelQueued`:
+ * `clearQueue` hands back their text alone and drops the messages, images and all. Read
+ * from pi's agent queues, which are private: should pi rename them, this throws before
+ * anything is cleared. A message the agent already took for its next turn is not in them,
+ * so it isn't queued twice.
+ */
+function queuedMessages(session: AgentSession): Record<"steering" | "followUp", Queued[]> {
+  const agent = session.agent as unknown as Record<
+    "steeringQueue" | "followUpQueue",
+    { messages: Message[] }
+  >;
+  // Custom messages (notices) sit in the same queues; `requeueNotices` handles those.
+  const users = (queue: Message[]) =>
+    queue
+      .filter((m): m is UserMessage => m.role === "user")
+      .map((m) => ({
+        text: contentText(m.content, ""),
+        images:
+          typeof m.content === "string"
+            ? []
+            : m.content.filter((c): c is ImageContent => c.type === "image"),
+      }));
+  return {
+    steering: users(agent.steeringQueue.messages),
+    followUp: users(agent.followUpQueue.messages),
+  };
 }
 
 // `message_update` carries the whole partial message on every delta; the client
