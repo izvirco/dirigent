@@ -185,6 +185,7 @@ mod tests {
             prompted_at: None,
             jobs: 0,
             spend: Default::default(),
+            forked_from: None,
             setup: None,
         }
     }

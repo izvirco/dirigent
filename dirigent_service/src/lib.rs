@@ -134,6 +134,8 @@ impl Service {
             | ClientMessage::RemoveWorkspace { id, .. }
             | ClientMessage::VcsStatus { id, .. }
             | ClientMessage::Prompt { id, .. }
+            | ClientMessage::EditMessage { id, .. }
+            | ClientMessage::ForkThread { id, .. }
             | ClientMessage::Answer { id, .. }
             | ClientMessage::Abort { id, .. }
             | ClientMessage::CancelQueued { id, .. }
@@ -196,14 +198,7 @@ impl Service {
                 ServerMessage::Thread { reply_to: id, thread_id, header, entries }
             }
             ClientMessage::CreateThread { id, thread_id, project_id, workspace, base, parent, name, report, notify, prompt } => {
-                let thread_id = match thread_id {
-                    // The client's pick, so it can open the thread before this reply.
-                    Some(t) => {
-                        anyhow::ensure!(uuid::Uuid::parse_str(&t).is_ok_and(|u| u.to_string() == t), "not a lowercase uuid: {t}");
-                        t
-                    }
-                    None => uuid::Uuid::now_v7().to_string(),
-                };
+                let thread_id = new_thread_id(thread_id)?;
                 let thread = {
                     let storage = self.storage.lock().unwrap();
                     let mut cwd = storage.project_path(&project_id)?.ok_or_else(|| anyhow!("no such project"))?;
@@ -261,7 +256,7 @@ impl Service {
                         *setup = None;
                     }
                     self.push_threads();
-                    if let Err(e) = self.deliver(&thread_id, PromptMode::Prompt, p).await {
+                    if let Err(e) = self.deliver(&thread_id, PromptMode::Prompt, p, None).await {
                         return Err(self.abandon(&thread_id, e));
                     }
                     self.starting.lock().unwrap().remove(&thread_id);
@@ -297,8 +292,27 @@ impl Service {
                 // Its first prompt goes first: a second one now would load its session ahead
                 // of it (in the project, while its workspace is being made).
                 anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
-                self.prompt(&thread_id, mode, &FirstPrompt { text, model, thinking_level, images, title, tools }).await?;
+                self.prompt(&thread_id, mode, &FirstPrompt { text, model, thinking_level, images, title, tools }, None).await?;
                 ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::EditMessage { id, thread_id, entry_id, text, model, thinking_level, images, tools } => {
+                anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
+                // Pi can't move its session back under a run; the runtime refuses it too.
+                anyhow::ensure!(self.runtime.running_since(&thread_id).is_none(), "the thread is running; stop it first");
+                anyhow::ensure!(
+                    self.storage.lock().unwrap().is_user_message(&thread_id, &entry_id)?,
+                    "only a message the user sent can be edited"
+                );
+                let p = FirstPrompt { text, model, thinking_level, images, title: None, tools };
+                self.prompt(&thread_id, PromptMode::Prompt, &p, Some(&entry_id)).await?;
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::ForkThread { id, thread_id, entry_id, fork_id } => {
+                let fork_id = new_thread_id(fork_id)?;
+                let fork = self.storage.lock().unwrap().fork_thread(&thread_id, &entry_id, &fork_id, now())?;
+                info!(thread = %fork_id, source = %thread_id, entry = %entry_id, "thread forked");
+                self.push_threads();
+                ServerMessage::ThreadCreated { reply_to: id, thread: Box::new(fork) }
             }
             ClientMessage::Answer { id, thread_id, ask_id, answers, silent } => {
                 // Taken before anything else so a second client answering the same ask is refused.
@@ -425,8 +439,8 @@ impl Service {
     }
 
     /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
-    /// `Prompt`'s fields.
-    async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
+    /// `Prompt`'s fields; `edit`, the user message it replaces (`EditMessage`).
+    async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
         // A message brings an archived thread back.
         let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
         // The run starts now, not at pi's `agent_start`: loading the session (and a nix
@@ -441,7 +455,7 @@ impl Service {
         if mode == PromptMode::Prompt || unarchived {
             self.push_threads();
         }
-        let sent = self.deliver(thread_id, mode, p).await;
+        let sent = self.deliver(thread_id, mode, p, edit).await;
         if sent.is_err() && self.runtime.settle(thread_id).is_some() {
             self.push_threads();
         }
@@ -450,14 +464,14 @@ impl Service {
 
     /// `prompt` after the run's start: load the session and send the prompt. On an error the
     /// caller settles the run.
-    async fn deliver(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt) -> Result<()> {
+    async fn deliver(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
         let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
         info!(thread = %thread_id, ?mode, model = model.map(tracing::field::display), "prompt");
         if let Some(tools) = &p.tools {
             self.storage.lock().unwrap().set_tools(thread_id, tools)?;
         }
         self.ensure_loaded(thread_id, model, thinking_level).await?;
-        self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref())
+        self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref(), edit)
     }
 
     /// A `CreateThread` with a prompt is still setting the thread up (`starting`).
@@ -761,6 +775,18 @@ impl Service {
                 self.push_threads();
             }
         }
+    }
+}
+
+/// A new thread's id: the client's pick (a lowercase, hyphenated uuid), so it can open the
+/// thread before the reply, else a fresh one.
+fn new_thread_id(pick: Option<String>) -> Result<String> {
+    match pick {
+        Some(t) => {
+            anyhow::ensure!(uuid::Uuid::parse_str(&t).is_ok_and(|u| u.to_string() == t), "not a lowercase uuid: {t}");
+            Ok(t)
+        }
+        None => Ok(uuid::Uuid::now_v7().to_string()),
     }
 }
 

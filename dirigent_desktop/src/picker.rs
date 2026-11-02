@@ -17,12 +17,14 @@ const WIDTH: f32 = 430.;
 /// Height of the scrolling model list (~9 rows).
 const LIST_H: f32 = 240.;
 
-pub fn menu(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> AnyElement {
+/// The popup, opening to `side` of the chip (above it in the composer, under it in an
+/// edit bubble).
+pub fn menu(this: &Dirigent, no_target: bool, side: Side, cx: &mut Context<Dirigent>) -> AnyElement {
     let page = match this.menu {
         Some(Menu::AllModels) => all_models(this, no_target, cx),
         _ => presets(this, cx),
     };
-    menu::popup(Side::Above, vec![div().w(u(WIDTH)).flex().flex_col().children(page).into_any()], cx)
+    menu::popup(side, vec![div().w(u(WIDTH)).flex().flex_col().children(page).into_any()], cx)
 }
 
 /// `{Saved presets | Save preset} … All models ›`, a hairline, then the preset rows.

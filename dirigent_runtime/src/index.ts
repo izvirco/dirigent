@@ -32,6 +32,7 @@ type Inbound =
       images?: Attachment[];
       title?: TitleGen;
       tools?: string[];
+      edit?: string;
     }
   | { type: "answer"; thread_id: string; ask: Ask; answers: string[][] | null }
   | {
@@ -73,6 +74,7 @@ async function handle(msg: Inbound): Promise<void> {
         msg.images,
         msg.title,
         msg.tools,
+        msg.edit,
       );
     case "answer":
       return sessions.answer(msg.thread_id, msg.ask, msg.answers);

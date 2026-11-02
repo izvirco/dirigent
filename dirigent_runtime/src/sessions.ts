@@ -286,7 +286,9 @@ export class Sessions {
    * prompt; sub-agents are named by their spawner) names the thread from `text`
    * alongside the run: pi persists the name as a `session_info` entry, which is how
    * the service and clients learn it. `tools`, when given, is the dirigent tool set
-   * from now on (see `load`).
+   * from now on (see `load`). `edit` is the id of a user message the prompt rewrites
+   * (`EditMessage`): the session first goes back to just before it (`rewind`), and comes
+   * back if the prompt fails before the new branch has an entry.
    */
   async prompt(
     threadId: string,
@@ -297,14 +299,49 @@ export class Sessions {
     attachments: Attachment[] = [],
     title?: TitleGen,
     tools?: string[],
+    edit?: string,
   ): Promise<void> {
     const live = this.live.get(threadId);
     if (!live) throw new Error(`thread not loaded: ${threadId}`);
     await live.nixEnv;
     const { session } = live;
-    if (model && model !== `${session.model?.provider}/${session.model?.id}`) {
-      await session.setModel(await this.resolveModel(model));
+    const switchTo =
+      model && model !== `${session.model?.provider}/${session.model?.id}`
+        ? await this.resolveModel(model)
+        : undefined;
+    const undo = edit ? rewind(session, edit) : undefined;
+    try {
+      await this.deliver(
+        live,
+        threadId,
+        text,
+        mode,
+        switchTo,
+        thinkingLevel,
+        attachments,
+        title,
+        tools,
+      );
+    } catch (e) {
+      undo?.();
+      throw e;
     }
+  }
+
+  /** `prompt` with the model resolved (`switchTo`, if it changes) and an edit's rewind done. */
+  private async deliver(
+    live: Live,
+    threadId: string,
+    text: string,
+    mode: "prompt" | "steer" | "follow_up",
+    switchTo: Model<Api> | undefined,
+    thinkingLevel: string | undefined,
+    attachments: Attachment[],
+    title: TitleGen | undefined,
+    tools: string[] | undefined,
+  ): Promise<void> {
+    const { session } = live;
+    if (switchTo) await session.setModel(switchTo);
     if (thinkingLevel && thinkingLevel !== session.thinkingLevel) {
       session.setThinkingLevel(thinkingLevel as ThinkingLevel);
     }
@@ -457,6 +494,35 @@ function cleanTitle(raw: string): string | null {
   if (!title || words > TITLE_MAX_WORDS || /^I[\s'’]/.test(title) || title.endsWith(":"))
     return null;
   return title;
+}
+
+/**
+ * Take the session back to just before the user message `edit`, for a prompt that rewrites
+ * it (`EditMessage`): pi's leaf, the entry the next one is appended to, moves to the
+ * message's parent, and the model's context becomes that branch. Nothing is persisted: the
+ * prompt is the new branch's first entry and, as the last entry, the leaf on every reload;
+ * the old branch stays in the history. Returns how to put the session back, for a prompt
+ * refused before the new branch has an entry (pi checks the model's credentials before it
+ * appends anything). Not pi's `navigateTree`, which does nothing when the message is the
+ * leaf itself (its run died before a reply).
+ */
+function rewind(session: AgentSession, edit: string): () => void {
+  if (session.isStreaming || session.isCompacting)
+    throw new Error("the thread is running; stop it first");
+  const sm = session.sessionManager;
+  const entry = sm.getEntry(edit);
+  if (entry?.type !== "message" || entry.message.role !== "user")
+    throw new Error(`not a user message: ${edit}`);
+  const [leaf, count] = [sm.getLeafId(), sm.getEntryCount()];
+  const moveTo = (id: string | null) => {
+    if (id) sm.branch(id);
+    else sm.resetLeaf();
+    session.refreshContext();
+  };
+  moveTo(entry.parentId);
+  return () => {
+    if (sm.getEntryCount() === count) moveTo(leaf);
+  };
 }
 
 /** Activate the dirigent tools in `tools` (and no other dirigent tool), leaving pi's own tools as they are. */

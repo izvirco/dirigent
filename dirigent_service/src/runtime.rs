@@ -101,6 +101,10 @@ enum Command_<'a> {
         images: &'a [ImageAttachment],
         title: Option<&'a TitleGen>,
         tools: Option<&'a [String]>,
+        /// The user message the prompt replaces (`EditMessage`): the session goes back to
+        /// just before it first.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        edit: Option<&'a str>,
     },
     /// The user's answers to `ask` (`None` = dismissed); the runtime hands them to the model.
     Answer {
@@ -425,9 +429,10 @@ impl Runtime {
         images: &[ImageAttachment],
         title: Option<&TitleGen>,
         tools: Option<&[String]>,
+        edit: Option<&str>,
     ) -> Result<()> {
         self.inner.lock().unwrap().last_activity.insert(thread_id.to_owned(), Instant::now());
-        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images, title, tools })
+        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images, title, tools, edit })
     }
 
     pub fn answer(&self, thread_id: &str, ask: &Ask, answers: Option<&[Vec<String>]>) -> Result<()> {

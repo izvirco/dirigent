@@ -293,6 +293,7 @@ mod tests {
             prompted_at: Some(prompted_at),
             jobs: 0,
             spend: Default::default(),
+            forked_from: None,
             setup: None,
         }
     }

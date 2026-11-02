@@ -59,7 +59,19 @@ interface ModelInfo {
   id: string;
 }
 
-type Entry = { seq: number; kind: string; json: any };
+type Entry = { seq: number; id: string; parent_id?: string | null; kind: string; json: any };
+
+/** The entries of a thread's current branch (`dirigent_protocol::branch`): the last one and
+ *  its ancestors, oldest first. An edited thread's old messages are on other branches. */
+function currentBranch(entries: Entry[]): Entry[] {
+  const byId = new Map(entries.map((e) => [e.id, e]));
+  const branch: Entry[] = [];
+  for (let e = entries.at(-1); e && branch.length < entries.length;) {
+    branch.push(e);
+    e = e.parent_id ? byId.get(e.parent_id) : undefined;
+  }
+  return branch.reverse();
+}
 type Reply = { type: string; reply_to?: number | null; [k: string]: any };
 
 /** The host's own service, as its agents (and its desktop) call it. */
@@ -446,7 +458,7 @@ export class Dirigent {
       type: "get_thread",
       thread_id: f.thread.id,
     });
-    const turns = r.entries
+    const turns = currentBranch(r.entries)
       .filter((e) => e.kind === "message")
       .map((e) => e.json.message)
       .filter(
