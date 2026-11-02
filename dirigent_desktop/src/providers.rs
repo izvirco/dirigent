@@ -430,12 +430,15 @@ fn provider_row(p: &ProviderInfo, signing_out: bool, cx: &mut Context<Dirigent>)
         .child(div().flex().flex_row().gap_1p5().flex_shrink_0().children(actions))
 }
 
+/// `action`'s height, in design px.
+const ACTION_H: f32 = 24.;
+
 /// A small outlined text button; `tip` explains it on hover.
 fn action(id: String, label: &'static str, tip: Option<String>) -> Stateful<Div> {
     let t = theme::t();
     div()
         .id(SharedString::from(id))
-        .h(u(24.))
+        .h(u(ACTION_H))
         .px_2()
         .flex()
         .items_center()
@@ -565,12 +568,13 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
                     }))
                     .into_any()
             } else {
+                // The field slimmed to Continue's height, to sit level with it.
                 div()
                     .flex()
                     .flex_row()
                     .gap_2()
                     .items_center()
-                    .child(field(this.providers.answer.clone()).flex_1())
+                    .child(field(this.providers.answer.clone()).flex_1().h(u(ACTION_H)).py_0().flex().items_center())
                     .child(
                         action("auth-answer".into(), "Continue", None).on_click(cx.listener(|this, _, _, cx| this.answer_login(None, cx))),
                     )
