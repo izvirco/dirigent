@@ -1,3 +1,9 @@
+## 0.0.4 (draft)
+
+- `dirigent pi …` runs the bundled pi's command line (install extensions, configure); pi's settings and sign-in move to `<config dir>/agent`, copied from `~/.pi/agent` the first time ([#105])
+
+[#105]: https://forge.sebba.dev/izvir/dirigent/changes/105
+
 ## 0.0.3
 
 Edit and fork threads, a macOS build, and better handling of images.

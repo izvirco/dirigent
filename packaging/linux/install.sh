@@ -3,8 +3,9 @@
 # (dirigent-<version>-<linux-x86_64|macos-aarch64>.tar.gz, built by
 # .github/workflows/release.yml):
 #
-#   ~/.local/lib/dirigent/                        the tarball's dirigent/: the binary, runtime/, this script
-#   ~/.local/bin/dirigent                         a link to the binary
+#   ~/.local/lib/dirigent/                        the tarball's dirigent/: the two binaries, runtime/, this script
+#   ~/.local/bin/dirigent                         a link to the command line (`dirigent [dir]` starts the
+#                                                 desktop, `dirigent pi …` the bundled pi)
 #   ~/.local/share/applications/dirigent.desktop  the app menu entry, also offered for folders (not on macOS)
 #
 # On macOS that's all there is: no .app, it starts from a terminal. Nothing it installs is
@@ -60,7 +61,7 @@ if [ -z "$mac" ]; then
 [Desktop Entry]
 Type=Application
 Name=Dirigent
-Exec="$dest/dirigent" %f
+Exec="$dest/dirigent_desktop" %f
 Icon=$dest/dirigent.png
 Terminal=false
 Categories=Development;
@@ -79,6 +80,6 @@ if [ -z "$update" ]; then
   fi
   case ":$PATH:" in
     *":$prefix/bin:"*) ;;
-    *) echo "($prefix/bin isn't on your PATH: add it to start Dirigent as \`dirigent\`.)" ;;
+    *) echo "($prefix/bin isn't on your PATH: add it to start Dirigent as \`dirigent\`, and pi as \`dirigent pi\`.)" ;;
   esac
 fi

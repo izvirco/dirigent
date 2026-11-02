@@ -1,9 +1,10 @@
 //! dirigent_service: owns this host's threads (sqlite), drives the pi runtime,
 //! and serves them to desktops over WebSocket.
 //!
-//! A library so the desktop can run the local service in-process (`run`); the
-//! `dirigent_service` binary is a thin wrapper for remote hosts.
+//! A library so the desktop can run the local service in-process (`run`); the `dirigent`
+//! binary (`main.rs`) is the command line: `dirigent service` runs it on remote hosts.
 
+mod agent;
 mod blobs;
 mod dirs;
 mod git;
@@ -29,6 +30,7 @@ use storage::Storage;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
+pub use agent::dir as agent_dir;
 pub use logging::init_logging;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
@@ -814,7 +816,8 @@ pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; d
                          default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows)";
 
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
-/// options, and return the operands (the desktop takes a folder to open; the service none).
+/// options, and return the operands (the desktop takes a folder to open; `dirigent` its
+/// command).
 /// Call it first thing in `main`, before anything asks for a directory. A test instance
 /// points both elsewhere so it never touches the real dbs or config (and, unlike overriding
 /// `XDG_*`, nothing it spawns sees a changed environment).
@@ -836,9 +839,11 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)>
     let mut operands = vec![];
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
+        // Options end at the first operand: what follows a command (`pi --help`) is its own.
         if !arg.starts_with("--") {
             operands.push(arg);
-            continue;
+            operands.extend(args);
+            break;
         }
         let (flag, value) = match arg.split_once('=') {
             Some((f, v)) => (f.to_owned(), Some(v.to_owned())),
@@ -872,8 +877,9 @@ pub fn data_dir() -> PathBuf {
 /// How to start the runtime: `bun run $DIRIGENT_RUNTIME` if set; the compiled runtime an
 /// install ships next to the binary (`runtime/dirigent_runtime`, built by
 /// `dirigent_runtime/build.ts`); else, in a dev checkout, `bun run` its source
-/// (`../../dirigent_runtime/src/index.ts` from the binary).
-fn runtime_cmd() -> Result<Vec<String>> {
+/// (`../../dirigent_runtime/src/index.ts` from the binary). With `runtime_env` in its
+/// environment; the service adds `DIRIGENT_URL`, `dirigent pi` the `pi` argument.
+pub fn runtime_cmd() -> Result<Vec<String>> {
     // Links resolved: on macOS `current_exe` is the path it was started by, for an install
     // the `~/.local/bin/dirigent` link (Linux resolves it already). Not on Windows, where a
     // canonical path is a `\\?\` one.
@@ -889,6 +895,12 @@ fn runtime_cmd() -> Result<Vec<String>> {
         }
     };
     Ok(vec!["bun".into(), "run".into(), path.to_string_lossy().into_owned()])
+}
+
+/// What the runtime (and the pi CLI it embeds) read from its environment: this instance's
+/// data dir and pi's agent dir (`agent::dir`, seeded on first use).
+pub fn runtime_env() -> [(&'static str, PathBuf); 2] {
+    [("DIRIGENT_DATA_DIR", data_dir()), ("PI_CODING_AGENT_DIR", agent_dir())]
 }
 
 /// Where the service listens: `DIRIGENT_BIND` (comma-separated IPs) if set, else loopback
@@ -983,8 +995,10 @@ mod tests {
         assert_eq!(d.config, Some(cwd.join("rel/c")));
         assert!(parse(&["--data-dir"]).is_err());
         assert!(parse(&["--port", "1"]).is_err());
-        // The desktop's folder to open.
+        // The desktop's folder to open; a command's own options are left to it.
         let (_, operands) = parse_dirs(["--data-dir=d", "/some/dir"].map(String::from).into_iter()).unwrap();
         assert_eq!(operands, ["/some/dir"]);
+        let (_, operands) = parse_dirs(["pi", "--version", "--data-dir"].map(String::from).into_iter()).unwrap();
+        assert_eq!(operands, ["pi", "--version", "--data-dir"]);
     }
 }

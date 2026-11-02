@@ -10,8 +10,9 @@
 ;
 ; Built by the release workflow (.github/workflows/release.yml):
 ;   iscc /DVersion=0.1.0 /DDist=<dir> packaging\windows\dirigent.iss
-; <dir> holds Dirigent.exe, runtime\ (dirigent_runtime/build.ts) and licenses\; the
-; installer is written there as Dirigent-Setup-<version>.exe.
+; <dir> holds dirigent_desktop.exe (the app), dirigent.exe (the command line: `dirigent pi`,
+; `dirigent [dir]`; not put on PATH), runtime\ (dirigent_runtime/build.ts) and licenses\;
+; the installer is written there as Dirigent-Setup-<version>.exe.
 
 #ifndef Version
   #define Version "0.0.0"
@@ -36,7 +37,7 @@ DisableReadyPage=yes
 OutputDir={#Dist}
 OutputBaseFilename=Dirigent-Setup-{#Version}
 SetupIconFile=..\..\dirigent_desktop\assets\dirigent.ico
-UninstallDisplayIcon={app}\Dirigent.exe
+UninstallDisplayIcon={app}\dirigent_desktop.exe
 UninstallDisplayName=Dirigent
 WizardStyle=modern
 Compression=lzma2/max
@@ -54,34 +55,37 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 [InstallDelete]
 ; The runtime's files are replaced wholesale: nothing of an older pi lingers.
 Type: filesandordirs; Name: "{app}\runtime"
+; The app's name in the first releases; dirigent.exe is the command line now (the same name on NTFS).
+Type: files; Name: "{app}\Dirigent.exe"
 
 [Files]
-Source: "{#Dist}\Dirigent.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Dist}\dirigent_desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Dirigent"; Filename: "{app}\Dirigent.exe"
-Name: "{autodesktop}\Dirigent"; Filename: "{app}\Dirigent.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Dirigent"; Filename: "{app}\dirigent_desktop.exe"
+Name: "{autodesktop}\Dirigent"; Filename: "{app}\dirigent_desktop.exe"; Tasks: desktopicon
 
 [Registry]
 ; "Open in Dirigent" on a folder, on a folder's background (inside it) and on a drive. The
 ; app takes the folder as its argument and hands it to the running instance if there is one.
 ; Windows 11 lists these under "Show more options".
 Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent"; ValueType: string; ValueName: ""; ValueData: "Open in Dirigent"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\Dirigent.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Dirigent.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent"; ValueType: string; ValueName: ""; ValueData: "Open in Dirigent"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\Dirigent.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Dirigent.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent"; ValueType: string; ValueName: ""; ValueData: "Open in Dirigent"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\Dirigent.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Dirigent.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 
 [Run]
 ; A first install offers to start it; an update starts it again.
-Filename: "{app}\Dirigent.exe"; Description: "Start Dirigent"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\Dirigent.exe"; Flags: nowait; Check: IsUpdate
+Filename: "{app}\dirigent_desktop.exe"; Description: "Start Dirigent"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\dirigent_desktop.exe"; Flags: nowait; Check: IsUpdate
 
 [UninstallDelete]
 ; Downloaded updates. Threads, settings and logs (%LOCALAPPDATA%\dirigent, %APPDATA%\dirigent) stay.
