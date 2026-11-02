@@ -205,7 +205,9 @@ impl OpenThread {
             Some("assistant") => self.streaming.steps.clear(),
             // A user message into an open work is a steer; `queue_update` already
             // dropped its echo (see `Timeline::push_message`, `Streaming::apply`).
-            Some("user") if self.timeline.open_work().is_none() => self.streaming.confirm_prompt(),
+            Some("user") if self.timeline.open_work().is_none() => {
+                self.streaming.confirm_prompt(&view::text_of(entry.json.pointer("/message/content")))
+            }
             _ => {}
         }
         if entry.json.get("customType").and_then(serde_json::Value::as_str) == Some("dirigent:answer") {
@@ -1115,7 +1117,16 @@ impl Dirigent {
                 if status == HostStatus::Disconnected {
                     self.blob_requests.remove(&host);
                     self.forks.retain(|_, (h, _)| *h != host);
+                    // Runs don't outlive the host (`runtime.rs` keeps them in memory): a
+                    // message sent meanwhile is a prompt, not a steer into a run that is gone.
+                    // The thread list keeps the old entries until the reconnect's refresh.
+                    if let Some(h) = self.host_mut(&host) {
+                        for t in &mut h.threads {
+                            t.running_since = None;
+                        }
+                    }
                     if self.open().is_some_and(|t| t.host == host) {
+                        self.settle_open();
                         self.unrewind(cx);
                     }
                 }
@@ -1249,18 +1260,11 @@ impl Dirigent {
                         let died = was_running && !self.is_running();
                         if let Pane::Thread(t) = &mut self.pane {
                             t.pins = pins;
-                            if died {
-                                t.streaming.settle();
-                                let tail = t.timeline.items.len();
-                                t.list.remeasure_items(tail..tail + 1);
-                                if t.log.is_some() {
-                                    t.log_list.remeasure();
-                                }
-                            }
                         }
-                        // An edit's run ended before its branch started: it failed in the
-                        // runtime (which says why in its own error).
                         if died {
+                            self.settle_open();
+                            // An edit's run ended before its branch started: it failed in the
+                            // runtime (which says why in its own error).
                             self.unrewind(cx);
                         }
                         self.mark_seen(&host, &id);
@@ -3452,6 +3456,18 @@ impl Dirigent {
             };
             self.clear_composer(window, cx);
             self.prompt(&host, &thread_id, text, &images, mode, cx);
+        }
+    }
+
+    /// The open thread's run ended without pi settling it (the runtime died under it, or
+    /// its host went away): nothing streams, runs or is queued any more.
+    fn settle_open(&mut self) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.streaming.settle();
+        let tail = t.timeline.items.len();
+        t.list.remeasure_items(tail..tail + 1);
+        if t.log.is_some() {
+            t.log_list.remeasure();
         }
     }
 

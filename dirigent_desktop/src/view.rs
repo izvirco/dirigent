@@ -820,9 +820,17 @@ impl Streaming {
         }
     }
 
-    /// A persisted user message started a run: drop the oldest prompt echo.
-    pub fn confirm_prompt(&mut self) {
-        if let Some(i) = self.echo.iter().position(|(_, m)| *m == PromptMode::Prompt) {
+    /// A persisted user message started a run: drop the oldest prompt echo. Without one,
+    /// the message was sent as a steer or follow-up to a model that turned out idle, and
+    /// its host prompted it instead (`sessions.ts` `deliver`): that echo goes, found by its
+    /// text (the host's has the image links the echo lacks, `split_image_refs`).
+    pub fn confirm_prompt(&mut self, text: &str) {
+        let i = self
+            .echo
+            .iter()
+            .position(|(_, m)| *m == PromptMode::Prompt)
+            .or_else(|| self.echo.iter().position(|(t, _)| split_image_refs(text).0 == t));
+        if let Some(i) = i {
             self.echo.remove(i);
         }
     }
@@ -1024,8 +1032,11 @@ mod tests {
         assert!(s.apply(&json!({"type":"queue_update","steering":["s2"],"followUp":["f"]}), 0));
         assert_eq!(s.echo, vec![("p".into(), PromptMode::Prompt), ("s2".into(), PromptMode::Steer), ("f".into(), PromptMode::FollowUp)]);
         assert_eq!(s.queued_steers().collect::<Vec<_>>(), vec!["s2"]);
-        s.confirm_prompt();
+        s.confirm_prompt("p");
         assert_eq!(s.echo.len(), 2);
+        // A steer the host prompted instead (the model was idle) is claimed by its text.
+        s.confirm_prompt("s2\n\n[image-1]: /a.png");
+        assert_eq!(s.echo, vec![("f".into(), PromptMode::FollowUp)]);
         // A prompt pi queued as a follow-up is no longer a prompt.
         s.echo.push(("late".into(), PromptMode::Prompt));
         s.apply(&json!({"type":"queue_update","steering":[],"followUp":["late"]}), 0);
