@@ -2,9 +2,12 @@
 
 - `dirigent pi …` runs the bundled pi's command line (install extensions, configure); pi's settings and sign-in move to `<config dir>/agent`, copied from `~/.pi/agent` the first time ([#105])
 - A message to a thread that just finished no longer strands in the queue and shows twice ([#106])
+- Drag projects on the Projects page to reorder them; the sidebar and the new-thread project menu follow that order ([#107])
+- The new-thread project menu has a search ([#107])
 
 [#105]: https://forge.sebba.dev/izvir/dirigent/changes/105
 [#106]: https://forge.sebba.dev/izvir/dirigent/changes/106
+[#107]: https://forge.sebba.dev/izvir/dirigent/changes/107
 
 ## 0.0.3
 
