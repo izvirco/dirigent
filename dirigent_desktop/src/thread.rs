@@ -1278,14 +1278,14 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
-            col = col.child(work_block(&work, key, true, setup, t, bubble, now, &fonts, keys, cx));
+            col = col.child(work_block(&work, key, true, setup, t, bubble, blobs, now, &fonts, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
             }
             // Pending steers last: the newest user input, closest to the composer.
-            for (_, text, _) in work.steers().filter(|(_, _, queued)| *queued) {
-                col = col.child(steer_bubble(text, true, t, bubble, &fonts, keys, cx));
+            for (six, text, images, _) in work.steers().filter(|(.., queued)| *queued) {
+                col = col.child(steer_bubble(text, images, (key, six), true, t, bubble, blobs, &fonts, keys, cx));
             }
         }
         for text in echo(PromptMode::FollowUp) {
@@ -1331,8 +1331,8 @@ fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
         }
     };
     // Steers pi still holds (typed, or answers on their way) show as queued steps of the run.
-    work.steps.extend(t.streaming.queued_steers().map(|text| Step::Steer { text: text.to_owned(), queued: true }));
-    work.steps.extend(t.streaming.answers.iter().map(|(_, text)| Step::Steer { text: text.clone(), queued: true }));
+    work.steps.extend(t.streaming.queued_steers().map(|text| Step::Steer { text: text.to_owned(), images: vec![], queued: true }));
+    work.steps.extend(t.streaming.answers.iter().map(|(_, text)| Step::Steer { text: text.clone(), images: vec![], queued: true }));
     work.steps.extend(t.streaming.steps.iter().filter_map(|s| match s {
         Step::Text(x) => x.contains('\n').then(|| Step::Text(markdown::committed(x).to_owned())),
         Step::Thinking(x) => x.contains('\n').then(|| Step::Thinking(markdown::committed(x).to_owned())),
@@ -1355,7 +1355,7 @@ fn render_timeline_item(
 ) -> AnyElement {
     match item {
         Item::User { text, images, .. } => user_bubble(text, images, blobs, ix, t, bubble, fonts, keys, cx).into_any(),
-        Item::Work(w) => work_block(w, ix, false, None, t, bubble, now, fonts, keys, cx).into_any(),
+        Item::Work(w) => work_block(w, ix, false, None, t, bubble, blobs, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
         // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
@@ -1473,13 +1473,34 @@ fn image_links(text: &str, refs: &[u32], images: &[String]) -> Vec<(String, Shar
     ns.into_iter().zip(images).map(|(n, id)| (crate::input::image_token(n), format!("dirigent://image/{id}").into())).collect()
 }
 
+/// A message's attached images as thumbnails (a blank box while the bytes are on their
+/// way); click one to see it. `id` names the i-th: thumbnail ids must be unique across the
+/// thread, since gpui shares click state between same-id elements and drops clicks on the
+/// others. `None` without images.
+fn thumbs(images: &[String], blobs: &HashMap<String, Blob>, id: impl Fn(usize) -> ElementId, cx: &mut Context<Dirigent>) -> Option<Div> {
+    (!images.is_empty()).then(|| {
+        div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, blob_id)| {
+            let blob = blobs.get(blob_id);
+            let box_ = thumb_box(blob).id(id(i));
+            match blob {
+                Some(blob) => box_
+                    .cursor_pointer()
+                    .on_click(cx.listener({
+                        let image = blob.image.clone();
+                        move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
+                    }))
+                    .child(thumb(blob)),
+                None => box_.bg(rgba(theme::t().accent)),
+            }
+        }))
+    })
+}
+
 /// The bubble bleeds past the column by its own padding, so its text lines up with
 /// replies and work lines instead of being inset. Attached images go under the text as
-/// thumbnails (a blank box while the bytes are on their way); click one, or its
-/// `[image-N]` in the text, to see it. The text's image file links are the model's: they
-/// don't show, nor go with a copy.
-/// `ix` is the bubble's timeline index: thumbnail ids must be unique across the thread,
-/// since gpui shares click state between same-id elements and drops clicks on the others.
+/// `thumbs`; click one, or its `[image-N]` in the text, to see it. The text's image file
+/// links are the model's: they don't show, nor go with a copy.
+/// `ix` is the bubble's timeline index, for the thumbnails' ids.
 #[allow(clippy::too_many_arguments)]
 fn user_bubble(
     text: &str,
@@ -1493,22 +1514,7 @@ fn user_bubble(
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let (body, refs) = split_image_refs(text);
-    let thumbs = (!images.is_empty()).then(|| {
-        div().flex().flex_row().flex_wrap().gap_3().pt_3().children(images.iter().enumerate().map(|(i, id)| {
-            let blob = blobs.get(id);
-            let box_ = thumb_box(blob).id(ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64));
-            match blob {
-                Some(blob) => box_
-                    .cursor_pointer()
-                    .on_click(cx.listener({
-                        let image = blob.image.clone();
-                        move |this, _, _, cx| this.set_preview(Some(image.clone()), cx)
-                    }))
-                    .child(thumb(blob)),
-                None => box_.bg(rgba(theme::t().accent)),
-            }
-        }))
-    });
+    let thumbs = thumbs(images, blobs, |i| ElementId::NamedInteger("bubble-img".into(), (ix as u64) << 8 | i as u64), cx);
     div()
         .group("msg")
         .relative()
@@ -1542,13 +1548,17 @@ fn work_block(
     setup: Option<Setup>,
     t: &OpenThread,
     bubble: u32,
+    blobs: &HashMap<String, Blob>,
     now: i64,
     fonts: &Fonts,
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
-    let taken: Vec<_> =
-        w.steers().filter(|(_, _, queued)| !queued).map(|(_, text, _)| steer_bubble(text, false, t, bubble, fonts, keys, cx)).collect();
+    let taken: Vec<_> = w
+        .steers()
+        .filter(|(.., queued)| !queued)
+        .map(|(six, text, images, _)| steer_bubble(text, images, (key, six), false, t, bubble, blobs, fonts, keys, cx))
+        .collect();
     let children: Vec<_> = w
         .steps
         .iter()
@@ -1563,8 +1573,22 @@ fn work_block(
 
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
 /// typed steer pi still holds) at the right until the model has it. Answers to an ask are
-/// steers too, but can't be cancelled: the host already has them.
-fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &Fonts, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
+/// steers too, but can't be cancelled: the host already has them. Its images go under the
+/// text as in `user_bubble`; `key` is its (work, step) index, for the thumbnails' ids.
+#[allow(clippy::too_many_arguments)]
+fn steer_bubble(
+    text: &str,
+    images: &[String],
+    key: (usize, usize),
+    pending: bool,
+    t: &OpenThread,
+    bubble: u32,
+    blobs: &HashMap<String, Blob>,
+    fonts: &Fonts,
+    keys: &mut Keys,
+    cx: &mut Context<Dirigent>,
+) -> Div {
+    let (body, refs) = split_image_refs(text);
     let cancelable = pending && t.streaming.queued_steers().any(|s| s == text);
     let cancel = cancelable.then(|| {
         let text = text.to_owned();
@@ -1607,12 +1631,14 @@ fn steer_bubble(text: &str, pending: bool, t: &OpenThread, bubble: u32, fonts: &
         .text_size(text::lg())
         .line_height(u(22.))
         .child(label)
-        .child(markdown::render(split_image_refs(text).0, &fonts.mono, keys, None, &[]))
+        .child(markdown::render(body, &fonts.mono, keys, None, &image_links(body, &refs, images)))
+        .children(thumbs(images, blobs, |i| ElementId::NamedInteger("steer-img".into(), step_id_n(key) << 8 | i as u64), cx))
 }
 
 /// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
 /// tool's time sits) until pi hands it to the model, with `cancel` revealed on hover just
-/// before it (typed steers only; see `steer_bubble`).
+/// before it (typed steers only; see `steer_bubble`). Text only: its images show in the
+/// transcript's bubble.
 fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
     let cancel = (queued && t.streaming.queued_steers().any(|s| s == text)).then(|| {
         let text = text.to_owned();
@@ -1745,7 +1771,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
             div().py_0p5().text_color(rgba(theme::t().fg)).child(body).into_any()
         }
         Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),
-        Step::Steer { text, queued } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
+        Step::Steer { text, queued, .. } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
         Step::Child { thread_id, text } => child_line(format!("log-child/{key}/{six}"), &t.host, thread_id, text, cx),
         Step::CacheMiss(text) => div()
             .h(u(ROW_H))

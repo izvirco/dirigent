@@ -51,9 +51,11 @@ pub enum Step {
     Tool(ToolCall),
     /// A message the user steered the run with mid-turn. Stays visible under the work line.
     /// `queued` until pi hands it to the model (it drains steers one per turn, after the
-    /// turn's tool calls; nothing is persisted or emitted before that).
+    /// turn's tool calls; nothing is persisted or emitted before that). `images`: blob ids of
+    /// its attachments, like `Item::User`'s (none while queued: echoes are text only).
     Steer {
         text: String,
+        images: Vec<String>,
         queued: bool,
     },
     /// Something that reached the model mid-run on its own: an `async_bash` job ending.
@@ -112,10 +114,10 @@ impl Work {
             .find_map(|s| if let Step::Text(t) = s { Some(t.as_str()) } else { None })
     }
 
-    /// `(step index, text, queued)` of every steer, in order.
-    pub fn steers(&self) -> impl Iterator<Item = (usize, &str, bool)> {
+    /// `(step index, text, images, queued)` of every steer, in order.
+    pub fn steers(&self) -> impl Iterator<Item = (usize, &str, &[String], bool)> {
         self.steps.iter().enumerate().filter_map(|(i, s)| match s {
-            Step::Steer { text, queued } => Some((i, text.as_str(), *queued)),
+            Step::Steer { text, images, queued } => Some((i, text.as_str(), images.as_slice(), *queued)),
             _ => None,
         })
     }
@@ -369,7 +371,7 @@ impl Timeline {
                 let text = answer_text(details).unwrap_or_else(|| text_of(entry.get("content")));
                 Some(match self.open_work() {
                     Some(ix) => {
-                        self.work_mut(ix).steps.push(Step::Steer { text, queued: false });
+                        self.work_mut(ix).steps.push(Step::Steer { text, images: vec![], queued: false });
                         ix
                     }
                     None => self.add(Item::User { text, images: vec![], at }),
@@ -412,13 +414,16 @@ impl Timeline {
         match role {
             // A user message while a work is open can only be a steer: a fresh prompt waits
             // for the final assistant message, which closes the work.
-            "user" => Some(match self.open_work() {
-                Some(ix) => {
-                    self.work_mut(ix).steps.push(Step::Steer { text: text_of(msg.get("content")), queued: false });
-                    ix
-                }
-                None => self.add(Item::User { text: text_of(msg.get("content")), images: images_of(msg.get("content")), at }),
-            }),
+            "user" => {
+                let (text, images) = (text_of(msg.get("content")), images_of(msg.get("content")));
+                Some(match self.open_work() {
+                    Some(ix) => {
+                        self.work_mut(ix).steps.push(Step::Steer { text, images, queued: false });
+                        ix
+                    }
+                    None => self.add(Item::User { text, images, at }),
+                })
+            }
             "assistant" => self.push_assistant(msg, at, miss),
             "toolResult" => {
                 let id = msg.get("toolCallId").and_then(Value::as_str).unwrap_or("");
@@ -730,8 +735,8 @@ pub fn blob_links(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Every blob the timeline shows: user attachments, images the model read, images its
-/// replies and interim prose link to.
+/// Every blob the timeline shows: user attachments (steers' too), images the model read,
+/// images its replies and interim prose link to.
 pub fn blobs_shown(items: &[Item]) -> Vec<String> {
     let mut out = vec![];
     for item in items {
@@ -743,6 +748,7 @@ pub fn blobs_shown(items: &[Item]) -> Vec<String> {
                     match step {
                         Step::Text(text) => out.extend(blob_links(text).map(str::to_owned)),
                         Step::Tool(t) => out.extend(t.result.iter().flat_map(|r| r.images.iter().cloned())),
+                        Step::Steer { images, .. } => out.extend(images.iter().cloned()),
                         _ => {}
                     }
                 }
@@ -980,7 +986,8 @@ mod tests {
             json!({"type":"message","message":{"role":"user","content":"hi","timestamp":1}}),
             assistant(2, "toolUse", json!([{"type":"text","text":"before"},{"type":"toolCall","id":"c1","name":"bash","arguments":{}}])),
             json!({"type":"message","message":{"role":"toolResult","toolCallId":"c1","timestamp":3,"content":""}}),
-            json!({"type":"message","message":{"role":"user","content":"no, other way","timestamp":4}}),
+            json!({"type":"message","message":{"role":"user","timestamp":4,"content":[
+                {"type":"text","text":"no, other way"},{"type":"image","mimeType":"image/png","blob":"abc"}]}}),
             assistant(5, "toolUse", json!([{"type":"text","text":"after"},{"type":"toolCall","id":"c2","name":"bash","arguments":{}}])),
             json!({"type":"message","message":{"role":"toolResult","toolCallId":"c2","timestamp":6,"content":""}}),
             assistant(7, "stop", json!([{"type":"text","text":"done"}])),
@@ -991,14 +998,15 @@ mod tests {
         // One work for the whole run; the steer changed item 1, not a new one.
         assert_eq!(changed[3], Some(1));
         let Item::Work(w) = &t.items[1] else { panic!() };
-        assert_eq!(w.steers().collect::<Vec<_>>(), vec![(2, "no, other way", false)]);
+        assert_eq!(w.steers().collect::<Vec<_>>(), vec![(2, "no, other way", &["abc".to_owned()][..], false)]);
+        assert_eq!(blobs_shown(&t.items), ["abc"]);
         assert_eq!(w.tool_count(), 2);
         assert_eq!(t.items[2], Item::Assistant("done".into()));
         assert_eq!(t.items[3], Item::User { text: "next prompt".into(), images: vec![], at: 8 });
         // Prose from before the steer is stale until the model writes again.
         let mut w = w.clone();
         assert_eq!(w.latest_text(), Some("after"));
-        w.steps.push(Step::Steer { text: "again".into(), queued: true });
+        w.steps.push(Step::Steer { text: "again".into(), images: vec![], queued: true });
         assert_eq!(w.latest_text(), None);
     }
 
