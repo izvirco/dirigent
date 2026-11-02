@@ -3,7 +3,7 @@
 // warning). EOF on stdin = shutdown.
 
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import { Sessions, type TitleGen } from "./sessions";
+import { type Attachment, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
 
 // pi loads its OAuth flows (Anthropic, Codex, Copilot sign-ins) through a variable import
@@ -29,7 +29,7 @@ type Inbound =
       mode: "prompt" | "steer" | "follow_up";
       model?: string;
       thinking_level?: string;
-      images?: { mime_type: string; data: string }[];
+      images?: Attachment[];
       title?: TitleGen;
       tools?: string[];
     }

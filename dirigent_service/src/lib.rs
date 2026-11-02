@@ -835,7 +835,8 @@ pub fn config_dir() -> PathBuf {
 }
 
 /// `--data-dir`, else the platform's (`platform::data_dir`): the service's and the
-/// desktop's dbs, workspaces, job logs and logs. The runtime gets it as `DIRIGENT_DATA_DIR`.
+/// desktop's dbs, workspaces, job logs, attached images (`attachments/`) and logs. The
+/// runtime gets it as `DIRIGENT_DATA_DIR`.
 pub fn data_dir() -> PathBuf {
     DIRS.get().and_then(|d| d.data.clone()).unwrap_or_else(platform::data_dir)
 }

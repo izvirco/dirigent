@@ -757,7 +757,7 @@ function duration(ms: number): string {
 }
 
 /** The service's data dir (`DIRIGENT_DATA_DIR`, which it sets for us); run by hand, the default. */
-function dataDir(): string {
+export function dataDir(): string {
   if (process.env.DIRIGENT_DATA_DIR) return process.env.DIRIGENT_DATA_DIR;
   const base = WINDOWS
     ? process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local")
