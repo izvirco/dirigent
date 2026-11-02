@@ -1335,6 +1335,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dirigent_cli"
+version = "0.0.3"
+dependencies = [
+ "anyhow",
+ "dirigent_service",
+]
+
+[[package]]
 name = "dirigent_desktop"
 version = "0.0.3"
 dependencies = [

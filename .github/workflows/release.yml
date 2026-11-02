@@ -60,7 +60,7 @@ jobs:
       - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop -p dirigent_service
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
       - name: Build the runtime
         working-directory: dirigent_runtime
@@ -140,7 +140,7 @@ jobs:
       - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop -p dirigent_service
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
       - name: Build the runtime
         working-directory: dirigent_runtime
@@ -212,7 +212,7 @@ jobs:
       - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop -p dirigent_service
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
       - name: Build the runtime
         working-directory: dirigent_runtime

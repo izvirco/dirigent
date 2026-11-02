@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["dirigent_api", "dirigent_desktop", "dirigent_protocol", "dirigent_service"]
+members = [
+  "dirigent_api",
+  "dirigent_cli",
+  "dirigent_desktop",
+  "dirigent_protocol",
+  "dirigent_service",
+]
 
 [workspace.package]
 version = "0.0.3"

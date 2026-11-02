@@ -37,9 +37,9 @@
       # here, rather than downloaded, so builds work offline (and in the nix sandbox).
       lilexDir = "${pkgs.lilex}/share/fonts/truetype";
 
-      # Packages: `nix build .#dirigent_desktop` (the default; with the `dirigent` command
-      # line), `.#dirigent_service` (the `dirigent` command line alone: `dirigent service` on
-      # a remote host), `.#dirigent_api`. They never self-update (no `DIRIGENT_BUILD_UPDATE_URL`).
+      # Packages: `nix build .#dirigent_desktop` (the default), `.#dirigent_service` (for a
+      # remote host), `.#dirigent_api`; the first two come with the `dirigent` command line.
+      # They never self-update (no `DIRIGENT_BUILD_UPDATE_URL`).
       #
       # Two hashes to bump: `cargoDeps` when Cargo.lock changes, `nodeModules` when bun.lock
       # does. Set it to `lib.fakeHash` and build: nix prints the right one.
@@ -62,16 +62,17 @@
           ./Cargo.lock
           ./changelog.md # compiled into the desktop
           ./dirigent_api
+          ./dirigent_cli
           ./dirigent_desktop
           ./dirigent_protocol
           ./dirigent_service
         ];
       };
-      # Vendored once for all three crates.
+      # Vendored once for all crates.
       cargoDeps = rustPlatform.fetchCargoVendor {
         name = "dirigent";
         src = rustSrc;
-        hash = "sha256-45wyD02bRRX34TRo/5mFvC0i4f0eniuv/eZOqmzL1F8=";
+        hash = "sha256-UYPPYxVz4WK0+yt7r2CkpN+Bi1ACxlstbcvBCEHhR+s=";
       };
       # One crate's binary, in `bin/`.
       crate =
@@ -154,10 +155,10 @@
       };
 
       # Binaries laid out as installs have them, side by side with `runtime/`, where the
-      # service finds it (`runtime_cmd` in dirigent_service) and the command line finds the
-      # desktop: that's next to the executable's real path, so `bin/` symlinks to them.
-      # Copied, not linked: a symlink would resolve to the crate's own store path, which has
-      # no `runtime/`. The first package names the result.
+      # service and `dirigent pi` find it (`runtime_cmd` in dirigent_service) and `dirigent`
+      # finds the desktop: that's next to the executable's real path, so `bin/` symlinks to
+      # them. Copied, not linked: a symlink would resolve to the crate's own store path,
+      # which has no `runtime/`. The first package names the result.
       withRuntime =
         pkgs':
         let
@@ -173,8 +174,8 @@
           ${lib.concatMapStrings place pkgs'}
         '';
 
-      # The crate's binary is `dirigent`, the command line (`dirigent service` is the service).
-      cli = crate "dirigent_service" { meta.mainProgram = "dirigent"; };
+      # The `dirigent` command line (`dirigent pi`, `dirigent [dir]`).
+      cli = crate "dirigent_cli" { meta.mainProgram = "dirigent"; };
     in
     {
       packages.${system} = rec {
@@ -199,9 +200,12 @@
           cli
         ];
 
-        # The command line alone: `dirigent service` for remote hosts (the desktop embeds
-        # its own), `dirigent pi`.
-        dirigent_service = withRuntime [ cli ];
+        # The service for remote hosts (the desktop embeds its own), with `dirigent pi` to
+        # sign in and install extensions there.
+        dirigent_service = withRuntime [
+          (crate "dirigent_service" { })
+          cli
+        ];
 
         dirigent_api = crate "dirigent_api" { };
       };

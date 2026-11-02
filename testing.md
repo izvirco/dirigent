@@ -167,10 +167,11 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
 
 - `dirigent_runtime`: `bun run dirigent_runtime/src/index.ts`, feed JSONL on stdin, e.g.
   `{"type":"load","thread_id":"t1","cwd":"/tmp/x","entries":[]}` then `{"type":"prompt","thread_id":"t1","text":"hi","mode":"prompt"}`.
-- `dirigent_service`: its binary is the `dirigent` command line; `dirigent service` is the standalone service for remote hosts (the desktop embeds the lib), `dirigent pi …` the bundled pi's CLI on dirigent's agent dir (`cargo run -p dirigent_service -- pi --help`). `cargo run -p dirigent_service -- service`, poke it with `websocat ws://localhost:7778/ws` (`nix run nixpkgs#websocat`):
+- `dirigent_service`: the standalone binary is for remote hosts; the desktop embeds the lib. `cargo run -p dirigent_service`, poke it with `websocat ws://localhost:7778/ws` (`nix run nixpkgs#websocat`):
   `{"type":"list_threads","id":1}`, `{"type":"add_project","id":2,"path":"/tmp/x"}`, `{"type":"create_thread","id":3,"project_id":"..."}`, `{"type":"prompt","id":4,"thread_id":"...","text":"hi","mode":"prompt"}`.
-  Use `DIRIGENT_PORT=7778 cargo run -p dirigent_service -- --data-dir /tmp/somewhere --config-dir /tmp/somewhere-config service`
+  Use `DIRIGENT_PORT=7778 cargo run -p dirigent_service -- --data-dir /tmp/somewhere --config-dir /tmp/somewhere-config`
   to keep a test instance away from the real one.
+- `dirigent_cli`: `cargo run -p dirigent_cli -- --config-dir /tmp/somewhere-config pi --help` runs the bundled pi on that agent dir.
 - `dirigent_runtime` compiled, as installs run it: `cd dirigent_runtime && bun run build` writes `dist/runtime/`;
   feed `dist/runtime/dirigent_runtime` the same JSONL.
 - `dirigent_api`: see `packaging/README.md` and the top of `dirigent_api/src/main.rs`.

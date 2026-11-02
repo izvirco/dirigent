@@ -1,0 +1,13 @@
+[package]
+name = "dirigent_cli"
+version.workspace = true
+edition.workspace = true
+
+# `dirigent`, the command line: `dirigent pi …` (the bundled pi), `dirigent [dir]` (the desktop).
+[[bin]]
+name = "dirigent"
+path = "src/main.rs"
+
+[dependencies]
+dirigent_service = { path = "../dirigent_service" }
+anyhow.workspace = true

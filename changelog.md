@@ -1,6 +1,7 @@
 ## 0.0.4 (draft)
 
-- `dirigent pi …` runs the bundled pi's command line (install extensions, configure); pi's settings and sign-in move to `<config dir>/agent`, copied from `~/.pi/agent` the first time ([#105])
+- `dirigent pi …` runs the bundled pi (install extensions, sign in) ([#105])
+- Pi's settings live in `<config dir>/agent`, copied from `~/.pi/agent` once ([#105])
 - A message to a thread that just finished no longer strands in the queue and shows twice ([#106])
 - Drag projects on the Projects page to reorder them; the sidebar and the new-thread project menu follow that order ([#107])
 - The new-thread project menu has a search ([#107])
