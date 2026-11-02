@@ -3,6 +3,12 @@ name = "dirigent_service"
 version.workspace = true
 edition.workspace = true
 
+# The command line (`dirigent service` is the standalone service, `dirigent pi` the bundled
+# pi, `dirigent [dir]` starts the desktop); the desktop embeds the lib.
+[[bin]]
+name = "dirigent"
+path = "src/main.rs"
+
 [dependencies]
 dirigent_protocol.workspace = true
 anyhow.workspace = true

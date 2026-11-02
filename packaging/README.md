@@ -6,7 +6,8 @@
 into `%LOCALAPPDATA%\Programs\Dirigent`:
 
 ```
-Dirigent.exe                 dirigent_desktop, with Lilex, the icon and version info built in (build.rs)
+dirigent_desktop.exe         the app, with Lilex, the icon and version info built in (build.rs)
+dirigent.exe                 the command line (below); not on PATH, so it's `%LOCALAPPDATA%\Programs\Dirigent\dirigent pi`
 runtime\dirigent_runtime.exe the bun runtime compiled to one exe (dirigent_runtime/build.ts), no bun needed
 runtime\package.json, docs\, …   what a compiled pi reads next to its exe
 licenses\Lilex-OFL.txt
@@ -22,7 +23,8 @@ its bash.
 `dirigent-<version>-linux-x86_64.tar.gz` holds one directory, `dirigent/`:
 
 ```
-dirigent              dirigent_desktop, with Lilex built in (build.rs)
+dirigent_desktop      the app, with Lilex built in (build.rs)
+dirigent              the command line (below)
 runtime/              the compiled runtime, as on Windows
 install.sh            linux/install.sh
 dirigent.png          the icon
@@ -35,7 +37,7 @@ Installing, on any distro, per user and without root:
 d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/stable/linux-x86_64 | tar xz -C "$d" && "$d/dirigent/install.sh"
 ```
 
-`install.sh` copies `dirigent/` to `~/.local/lib/dirigent`, links `~/.local/bin/dirigent` to the binary and
+`install.sh` copies `dirigent/` to `~/.local/lib/dirigent`, links `~/.local/bin/dirigent` to the command line and
 writes `~/.local/share/applications/dirigent.desktop` (the app menu entry; with `MimeType=inode/directory`, file
 managers offer it in "Open with" on folders). Built on Ubuntu 22.04, so it needs glibc 2.35 or newer, plus a Vulkan
 driver and `libxkbcommon-x11` (which a pure Wayland setup may lack). Uninstalling is removing those three. User data is where it always was (`~/.local/share/dirigent`,
@@ -62,6 +64,24 @@ don't. A tarball downloaded with a browser does get marked: `xattr -dr com.apple
 installing, or use the curl line.
 
 None of it is tested by us (no Mac): CI only proves it builds.
+
+## The command line (`dirigent`)
+
+`dirigent_service`'s binary, a console program next to the app in every install (and `~/.local/bin/dirigent`):
+
+```
+dirigent [dir]        start the desktop (a running one gets the folder)
+dirigent pi [args…]   the bundled pi's own CLI: `dirigent pi install npm:…`, `dirigent pi config`, a terminal session
+dirigent service      the headless service, for remote hosts
+```
+
+`--data-dir` / `--config-dir` go first and apply to all of them. It finds the desktop and `runtime/` next to its
+own (real) path, so it works from an install, a nix package and `target/`.
+
+Pi (the runtime and `dirigent pi` alike) keeps its agent dir (`auth.json`, `settings.json`, installed packages,
+extensions, skills…) in `<config dir>/agent`, apart from `~/.pi/agent`. The first start without one copies
+`~/.pi/agent` (minus `sessions/` and caches; `dirigent_service/src/agent.rs`), so nothing needs signing in again;
+a `--config-dir` instance copies the real install's instead.
 
 ## Updates
 
@@ -136,10 +156,10 @@ On NixOS: import the flake's `nixosModules.dirigent_api` and set `services.dirig
 
 ## Nix (x86_64-linux)
 
-`flake.nix` packages all three: `dirigent_desktop` (the default), `dirigent_service` for remote hosts, and
-`dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The desktop
-and service are laid out like an install: the binary in `libexec/dirigent/` next to the compiled `runtime/`,
-symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
+`flake.nix` packages all three: `dirigent_desktop` (the default; the app plus the `dirigent` command line),
+`dirigent_service` (the `dirigent` command line alone, for remote hosts: `dirigent service`), and
+`dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The first two are laid out like an
+install: the binaries in `libexec/dirigent/` next to the compiled `runtime/`, symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
 driver: on NixOS `hardware.graphics.enable`; elsewhere nix's vulkan-loader may not find the system's drivers
 (nixGL).
 
@@ -147,7 +167,7 @@ Two hashes in `flake.nix` follow the lockfiles: `cargoDeps` (Cargo.lock) and `no
 changing a lockfile, set the hash to `lib.fakeHash` and run `nix build .#dirigent_service`, which needs both but
 doesn't build gpui; it prints the right hash.
 
-Not built yet: the standalone `dirigent_service` for remote hosts could ship as a tarball the same way; an AUR
+Not built yet: the standalone `dirigent service` for remote hosts could ship as a tarball the same way; an AUR
 package could repackage the Linux tarball (pacman would then update it, so its installs shouldn't self-update).
 
 ## The icon

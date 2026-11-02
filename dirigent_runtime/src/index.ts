@@ -1,8 +1,12 @@
 // dirigent runtime: newline-framed JSON on stdin/stdout, one pi session per thread.
 // stdout is protocol only; stderr is for failures (the service logs each line as a
 // warning). EOF on stdin = shutdown.
+//
+// Started as `dirigent_runtime pi [args…]` it is pi's own CLI instead (`dirigent pi`): the
+// bundled version, on the agent dir the service gives it (`PI_CODING_AGENT_DIR`).
 
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+import { main as piMain } from "@earendil-works/pi-coding-agent";
 import { type Attachment, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
 
@@ -49,9 +53,8 @@ type Inbound =
   | { type: "generate_title"; id: number; title: TitleGen; text: string };
 
 const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
-const sessions = new Sessions(send);
 
-async function handle(msg: Inbound): Promise<void> {
+async function handle(sessions: Sessions, msg: Inbound): Promise<void> {
   switch (msg.type) {
     case "load":
       return sessions.load(
@@ -106,32 +109,46 @@ async function handle(msg: Inbound): Promise<void> {
 // whole thread, images inline (hundreds of MB): keep the bytes of an unfinished
 // line and search only each new chunk for "\n", so reading stays linear. A line
 // is decoded only once complete, so no UTF-8 character is split across chunks.
-let partial: Uint8Array[] = [];
-const decoder = new TextDecoder();
-for await (const chunk of Bun.stdin.stream()) {
-  let start = 0;
-  let nl: number;
-  while ((nl = chunk.indexOf(10, start)) >= 0) {
-    partial.push(chunk.subarray(start, nl));
-    const line = decoder.decode(Buffer.concat(partial)).trim();
-    partial = [];
-    start = nl + 1;
-    if (!line) continue;
-    let msg: Inbound;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      send({ type: "error", message: `bad json: ${line.slice(0, 80)}` });
-      continue;
+async function serve(): Promise<void> {
+  const sessions = new Sessions(send);
+  let partial: Uint8Array[] = [];
+  const decoder = new TextDecoder();
+  for await (const chunk of Bun.stdin.stream()) {
+    let start = 0;
+    let nl: number;
+    while ((nl = chunk.indexOf(10, start)) >= 0) {
+      partial.push(chunk.subarray(start, nl));
+      const line = decoder.decode(Buffer.concat(partial)).trim();
+      partial = [];
+      start = nl + 1;
+      if (!line) continue;
+      let msg: Inbound;
+      try {
+        msg = JSON.parse(line);
+      } catch {
+        send({ type: "error", message: `bad json: ${line.slice(0, 80)}` });
+        continue;
+      }
+      handle(sessions, msg).catch((e) => {
+        const threadId = "thread_id" in msg ? msg.thread_id : undefined;
+        console.error(`${msg.type} ${threadId ?? ""} failed:`, e);
+        send({ type: "error", thread_id: threadId, message: (e as Error).message ?? String(e) });
+      });
     }
-    handle(msg).catch((e) => {
-      const threadId = "thread_id" in msg ? msg.thread_id : undefined;
-      console.error(`${msg.type} ${threadId ?? ""} failed:`, e);
-      send({ type: "error", thread_id: threadId, message: (e as Error).message ?? String(e) });
-    });
+    if (start < chunk.length) partial.push(chunk.subarray(start));
   }
-  if (start < chunk.length) partial.push(chunk.subarray(start));
+
+  sessions.disposeAll();
+  process.exit(0);
 }
 
-sessions.disposeAll();
-process.exit(0);
+if (process.argv[2] === "pi") {
+  // What pi's own entry point sets up before `main` (`dist/cli/setup.js`, not exported).
+  process.title = "pi";
+  process.env.PI_CODING_AGENT = "true";
+  process.env.AI_AGENT = "pi";
+  process.emitWarning = () => {};
+  await piMain(process.argv.slice(3));
+} else {
+  await serve();
+}

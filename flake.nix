@@ -37,8 +37,9 @@
       # here, rather than downloaded, so builds work offline (and in the nix sandbox).
       lilexDir = "${pkgs.lilex}/share/fonts/truetype";
 
-      # Packages: `nix build .#dirigent_desktop` (the default), `.#dirigent_service`,
-      # `.#dirigent_api`. They never self-update (no `DIRIGENT_BUILD_UPDATE_URL`).
+      # Packages: `nix build .#dirigent_desktop` (the default; with the `dirigent` command
+      # line), `.#dirigent_service` (the `dirigent` command line alone: `dirigent service` on
+      # a remote host), `.#dirigent_api`. They never self-update (no `DIRIGENT_BUILD_UPDATE_URL`).
       #
       # Two hashes to bump: `cargoDeps` when Cargo.lock changes, `nodeModules` when bun.lock
       # does. Set it to `lib.fakeHash` and build: nix prints the right one.
@@ -152,28 +153,35 @@
         dontPatchELF = true;
       };
 
-      # A binary laid out as installs have it, with `runtime/` next to it, where the service
-      # finds it (`runtime_cmd` in dirigent_service): that's next to the executable's real
-      # path, so `bin/` symlinks to it. Copied, not linked: a symlink would resolve to the
-      # crate's own store path, which has no `runtime/`.
+      # Binaries laid out as installs have them, side by side with `runtime/`, where the
+      # service finds it (`runtime_cmd` in dirigent_service) and the command line finds the
+      # desktop: that's next to the executable's real path, so `bin/` symlinks to them.
+      # Copied, not linked: a symlink would resolve to the crate's own store path, which has
+      # no `runtime/`. The first package names the result.
       withRuntime =
-        pkg:
+        pkgs':
         let
-          name = pkg.meta.mainProgram;
+          name = (builtins.head pkgs').meta.mainProgram;
+          place = pkg: ''
+            cp ${lib.getExe pkg} $out/libexec/dirigent/
+            ln -s ../libexec/dirigent/${pkg.meta.mainProgram} $out/bin/${pkg.meta.mainProgram}
+          '';
         in
         pkgs.runCommand "${name}-${version}" { meta.mainProgram = name; } ''
           mkdir -p $out/bin $out/libexec/dirigent
-          cp ${lib.getExe pkg} $out/libexec/dirigent/
           ln -s ${runtime} $out/libexec/dirigent/runtime
-          ln -s ../libexec/dirigent/${name} $out/bin/${name}
+          ${lib.concatMapStrings place pkgs'}
         '';
+
+      # The crate's binary is `dirigent`, the command line (`dirigent service` is the service).
+      cli = crate "dirigent_service" { meta.mainProgram = "dirigent"; };
     in
     {
       packages.${system} = rec {
         default = dirigent_desktop;
 
-        dirigent_desktop = withRuntime (
-          crate "dirigent_desktop" {
+        dirigent_desktop = withRuntime [
+          (crate "dirigent_desktop" {
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = gpuiLibs;
             env.DIRIGENT_LILEX_DIR = lilexDir;
@@ -187,11 +195,13 @@
                 ]
               } $out/bin/dirigent_desktop
             '';
-          }
-        );
+          })
+          cli
+        ];
 
-        # The service for remote hosts (the desktop embeds its own).
-        dirigent_service = withRuntime (crate "dirigent_service" { });
+        # The command line alone: `dirigent service` for remote hosts (the desktop embeds
+        # its own), `dirigent pi`.
+        dirigent_service = withRuntime [ cli ];
 
         dirigent_api = crate "dirigent_api" { };
       };

@@ -57,10 +57,10 @@ jobs:
         run: bun install --frozen-lockfile
 
       # The update endpoint is baked in: dev builds have none and never check.
-      - name: Build the desktop
+      - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_service
 
       - name: Build the runtime
         working-directory: dirigent_runtime
@@ -69,9 +69,9 @@ jobs:
       - name: Stage the install
         shell: bash
         run: |
-          cp target/release/dirigent_desktop.exe dist/Dirigent.exe
+          cp target/release/dirigent_desktop.exe target/release/dirigent.exe dist/
           mkdir -p dist/licenses
-          # Lilex (embedded in Dirigent.exe by dirigent_desktop/build.rs) is under the OFL,
+          # Lilex (embedded in dirigent_desktop.exe by dirigent_desktop/build.rs) is under the OFL,
           # which goes along with it.
           curl -fsSL -o dist/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
           echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/licenses/Lilex-OFL.txt" | sha256sum -c
@@ -137,10 +137,10 @@ jobs:
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build the desktop
+      - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_service
 
       - name: Build the runtime
         working-directory: dirigent_runtime
@@ -152,7 +152,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
-          cp target/release/dirigent_desktop dist/dirigent/dirigent
+          cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
           mv dist/runtime dist/dirigent/runtime
           cp packaging/linux/install.sh dirigent_desktop/assets/dirigent.png dist/dirigent/
           curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
@@ -209,10 +209,10 @@ jobs:
       - name: Install JS dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build the desktop
+      - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_service
 
       - name: Build the runtime
         working-directory: dirigent_runtime
@@ -227,10 +227,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
-          cp target/release/dirigent_desktop dist/dirigent/dirigent
+          cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
           mv dist/runtime dist/dirigent/runtime
-          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/runtime/dirigent_runtime
-          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/runtime/dirigent_runtime
+          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/runtime/dirigent_runtime
+          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/runtime/dirigent_runtime
           cp packaging/linux/install.sh dist/dirigent/
           curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
           echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/dirigent/licenses/Lilex-OFL.txt" | shasum -a 256 -c

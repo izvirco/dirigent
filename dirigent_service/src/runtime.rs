@@ -222,7 +222,7 @@ impl Runtime {
         let mut child = Command::from(crate::platform::command(&self.cmd[0]))
             .args(&self.cmd[1..])
             .env("DIRIGENT_URL", &self.url)
-            .env("DIRIGENT_DATA_DIR", crate::data_dir())
+            .envs(crate::runtime_env())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
