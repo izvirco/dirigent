@@ -121,7 +121,7 @@
         # A fixed output can't refer to the store (patchShebangs would).
         dontFixup = true;
         outputHashMode = "recursive";
-        outputHash = "sha256-msyNGZdNCr0ggm2dU6Vnq4uOHzDjrH9wFNDvGfw/5zQ=";
+        outputHash = "sha256-BuunT+i+7h5r94Qdd5KaZZrH7oNsEUOKShfnEoKMxbI=";
       };
 
       # The runtime compiled to one executable, plus the files pi reads next to it
