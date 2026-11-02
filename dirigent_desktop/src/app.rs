@@ -44,9 +44,12 @@ const PRESETS_KEY: &str = "presets";
 const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
 /// The folded sidebar sections (`Section::parse_folded`).
 const COLLAPSED_KEY: &str = "collapsed";
-/// The project groups pinned to the sidebar, in its order: a JSON list of group keys.
-/// Missing (an older install): nothing pinned. (The old `project_order` key is unused.)
+/// The project groups pinned to the sidebar: a JSON list of group keys. Missing (an older
+/// install): nothing pinned. (The old `project_order` key is unused.)
 const PINNED_PROJECTS_KEY: &str = "pinned_projects";
+/// The order the user dragged the project groups into (`projects::groups`): a JSON list of
+/// group keys. Missing (an older install): the pins', which used to be ordered on their own.
+const GROUP_ORDER_KEY: &str = "group_order";
 /// Where the user was when the app last closed (see `remember_pane`).
 const PANE_KEY: &str = "pane";
 const SIDEBAR_MIN: f32 = 180.;
@@ -435,7 +438,7 @@ pub enum Menu {
     /// Model picker, searchable list of every model the host offers.
     AllModels,
     Effort,
-    /// Draft: which project group the thread will run in.
+    /// Draft: which project group the thread will run in (`target_search` over them).
     Target,
     /// Draft: which of the group's hosts.
     TargetHost,
@@ -481,6 +484,15 @@ pub enum Menu {
     },
 }
 
+/// A project row being dragged to reorder (gpui drag payload; `Dirigent::dragging` while
+/// it lasts): its group key, and whether it is a sidebar row or a Projects page one. Each
+/// list follows only its own rows' drags.
+#[derive(Clone)]
+pub struct DragProject {
+    pub key: String,
+    pub sidebar: bool,
+}
+
 /// What the rename field (`Dirigent::rename_input`) is naming.
 #[derive(Clone, PartialEq)]
 pub enum Renaming {
@@ -520,16 +532,19 @@ pub struct Dirigent {
     /// The project or thread being renamed, its name field `rename_input`.
     pub renaming: Option<Renaming>,
     pub rename_input: Entity<TextInput>,
-    /// The project group keys pinned to the sidebar, in its order (`projects::pinned`).
+    /// The project group keys pinned to the sidebar (`projects::pinned`).
     pub pinned_projects: Vec<String>,
+    /// The group keys in the order the user dragged them into (`projects::groups`).
+    pub group_order: Vec<String>,
     /// The host the Add project modal adds on; `None`: the first connected one.
     pub new_project_host: Option<String>,
     /// The Add project modal, while open (its path field is `path_input`).
     pub add_project: Option<add_project::State>,
     /// `ListDirs` requests not answered yet: their errors are the modal's, never toasts.
     dir_requests: HashSet<u64>,
-    /// The pinned project being dragged in the sidebar; its row is a gap meanwhile.
-    pub dragging: Option<String>,
+    /// The project row being dragged, in the sidebar or on the Projects page; its row is a
+    /// gap meanwhile.
+    pub dragging: Option<DragProject>,
     /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
     pub hovered_card: Option<(String, String)>,
     /// Threads whose archived sub-agents are unfolded in the agent tree (`orchestra::lineage`).
@@ -575,6 +590,8 @@ pub struct Dirigent {
     pub model_search: Entity<TextInput>,
     /// Filter (or free text) for the workspace base picker.
     pub base_search: Entity<TextInput>,
+    /// Filter for the draft's `Create thread in` popup.
+    pub target_search: Entity<TextInput>,
     /// The Usage modal: window, grouping, hidden series and the hosts' buckets.
     pub usage: usage::State,
     /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
@@ -666,7 +683,15 @@ impl Dirigent {
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
-        let pinned_projects = cache.get(PINNED_PROJECTS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let pinned_projects: Vec<String> = cache.get(PINNED_PROJECTS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        // Seeded once, and kept: the pins are no longer ordered from here on.
+        let group_order: Vec<String> = match cache.get(GROUP_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()) {
+            Some(order) => order,
+            None => {
+                let _ = cache.set(GROUP_ORDER_KEY, &serde_json::to_string(&pinned_projects).unwrap_or_default());
+                pinned_projects.clone()
+            }
+        };
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
         let presets = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -707,6 +732,8 @@ impl Dirigent {
         cx.subscribe(&model_search, |this, _, _: &Submitted, cx| this.pick_first_model(cx)).detach();
         let base_search = cx.new(|cx| TextInput::new(cx, "Branch, commit or revset", true));
         cx.subscribe(&base_search, |this, _, _: &Submitted, cx| this.pick_first_base(cx)).detach();
+        let target_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
+        cx.subscribe(&target_search, |this, _, _: &Submitted, cx| this.pick_first_target(cx)).detach();
         let usage_from = cx.new(|cx| TextInput::new(cx, "2026-01-01", true));
         let usage_to = cx.new(|cx| TextInput::new(cx, "2026-01-31", true));
         for input in [&usage_from, &usage_to] {
@@ -729,6 +756,7 @@ impl Dirigent {
             renaming: None,
             rename_input,
             pinned_projects,
+            group_order,
             new_project_host: None,
             add_project: None,
             dir_requests: HashSet::new(),
@@ -756,6 +784,7 @@ impl Dirigent {
             host_url_input,
             model_search,
             base_search,
+            target_search,
             usage: usage::State::new(),
             usage_from,
             usage_to,
@@ -1940,6 +1969,53 @@ impl Dirigent {
         self.host(&t.host).is_some_and(|h| h.projects.iter().any(|p| p.id == t.project_id))
     }
 
+    /// Open the `Create thread in` popup with an empty, focused search; or close it.
+    pub fn toggle_target_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.menu == Some(Menu::Target) {
+            self.close_menu(cx);
+        } else if self.open_menu(Menu::Target, cx) {
+            self.clear_target_search(window, cx);
+        }
+    }
+
+    /// Empty and focus the search (none shows without a project: the composer keeps focus).
+    fn clear_target_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.groups().0.is_empty() {
+            return;
+        }
+        self.target_search.update(cx, |input, cx| input.set_text("", window, cx));
+        self.focus(self.target_search.focus_handle(cx), cx);
+    }
+
+    /// The project groups matching every word of the target search (in a name, a path or a
+    /// host), in the groups' order.
+    pub fn filtered_targets(&self, cx: &App) -> Vec<projects::Group> {
+        let query = self.target_search.read(cx).text().to_lowercase();
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let (groups, _) = self.groups();
+        groups
+            .into_iter()
+            .filter(|g| {
+                let mut hay = g.name.to_lowercase();
+                for m in &g.members {
+                    hay += &format!(" {} {}", m.host, m.project.path).to_lowercase();
+                }
+                words.iter().all(|w| hay.contains(w))
+            })
+            .collect()
+    }
+
+    /// Enter in the target search: the top match, on the draft's host if it has one there.
+    fn pick_first_target(&mut self, cx: &mut Context<Self>) {
+        let host = match &self.pane {
+            Pane::Draft { target: Some(t) } => Some(t.host.clone()),
+            _ => None,
+        };
+        if let Some(g) = self.filtered_targets(cx).first() {
+            self.set_target(g.member_for(host.as_deref()).into(), cx);
+        }
+    }
+
     pub fn set_target(&mut self, target: Target, cx: &mut Context<Self>) {
         if let Pane::Draft { target: t } = &mut self.pane {
             *t = Some(target);
@@ -2815,8 +2891,8 @@ impl Dirigent {
         }
     }
 
-    /// Remove a project from its host (its threads are kept, as orphans). A pin on a group
-    /// that is gone is skipped (`projects::pinned`) and dropped on the next reorder.
+    /// Remove a project from its host (its threads are kept, as orphans). The pin and place
+    /// of a group that is gone stay unused: from here, it looks like a host that is offline.
     pub fn remove_project(&mut self, host: &str, project_id: &str, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::RemoveProject { id, project_id: project_id.to_owned() });
@@ -2855,10 +2931,13 @@ impl Dirigent {
                 self.set_name(t, Some(name));
             }
         }
-        // The members' group key changed: a pinned group stays pinned under its new key(s).
+        // The members' group key changed: a pinned group stays pinned, and in its place,
+        // under its new key(s).
         let new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
-        self.pinned_projects = projects::repin(&self.pinned_projects, group_key, &new);
+        self.pinned_projects = projects::rekey(&self.pinned_projects, group_key, &new);
+        self.group_order = projects::rekey(&self.group_order, group_key, &new);
         self.save_pins();
+        self.save_order();
         self.menu = None;
         cx.notify();
     }
@@ -2866,7 +2945,7 @@ impl Dirigent {
     /// Every project group (the Projects page; the sidebar shows the pinned ones) and the
     /// orphan threads.
     pub fn groups(&self) -> (Vec<projects::Group>, Vec<(String, ThreadSummary)>) {
-        projects::groups(&self.hosts, &self.links, &self.names)
+        projects::groups(&self.hosts, &self.links, &self.names, &self.group_order)
     }
 
     /// `Rename` in a Projects page row's menu: its name turns into a field (Enter saves,
@@ -2970,7 +3049,7 @@ impl Dirigent {
         };
     }
 
-    /// The keys of the pinned groups that still exist, in the sidebar's order.
+    /// The keys of the pinned groups that exist, in the sidebar's order.
     pub fn pinned_keys(&self) -> Vec<String> {
         let (groups, _) = self.groups();
         projects::pinned(&groups, &self.pinned_projects).into_iter().map(|g| g.key.clone()).collect()
@@ -2980,7 +3059,7 @@ impl Dirigent {
         self.pinned_projects.iter().any(|k| k == group_key)
     }
 
-    /// Pin a project group to the sidebar (at the end) or unpin it.
+    /// Pin a project group to the sidebar (in its place in the order) or unpin it.
     pub fn set_project_pinned(&mut self, group_key: &str, pinned: bool, cx: &mut Context<Self>) {
         self.pinned_projects.retain(|k| k != group_key);
         if pinned {
@@ -2996,18 +3075,22 @@ impl Dirigent {
         }
     }
 
-    /// Put the pinned group at `index` of the sidebar's pinned list (the drag's live
-    /// reorder). Keys of groups that are gone are dropped on the way.
-    pub fn move_project(&mut self, group_key: &str, index: usize, cx: &mut Context<Self>) {
-        let mut keys = self.pinned_keys();
-        let Some(from) = keys.iter().position(|k| k == group_key) else { return };
-        if from == index {
+    fn save_order(&self) {
+        if let Ok(json) = serde_json::to_string(&self.group_order) {
+            let _ = self.cache.lock().unwrap().set(GROUP_ORDER_KEY, &json);
+        }
+    }
+
+    /// Put the group `group_key` where the group `onto` is: a drag's live reorder, in the
+    /// sidebar or on the Projects page (one order for both). A sidebar drag so also moves
+    /// it past the unpinned groups between the two on the Projects page.
+    pub fn move_project(&mut self, group_key: &str, onto: &str, cx: &mut Context<Self>) {
+        if group_key == onto {
             return;
         }
-        let key = keys.remove(from);
-        keys.insert(index.min(keys.len()), key);
-        self.pinned_projects = keys;
-        self.save_pins();
+        let (groups, _) = self.groups();
+        self.group_order = projects::moved(&self.group_order, &groups, group_key, onto);
+        self.save_order();
         cx.notify();
     }
 
@@ -3355,6 +3438,7 @@ impl Dirigent {
             let Some(target) = target.clone() else {
                 self.toast("Pick a project first", cx);
                 self.menu = Some(Menu::Target);
+                self.clear_target_search(window, cx);
                 return;
             };
             if self.model.is_none() {
@@ -3599,6 +3683,7 @@ impl Dirigent {
             self.host_url_input.clone(),
             self.model_search.clone(),
             self.base_search.clone(),
+            self.target_search.clone(),
             self.usage_from.clone(),
             self.usage_to.clone(),
             self.settings.font_ui.clone(),
@@ -4056,7 +4141,7 @@ impl Dirigent {
     /// Close the open menu. Leaving the model search hands focus back to the composer.
     pub fn close_menu(&mut self, cx: &mut Context<Self>) {
         match self.menu.take() {
-            Some(Menu::AllModels | Menu::Base) => self.focus_composer(cx),
+            Some(Menu::AllModels | Menu::Base | Menu::Target) => self.focus_composer(cx),
             Some(_) => {}
             None => return,
         }

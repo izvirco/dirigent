@@ -1,14 +1,17 @@
 //! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
 //! 40px header bar and the Projects page (every project, pins).
 
-use crate::app::{ArchiveAt, Dirigent, Menu, Pane, Renaming, Target};
+use crate::app::{ArchiveAt, Dirigent, DragProject, Menu, Pane, Renaming, Target};
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::Group;
 use crate::theme::{self, Status, text, u};
-use crate::{projects, thread, titlebar};
+use crate::{projects, sidebar, thread, titlebar};
 use dirigent_protocol::ThreadSummary;
-use gpui::{AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, rgba, uniform_list};
+use gpui::{
+    AnyElement, Context, Div, DragMoveEvent, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, rgba,
+    uniform_list,
+};
 use std::ops::Range;
 
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
@@ -39,10 +42,28 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 /// The Projects page (the sidebar's folder): every project group as a row (pin toggle,
 /// name, its hosts, thread count, `⋯` menu), "Removed projects" last; `Add project` in
 /// the top bar opens the modal (`add_project.rs`). A row opens the project's page; a pinned one is also listed in the
-/// sidebar.
+/// sidebar. Rows reorder by drag, as the sidebar's pinned ones do (one order for both,
+/// `move_project`), and the draft's `Create thread in` popup lists them in that order.
 fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
     let (groups, orphans) = this.groups();
-    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, &groups, this, cx)).collect();
+    let dragging = this.dragging.clone().filter(|d| !d.sidebar && cx.has_active_drag()).map(|d| d.key);
+    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, &groups, dragging.as_deref() == Some(&g.key), this, cx)).collect();
+    // The dragged row is a gap that follows the cursor row by row, the others shuffling
+    // around it.
+    let rows = div().flex().flex_col().gap(u(ENTRY_GAP)).children(rows).on_drag_move(cx.listener(
+        |this, ev: &DragMoveEvent<DragProject>, _, cx| {
+            let drag = ev.drag(cx);
+            if drag.sidebar {
+                return;
+            }
+            let (groups, _) = this.groups();
+            let slot = ((ev.event.position.y - ev.bounds.top()) / u(ENTRY_H + ENTRY_GAP)).floor().max(0.) as usize;
+            if let Some(onto) = groups.get(slot.min(groups.len().saturating_sub(1))) {
+                let key = drag.key.clone();
+                this.move_project(&key, &onto.key, cx);
+            }
+        },
+    ));
     let removed = (!orphans.is_empty()).then(|| {
         entry_row("proj/orphans", projects::ORPHANS, cx)
             .child(div().size(u(24.)).flex_shrink_0())
@@ -62,12 +83,18 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
 
     let add = theme::button("add-project", "plus", "Add project").on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx)));
     let pane = pane.child(header(div().child("Projects"), Some(add.into_any_element())));
-    if rows.is_empty() && removed.is_none() {
+    if groups.is_empty() && removed.is_none() {
         return pane.child(theme::empty("No projects yet", "Add a directory on one of your hosts with Add project."));
     }
-    let column = div().w_full().max_w(u(760.)).flex().flex_col().gap_1().py_6().px_6().children(rows).children(removed);
+    let column = div().w_full().max_w(u(ENTRY_MAX_W)).flex().flex_col().gap(u(ENTRY_GAP)).py_6().px_6().child(rows).children(removed);
     pane.child(scroll("projects", div().flex().flex_col().items_center().child(column)))
 }
+
+/// A Projects page row's height, the gap between rows (their pitch is what a dragged row
+/// snaps to), and the widest the list gets (`px_6` inside).
+const ENTRY_H: f32 = 36.;
+const ENTRY_GAP: f32 = 4.;
+const ENTRY_MAX_W: f32 = 760.;
 
 /// A Projects page row: opens the project's page (`key`) when clicked.
 fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>) -> Stateful<Div> {
@@ -79,7 +106,7 @@ fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>)
         .flex_row()
         .items_center()
         .gap_3()
-        .h(u(36.))
+        .h(u(ENTRY_H))
         .px_2()
         .rounded_md()
         .cursor_pointer()
@@ -95,8 +122,9 @@ fn thread_count(n: usize) -> Div {
 /// One project group on the Projects page: the pin toggle (amber while pinned, faint
 /// otherwise), its name, its hosts on one line, its thread count, and the `⋯`
 /// menu: rename it (UI only), link it into another group, unlink it, remove it from a host
-/// (its threads are kept, under Removed projects).
-fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+/// (its threads are kept, under Removed projects). Grab it to reorder: a `Ghost` follows
+/// the cursor and the row itself is a gap (`dragged`).
+fn project_entry(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let pinned = this.is_pinned_project(&key);
     let menu_open = this.menu == Some(Menu::Project { group_key: key.clone() });
@@ -202,7 +230,31 @@ fn project_entry(g: &Group, all: &[Group], this: &Dirigent, cx: &mut Context<Dir
     } else {
         div().truncate().child(g.name.clone())
     };
+    // The ghost is as wide as the row: the pane (the window right of the docked sidebar) up
+    // to the list's widest, minus its padding. Its name sits where the row's does: past the
+    // row's padding, the pin and the gap.
+    let sidebar_w = if this.sidebar_hidden { 0. } else { this.sidebar_width };
+    let (ghost_name, font) = (g.name.clone(), this.fonts.ui.clone());
+    let entity = cx.weak_entity();
     entry_row(format!("proj/{key}"), &key, cx)
+        .when(dragged, |d| d.opacity(0.))
+        .on_drag(DragProject { key: key.clone(), sidebar: false }, move |drag, _, window, cx| {
+            let drag = drag.clone();
+            let _ = entity.update(cx, |this, cx| {
+                this.dragging = Some(drag);
+                cx.notify();
+            });
+            let pane = f32::from(window.viewport_size().width) / theme::zoom() - sidebar_w;
+            let width = pane.min(ENTRY_MAX_W) - 2. * 24.;
+            cx.new(|_| sidebar::Ghost {
+                name: ghost_name.clone(),
+                width,
+                height: ENTRY_H,
+                indent: 8. + 24. + 12.,
+                weight: FontWeight::MEDIUM,
+                font: font.clone(),
+            })
+        })
         .child(pin)
         .child(name.w(u(160.)).flex_shrink_0().font_weight(FontWeight::MEDIUM))
         .child(div().flex_1().min_w_0().truncate().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(hosts))

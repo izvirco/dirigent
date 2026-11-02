@@ -3,10 +3,11 @@
 //! but a right click opens its context menu).
 
 use crate::app::Dirigent;
+use crate::input::TextInput;
 use crate::theme::{self, text, u};
 use gpui::{
-    Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, Pixels, Point, SharedString, Stateful, anchored, canvas, div, point,
-    prelude::*, px, rgba, size,
+    Anchor, AnyElement, AvailableSpace, Context, Div, ElementId, Entity, Pixels, Point, SharedString, Stateful, anchored, canvas, div,
+    point, prelude::*, px, rgba, size,
 };
 
 /// Gap between trigger and popup.
@@ -163,4 +164,9 @@ pub fn header(text: impl Into<SharedString>) -> AnyElement {
 /// A hairline between sections.
 pub fn separator() -> AnyElement {
     div().h(px(1.)).flex_shrink_0().my_1().bg(rgba(theme::t().line)).into_any()
+}
+
+/// A search field as a row, for a popup that filters its items as you type.
+pub fn search(input: Entity<TextInput>) -> Div {
+    div().flex().items_center().h(u(ROW_H)).flex_shrink_0().px_2().child(div().flex_1().min_w_0().text_size(text::base()).child(input))
 }

@@ -380,6 +380,9 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
         )
 }
 
+/// Height of the project list in the `Create thread in` popup (~10 rows).
+const TARGET_LIST_H: f32 = 270.;
+
 /// The new-thread page: `Create thread in <project>` above the composer, both centered in
 /// the pane. Projects linked across hosts are one entry; `on <host>` then picks the host.
 /// Leaving the page (sidebar, a thread) keeps whatever was typed.
@@ -388,9 +391,13 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
     let group = target.as_ref().and_then(|t| groups.iter().find(|g| g.has(&t.host, &t.project_id)));
     let project = group.map(|g| g.name.clone());
     let target_open = this.menu == Some(Menu::Target);
+    // A search over the groups (in the user's order, `projects::groups`), then their rows.
     let target_menu = target_open.then(|| {
+        if groups.is_empty() {
+            return menu::popup(Side::Below(26.), vec![menu::header("No projects yet. Add one with the folder in the sidebar.")], cx);
+        }
         let mut items = Vec::new();
-        for g in &groups {
+        for g in &this.filtered_targets(cx) {
             let selected = group.is_some_and(|s| s.key == g.key);
             // Keep the host when switching to a group that also lives there.
             let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
@@ -406,9 +413,12 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             ));
         }
         if items.is_empty() {
-            items.push(menu::header("No projects yet. Add one with the folder in the sidebar."));
+            items.push(menu::header("No projects match"));
         }
-        menu::popup(Side::Below(26.), items, cx)
+        let search = menu::search(this.target_search.clone());
+        let list = div().id("target-list").flex().flex_col().max_h(u(TARGET_LIST_H)).overflow_y_scroll().children(items);
+        let body = div().w(u(360.)).flex().flex_col().child(search).child(menu::separator()).child(list).into_any();
+        menu::popup(Side::Below(26.), vec![body], cx)
     });
     // `on <host>`: a plain chip when the project is on one host, a dropdown when it is linked
     // across several.
@@ -469,7 +479,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
                 project.is_none(),
                 target_open,
             )
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Target, cx)))
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_target_picker(window, cx)))
             .children(target_menu),
         )
         .children(host_chip);
@@ -632,14 +642,7 @@ const BASE_LIST_H: f32 = 160.;
 /// `main~3`, a revset). The list follows the repo: it is re-fetched every few seconds
 /// while open (`VCS_REFRESH_SECS`).
 fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Dirigent>) -> AnyElement {
-    let search = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .h(u(menu::ROW_H))
-        .flex_shrink_0()
-        .px_2()
-        .child(div().flex_1().min_w_0().text_size(text::base()).child(this.base_search.clone()));
+    let search = menu::search(this.base_search.clone());
     let typed = this.base_search.read(cx).text().trim().to_owned();
     let refs = this.filtered_refs(cx);
     let drafting = matches!(this.pane, Pane::Draft { .. });
