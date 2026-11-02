@@ -141,6 +141,11 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
 
 ## Launches and updates
 
+- **The changelog**: the first launch of a session whose `desktop.db` last ran an older version (after a version
+  bump) opens the changelog modal over the pane, with keys going to it, not the composer: Esc closes it, and later
+  launches (`setup` relaunches) don't show it. To see it, set `kv.last_version` in `data/desktop.db` lower and
+  `start`, or click the version beside the sidebar title (~(104, 19)).
+
 - **Open in Dirigent** / a second launch: run the binary on the session's dirs with a folder,
   `target/debug/dirigent_desktop --data-dir <session>/data --config-dir <session>/config /some/dir`. It hands the
   folder to the session's app and exits at once (`instance.rs`); the app adds it as a local project if it isn't

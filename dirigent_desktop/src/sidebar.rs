@@ -153,14 +153,32 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .h(u(titlebar::HEIGHT)) // same as `lists::header`, so the title aligns with the main pane's
         .pl_4()
         .pr_2()
-        // The title drags the window (`titlebar.rs`); the buttons beside it don't overlap it.
-        .child({
-            let label = div().flex_1().h_full().flex().items_center().gap_1p5();
-            let label = if titlebar::CUSTOM { titlebar::grab(label, cx) } else { label };
-            label
-                .child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child("Dirigent"))
-                .child(div().text_color(rgba(theme::t().fg_2)).child(env!("CARGO_PKG_VERSION")))
-        })
+        // The title drags the window (`titlebar.rs`): the name and the space after the
+        // version. The version (the changelog) and the buttons are beside those, not over them.
+        .child(
+            div()
+                .h_full()
+                .flex()
+                .items_center()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(rgba(theme::t().fg))
+                .child("Dirigent")
+                .when(titlebar::CUSTOM, |d| titlebar::grab(d, cx)),
+        )
+        .child(
+            div()
+                .id("version")
+                .h_full()
+                .flex()
+                .items_center()
+                .ml_1p5()
+                .cursor_pointer()
+                .text_color(rgba(theme::t().fg_2))
+                .hover(|d| d.text_color(rgba(theme::t().fg)))
+                .on_click(cx.listener(|this, _, _, cx| this.open_changelog(cx)))
+                .child(env!("CARGO_PKG_VERSION")),
+        )
+        .child(div().flex_1().h_full().when(titlebar::CUSTOM, |d| titlebar::grab(d, cx)))
         // The folder opens the Projects page (lit while it's open); `+` a new thread.
         .child(
             theme::icon_button("projects", "folder", cx, |this, cx| this.show_projects(cx))

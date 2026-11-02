@@ -12,7 +12,7 @@ use crate::projects::{self, HostState, Links};
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
-use crate::{config, hosts, images, instance, settings, update};
+use crate::{changelog, config, hosts, images, instance, settings, update};
 use crate::{lists, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
@@ -488,14 +488,16 @@ pub enum Renaming {
     Thread { host: String, id: String },
 }
 
-/// The modals opened from the sidebar's bottom bar; they float over whatever pane is open
-/// (see `modal.rs`).
+/// The modals opened from the sidebar; they float over whatever pane is open (see
+/// `modal.rs`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Modal {
     /// `settings.rs`: config, thread titles, agent tools, hosts.
     Settings,
     /// `usage.rs`: tokens and cost over time, across hosts.
     Usage,
+    /// `changelog.rs`: the release history. Also opens by itself after an update.
+    Changelog,
 }
 
 /// Which archive button opened `Menu::ConfirmArchive`, so only that one shows the popup.
@@ -657,6 +659,8 @@ impl Dirigent {
             }
             Err(e) => Some(format!("{e:#}")),
         };
+        // First, before anything is kept in `kv`: it tells a new data dir from an old one.
+        let updated = changelog::after_update(&cache);
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
@@ -791,6 +795,9 @@ impl Dirigent {
             Err(e) => this.toast(format!("{e:#}"), cx),
         }
         this.restore_pane(cx);
+        if updated {
+            this.open_changelog(cx);
+        }
         this.tick(cx);
         update::start(cx);
         if let Some(e) = hosts_error {
@@ -2229,12 +2236,23 @@ impl Dirigent {
         self.request_usage(cx);
     }
 
+    /// The version beside the sidebar's title, and the first start after an update
+    /// (`changelog::after_update`): the changelog.
+    pub fn open_changelog(&mut self, cx: &mut Context<Self>) {
+        self.modal = Some(Modal::Changelog);
+        self.menu = None;
+        self.focus(self.focus_handle.clone(), cx);
+        cx.notify();
+    }
+
     /// Esc or a press on the dim: back to the pane, with the composer focused if it has one.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         self.menu = None;
         // The chart's hover-out never fires once it's gone; a reopen would show a stale readout.
         self.usage.hover = None;
+        // The changelog's (any other went with the press that opened the modal).
+        self.selection.clear();
         if composer_key(&self.pane).is_some() {
             self.focus_composer(cx);
         } else {
@@ -3666,11 +3684,13 @@ impl Dirigent {
     /// Extend the selection to the mouse, scrolling its document when the mouse is past
     /// the document's edge.
     fn drag_selection(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
-        if let (Some(doc), Pane::Thread(t)) = (self.selection.doc(), &self.pane) {
-            let list = match doc {
-                Doc::Thread => &t.list,
-                Doc::Log => &t.log_list,
-            };
+        // The transcript and the log scroll along; the changelog modal doesn't.
+        let list = match (self.selection.doc(), &self.pane) {
+            (Some(Doc::Thread), Pane::Thread(t)) => Some(&t.list),
+            (Some(Doc::Log), Pane::Thread(t)) => Some(&t.log_list),
+            _ => None,
+        };
+        if let Some(list) = list {
             let viewport = list.viewport_bounds();
             let overshoot = if p.y < viewport.top() { p.y - viewport.top() } else { (p.y - viewport.bottom()).max(px(0.)) };
             if overshoot != px(0.) {
@@ -3700,6 +3720,11 @@ impl Dirigent {
                     for six in start.key.item..=end.key.item {
                         thread::render_step(self, &work, live, six, cx);
                     }
+                }
+            }
+            Doc::Changelog => {
+                if self.modal == Some(Modal::Changelog) {
+                    changelog::render(self, cx);
                 }
             }
         }
@@ -4322,6 +4347,7 @@ impl Render for Dirigent {
             .children(self.modal.map(|m| match m {
                 Modal::Settings => settings::render(self, cx),
                 Modal::Usage => usage::render(self, cx),
+                Modal::Changelog => changelog::render(self, cx),
             }))
             .children(self.preview.clone().map(|image| thread::preview(image, cx)))
             .children((!toasts.is_empty()).then(|| {

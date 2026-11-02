@@ -40,6 +40,8 @@ pub struct OpenAppLink {
 pub enum Doc {
     Thread,
     Log,
+    /// The changelog modal (`changelog.rs`).
+    Changelog,
 }
 
 /// A block's place in its document: the list item / log step it belongs to, then its

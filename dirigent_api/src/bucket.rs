@@ -7,7 +7,7 @@
 //! ```
 //!
 //! Channels are independent: each is its own build (the release workflow bakes the
-//! channel's update url in) with its own versions, so beta and stable can both have a 0.2.0.
+//! channel's update url in) with its own versions, so nightly and stable can both have a 0.2.0.
 //!
 //! The bucket is public: objects are read with plain GETs and their urls go to clients as
 //! they are. Writes are signed with the S3 keys (`rusty-s3` signs, `ureq` sends).
