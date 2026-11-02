@@ -326,6 +326,7 @@ impl Storage {
                     .zip(r.get::<_, Option<String>>(22)?)
                     .map(|(thread_id, entry_id)| ForkedFrom { thread_id, entry_id }),
                 setup: None,
+                compacting_since: None,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -612,6 +613,7 @@ impl Storage {
             spend: Spend::default(),
             forked_from: None,
             setup: None,
+            compacting_since: None,
         })
     }
 

@@ -187,6 +187,7 @@ mod tests {
             spend: Default::default(),
             forked_from: None,
             setup: None,
+            compacting_since: None,
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

@@ -73,6 +73,7 @@ impl Service {
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
             t.workspace_missing = missing.contains(&t.id);
             t.setup = starting.get(&t.id).copied().flatten().or(self.runtime.nix_shell(&t.id).then_some(Setup::NixShell));
+            t.compacting_since = self.runtime.compacting_since(&t.id);
         }
         Ok(threads)
     }
@@ -701,7 +702,8 @@ impl Service {
             }
             RuntimeMessage::Event { thread_id, event } => {
                 let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
-                let lifecycle = matches!(kind, "agent_start" | "agent_settled");
+                // Changes the thread list shows (`running_since`, `compacting_since`).
+                let lifecycle = matches!(kind, "agent_start" | "agent_settled" | "compaction_start" | "compaction_end");
                 if kind == "agent_start" {
                     info!(thread = %thread_id, "agent started");
                     // Whatever woke it (a message does that earlier, a job's notice only

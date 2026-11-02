@@ -295,6 +295,7 @@ mod tests {
             spend: Default::default(),
             forked_from: None,
             setup: None,
+            compacting_since: None,
         }
     }
 
