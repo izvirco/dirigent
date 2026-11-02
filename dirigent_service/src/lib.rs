@@ -444,6 +444,10 @@ impl Service {
     /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
     /// `Prompt`'s fields; `edit`, the user message it replaces (`EditMessage`).
     async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
+        // A steer or follow-up into a run that is over (the sender's view was stale: it
+        // ended, or this service restarted under it) is a new turn. The runtime does the
+        // same when the run ends while the message is on its way (`deliver`).
+        let mode = if self.runtime.running_since(thread_id).is_none() { PromptMode::Prompt } else { mode };
         // A message brings an archived thread back.
         let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
         // The run starts now, not at pi's `agent_start`: loading the session (and a nix

@@ -380,11 +380,14 @@ export class Sessions {
         });
       }
     }
-    if (mode === "steer") {
+    // A steer or follow-up only queues in pi: on an idle model (the sender's view was
+    // stale: the run ended, or the service restarted under it) it would sit there until
+    // some later turn delivers it, so it is a prompt instead.
+    if (mode === "steer" && session.isStreaming) {
       // The model is meant to see it now, not after a `wait` times out. (The user's, or a
       // parent's `dirigent send`: hence no who.)
       if ((await session.steer(text, images)) === "queued") wake(live, "a message came in");
-    } else if (mode === "follow_up") await session.followUp(text, images);
+    } else if (mode === "follow_up" && session.isStreaming) await session.followUp(text, images);
     else await session.prompt(text, { images, streamingBehavior: "followUp" });
   }
 

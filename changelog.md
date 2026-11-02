@@ -1,8 +1,10 @@
 ## 0.0.4 (draft)
 
 - `dirigent pi …` runs the bundled pi's command line (install extensions, configure); pi's settings and sign-in move to `<config dir>/agent`, copied from `~/.pi/agent` the first time ([#105])
+- A message to a thread that just finished no longer strands in the queue and shows twice ([#106])
 
 [#105]: https://forge.sebba.dev/izvir/dirigent/changes/105
+[#106]: https://forge.sebba.dev/izvir/dirigent/changes/106
 
 ## 0.0.3
 
