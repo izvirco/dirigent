@@ -18,7 +18,8 @@ pub enum Item {
     Work(Work),
     /// The reply that ends a turn.
     Assistant(String),
-    /// Assistant turn ended with an error (API failure, abort, ...).
+    /// Assistant turn ended with an error (API failure, abort, ...), or compacting the
+    /// context failed.
     Error(String),
     /// The context was compacted here (its own item so the ruler can mark it).
     Compaction,
@@ -352,6 +353,11 @@ impl Timeline {
             "model_change" => {
                 self.model = entry.get("modelId").and_then(Value::as_str).map(str::to_owned);
                 None
+            }
+            // The runtime's record of a failed compaction (`sessions.ts`); pi keeps none.
+            "custom" if entry.get("customType").and_then(Value::as_str) == Some("dirigent:compaction_failed") => {
+                let error = entry.pointer("/data/error").and_then(Value::as_str).unwrap_or("Compaction failed");
+                Some(self.add(Item::Error(error.to_owned())))
             }
             "session_info" | "label" | "usage" | "custom" => None,
             "compaction" => Some(self.add(Item::Compaction)),
@@ -1222,6 +1228,17 @@ mod tests {
         assert_eq!(t.items[1], Item::Assistant("yo".into()));
         assert_eq!(t.items[2], Item::Compaction);
         assert_eq!(t.items[3], Item::Notice("unknown entry: wat".into()));
+    }
+
+    /// The runtime's record of a failed compaction shows as an error; other custom entries don't show.
+    #[test]
+    fn failed_compaction_is_an_error() {
+        let entries = [
+            json!({"type":"custom","customType":"dirigent:compaction_failed","data":{"error":"Auto-compaction failed: 529"}}),
+            json!({"type":"custom","customType":"other","data":{}}),
+        ];
+        let t = Timeline::from_entries(entries.iter());
+        assert_eq!(t.items, vec![Item::Error("Auto-compaction failed: 529".into())]);
     }
 
     /// Items keep the id of the entry they came from, through a work dropped for being

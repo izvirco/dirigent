@@ -11,6 +11,7 @@ Edit and fork threads, a macOS build, and better handling of images.
 - Threads with many images load in about a second ([#99])
 - Images load reliably over slow or dropped connections ([#99])
 - Queued messages show and keep their images ([#98])
+- Context compaction shows on the work line with a timer; a failed one leaves its error in the thread ([#104])
 
 [#101]: https://forge.sebba.dev/izvir/dirigent/changes/101
 [#95]: https://forge.sebba.dev/izvir/dirigent/changes/95
@@ -18,6 +19,7 @@ Edit and fork threads, a macOS build, and better handling of images.
 [#97]: https://forge.sebba.dev/izvir/dirigent/changes/97
 [#99]: https://forge.sebba.dev/izvir/dirigent/changes/99
 [#98]: https://forge.sebba.dev/izvir/dirigent/changes/98
+[#104]: https://forge.sebba.dev/izvir/dirigent/changes/104
 
 ## 0.0.2
 

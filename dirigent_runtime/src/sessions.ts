@@ -214,6 +214,12 @@ export class Sessions {
     live.unsubscribe = session.subscribe((event) => {
       if (event.type === "message_start" && event.message.role === "custom")
         noticeDelivered(live, event.message);
+      // Pi records nothing when compacting the context fails: a custom entry (outside the
+      // model's context) keeps the error in the thread. An aborted compaction has none.
+      if (event.type === "compaction_end" && event.errorMessage)
+        session.sessionManager.appendCustomEntry("dirigent:compaction_failed", {
+          error: event.errorMessage,
+        });
       this.send({ type: "event", thread_id: threadId, event: slim(event) });
       queueMicrotask(() => this.flushEntries(threadId, live));
     });

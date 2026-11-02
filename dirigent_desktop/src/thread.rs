@@ -30,7 +30,7 @@ use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
 use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
 use crate::working;
-use dirigent_protocol::{PromptMode, Setup};
+use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
 use gpui::{
     Anchor, AnyElement, Bounds, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, SharedString, Stateful,
     Window, anchored, deferred, div, img, list, point, prelude::*, px, relative, rgba,
@@ -1307,7 +1307,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     let keys = &mut Keys::new(&this.selection, Doc::Thread, ix);
     // User bubbles go gray in an archived thread, so it reads as one at a glance.
     let archived = this.summary(&t.host, &t.id).is_some_and(|s| s.archived);
-    let setup = this.summary(&t.host, &t.id).and_then(|s| s.setup);
+    let busy = this.summary(&t.host, &t.id).and_then(|s| busy(s, now));
     let bubble = if archived { theme::t().hover } else { theme::t().bubble };
     // Messages can be edited while nothing runs and no edit is on its way.
     let idle = !this.is_running() && t.rewound.is_none();
@@ -1328,7 +1328,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, false, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
-            col = col.child(work_block(&work, key, true, setup, t, bubble, blobs, now, &fonts, keys, cx));
+            col = col.child(work_block(&work, key, true, busy, t, bubble, blobs, now, &fonts, keys, cx));
             // Streamed text is already cut at its last completed line (`live_work`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
@@ -1656,16 +1656,28 @@ fn edit_bubble(this: &Dirigent, bubble: u32, fonts: &Fonts, cx: &mut Context<Dir
         )
 }
 
+/// What a thread's run is busy with besides the model, from its summary: the step it is
+/// being set up with, or compacting its context (and for how long). The live work line
+/// shows it in place of the time and tool count.
+fn busy(s: &ThreadSummary, now: i64) -> Option<String> {
+    match s.setup {
+        Some(Setup::Workspace) => Some("Creating a workspace…".into()),
+        Some(Setup::NixShell) => Some("Activating nix dev shell…".into()),
+        None => s.compacting_since.map(|since| format!("Compacting context… · {}", elapsed(now - since))),
+    }
+}
+
 /// A turn's work in the transcript: the steers the model has already taken (user bubbles,
 /// kept after the run), the work line, then the sub-agents it started or that finished
 /// meanwhile (`Step::Child`). Pending steers are rendered by the tail; cache misses show
-/// only in the log. `live` is the run in progress, `setup` the step its thread is in.
+/// only in the log. `live` is the run in progress, `busy` what it is busy with besides the
+/// model (`busy()`).
 #[allow(clippy::too_many_arguments)]
 fn work_block(
     w: &Work,
     key: usize,
     live: bool,
-    setup: Option<Setup>,
+    busy: Option<String>,
     t: &OpenThread,
     bubble: u32,
     blobs: &HashMap<String, Blob>,
@@ -1688,7 +1700,7 @@ fn work_block(
             _ => None,
         })
         .collect();
-    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, setup, t, now, cx)).children(children)
+    div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, busy, t, now, cx)).children(children)
 }
 
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
@@ -1794,9 +1806,9 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys
 /// A turn's work as one line: `model effort · 1m 23s · 4 tool calls`; while `live`,
 /// `· Working for 12s ·` and the line animated (`working.rs`). Click to show its log in the
 /// panel; tinted while the panel shows it.
-/// The step its thread is being set up with (`setup`) stands in for the time and tool count
-/// until the model can start.
-fn work_line(w: &Work, key: usize, live: bool, setup: Option<Setup>, t: &OpenThread, now: i64, cx: &mut Context<Dirigent>) -> AnyElement {
+/// What the run is busy with besides the model (`busy`: setting the thread up, compacting
+/// its context) stands in for the time and tool count meanwhile.
+fn work_line(w: &Work, key: usize, live: bool, busy: Option<String>, t: &OpenThread, now: i64, cx: &mut Context<Dirigent>) -> AnyElement {
     let shown = t.log == Some(key);
     let tools = match w.tool_count() {
         0 => "no tool calls".to_owned(),
@@ -1804,9 +1816,8 @@ fn work_line(w: &Work, key: usize, live: bool, setup: Option<Setup>, t: &OpenThr
         n => format!("{n} tool calls"),
     };
     let model = w.model.as_deref().map(theme::short_model).unwrap_or("model").to_owned();
-    let status = match (live, setup) {
-        (true, Some(Setup::Workspace)) => vec!["Creating a workspace…".to_owned()],
-        (true, Some(Setup::NixShell)) => vec!["Activating nix dev shell…".to_owned()],
+    let status = match (live, busy) {
+        (true, Some(busy)) => vec![busy],
         (true, None) => vec![format!("Working for {}", elapsed(now - w.started)), "·".into(), tools],
         (false, _) => vec![duration(w.duration()), "·".into(), tools],
     };

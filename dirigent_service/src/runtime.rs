@@ -183,6 +183,9 @@ struct Inner {
     /// Nix dev shell captures in progress per thread (`nix_shell`): a count, as a session
     /// reloaded meanwhile starts another while the first still runs; absent = none.
     nix_shells: HashMap<String, u32>,
+    /// Threads whose context pi is compacting, since when (unix ms): `compaction_start` to
+    /// `compaction_end`.
+    compacting: HashMap<String, i64>,
     /// Callers waiting on a `loaded` reply, per thread.
     pending_loads: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
     /// Callers waiting on a `models` reply (the runtime has no request ids; replies are FIFO).
@@ -293,10 +296,25 @@ impl Runtime {
             }
             RuntimeMessage::Event { thread_id, event } => {
                 inner.last_activity.insert(thread_id.clone(), Instant::now());
-                // `agent_settled` is cleared by the service (`settle`), which records the run length.
-                // A run begun by `begin_run` keeps its earlier start.
-                if event.get("type").and_then(Value::as_str) == Some("agent_start") {
-                    inner.running.entry(thread_id.clone()).or_insert_with(now);
+                match event.get("type").and_then(Value::as_str) {
+                    // `agent_settled` is cleared by the service (`settle`), which records the run
+                    // length. A run begun by `begin_run` keeps its earlier start.
+                    Some("agent_start") => {
+                        inner.running.entry(thread_id.clone()).or_insert_with(now);
+                    }
+                    // Pi compacts on its own inside a run, but may do it before `agent_start`
+                    // (`_prepareRun`): a run nobody `begin_run` (a job's notice waking the thread)
+                    // counts from here. Not a `manual` one (`session.compact()`), outside any run.
+                    Some("compaction_start") => {
+                        if event.get("reason").and_then(Value::as_str) != Some("manual") {
+                            inner.running.entry(thread_id.clone()).or_insert_with(now);
+                        }
+                        inner.compacting.insert(thread_id.clone(), now());
+                    }
+                    Some("compaction_end") => {
+                        inner.compacting.remove(thread_id);
+                    }
+                    _ => {}
                 }
             }
             RuntimeMessage::Jobs { thread_id, running: 0 } => {
@@ -327,6 +345,7 @@ impl Runtime {
         inner.running.clear();
         inner.jobs.clear();
         inner.nix_shells.clear();
+        inner.compacting.clear();
         for (_, waiters) in inner.pending_loads.drain() {
             for w in waiters {
                 let _ = w.send(Err("runtime exited".into()));
@@ -362,6 +381,11 @@ impl Runtime {
         self.inner.lock().unwrap().nix_shells.contains_key(thread_id)
     }
 
+    /// Since when (unix ms) pi is compacting the thread's context, if it is.
+    pub fn compacting_since(&self, thread_id: &str) -> Option<i64> {
+        self.inner.lock().unwrap().compacting.get(thread_id).copied()
+    }
+
     /// A prompt is on its way: count the thread as running from now, so clients see it work
     /// while the session loads rather than only once pi reports `agent_start`.
     pub fn begin_run(&self, thread_id: &str) {
@@ -370,7 +394,10 @@ impl Runtime {
 
     /// The run is over: forget it and return how long it took.
     pub fn settle(&self, thread_id: &str) -> Option<i64> {
-        self.inner.lock().unwrap().running.remove(thread_id).map(|since| now() - since)
+        let mut inner = self.inner.lock().unwrap();
+        // Pi's own compactions never outlive their run.
+        inner.compacting.remove(thread_id);
+        inner.running.remove(thread_id).map(|since| now() - since)
     }
 
     /// Load a thread from its stored header + entries and wait until the runtime confirms.
@@ -414,6 +441,7 @@ impl Runtime {
         let mut inner = self.inner.lock().unwrap();
         inner.loaded.remove(thread_id);
         inner.running.remove(thread_id);
+        inner.compacting.remove(thread_id);
         inner.last_activity.remove(thread_id);
         Ok(())
     }

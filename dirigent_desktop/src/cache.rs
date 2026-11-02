@@ -199,6 +199,7 @@ impl Cache {
                 spend: r.get::<_, Option<String>>(18)?.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
                 forked_from: r.get::<_, Option<String>>(19)?.and_then(|s| serde_json::from_str(&s).ok()),
                 setup: None,
+                compacting_since: None,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -433,6 +434,7 @@ mod tests {
             spend: Default::default(),
             forked_from: None,
             setup: None,
+            compacting_since: None,
         }
     }
 

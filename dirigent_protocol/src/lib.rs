@@ -606,6 +606,10 @@ pub struct ThreadSummary {
     /// state, never stored.
     #[serde(default)]
     pub setup: Option<Setup>,
+    /// Unix millis its host started compacting the thread's context, while it does (pi's
+    /// `compaction_start` to `compaction_end`). Runtime state, never stored.
+    #[serde(default)]
+    pub compacting_since: Option<i64>,
 }
 
 /// Where a fork came from (`ThreadSummary::forked_from`): its source thread and the last
@@ -901,6 +905,7 @@ mod tests {
             spend: Spend { input: 10, output: 2, cached: 8, cost: 0.5 },
             forked_from: Some(ForkedFrom { thread_id: "t1".into(), entry_id: "e1".into() }),
             setup: Some(Setup::NixShell),
+            compacting_since: Some(6),
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
