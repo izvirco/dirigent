@@ -1,8 +1,9 @@
 //! dirigent_service: owns this host's threads (sqlite), drives the pi runtime,
 //! and serves them to desktops over WebSocket.
 //!
-//! A library so the desktop can run the local service in-process (`run`); the `dirigent`
-//! binary (`main.rs`) is the command line: `dirigent service` runs it on remote hosts.
+//! A library so the desktop can run the local service in-process (`run`) and the `dirigent`
+//! command line (`dirigent_cli`) shares its dirs and runtime; the `dirigent_service` binary
+//! is a thin wrapper for remote hosts.
 
 mod agent;
 mod blobs;
@@ -819,9 +820,9 @@ pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; d
                          %LOCALAPPDATA%\\dirigent on Windows) --config-dir DIR (config.toml, hosts.toml, themes; \
                          default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows)";
 
-/// Take `--data-dir DIR` / `--config-dir DIR` from the command line, both binaries' only
-/// options, and return the operands (the desktop takes a folder to open; `dirigent` its
-/// command).
+/// Take `--data-dir DIR` / `--config-dir DIR` from the command line, every binary's only
+/// options, and return the operands (the desktop takes a folder to open, `dirigent` its
+/// command, the service none).
 /// Call it first thing in `main`, before anything asks for a directory. A test instance
 /// points both elsewhere so it never touches the real dbs or config (and, unlike overriding
 /// `XDG_*`, nothing it spawns sees a changed environment).

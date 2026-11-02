@@ -67,16 +67,15 @@ None of it is tested by us (no Mac): CI only proves it builds.
 
 ## The command line (`dirigent`)
 
-`dirigent_service`'s binary, a console program next to the app in every install (and `~/.local/bin/dirigent`):
+`dirigent_cli`'s binary, a console program next to the app in every install (and `~/.local/bin/dirigent`):
 
 ```
 dirigent [dir]        start the desktop (a running one gets the folder)
 dirigent pi [args…]   the bundled pi's own CLI: `dirigent pi install npm:…`, `dirigent pi config`, a terminal session
-dirigent service      the headless service, for remote hosts
 ```
 
-`--data-dir` / `--config-dir` go first and apply to all of them. It finds the desktop and `runtime/` next to its
-own (real) path, so it works from an install, a nix package and `target/`.
+`--data-dir` / `--config-dir` go first and apply to both. It finds the desktop and `runtime/` next to its own
+(real) path, so it works from an install, a nix package and `target/`.
 
 Pi (the runtime and `dirigent pi` alike) keeps its agent dir (`auth.json`, `settings.json`, installed packages,
 extensions, skills…) in `<config dir>/agent`, apart from `~/.pi/agent`. The first start without one copies
@@ -156,9 +155,9 @@ On NixOS: import the flake's `nixosModules.dirigent_api` and set `services.dirig
 
 ## Nix (x86_64-linux)
 
-`flake.nix` packages all three: `dirigent_desktop` (the default; the app plus the `dirigent` command line),
-`dirigent_service` (the `dirigent` command line alone, for remote hosts: `dirigent service`), and
-`dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The first two are laid out like an
+`flake.nix` packages all three: `dirigent_desktop` (the default), `dirigent_service` for remote hosts, and
+`dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The first two come with the `dirigent`
+command line (`dirigent pi` signs in and installs extensions on a remote host too) and are laid out like an
 install: the binaries in `libexec/dirigent/` next to the compiled `runtime/`, symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
 driver: on NixOS `hardware.graphics.enable`; elsewhere nix's vulkan-loader may not find the system's drivers
 (nixGL).
@@ -167,7 +166,7 @@ Two hashes in `flake.nix` follow the lockfiles: `cargoDeps` (Cargo.lock) and `no
 changing a lockfile, set the hash to `lib.fakeHash` and run `nix build .#dirigent_service`, which needs both but
 doesn't build gpui; it prints the right hash.
 
-Not built yet: the standalone `dirigent service` for remote hosts could ship as a tarball the same way; an AUR
+Not built yet: the standalone `dirigent_service` for remote hosts could ship as a tarball the same way; an AUR
 package could repackage the Linux tarball (pacman would then update it, so its installs shouldn't self-update).
 
 ## The icon

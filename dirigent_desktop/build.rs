@@ -37,6 +37,8 @@ fn lilex(out: &Path) -> Result<(), String> {
     if let Ok(src) = std::env::var("DIRIGENT_LILEX_DIR") {
         for name in LILEX_FACES {
             let from = Path::new(&src).join(format!("Lilex-{name}.ttf"));
+            // Removed first: `copy` keeps the source's mode, read-only from a nix store.
+            let _ = std::fs::remove_file(face(name));
             std::fs::copy(&from, face(name)).map_err(|e| format!("{}: {e}", from.display()))?;
         }
     } else if !LILEX_FACES.iter().all(|name| face(name).exists()) {
