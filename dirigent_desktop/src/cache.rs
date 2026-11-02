@@ -394,6 +394,12 @@ impl Cache {
         self.conn.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)", params![key, value])?;
         Ok(())
     }
+
+    /// Nothing in `kv` yet: a new data dir. Using the app keeps things there (the pane, the
+    /// last project, ...).
+    pub fn kv_empty(&self) -> bool {
+        self.conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM kv)", [], |r| r.get(0)).unwrap_or(true)
+    }
 }
 
 #[cfg(test)]

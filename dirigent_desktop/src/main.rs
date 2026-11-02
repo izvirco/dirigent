@@ -8,6 +8,7 @@ mod add_project;
 mod ambient;
 mod app;
 mod cache;
+mod changelog;
 mod config;
 mod icons;
 mod images;

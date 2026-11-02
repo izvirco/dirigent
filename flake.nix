@@ -59,6 +59,7 @@
         fileset = lib.fileset.unions [
           ./Cargo.toml
           ./Cargo.lock
+          ./CHANGELOG.md # compiled into the desktop
           ./dirigent_api
           ./dirigent_desktop
           ./dirigent_protocol

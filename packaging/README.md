@@ -50,7 +50,7 @@ Apple silicon only, and the Linux install as is, minus the app menu entry and th
 (`~/.local/share/dirigent`, `~/.config/dirigent`), as developer tools on macOS mostly do.
 
 ```sh
-d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/beta/macos-aarch64 | tar xz -C "$d" && "$d/dirigent/install.sh"
+d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/stable/macos-aarch64 | tar xz -C "$d" && "$d/dirigent/install.sh"
 ```
 
 There's no `.app` yet: it starts from a terminal (`dirigent`), and quits with it.
@@ -85,13 +85,18 @@ can change in any release. What installs in the field rely on, and must stay com
 
 ## Making a release
 
-1. Bump `[workspace.package] version` in `Cargo.toml` (semver; a version is published once per channel) and push to
-   GitHub.
-2. Actions › Release › Run workflow, pick the channel (`beta`), optionally notes.
+1. Bump `[workspace.package] version` in `Cargo.toml` (semver; a version is published once per channel), make its
+   `CHANGELOG.md` section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
+   refuses a version without a final section; the app shows the changelog after updating
+   (`dirigent_desktop/src/changelog.rs`). Each section is a one-line summary, then a glanceable list: a short line
+   per change, ending in a link to its forge change (`([#101])`, with `[#101]: <change url>` under the section's
+   list). The next version's starts as a draft.
+2. Actions › Release › Run workflow, pick the channel: `nightly` (the default) or `stable`.
 
 Channels are independent: each is a build of its own (the update url is baked in) with its own versions. Publishing
-0.2.0 to `beta` and later the same commit to `stable` gives both a 0.2.0. A machine only updates within its channel:
-moving one to another channel is installing that channel's installer by hand.
+0.2.0 to `nightly` and later the same commit to `stable` gives both a 0.2.0. A machine only updates within its channel:
+moving one to another channel is installing that channel's installer by hand. (The first installs were on `beta`,
+which gets no more releases: they move to `nightly` or `stable` that way.)
 
 The workflow (`.github/workflows/release.yml`) has a job per platform. Each builds the desktop with the channel's
 update url baked in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime,

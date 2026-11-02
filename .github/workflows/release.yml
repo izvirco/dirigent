@@ -1,7 +1,8 @@
 # Builds the Windows installer and the Linux and macOS tarballs and publishes them to a channel. Run by
 # hand (Actions › Release › Run workflow) after bumping `[workspace.package] version` in
-# Cargo.toml: a version is published once per channel and platform (`dirigent_api publish`
-# refuses to overwrite it). Channels are independent builds with their own versions.
+# Cargo.toml and making its CHANGELOG.md section final (no "(draft)"), which the app shows: a
+# version is published once per channel and platform (`dirigent_api publish` refuses to
+# overwrite it). Channels (stable, nightly) are independent builds with their own versions.
 #
 # Repository settings it needs:
 #   variables  S3_ENDPOINT (https://fsn1.your-objectstorage.com), S3_REGION, S3_BUCKET
@@ -21,11 +22,10 @@ on:
     inputs:
       channel:
         description: Channel to publish to
-        default: beta
+        type: choice
+        options: [stable, nightly]
+        default: nightly
         required: true
-      notes:
-        description: Release notes (optional)
-        default: ""
 
 concurrency: release
 
@@ -40,7 +40,12 @@ jobs:
       - name: Version
         id: version
         shell: bash
-        run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          # No release without its CHANGELOG.md section, which the app shows after updating, and
+          # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
+          grep -Eq "^## $version[[:space:]]*\$" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -93,11 +98,10 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
           CHANNEL: ${{ inputs.channel }}
-          NOTES: ${{ inputs.notes }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform windows-x86_64 \
-            --version "$VERSION" --notes "$NOTES" "dist/Dirigent-Setup-$VERSION.exe"
+            --version "$VERSION" "dist/Dirigent-Setup-$VERSION.exe"
           echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/windows-x86_64" >> "$GITHUB_STEP_SUMMARY"
 
   linux:
@@ -110,7 +114,12 @@ jobs:
 
       - name: Version
         id: version
-        run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          # No release without its CHANGELOG.md section, which the app shows after updating, and
+          # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
+          grep -Eq "^## $version[[:space:]]*\$" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -164,11 +173,10 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
           CHANNEL: ${{ inputs.channel }}
-          NOTES: ${{ inputs.notes }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform linux-x86_64 \
-            --version "$VERSION" --notes "$NOTES" "dist/dirigent-$VERSION-linux-x86_64.tar.gz"
+            --version "$VERSION" "dist/dirigent-$VERSION-linux-x86_64.tar.gz"
           echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/linux-x86_64" >> "$GITHUB_STEP_SUMMARY"
 
   macos:
@@ -181,7 +189,12 @@ jobs:
 
       - name: Version
         id: version
-        run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          # No release without its CHANGELOG.md section, which the app shows after updating, and
+          # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
+          grep -Eq "^## $version[[:space:]]*\$" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -238,9 +251,8 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
           CHANNEL: ${{ inputs.channel }}
-          NOTES: ${{ inputs.notes }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform macos-aarch64 \
-            --version "$VERSION" --notes "$NOTES" "dist/dirigent-$VERSION-macos-aarch64.tar.gz"
+            --version "$VERSION" "dist/dirigent-$VERSION-macos-aarch64.tar.gz"
           echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/macos-aarch64" >> "$GITHUB_STEP_SUMMARY"

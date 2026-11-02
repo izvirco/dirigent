@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! dirigent_api serve
-//! dirigent_api publish --channel beta --platform windows-x86_64 --version 0.1.0 [--notes TEXT] FILE
+//! dirigent_api publish --channel nightly --platform windows-x86_64 --version 0.1.0 [--notes TEXT] FILE
 //! dirigent_api keygen FILE     a new signing key: the secret one to FILE, the public one printed
 //! ```
 //!

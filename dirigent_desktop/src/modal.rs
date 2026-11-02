@@ -1,7 +1,7 @@
 //! The frame every modal sits in: a card centered over a dimmed window. A press on the
 //! dim closes the modal (`Dirigent::dim_pressed`); the card occludes it, so presses
 //! inside the card never get there. One modal is open at a time: Add project
-//! (`add_project.rs`), or `Dirigent::modal` (Settings, Usage).
+//! (`add_project.rs`), or `Dirigent::modal` (Settings, Usage, Changelog).
 
 use crate::app::Dirigent;
 use crate::theme::{self, u};
