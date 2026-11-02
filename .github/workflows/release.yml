@@ -1,6 +1,6 @@
 # Builds the Windows installer and the Linux and macOS tarballs and publishes them to a channel. Run by
 # hand (Actions › Release › Run workflow) after bumping `[workspace.package] version` in
-# Cargo.toml and making its CHANGELOG.md section final (no "(draft)"), which the app shows: a
+# Cargo.toml and making its changelog.md section final (no "(draft)"), which the app shows: a
 # version is published once per channel and platform (`dirigent_api publish` refuses to
 # overwrite it). Channels (stable, nightly) are independent builds with their own versions.
 #
@@ -42,9 +42,9 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its CHANGELOG.md section, which the app shows after updating, and
+          # No release without its changelog.md section, which the app shows after updating, and
           # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
-          grep -Eq "^## $version[[:space:]]*\$" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
@@ -116,9 +116,9 @@ jobs:
         id: version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its CHANGELOG.md section, which the app shows after updating, and
+          # No release without its changelog.md section, which the app shows after updating, and
           # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
-          grep -Eq "^## $version[[:space:]]*\$" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
@@ -191,9 +191,9 @@ jobs:
         id: version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its CHANGELOG.md section, which the app shows after updating, and
+          # No release without its changelog.md section, which the app shows after updating, and
           # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
-          grep -Eq "^## $version[[:space:]]*\$" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2

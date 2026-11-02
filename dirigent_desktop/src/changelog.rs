@@ -1,4 +1,4 @@
-//! The changelog. The repo's `CHANGELOG.md` is compiled in: a `## <version>` section per
+//! The changelog. The repo's `changelog.md` is compiled in: a `## <version>` section per
 //! release (`## <version> (draft)` until it's out), newest first, and nothing else (it's
 //! shown as is). It opens by itself on the first start after an update (`after_update`), and
 //! from the version beside the sidebar's title; either way the whole history, to scroll down
@@ -14,7 +14,7 @@ use gpui::{AnyElement, Context, div, prelude::*};
 use semver::Version;
 use tracing::warn;
 
-const CHANGELOG: &str = include_str!("../../CHANGELOG.md");
+const CHANGELOG: &str = include_str!("../../changelog.md");
 /// `kv`: the newest version this data dir has run.
 const LAST_VERSION_KEY: &str = "last_version";
 const WIDTH: f32 = 620.;

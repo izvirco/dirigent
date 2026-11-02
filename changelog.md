@@ -52,5 +52,4 @@ Dirigent comes to Linux.
 
 ## 0.0.0
 
-Dirigent runs pi coding agents in your projects: a thread per task, an inbox for the ones waiting on you,
-sub-agents, and projects on other machines next to your own. This first release is for Windows.
+The best way to combobulate your codebase.
