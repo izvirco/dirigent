@@ -1,4 +1,4 @@
-# Builds the Windows installer and the Linux tarball and publishes both to a channel. Run by
+# Builds the Windows installer and the Linux and macOS tarballs and publishes them to a channel. Run by
 # hand (Actions › Release › Run workflow) after bumping `[workspace.package] version` in
 # Cargo.toml: a version is published once per channel and platform (`dirigent_api publish`
 # refuses to overwrite it). Channels are independent builds with their own versions.
@@ -10,7 +10,8 @@
 #              public half is in dirigent_protocol/src/release.rs
 #
 # A job per platform, each publishing its own (gpui's Windows build compiles its shaders with
-# the Windows SDK's fxc). If one fails, re-run just that one: the other's release is up.
+# the Windows SDK's fxc, its macOS build with Xcode's metal). If one fails, re-run just that
+# one: the others' releases are up.
 # The secrets are only given to the publish steps.
 
 name: Release
@@ -169,3 +170,77 @@ jobs:
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform linux-x86_64 \
             --version "$VERSION" --notes "$NOTES" "dist/dirigent-$VERSION-linux-x86_64.tar.gz"
           echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/linux-x86_64" >> "$GITHUB_STEP_SUMMARY"
+
+  macos:
+    # Apple silicon.
+    runs-on: macos-15
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Version
+        id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - uses: Swatinem/rust-cache@v2
+
+      # gpui compiles its shaders with Xcode's metal, which Xcode 26 only downloads on demand.
+      - name: Metal toolchain
+        run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the desktop
+        env:
+          DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
+        run: cargo build --release --locked -p dirigent_desktop
+
+      - name: Build the runtime
+        working-directory: dirigent_runtime
+        run: bun run build
+
+      # Linux's layout and install.sh. Without a developer account nothing is signed for real:
+      # Apple silicon runs any binary with an ad-hoc signature (the linker and bun make one;
+      # this makes sure), and Gatekeeper only checks quarantined files, which a curl install
+      # and the app's own updates never are.
+      - name: Pack the tarball
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist/dirigent/licenses
+          cp target/release/dirigent_desktop dist/dirigent/dirigent
+          mv dist/runtime dist/dirigent/runtime
+          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/runtime/dirigent_runtime
+          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/runtime/dirigent_runtime
+          cp packaging/linux/install.sh dist/dirigent/
+          curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
+          echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/dirigent/licenses/Lilex-OFL.txt" | shasum -a 256 -c
+          # No AppleDouble (._*) files or extended attributes in the archive.
+          COPYFILE_DISABLE=1 tar --no-xattrs -czf "dist/dirigent-$VERSION-macos-aarch64.tar.gz" -C dist dirigent
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dirigent-${{ steps.version.outputs.version }}-macos-aarch64
+          path: dist/dirigent-${{ steps.version.outputs.version }}-macos-aarch64.tar.gz
+
+      - name: Publish
+        env:
+          S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+          S3_REGION: ${{ vars.S3_REGION }}
+          S3_BUCKET: ${{ vars.S3_BUCKET }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
+          CHANNEL: ${{ inputs.channel }}
+          NOTES: ${{ inputs.notes }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform macos-aarch64 \
+            --version "$VERSION" --notes "$NOTES" "dist/dirigent-$VERSION-macos-aarch64.tar.gz"
+          echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/macos-aarch64" >> "$GITHUB_STEP_SUMMARY"

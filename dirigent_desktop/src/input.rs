@@ -4,7 +4,7 @@
 //! (wheel, and automatically to keep the cursor in view) and paints cursor/selection.
 //! Mouse selection (double click = word, triple = all) keeps following the mouse once it
 //! leaves the input, and every edit is undoable (typing a word is one step). Ctrl+backspace /
-//! ctrl+delete delete a word (`word_boundary`).
+//! ctrl+delete (alt on macOS) delete a word (`word_boundary`).
 //! Adapted from zed's `gpui/examples/input.rs`, extended to multiple lines.
 
 use crate::select::{self, word_at};
@@ -57,7 +57,7 @@ const BAR_GUTTER: f32 = 12.;
 const UNDO_GROUP: Duration = Duration::from_secs(1);
 const UNDO_DEPTH: usize = 200;
 
-/// Emitted on ctrl+Enter, or shift+Enter with `queued` (Enter alone inserts a newline;
+/// Emitted on ctrl+Enter (cmd on macOS), or shift+Enter with `queued` (Enter alone inserts a newline;
 /// single-line inputs submit on Enter too, with `ctrl` false). What `queued` means is up to
 /// the subscriber.
 pub struct Submitted {
@@ -1037,34 +1037,47 @@ impl Focusable for TextInput {
     }
 }
 
-/// Key bindings for the `Input` context. Registered once in `main`.
+/// The shortcuts' modifier as hints name it: what gpui's `secondary-` binds, cmd on macOS
+/// and ctrl elsewhere.
+pub const MOD: &str = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
+
+/// Key bindings for the `Input` context. Registered once in `main`. `secondary-` is cmd on
+/// macOS, ctrl elsewhere.
 pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     use gpui::KeyBinding;
     let c = Some(KEY_CONTEXT);
-    vec![
+    let mac = cfg!(target_os = "macos");
+    // A word at a time: alt on macOS, where cmd+backspace deletes the whole line.
+    let word = if mac { "alt" } else { "ctrl" };
+    let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, c),
         KeyBinding::new("delete", Delete, c),
-        KeyBinding::new("ctrl-backspace", BackspaceWord, c),
-        KeyBinding::new("ctrl-delete", DeleteWord, c),
+        KeyBinding::new(&format!("{word}-backspace"), BackspaceWord, c),
+        KeyBinding::new(&format!("{word}-delete"), DeleteWord, c),
         KeyBinding::new("left", Left, c),
         KeyBinding::new("right", Right, c),
         KeyBinding::new("up", Up, c),
         KeyBinding::new("down", Down, c),
         KeyBinding::new("shift-left", SelectLeft, c),
         KeyBinding::new("shift-right", SelectRight, c),
-        KeyBinding::new("ctrl-a", SelectAll, c),
-        KeyBinding::new("ctrl-v", Paste, c),
-        KeyBinding::new("ctrl-c", Copy, c),
-        KeyBinding::new("ctrl-x", Cut, c),
-        KeyBinding::new("ctrl-z", Undo, c),
-        KeyBinding::new("ctrl-shift-z", Redo, c),
-        KeyBinding::new("ctrl-y", Redo, c),
+        KeyBinding::new("secondary-a", SelectAll, c),
+        KeyBinding::new("secondary-v", Paste, c),
+        KeyBinding::new("secondary-c", Copy, c),
+        KeyBinding::new("secondary-x", Cut, c),
+        KeyBinding::new("secondary-z", Undo, c),
+        KeyBinding::new("secondary-shift-z", Redo, c),
+        KeyBinding::new("secondary-y", Redo, c),
         KeyBinding::new("home", Home, c),
         KeyBinding::new("end", End, c),
         KeyBinding::new("enter", Newline, c),
-        KeyBinding::new("ctrl-enter", Submit, c),
+        KeyBinding::new("secondary-enter", Submit, c),
         KeyBinding::new("shift-enter", SubmitQueued, c),
-    ]
+    ];
+    if mac {
+        // A MacBook has no Home / End keys.
+        bindings.extend([KeyBinding::new("cmd-left", Home, c), KeyBinding::new("cmd-right", End, c)]);
+    }
+    bindings
 }
 
 #[cfg(test)]

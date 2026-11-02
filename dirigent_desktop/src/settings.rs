@@ -10,7 +10,7 @@
 use crate::ambient::{Pattern, Reach};
 use crate::app::{Dirigent, Menu};
 use crate::icons::icon;
-use crate::input::TextInput;
+use crate::input::{self, TextInput};
 use crate::lists::scroll;
 use crate::menu::{self, Side};
 use crate::modal;
@@ -259,19 +259,19 @@ fn background_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div>
         .children(menu)
 }
 
-/// `−  13  +`: the UI's text size, a px at a time (also ctrl - / ctrl =, ctrl 0 resets).
-/// Everything else scales with it.
+/// `−  13  +`: the UI's text size, a px at a time (also ctrl - / ctrl =, ctrl 0 resets; cmd
+/// on macOS). Everything else scales with it.
 fn text_size(size: f32, cx: &mut Context<Dirigent>) -> Div {
-    let step = |id: &'static str, icon: &'static str, delta: f32, tip: &'static str, cx: &mut Context<Dirigent>| {
+    let step = |id: &'static str, icon: &'static str, delta: f32, tip: String, cx: &mut Context<Dirigent>| {
         theme::icon_button(id, icon, cx, move |this, cx| this.step_text_size(delta, cx)).tooltip(theme::tooltip(tip))
     };
     div()
         .flex()
         .flex_row()
         .items_center()
-        .child(step("text-smaller", "minus", -1., "Smaller (ctrl -)", cx))
+        .child(step("text-smaller", "minus", -1., format!("Smaller ({} -)", input::MOD), cx))
         .child(div().w(u(32.)).text_center().child(format!("{size}")))
-        .child(step("text-bigger", "plus", 1., "Bigger (ctrl =)", cx))
+        .child(step("text-bigger", "plus", 1., format!("Bigger ({} =)", input::MOD), cx))
 }
 
 fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {

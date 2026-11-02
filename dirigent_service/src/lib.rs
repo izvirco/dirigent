@@ -845,7 +845,11 @@ pub fn data_dir() -> PathBuf {
 /// `dirigent_runtime/build.ts`); else, in a dev checkout, `bun run` its source
 /// (`../../dirigent_runtime/src/index.ts` from the binary).
 fn runtime_cmd() -> Result<Vec<String>> {
+    // Links resolved: on macOS `current_exe` is the path it was started by, for an install
+    // the `~/.local/bin/dirigent` link (Linux resolves it already). Not on Windows, where a
+    // canonical path is a `\\?\` one.
     let exe = std::env::current_exe()?;
+    let exe = if cfg!(windows) { exe } else { exe.canonicalize()? };
     let compiled = exe.with_file_name("runtime").join(format!("dirigent_runtime{}", std::env::consts::EXE_SUFFIX));
     let path = match std::env::var("DIRIGENT_RUNTIME") {
         Ok(p) => PathBuf::from(p),

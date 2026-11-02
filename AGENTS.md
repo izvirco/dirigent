@@ -28,6 +28,7 @@ Read `testing.md` (how to drive the UI) first.
 - **Hover-revealed controls**: `group("row")` on the row + `opacity(0.).group_hover("row", |d| d.opacity(1.))` on the control; `cx.stop_propagation()` in its click handler so the row doesn't also fire.
 - **Hover-revealed overlays** (sidebar peek): make the hot zone and the panel _one_ element whose width depends on the hover state, so a single `on_hover` covers both. Two elements flicker as the mouse crosses from one to the other.
 - **gpui `Animation::with_max_fps`** never redraws (its throttled notify doesn't reach the window): leave it off and let `with_animation` request frames.
+- **Shortcuts**: bind `secondary-x` (cmd on macOS, ctrl elsewhere) and name the modifier in hints with `input::MOD`, never a bare `ctrl-`.
 - **gpui `Context::spawn` / listeners** often lack a `Window`; focus via `Dirigent::focus()` (deferred through the stored `AnyWindowHandle`).
 - **oxfmt reformats TS to 2 spaces** — after `bun run fmt`, string-based patching of the runtime files silently misses; read the file first.
 - **Default pi model may be rate-limited**; use `anthropic/claude-opus-5-5` for tests. Pick it in the model chip, it's remembered.
@@ -45,6 +46,10 @@ The desktop and service also build natively on Windows (MSVC: rustup + Visual St
 - Paths from a host may be Windows paths (`C:\x\y`): the desktop splits them at `\` too (`projects::basename`, `add_project::split`).
 - `build.rs` downloads Lilex (embedded in the binary) unless `DIRIGENT_LILEX_DIR` points at its TTFs; the dev shells set it, so builds there work offline. On a Windows target it also compiles the icon and version info into the exe (resource 1 is also gpui's window icon).
 - `scripts/ui.sh` is Linux-only; Seb tests on Windows himself. You can still check that it compiles: `nix develop .#windows -c cargo clippy --workspace --all-targets --target x86_64-pc-windows-gnu`.
+
+## macOS
+
+Released for Apple silicon as a tarball, the Linux install minus the app menu (`packaging/README.md`). Built by the release workflow only: nobody here has a Mac, so nothing is tried on one. Same dirs as Linux; what differs is the host name (`platform.rs`), fonts (`config.rs`, Core Text instead of fontconfig) and the shortcuts' modifier.
 
 ## Checks before you're done
 
