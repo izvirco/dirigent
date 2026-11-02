@@ -7,11 +7,12 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
 use axum::response::Response;
 use axum::routing::get;
+use axum::serve::ListenerExt;
 use dirigent_protocol::{ClientMessage, ServerMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
@@ -29,10 +30,28 @@ pub async fn bind(addrs: &[SocketAddr]) -> anyhow::Result<Vec<TcpListener>> {
 pub async fn serve(svc: Arc<Service>, listeners: Vec<TcpListener>) -> anyhow::Result<()> {
     let app = Router::new().route("/ws", get(upgrade)).with_state(svc);
     // With each connection's peer address, for the log.
-    let serve = |l| axum::serve(l, app.clone().into_make_service_with_connect_info::<SocketAddr>()).into_future();
+    let serve = |l: TcpListener| axum::serve(l.tap_io(tune), app.clone().into_make_service_with_connect_info::<SocketAddr>()).into_future();
     futures_util::future::try_join_all(listeners.into_iter().map(serve)).await?;
     Ok(())
 }
+
+/// Keep at most this much unsent data in a connection's kernel send buffer. Left alone,
+/// Linux grows the buffer to megabytes and fills it with images, and what is in it goes out
+/// first: on a slow link a reply would wait seconds behind them however `connection` orders
+/// its writes. Only unsent data counts, not data in flight, so throughput is the same.
+#[cfg(target_os = "linux")]
+const NOTSENT_LOWAT: u32 = 128 << 10;
+
+/// Set up an accepted connection's socket (`NOTSENT_LOWAT`; Windows has no such option).
+#[cfg(target_os = "linux")]
+fn tune(tcp: &mut TcpStream) {
+    if let Err(e) = socket2::SockRef::from(&*tcp).set_tcp_notsent_lowat(NOTSENT_LOWAT) {
+        warn!("set TCP_NOTSENT_LOWAT: {e}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn tune(_: &mut TcpStream) {}
 
 /// Largest message we read, and frame too: clients send each message as one frame, so
 /// axum's 16 MiB frame default would cut off big requests far below its message limit.
@@ -47,14 +66,20 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
     debug!(%peer, "client connected");
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    // Images (`Blob` replies) have a queue of their own, sent from only when nothing else
+    // waits: opening a thread asks for all its images at once, possibly hundreds of MB,
+    // minutes over a slow link, and every reply and push would wait behind them.
+    let (blobs, mut blobs_rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut push_rx = svc.push.subscribe();
 
     let _ = out.send(ServerMessage::Hello { host_name: svc.host_name.clone(), version: env!("CARGO_PKG_VERSION").into() });
 
-    // Writer: merges replies for this connection with global pushes.
+    // Writer: this connection's replies, then global pushes, then images. One image already
+    // being written still goes first: a message can't be cut into.
     let writer = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {
+                biased;
                 Some(m) = out_rx.recv() => m,
                 p = push_rx.recv() => match p {
                     Ok(m) => m,
@@ -64,6 +89,7 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                Some(m) = blobs_rx.recv() => m,
                 else => break,
             };
             let text = serde_json::to_string(&msg).unwrap();
@@ -93,9 +119,11 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         };
         match serde_json::from_str::<ClientMessage>(&text) {
             Ok(req) => {
-                let (svc, out) = (svc.clone(), out.clone());
+                let (svc, out, blobs) = (svc.clone(), out.clone(), blobs.clone());
                 tokio::spawn(async move {
-                    let _ = out.send(svc.handle(req).await);
+                    let reply = svc.handle(req).await;
+                    let queue = if matches!(reply, ServerMessage::Blob { .. }) { &blobs } else { &out };
+                    let _ = queue.send(reply);
                 });
             }
             Err(e) => {

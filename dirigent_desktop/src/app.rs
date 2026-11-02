@@ -515,9 +515,12 @@ pub struct Dirigent {
     /// Mouse selection in the transcript or the work log.
     pub selection: Selection,
     /// Images referenced from entries, by blob id: filled from the cache db, else fetched
-    /// from the host once (`blob_requests`) when the thread shows them.
+    /// from the host (`blob_requests`) when the thread shows them.
     pub blobs: HashMap<String, Blob>,
-    blob_requests: HashSet<String>,
+    /// Blob ids asked of each host and not in yet. A dropped connection (or a host removed
+    /// from `hosts.toml`) loses the answers: its host's set goes, so the open thread's fetch
+    /// on reconnect asks again.
+    blob_requests: HashMap<String, HashSet<String>>,
     /// A draft was sent (`CreateThread` with its first prompt), not yet confirmed.
     pending: Option<PendingDraft>,
     /// Draft: start the thread in its own workspace (the composer's `isolated` chip), and
@@ -665,7 +668,7 @@ impl Dirigent {
             preview: None,
             selection: Selection::default(),
             blobs: HashMap::new(),
-            blob_requests: HashSet::new(),
+            blob_requests: HashMap::new(),
             pending: None,
             isolate,
             base: None,
@@ -995,6 +998,10 @@ impl Dirigent {
                 if let Some(h) = self.host_mut(&host) {
                     h.status = status;
                 }
+                // Images asked for and not in yet won't come over a dropped connection.
+                if status == HostStatus::Disconnected {
+                    self.blob_requests.remove(&host);
+                }
                 // The open thread is fetched once its host connects (`fetch_open` doesn't ask
                 // while it's offline).
                 if status == HostStatus::Connected && self.open().is_some_and(|t| t.host == host) {
@@ -1194,7 +1201,9 @@ impl Dirigent {
                 }
             }
             ServerMessage::Blob { blob_id, mime_type, data, .. } => {
-                self.blob_requests.remove(&blob_id);
+                if let Some(asked) = self.blob_requests.get_mut(&host) {
+                    asked.remove(&blob_id);
+                }
                 if let Some(blob) = decode_blob(&mime_type, &data) {
                     self.blobs.insert(blob_id, blob);
                 }
@@ -2599,6 +2608,8 @@ impl Dirigent {
             self.net.remove(&name);
             self.hosts.retain(|h| h.name != name);
             self.links.retain(|(h, _), _| *h != name);
+            // Its connection ends without a `Disconnected`: what it was fetching never comes.
+            self.blob_requests.remove(&name);
             // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
                 self.set_pane(Pane::Inbox, cx);
@@ -3141,13 +3152,14 @@ impl Dirigent {
     }
 
     /// Make sure every image the open thread shows is in `blobs`: from the cache db, else
-    /// asked of the host (once).
+    /// asked of the host (once per connection: `blob_requests`).
     fn fetch_blobs(&mut self) {
         let Pane::Thread(t) = &self.pane else { return };
         let host = t.host.clone();
+        let asked = self.blob_requests.get(&host);
         let ids: Vec<String> = view::blobs_shown(&t.timeline.items)
             .into_iter()
-            .filter(|id| !self.blobs.contains_key(id) && !self.blob_requests.contains(id))
+            .filter(|id| !self.blobs.contains_key(id) && !asked.is_some_and(|a| a.contains(id)))
             .collect();
         for id in ids {
             let cached = self.cache.lock().unwrap().blob(&id);
@@ -3157,7 +3169,7 @@ impl Dirigent {
                 }
                 None => {
                     let rid = self.next_id();
-                    self.blob_requests.insert(id.clone());
+                    self.blob_requests.entry(host.clone()).or_default().insert(id.clone());
                     self.net.send(&host, ClientMessage::GetBlob { id: rid, blob_id: id });
                 }
             }

@@ -99,15 +99,21 @@ async function handle(msg: Inbound): Promise<void> {
   }
 }
 
-// Decode stdin into lines, dispatching each message without awaiting it so a
-// long `prompt` never blocks a concurrent `abort`.
-let buf = "";
+// Split stdin into lines, dispatching each message without awaiting it so a
+// long `prompt` never blocks a concurrent `abort`. A `load` is one line of the
+// whole thread, images inline (hundreds of MB): keep the bytes of an unfinished
+// line and search only each new chunk for "\n", so reading stays linear. A line
+// is decoded only once complete, so no UTF-8 character is split across chunks.
+let partial: Uint8Array[] = [];
+const decoder = new TextDecoder();
 for await (const chunk of Bun.stdin.stream()) {
-  buf += new TextDecoder().decode(chunk);
+  let start = 0;
   let nl: number;
-  while ((nl = buf.indexOf("\n")) >= 0) {
-    const line = buf.slice(0, nl).trim();
-    buf = buf.slice(nl + 1);
+  while ((nl = chunk.indexOf(10, start)) >= 0) {
+    partial.push(chunk.subarray(start, nl));
+    const line = decoder.decode(Buffer.concat(partial)).trim();
+    partial = [];
+    start = nl + 1;
     if (!line) continue;
     let msg: Inbound;
     try {
@@ -122,6 +128,7 @@ for await (const chunk of Bun.stdin.stream()) {
       send({ type: "error", thread_id: threadId, message: (e as Error).message ?? String(e) });
     });
   }
+  if (start < chunk.length) partial.push(chunk.subarray(start));
 }
 
 sessions.disposeAll();
