@@ -1,8 +1,11 @@
 //! dirigent_api: the update api at `https://dirigent.sebba.dev/api/v0/` (run behind a TLS
-//! proxy), and the `publish` command the release workflow uploads a release with.
+//! proxy), the leaderboard's, and the `publish` command the release workflow uploads a
+//! release with.
 //!
 //! Releases are files in a public S3 bucket (`bucket.rs`): `publish` is its only writer and
-//! needs the bucket's keys; `serve` only reads, anonymously, so the server holds no secrets.
+//! needs the bucket's keys; `serve` only reads them, anonymously. The leaderboard
+//! (`leaderboard.rs`) is what makes the server hold a secret and data: the forge app's
+//! client secret, and a sqlite db (`store.rs`).
 //!
 //! ```text
 //! dirigent_api serve
@@ -14,11 +17,15 @@
 //! `S3_BUCKET`, `S3_PREFIX` (optional, e.g. `test/` to keep tests away from real releases);
 //! `publish` also `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `DIRIGENT_SIGNING_KEY` (the
 //! minisign secret key file's text); `serve` takes `DIRIGENT_API_BIND` (default
-//! `127.0.0.1:7790`). `DIRIGENT_LOG` sets the log filter (default `info`).
+//! `127.0.0.1:7790`) and, for the leaderboard, `FORGE_CLIENT_ID`, `FORGE_CLIENT_SECRET`,
+//! `FORGE_URL`, `DIRIGENT_API_URL` and `DIRIGENT_API_DB` (see `Leaderboard::from_env`;
+//! without a client id it's off). `DIRIGENT_LOG` sets the log filter (default `info`).
 
 mod bucket;
+mod leaderboard;
 mod publish;
 mod serve;
+mod store;
 
 use anyhow::{Context, Result, bail};
 use tracing_subscriber::EnvFilter;
@@ -45,7 +52,8 @@ async fn run() -> Result<()> {
     match command.as_deref() {
         Some("serve") => {
             let bind = std::env::var("DIRIGENT_API_BIND").unwrap_or_else(|_| "127.0.0.1:7790".into());
-            serve::run(bucket, bind.parse().with_context(|| format!("DIRIGENT_API_BIND {bind}"))?).await
+            let board = leaderboard::Leaderboard::from_env()?;
+            serve::run(bucket, bind.parse().with_context(|| format!("DIRIGENT_API_BIND {bind}"))?, board).await
         }
         Some("publish") => {
             let args = publish::Args::parse(args)?;

@@ -83,7 +83,11 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
     let (blobs, mut blobs_rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut push_rx = svc.push.subscribe();
 
-    let _ = out.send(ServerMessage::Hello { host_name: svc.host_name.clone(), version: env!("CARGO_PKG_VERSION").into() });
+    let _ = out.send(ServerMessage::Hello {
+        host_name: svc.host_name.clone(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        service_id: svc.service_id.clone(),
+    });
 
     // Writer: this connection's replies, then global pushes, then images. One image already
     // being written still goes first: a message can't be cut into.

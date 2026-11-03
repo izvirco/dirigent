@@ -14,6 +14,7 @@ mod icons;
 mod images;
 mod input;
 mod instance;
+mod leaderboard;
 mod lists;
 mod markdown;
 mod menu;

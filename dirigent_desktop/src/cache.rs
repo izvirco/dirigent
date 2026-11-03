@@ -396,6 +396,11 @@ impl Cache {
         Ok(())
     }
 
+    pub fn remove(&self, key: &str) -> Result<()> {
+        self.conn.execute("DELETE FROM kv WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     /// Nothing in `kv` yet: a new data dir. Using the app keeps things there (the pane, the
     /// last project, ...).
     pub fn kv_empty(&self) -> bool {

@@ -29,6 +29,7 @@ icons!(
     "claude",
     "copy",
     "corner-down-right",
+    "crown",
     "ellipsis",
     "folder",
     "git-branch",

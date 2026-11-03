@@ -6,9 +6,11 @@
 //! ```
 //!
 //! Both read the channel file from the bucket, cached for a minute: publishing shows up
-//! within one desktop check interval.
+//! within one desktop check interval. The leaderboard's endpoints come along when it's on
+//! (`leaderboard.rs`).
 
 use crate::bucket::{self, Bucket};
+use crate::leaderboard::{self, Leaderboard};
 use anyhow::{Result, anyhow};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
@@ -30,12 +32,15 @@ struct Api {
     cache: Mutex<HashMap<String, (Instant, Option<Release>)>>,
 }
 
-pub async fn run(bucket: Bucket, bind: SocketAddr) -> Result<()> {
+pub async fn run(bucket: Bucket, bind: SocketAddr, board: Option<Arc<Leaderboard>>) -> Result<()> {
     let api = Arc::new(Api { bucket, cache: Mutex::default() });
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/api/v0/updates/{channel}/{platform}", get(updates))
         .route("/api/v0/download/{channel}/{platform}", get(download))
         .with_state(api);
+    if let Some(board) = board {
+        app = app.merge(leaderboard::router(board));
+    }
     let listener = tokio::net::TcpListener::bind(bind).await?;
     info!("listening on http://{bind}");
     axum::serve(listener, app).await?;

@@ -64,6 +64,8 @@ pub struct Service {
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
+    /// `Storage::service_id`, sent in every `Hello`.
+    pub service_id: String,
 }
 
 #[derive(Default)]
@@ -1027,6 +1029,7 @@ fn tailscale_ips() -> Vec<IpAddr> {
 /// already owns this host.
 pub async fn run(port: u16) -> Result<()> {
     let storage = Storage::open(&data_dir().join("service.db"))?;
+    let service_id = storage.service_id()?;
     let cmd = runtime_cmd()?;
     // Bound before the runtime starts: a service that can't listen leaves no runtime behind
     // (the desktop retries its embedded one) and logs nothing more.
@@ -1042,6 +1045,7 @@ pub async fn run(port: u16) -> Result<()> {
         logins: Mutex::new(Default::default()),
         push: broadcast::channel(1024).0,
         host_name,
+        service_id,
     });
 
     tokio::spawn({

@@ -2,8 +2,9 @@
 //!
 //! Requests carry an `id`, replies carry `reply_to`, pushes have neither.
 //! Pi entries and events stay opaque `serde_json::Value`s so this crate is pi-version-agnostic.
-//! `release` is the other wire: the update api's.
+//! `release` and `leaderboard` are the other wire: the update api's (`dirigent_api`).
 
+pub mod leaderboard;
 pub mod release;
 
 use serde::{Deserialize, Serialize};
@@ -314,6 +315,10 @@ pub enum ServerMessage {
     Hello {
         host_name: String,
         version: String,
+        /// Random, made once per service (its `service.db`): what the leaderboard counts a
+        /// service's usage under, whichever desktops upload it. Empty from older services.
+        #[serde(default)]
+        service_id: String,
     },
     /// Reply to `ListProjects`, or pushed (`reply_to: None`) whenever a project changes.
     Projects {
@@ -1108,7 +1113,7 @@ mod tests {
         let e = Entry::from_pi(0, json!({"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"hi"}}));
         assert_eq!(e.kind, "message");
         assert_eq!(e.parent_id, None);
-        roundtrip(ServerMessage::Hello { host_name: "h".into(), version: "0".into() });
+        roundtrip(ServerMessage::Hello { host_name: "h".into(), version: "0".into(), service_id: "s".into() });
         roundtrip(ServerMessage::Threads { reply_to: None, threads: vec![t.clone()] });
         roundtrip(ServerMessage::Thread {
             reply_to: 1,

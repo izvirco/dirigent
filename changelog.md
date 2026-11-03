@@ -7,12 +7,15 @@
 - Drag projects on the Projects page to reorder them; the sidebar and the new-thread project menu follow that order ([#107])
 - The new-thread project menu has a search ([#107])
 - Pi 1.5.0: faster streaming of big tool calls and code-heavy answers, GPT-6.1 Terra ([#109])
+- A leaderboard in the Usage modal: join with your forge account and race everyone on cost and tokens ([#110])
+- Usage charts show cost, tokens, output or messages, per slot or as a running total ([#110])
 
 [#96]: https://forge.sebba.dev/izvir/dirigent/changes/96
 [#105]: https://forge.sebba.dev/izvir/dirigent/changes/105
 [#106]: https://forge.sebba.dev/izvir/dirigent/changes/106
 [#107]: https://forge.sebba.dev/izvir/dirigent/changes/107
 [#109]: https://forge.sebba.dev/izvir/dirigent/changes/109
+[#110]: https://forge.sebba.dev/izvir/dirigent/changes/110
 
 ## 0.0.3
 
