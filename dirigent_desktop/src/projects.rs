@@ -202,6 +202,7 @@ mod tests {
             pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
+            free_jobs: 0,
             spend: Default::default(),
             forked_from: None,
             setup: None,

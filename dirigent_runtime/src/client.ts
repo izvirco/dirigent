@@ -23,8 +23,10 @@ export interface ThreadSummary {
   snoozed: boolean;
   /** When it was last given a task (a prompt that started a turn); orders a parent's children. */
   prompted_at: number | null;
-  /** `async_bash` jobs running in its live session. */
+  /** `async_bash` jobs running in its live session that it waits on. */
   jobs: number;
+  /** `async_bash` jobs it left running (`notify: "never"`): servers, watchers. */
+  free_jobs?: number;
 }
 
 export interface Project {
@@ -606,7 +608,9 @@ export function describeThread(f: Found, now = Date.now()): string {
         : t.snoozed
           ? "snoozed"
           : "done";
-  const jobs = t.jobs > 0 ? `, ${t.jobs} job${t.jobs === 1 ? "" : "s"} running` : "";
+  const jobs =
+    (t.jobs > 0 ? `, ${t.jobs} job${t.jobs === 1 ? "" : "s"} running` : "") +
+    (t.free_jobs ? `, ${t.free_jobs} job${t.free_jobs === 1 ? "" : "s"} left running` : "");
   const parent = t.parent_id ? ` parent=${t.parent_id}` : "";
   const project = f.project ? ` project=${f.project.path}` : " project=(removed)";
   // A thread in its own workspace works somewhere else than its project.

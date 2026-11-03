@@ -746,6 +746,11 @@ pub struct ThreadSummary {
     /// whose turn ended with jobs running is waiting on them (they wake it when they end).
     #[serde(default)]
     pub jobs: u32,
+    /// `async_bash` jobs it left running (`notify: "never"`: dev servers, watchers), not in
+    /// `jobs`. Nothing waits on them, so the thread can finish; archiving it stops them.
+    /// Runtime state, never stored.
+    #[serde(default)]
+    pub free_jobs: u32,
     /// What the thread's own agent has consumed so far (its sub-agents not included, nor,
     /// in a fork, what its source spent on the history it copied).
     #[serde(default)]
@@ -1022,7 +1027,7 @@ mod tests {
         assert!(!t.snoozed);
         assert_eq!(t.parent_id, None);
         assert_eq!(t.prompted_at, None);
-        assert_eq!(t.jobs, 0);
+        assert_eq!((t.jobs, t.free_jobs), (0, 0));
         assert_eq!(t.spend, Spend::default());
         assert_eq!(t.setup, None);
         assert_eq!(t.forked_from, None);
@@ -1059,6 +1064,7 @@ mod tests {
             pinned_entries: vec!["e1".into()],
             prompted_at: Some(4),
             jobs: 2,
+            free_jobs: 1,
             spend: Spend { input: 10, output: 2, cached: 8, cost: 0.5 },
             forked_from: Some(ForkedFrom { thread_id: "t1".into(), entry_id: "e1".into() }),
             setup: Some(Setup::NixShell),

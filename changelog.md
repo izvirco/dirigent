@@ -1,3 +1,9 @@
+## 0.0.5 (draft)
+
+- Threads that leave a dev server running land in the Inbox; archiving stops the server ([#112])
+
+[#112]: https://forge.sebba.dev/izvir/dirigent/changes/112
+
 ## 0.0.4
 
 Sign in to providers without a terminal, put your projects in order, and race everyone on the usage leaderboard.

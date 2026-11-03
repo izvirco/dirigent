@@ -43,10 +43,12 @@ pub enum RuntimeMessage {
         thread_id: String,
         ask: Ask,
     },
-    /// A thread's count of running `async_bash` jobs changed.
+    /// A thread's counts of running `async_bash` jobs changed: those it waits on (their end
+    /// wakes it) and those it left running (`notify: "never"`: servers, watchers).
     Jobs {
         thread_id: String,
         running: u32,
+        free: u32,
     },
     /// A session load started (`active`) or finished capturing its nix dev shell.
     NixShell {
@@ -212,8 +214,9 @@ struct Inner {
     /// Threads with a run in progress, with the start time (unix ms): from the prompt being
     /// sent (`begin_run`) or pi's `agent_start`, until `agent_settled`.
     running: HashMap<String, i64>,
-    /// Running `async_bash` jobs per thread, as the runtime last reported (`jobs`); absent = none.
-    jobs: HashMap<String, u32>,
+    /// Running `async_bash` jobs per thread, as the runtime last reported (`jobs`): those it
+    /// waits on and those it left running (`free_jobs`). Absent = none.
+    jobs: HashMap<String, (u32, u32)>,
     /// Nix dev shell captures in progress per thread (`nix_shell`): a count, as a session
     /// reloaded meanwhile starts another while the first still runs; absent = none.
     nix_shells: HashMap<String, u32>,
@@ -352,11 +355,11 @@ impl Runtime {
                     _ => {}
                 }
             }
-            RuntimeMessage::Jobs { thread_id, running: 0 } => {
+            RuntimeMessage::Jobs { thread_id, running: 0, free: 0 } => {
                 inner.jobs.remove(thread_id);
             }
-            RuntimeMessage::Jobs { thread_id, running } => {
-                inner.jobs.insert(thread_id.clone(), *running);
+            RuntimeMessage::Jobs { thread_id, running, free } => {
+                inner.jobs.insert(thread_id.clone(), (*running, *free));
             }
             RuntimeMessage::NixShell { thread_id, active: true } => {
                 *inner.nix_shells.entry(thread_id.clone()).or_default() += 1;
@@ -408,9 +411,14 @@ impl Runtime {
         self.inner.lock().unwrap().running.get(thread_id).copied()
     }
 
-    /// How many `async_bash` jobs the thread has running.
+    /// How many `async_bash` jobs the thread has running that it waits on.
     pub fn jobs(&self, thread_id: &str) -> u32 {
-        self.inner.lock().unwrap().jobs.get(thread_id).copied().unwrap_or(0)
+        self.inner.lock().unwrap().jobs.get(thread_id).map_or(0, |j| j.0)
+    }
+
+    /// How many `async_bash` jobs the thread left running (`notify: "never"`).
+    pub fn free_jobs(&self, thread_id: &str) -> u32 {
+        self.inner.lock().unwrap().jobs.get(thread_id).map_or(0, |j| j.1)
     }
 
     /// The thread's session is capturing its nix dev shell.
@@ -585,8 +593,8 @@ impl Runtime {
         self.send(&Command_::CancelQueued { thread_id, text })
     }
 
-    /// Loaded, not running, no jobs running (unloading would kill them), and quiet for
-    /// longer than `max_idle`.
+    /// Loaded, not running, no jobs running (unloading would kill them, even those it left
+    /// running), and quiet for longer than `max_idle`.
     pub fn idle_threads(&self, max_idle: Duration) -> Vec<String> {
         let inner = self.inner.lock().unwrap();
         inner

@@ -227,7 +227,9 @@ fn start_installer(installer: &Path) -> Result<()> {
 
 impl Dirigent {
     /// Local threads a restart would cut off: working, still being set up, or running
-    /// `async_bash` jobs. (Waiting on an answer is fine: asks are kept by the service.)
+    /// `async_bash` jobs they wait on. (Waiting on an answer is fine: asks are kept by the
+    /// service. Jobs left running, `free_jobs`, would hold an update off for good: the
+    /// restart stops them.)
     pub fn local_busy(&self) -> usize {
         let Some(host) = self.host(dirigent_service::hosts::LOCAL) else { return 0 };
         host.threads.iter().filter(|t| t.running() || t.jobs > 0 || t.setup.is_some()).count()

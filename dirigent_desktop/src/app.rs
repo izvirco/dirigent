@@ -929,8 +929,9 @@ impl Dirigent {
         self.status(host, t).finished() && !t.running()
     }
 
-    /// Nothing going on: neither it nor a sub-agent runs or has jobs going. Only such a
-    /// thread can be archived (the host refuses the rest); a message or run brings it back.
+    /// Nothing going on: neither it nor a sub-agent runs or has jobs going it waits on (jobs
+    /// left running, `free_jobs`, don't count: archiving stops them). Only such a thread can
+    /// be archived (the host refuses the rest); a message or run brings it back.
     pub fn at_rest(&self, host: &str, t: &ThreadSummary) -> bool {
         !t.running() && t.jobs == 0 && !self.has_busy_children(host, &t.id)
     }
@@ -947,8 +948,9 @@ impl Dirigent {
         }
     }
 
-    /// `Status::of`, with an idle thread that has `async_bash` jobs running or sub-agents
-    /// still at it reported as `Waiting`: their results will wake it.
+    /// `Status::of`, with an idle thread that has `async_bash` jobs running it waits on
+    /// (`jobs`, not `free_jobs`) or sub-agents still at it reported as `Waiting`: their
+    /// results will wake it.
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
         match Status::of(t) {
             Status::Done if t.jobs > 0 || self.has_busy_children(host, &t.id) => Status::Waiting,

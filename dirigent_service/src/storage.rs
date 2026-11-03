@@ -267,7 +267,7 @@ impl Storage {
             .optional()?)
     }
 
-    /// Threads ordered by most recently updated. `running_since` and `jobs` (runtime state) are always unset here; the caller fills them in.
+    /// Threads ordered by most recently updated. `running_since` and the job counts (runtime state) are always unset here; the caller fills them in.
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
@@ -316,6 +316,7 @@ impl Storage {
                 pinned_entries: vec![],
                 prompted_at: r.get(14)?,
                 jobs: 0,
+                free_jobs: 0,
                 spend: Spend {
                     cost: r.get(17)?,
                     input: r.get::<_, i64>(18)? as u64,
@@ -611,6 +612,7 @@ impl Storage {
             pinned_entries: vec![],
             prompted_at: None,
             jobs: 0,
+            free_jobs: 0,
             spend: Spend::default(),
             forked_from: None,
             setup: None,
