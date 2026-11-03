@@ -141,7 +141,7 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                                 Ok(msg) => {
                                     // The service's first message; its version explains a remote host lagging behind.
-                                    if let ServerMessage::Hello { host_name, version } = &msg {
+                                    if let ServerMessage::Hello { host_name, version, .. } = &msg {
                                         info!(host = %name, machine = %host_name, %version, "connected");
                                     }
                                     if let Err(e) = update_cache(&cache, &name, &msg) {

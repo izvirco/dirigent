@@ -14,7 +14,7 @@ use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{changelog, config, hosts, images, instance, settings, update};
-use crate::{lists, ruler, sidebar, thread, titlebar, usage};
+use crate::{leaderboard, lists, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
     Ask, ClientMessage, Entry, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary,
@@ -469,6 +469,10 @@ pub enum Menu {
     Base,
     /// Usage modal: what a series is (model / provider / everything).
     UsageGroup,
+    /// Usage modal: what the chart shows (cost, tokens, ...).
+    UsageMetric,
+    /// Usage modal's Leaderboard tab: the joined account's menu (leave).
+    BoardAccount,
     /// Settings modal: theme, background pattern, title model, title reasoning level, the
     /// host whose providers show.
     Theme,
@@ -600,6 +604,8 @@ pub struct Dirigent {
     /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
     pub usage_from: Entity<TextInput>,
     pub usage_to: Entity<TextInput>,
+    /// The leaderboard: account, uploads, the board shown in the Usage modal.
+    pub leaderboard: leaderboard::State,
     /// Seconds since launch, from `tick`.
     ticks: u64,
     /// Model (`provider/id`) and thinking level the next prompt is sent with.
@@ -666,7 +672,7 @@ pub struct Dirigent {
     /// `AddProject`), then opened on a new-thread draft (`resume_open_folder`).
     open_folder: Option<OpenFolder>,
     net: Net,
-    cache: Arc<Mutex<Cache>>,
+    pub(crate) cache: Arc<Mutex<Cache>>,
     next_id: u64,
     focus_handle: FocusHandle,
     window: AnyWindowHandle,
@@ -704,6 +710,7 @@ impl Dirigent {
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
         let collapsed = Section::parse_folded(cache.get(COLLAPSED_KEY).as_deref());
+        let leaderboard = leaderboard::State::new(&cache);
         let cache = Arc::new(Mutex::new(cache));
 
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
@@ -794,6 +801,7 @@ impl Dirigent {
             usage: usage::State::new(),
             usage_from,
             usage_to,
+            leaderboard,
             ticks: 0,
             model,
             effort,
@@ -1169,6 +1177,7 @@ impl Dirigent {
                 if status == HostStatus::Disconnected {
                     self.blob_requests.remove(&host);
                     self.forks.retain(|_, (h, _)| *h != host);
+                    self.leaderboard.drop_uploads(&host);
                     // Runs don't outlive the host (`runtime.rs` keeps them in memory): a
                     // message sent meanwhile is a prompt, not a steer into a run that is gone.
                     // The thread list keeps the old entries until the reconnect's refresh.
@@ -1245,7 +1254,12 @@ impl Dirigent {
 
     fn on_server_message(&mut self, host: String, msg: ServerMessage, cx: &mut Context<Self>) {
         match msg {
-            ServerMessage::Hello { .. } => {}
+            ServerMessage::Hello { service_id, .. } => {
+                if let Some(h) = self.host_mut(&host) {
+                    h.service_id = Some(service_id).filter(|id| !id.is_empty());
+                }
+                self.upload_usage(&host);
+            }
             ServerMessage::Ok { reply_to } => {
                 self.on_providers_reply(&host, reply_to, Ok(()), cx);
             }
@@ -1377,6 +1391,9 @@ impl Dirigent {
                 }
             }
             ServerMessage::Usage { reply_to, buckets } => {
+                if self.on_upload_usage(reply_to, &buckets, cx) {
+                    return;
+                }
                 if self.usage.request == Some(reply_to) {
                     self.usage.buckets.insert(host, buckets);
                 }
@@ -1908,8 +1925,15 @@ impl Dirigent {
                 cx.background_executor().timer(Duration::from_secs(1)).await;
                 let alive = this.update(cx, |this, cx| {
                     this.ticks += 1;
-                    if this.ticks % USAGE_REFRESH_SECS == 0 && this.modal == Some(Modal::Usage) && this.usage.at_now() {
-                        this.request_usage(cx);
+                    if this.ticks % USAGE_REFRESH_SECS == 0 && this.modal == Some(Modal::Usage) {
+                        match this.usage.tab {
+                            usage::Tab::Mine if this.usage.at_now() => this.request_usage(cx),
+                            usage::Tab::Board => this.fetch_board(cx),
+                            _ => {}
+                        }
+                    }
+                    if this.ticks % leaderboard::UPLOAD_EVERY == 0 {
+                        this.upload_all();
                     }
                     if this.watch.changed() {
                         this.reload_config(cx);
@@ -2362,6 +2386,9 @@ impl Dirigent {
         self.menu = None;
         self.focus(self.focus_handle.clone(), cx);
         self.request_usage(cx);
+        if self.usage.tab == usage::Tab::Board {
+            self.fetch_board(cx);
+        }
     }
 
     /// The version beside the sidebar's title, and the first start after an update
@@ -3205,10 +3232,35 @@ impl Dirigent {
         cx.notify();
     }
 
+    /// Your usage or the leaderboard; the board is fetched as it shows.
+    pub fn set_usage_tab(&mut self, tab: usage::Tab, cx: &mut Context<Self>) {
+        self.usage.tab = tab;
+        self.usage.hover = None;
+        self.menu = None;
+        if tab == usage::Tab::Board {
+            self.fetch_board(cx);
+        }
+        cx.notify();
+    }
+
+    /// What the open tab's chart shows.
+    pub fn set_usage_metric(&mut self, metric: usage::Metric, cx: &mut Context<Self>) {
+        self.usage.view_mut().metric = metric;
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// The open tab's chart per slot, or as running totals.
+    pub fn set_usage_running(&mut self, running: bool, cx: &mut Context<Self>) {
+        self.usage.view_mut().running = running;
+        cx.notify();
+    }
+
     /// A legend row was clicked: hide its line, or show it again.
     pub fn toggle_usage_series(&mut self, key: &str, cx: &mut Context<Self>) {
-        if !self.usage.hidden.remove(key) {
-            self.usage.hidden.insert(key.to_owned());
+        let hidden = &mut self.usage.view_mut().hidden;
+        if !hidden.remove(key) {
+            hidden.insert(key.to_owned());
         }
         cx.notify();
     }
@@ -4328,7 +4380,7 @@ fn image_rows(images: &[Attachment]) -> Vec<(u32, &str, &[u8])> {
 }
 
 /// A renderable image from stored bytes; `None` for formats gpui can't decode.
-fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
+pub fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     let format = gpui::ImageFormat::from_mime_type(mime)?;
     let id = gpui::hash(&bytes);
     Some(Arc::new(gpui::Image { format, bytes, id }))
@@ -4343,6 +4395,7 @@ fn host_state(cache: &Cache, name: &str, url: &str) -> HostState {
         projects: cache.projects(name).unwrap_or_default(),
         threads: cache.threads(name).unwrap_or_default(),
         models: cache.models(name),
+        service_id: None,
     }
 }
 

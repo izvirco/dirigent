@@ -6,7 +6,7 @@
 //! kept on its row the same way (`spend_*`, `ADD_SPEND`). `asks` holds the model's
 //! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
 //! full-text index of every message's text (derived like `usage`, backfilled once), for
-//! `SearchThreads`.
+//! `SearchThreads`. `meta` holds the service's own settings, like its id (`service_id`).
 //!
 //! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
 //! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open. Nothing
@@ -79,6 +79,7 @@ CREATE TABLE IF NOT EXISTS message_pins (
     entry_id TEXT NOT NULL,
     PRIMARY KEY (thread_id, entry_id)
 );
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 ";
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
@@ -755,6 +756,13 @@ impl Storage {
         Ok(entry)
     }
 
+    /// This service's id (`ServerMessage::Hello`): random, made on first use and kept.
+    pub fn service_id(&self) -> Result<String> {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        self.conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('service_id', ?1)", [&id])?;
+        Ok(self.conn.query_row("SELECT value FROM meta WHERE key = 'service_id'", [], |r| r.get(0))?)
+    }
+
     /// Usage in `since..until`, summed per `bucket`-wide slot from `since` and per
     /// provider + model, oldest slot first.
     pub fn usage(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<UsageBucket>> {
@@ -1054,6 +1062,14 @@ mod tests {
         assert_eq!(s.search("index", 10).unwrap()[0].thread_id, "root");
         s.delete_thread("root").unwrap();
         assert!(s.search("index", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn service_id_is_made_once() {
+        let s = Storage::in_memory().unwrap();
+        let id = s.service_id().unwrap();
+        assert_eq!(id.len(), 32);
+        assert_eq!(s.service_id().unwrap(), id);
     }
 
     #[test]

@@ -19,6 +19,9 @@ pub struct HostState {
     pub projects: Vec<Project>,
     pub threads: Vec<ThreadSummary>,
     pub models: Vec<ModelInfo>,
+    /// The service's id from its `Hello` (`leaderboard.rs` uploads under it); `None` until
+    /// it connects, or from a service too old to send one.
+    pub service_id: Option<String>,
 }
 
 /// Pseudo group key for threads whose project was removed.
@@ -206,7 +209,15 @@ mod tests {
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {
-        HostState { name: name.into(), url: String::new(), status: HostStatus::Connected, projects, threads, models: vec![] }
+        HostState {
+            name: name.into(),
+            url: String::new(),
+            status: HostStatus::Connected,
+            projects,
+            threads,
+            models: vec![],
+            service_id: None,
+        }
     }
 
     #[test]

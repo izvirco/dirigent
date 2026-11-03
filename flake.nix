@@ -72,7 +72,7 @@
       cargoDeps = rustPlatform.fetchCargoVendor {
         name = "dirigent";
         src = rustSrc;
-        hash = "sha256-UYPPYxVz4WK0+yt7r2CkpN+Bi1ACxlstbcvBCEHhR+s=";
+        hash = "sha256-T72+xoW6oQe3c2Mhw2Ychn3CFLJ83c0/9t0rSVX4Cdo=";
       };
       # One crate's binary, in `bin/`.
       crate =
@@ -211,8 +211,10 @@
       };
 
       # `services.dirigent-api`: the update api (`dirigent_api serve`), to put behind the TLS
-      # proxy (packaging/README.md). It holds no secrets and writes nothing: it reads the
-      # public bucket. More environment (`S3_PREFIX`, `DIRIGENT_LOG`) goes into
+      # proxy (packaging/README.md). Updates hold no secrets: they read the public bucket.
+      # The leaderboard, on with `leaderboard.forgeClientId`, keeps a db in the state dir and
+      # reads the forge app's secret (`FORGE_CLIENT_SECRET=…`) from `environmentFile`. More
+      # environment (`S3_PREFIX`, `DIRIGENT_LOG`) goes into
       # `systemd.services.dirigent-api.environment`.
       nixosModules.dirigent_api =
         { config, ... }:
@@ -243,6 +245,28 @@
               region = str "The bucket's region, e.g. `fsn1`.";
               bucket = str "The bucket's name.";
             };
+            url = lib.mkOption {
+              type = lib.types.str;
+              default = "https://dirigent.sebba.dev";
+              description = "Where the api is reached (`DIRIGENT_API_URL`): the forge app's redirect URI is `<url>/api/v0/auth/callback`.";
+            };
+            leaderboard = {
+              forgeUrl = lib.mkOption {
+                type = lib.types.str;
+                default = "https://forge.sebba.dev";
+                description = "The forge players sign in with (`FORGE_URL`).";
+              };
+              forgeClientId = lib.mkOption {
+                type = lib.types.nullOr lib.types.str;
+                default = null;
+                description = "The forge app's client id (`FORGE_CLIENT_ID`); null leaves the leaderboard off.";
+              };
+            };
+            environmentFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.path;
+              default = null;
+              description = "Secrets as `NAME=value` lines, kept out of the store: the leaderboard's `FORGE_CLIENT_SECRET`.";
+            };
           };
 
           config = lib.mkIf cfg.enable {
@@ -252,14 +276,25 @@
               after = [ "network.target" ];
               environment = {
                 DIRIGENT_API_BIND = cfg.bind;
+                DIRIGENT_API_URL = cfg.url;
+                DIRIGENT_API_DB = "/var/lib/dirigent-api/leaderboard.db";
+                FORGE_URL = cfg.leaderboard.forgeUrl;
                 S3_ENDPOINT = cfg.s3.endpoint;
                 S3_REGION = cfg.s3.region;
                 S3_BUCKET = cfg.s3.bucket;
+              }
+              // lib.optionalAttrs (cfg.leaderboard.forgeClientId != null) {
+                FORGE_CLIENT_ID = cfg.leaderboard.forgeClientId;
               };
               serviceConfig = {
                 ExecStart = "${lib.getExe cfg.package} serve";
                 DynamicUser = true;
+                # /var/lib/dirigent-api: the leaderboard's db.
+                StateDirectory = "dirigent-api";
                 Restart = "on-failure";
+              }
+              // lib.optionalAttrs (cfg.environmentFile != null) {
+                EnvironmentFile = cfg.environmentFile;
               };
             };
           };

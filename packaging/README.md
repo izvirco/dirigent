@@ -134,8 +134,8 @@ install with a release signed by the old one, which is then impossible.
 
 ## The update api (`dirigent_api`)
 
-Holds no secrets: it reads the public bucket. Run it behind the TLS proxy for `dirigent.sebba.dev`, routing
-`/api/v0/` to it:
+The update endpoints hold no secrets: they read the public bucket. Run it behind the TLS proxy for
+`dirigent.sebba.dev`, routing `/api/v0/` to it:
 
 ```sh
 S3_ENDPOINT=https://fsn1.your-objectstorage.com S3_REGION=fsn1 S3_BUCKET=dirigent \
@@ -152,6 +152,16 @@ and a signing key).
 
 On NixOS: import the flake's `nixosModules.dirigent_api` and set `services.dirigent-api` (`enable`, `s3.endpoint`,
 `s3.region`, `s3.bucket`; `bind` defaults to `127.0.0.1:7790`).
+
+**The leaderboard** (the desktop's Usage modal, `dirigent_api/src/leaderboard.rs`) runs in the same api when it
+has a forge app to sign players in with. Register one on the forge's account page with the redirect URI
+`https://dirigent.sebba.dev/api/v0/auth/callback`, then give the api `FORGE_CLIENT_ID` and
+`FORGE_CLIENT_SECRET` (`FORGE_URL` defaults to `https://forge.sebba.dev`, `DIRIGENT_API_URL` to
+`https://dirigent.sebba.dev`) and a writable `DIRIGENT_API_DB` (default `leaderboard.db`): the one piece of
+state the server has, worth a backup. On NixOS: `leaderboard.forgeClientId`, and `environmentFile` for the
+secret; the db goes to `/var/lib/dirigent-api/`. Without a client id the leaderboard is off and the desktops
+show it can't be reached. Desktops use `https://dirigent.sebba.dev` (all builds, dev and nix too), or
+`DIRIGENT_API_URL` at run time for tests.
 
 ## Nix (x86_64-linux)
 

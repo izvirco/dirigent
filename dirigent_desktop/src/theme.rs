@@ -542,9 +542,11 @@ pub fn rel_time(age_ms: i64) -> String {
     }
 }
 
-/// Token counts: `812`, `9.5k`, `138k`, `1M`, `1.2M`, `33M`.
+/// Token counts: `812`, `9.5k`, `138k`, `1M`, `1.2M`, `33M`, `2.1B`.
 pub fn kilo(n: u64) -> String {
-    let (v, suffix) = if n >= 1_000_000 {
+    let (v, suffix) = if n >= 1_000_000_000 {
+        (n as f64 / 1e9, "B")
+    } else if n >= 1_000_000 {
         (n as f64 / 1e6, "M")
     } else if n >= 1000 {
         (n as f64 / 1e3, "k")
@@ -580,6 +582,7 @@ mod tests {
         assert_eq!(kilo(138_400), "138k");
         assert_eq!(kilo(1_000_000), "1M");
         assert_eq!(kilo(1_240_000), "1.2M");
+        assert_eq!(kilo(2_140_000_000), "2.1B");
         assert_eq!(dollars(24.664), "$24.66");
         assert_eq!(dollars(0.004), "$0.004");
         assert_eq!(dollars(0.), "$0.00");

@@ -14,6 +14,12 @@ axum = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq.workspace = true
 semver.workspace = true
+# The leaderboard (`leaderboard.rs`, `store.rs`): its db, hashed tokens, random ids and
+# the forge sign-in's query strings.
+rusqlite.workspace = true
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+form_urlencoded = "1"
 # Signs the S3 requests `publish` makes (no AWS SDK); reads are anonymous: the bucket is public.
 rusty-s3 = { version = "0.11", default-features = false, features = ["rustcrypto"] }
 # Signs releases (`publish`); the desktop only verifies (`minisign-verify`).

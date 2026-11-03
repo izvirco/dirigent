@@ -1323,15 +1323,19 @@ dependencies = [
  "anyhow",
  "axum",
  "dirigent_protocol",
+ "form_urlencoded",
  "minisign",
+ "rusqlite",
  "rusty-s3",
  "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "uuid",
 ]
 
 [[package]]
