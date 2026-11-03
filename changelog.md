@@ -3,10 +3,12 @@
 - Threads that leave a dev server running land in the Inbox; archiving stops the server ([#112])
 - Code blocks in replies and the work log have a copy button on hover ([#117])
 - Scrolled up in a thread, a small pill above the composer jumps back to the latest output; it reads "New output" when something arrived meanwhile ([#115])
+- Text inputs move and select by word (ctrl+←/→, with shift to select; alt on macOS), select with shift+home/end/↑/↓, and jump to the start / end with ctrl+home/end (cmd+↑/↓ on macOS) ([#113])
 
 [#112]: https://forge.sebba.dev/izvir/dirigent/changes/112
 [#117]: https://forge.sebba.dev/izvir/dirigent/changes/117
 [#115]: https://forge.sebba.dev/izvir/dirigent/changes/115
+[#113]: https://forge.sebba.dev/izvir/dirigent/changes/113
 
 ## 0.0.4
 
