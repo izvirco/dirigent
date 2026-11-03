@@ -2,9 +2,11 @@
 
 - Threads that leave a dev server running land in the Inbox; archiving stops the server ([#112])
 - Code blocks in replies and the work log have a copy button on hover ([#117])
+- Scrolled up in a thread, a small pill above the composer jumps back to the latest output; it reads "New output" when something arrived meanwhile ([#115])
 
 [#112]: https://forge.sebba.dev/izvir/dirigent/changes/112
 [#117]: https://forge.sebba.dev/izvir/dirigent/changes/117
+[#115]: https://forge.sebba.dev/izvir/dirigent/changes/115
 
 ## 0.0.4
 
