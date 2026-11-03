@@ -89,6 +89,7 @@ impl Service {
         for t in &mut threads {
             t.running_since = self.runtime.running_since(&t.id);
             t.jobs = self.runtime.jobs(&t.id);
+            t.free_jobs = self.runtime.free_jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
             t.workspace_missing = missing.contains(&t.id);
             t.setup = starting.get(&t.id).copied().flatten().or(self.runtime.nix_shell(&t.id).then_some(Setup::NixShell));
@@ -442,15 +443,18 @@ impl Service {
             ClientMessage::ArchiveThread { id, thread_id, archived } => {
                 {
                     let storage = self.storage.lock().unwrap();
-                    // Archive holds threads at rest: nothing runs or has jobs going, the
-                    // thread itself nor its sub-agents. A message or run brings it back
-                    // (`unarchive`); it doesn't go back by itself.
-                    if archived {
-                        let busy =
-                            storage.family(&thread_id)?.iter().any(|t| self.runtime.running_since(t).is_some() || self.runtime.jobs(t) > 0);
-                        anyhow::ensure!(!busy, "the thread or one of its sub-agents is still working; archive it once they are done");
-                    }
+                    // Archive holds threads at rest: nothing runs or has jobs going it waits
+                    // on, the thread itself nor its sub-agents. Jobs they left running
+                    // (servers, watchers) go with it: unloading a session kills its jobs. A
+                    // message or run brings it back (`unarchive`); it doesn't go back by itself.
+                    let family = if archived { storage.family(&thread_id)? } else { vec![] };
+                    let busy = family.iter().any(|t| self.runtime.running_since(t).is_some() || self.runtime.jobs(t) > 0);
+                    anyhow::ensure!(!busy, "the thread or one of its sub-agents is still working; archive it once they are done");
                     storage.set_archived(&thread_id, archived, now())?;
+                    for t in family.iter().filter(|t| self.runtime.free_jobs(t) > 0) {
+                        info!(thread = %t, "archived: stopping the jobs it left running");
+                        let _ = self.runtime.unload(t);
+                    }
                 }
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }

@@ -7,7 +7,9 @@
 // also wakes an idle agent for a new turn. A job picks how it interrupts (`notify`); the
 // user's answers are user input and always steer; a sub-agent ending is delivered by the
 // service (`deliverNotice`). `async_bash wait` is the one call that blocks: until one of
-// those notices or a user steer comes in, so models stop doing `sleep 60; cat log`.
+// those notices or a user steer comes in, so models stop doing `sleep 60; cat log`. A job
+// started with `notify: "never"` (a dev server, a watcher) is left running: nothing reports
+// its end and nothing waits on it, so its thread can finish (`reportJobs`).
 
 import { spawn } from "node:child_process";
 import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
@@ -28,6 +30,9 @@ const WINDOWS = process.platform === "win32";
 
 /** When a notice reaches the model: after the current tool batch, or once it is idle. */
 export type Notify = "asap" | "when_idle";
+
+/** When a job's end reaches the model: as a notice, or `never` for one left running. */
+type JobNotify = Notify | "never";
 
 export interface Question {
   text: string;
@@ -55,7 +60,7 @@ interface Job {
   killed?: boolean;
   /** Outlived `GRACE_MS`: the model was told it runs on, and the host counts it (`reportJobs`). */
   background?: boolean;
-  notify: Notify;
+  notify: JobNotify;
   exited: Promise<number>;
 }
 
@@ -79,8 +84,8 @@ export interface ToolHost {
    */
   dirigentCalls: Set<Promise<void>>;
   onAsk: (ask: Ask) => void;
-  /** Tell the host how many jobs are running (`reportJobs`). */
-  onJobs: (running: number) => void;
+  /** Tell the host how many jobs are running: waited on, and left running (`reportJobs`). */
+  onJobs: (running: number, free: number) => void;
 }
 
 interface Notice {
@@ -111,13 +116,19 @@ const asyncBashParams = Type.Object({
       {
         description:
           '"start" (default) runs `command`; "status" reports on `job_id` (or all jobs); "kill" stops `job_id`; ' +
-          '"wait" blocks until one of your jobs or sub-agents ends (whatever its `notify`) or a message comes in, then says what woke it (in full in the next message).',
+          '"wait" blocks until one of your jobs or sub-agents ends (whatever its `notify`, bar "never") or a message comes in, then says what woke it (in full in the next message).',
       },
     ),
   ),
   command: Type.Optional(Type.String({ description: "Bash command to run in the background." })),
   job_id: Type.Optional(Type.String({ description: "The job to report on or kill." })),
-  notify: notifyParam,
+  notify: Type.Optional(
+    Type.Union([Type.Literal("asap"), Type.Literal("when_idle"), Type.Literal("never")], {
+      description:
+        'start: when its end reaches you: "asap" (default) after your current tool calls, "when_idle" once your turn has ended, ' +
+        '"never" for a server or watcher you leave running (nothing tells you it ended, and your thread doesn\'t wait on it).',
+    }),
+  ),
   timeout: Type.Optional(
     Type.Number({ description: `wait: give up after this many seconds (default ${WAIT_S}).` }),
   ),
@@ -244,8 +255,9 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     label: "Background command",
     description:
       "Run a long command in the background (builds, test suites, servers) and keep working; a message tells you " +
-      "when it ends. Use `bash` when you'd only wait for the output. When you have nothing left to do but wait for " +
-      "jobs or sub-agents, use `wait`; never `sleep` or poll `status`.",
+      'when it ends. Start a server or watcher you leave running with `notify: "never"`. Use `bash` when you\'d only ' +
+      "wait for the output. When you have nothing left to do but wait for jobs or sub-agents, use `wait`; never " +
+      "`sleep` or poll `status`.",
     promptGuidelines: [
       "To wait for async_bash jobs or sub-agents, call async_bash `wait` instead of `sleep` / polling: it returns the moment one ends.",
     ],
@@ -498,7 +510,7 @@ export function killJobs(host: ToolHost): void {
   reportJobs(host);
 }
 
-async function startJob(host: ToolHost, command: string, notify: Notify): Promise<string> {
+async function startJob(host: ToolHost, command: string, notify: JobNotify): Promise<string> {
   // The shell pi's bash tool runs: bash, Git Bash on Windows (throws, saying how to get
   // one, when there is none).
   const shell = getShellConfig();
@@ -542,7 +554,7 @@ async function startJob(host: ToolHost, command: string, notify: Notify): Promis
   reportJobs(host);
   job.exited.then(() => {
     reportJobs(host);
-    if (job.killed) return;
+    if (job.killed || notify === "never") return;
     return deliver(host, `job-${id}`, {
       customType: "dirigent:job",
       content: describe(job, true),
@@ -556,7 +568,11 @@ async function startJob(host: ToolHost, command: string, notify: Notify): Promis
       notify,
     });
   });
-  return `job ${id} started: \`${command}\`\nlog: ${log}\nYou will be told when it ends; \`wait\` if you have nothing else to do.`;
+  const then =
+    notify === "never"
+      ? "It runs on until killed; you won't be told when it ends."
+      : "You will be told when it ends; `wait` if you have nothing else to do.";
+  return `job ${id} started: \`${command}\`\nlog: ${log}\n${then}`;
 }
 
 /**
@@ -590,7 +606,7 @@ async function wait(host: ToolHost, timeoutS: number, signal?: AbortSignal): Pro
       if (later.length) out.push("Queued for when your turn ends (end it to get them):", ...later);
       return out.join("\n");
     }
-    if (!busy) return "Nothing to wait for: no jobs or sub-agents running.";
+    if (!busy) return "Nothing to wait for: no jobs or sub-agents running that would wake you.";
 
     const why = await woken;
     const waited = duration(Date.now() - started);
@@ -616,8 +632,11 @@ export function wake(host: ToolHost, why: string): void {
   for (const w of host.waiters) w(why);
 }
 
+/** Running jobs whose end will reach the model: what `wait` waits on. */
 function runningJobs(host: ToolHost): Job[] {
-  return [...host.jobs.values()].filter((j) => j.exit === undefined && !j.killed);
+  return [...host.jobs.values()].filter(
+    (j) => j.exit === undefined && !j.killed && j.notify !== "never",
+  );
 }
 
 /** Whether one of the thread's sub-agents runs or has jobs. True when the service can't say: wait then. */
@@ -636,14 +655,20 @@ async function subAgentsBusy(threadId: string): Promise<boolean> {
 }
 
 /**
- * Send the host the thread's count of running background jobs: started past the grace
- * window (an inline one never counts), not ended, not killed. Called wherever that changes.
+ * Send the host the thread's counts of running background jobs: started past the grace
+ * window (an inline one never counts), not ended, not killed. Those the model hears the
+ * end of hold the thread (it waits on them); `never` ones are left running, `free`: they
+ * only keep the session loaded. Called wherever that changes.
  */
 function reportJobs(host: ToolHost): void {
   let running = 0;
-  for (const j of host.jobs.values())
-    if (j.background && j.exit === undefined && !j.killed) running++;
-  host.onJobs(running);
+  let free = 0;
+  for (const j of host.jobs.values()) {
+    if (!j.background || j.exit !== undefined || j.killed) continue;
+    if (j.notify === "never") free++;
+    else running++;
+  }
+  host.onJobs(running, free);
 }
 
 function finish(job: Job, code: number, error?: string): number {

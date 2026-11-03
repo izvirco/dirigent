@@ -662,7 +662,8 @@ fn lab_logo(model: &str) -> &'static str {
 }
 
 /// The hovered card's popup: the title, then one line each for what the card abbreviates:
-/// `project, host` / model (effort) / workspace name or branch / run time.
+/// `project, host` / model (effort) / workspace name or branch / run time, plus the jobs it
+/// left running, if any.
 fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent) -> Vec<AnyElement> {
     let model = match (&t.model, &t.thinking_level) {
         (Some(m), Some(e)) => format!("{m} ({e})"),
@@ -673,6 +674,12 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
         (true, _) => String::new(),
         (false, true) => format!("running for {elapsed}"),
         (false, false) => format!("last run {elapsed}"),
+    };
+    // Servers and watchers the agent left running: archiving the thread stops them.
+    let free = match t.free_jobs {
+        0 => String::new(),
+        1 => "1 job left running".into(),
+        n => format!("{n} jobs left running"),
     };
     let line = |value: String| div().px_2().py_0p5().max_w(u(360.)).truncate().text_size(text::sm()).child(value).into_any();
     let mut rows = vec![
@@ -686,7 +693,7 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
             .into_any(),
         line(format!("{}, {host}", this.project_name(host, t))),
     ];
-    rows.extend([model, vcs, run].into_iter().filter(|s| !s.is_empty()).map(line));
+    rows.extend([model, vcs, run, free].into_iter().filter(|s| !s.is_empty()).map(line));
     rows
 }
 
