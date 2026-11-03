@@ -1,5 +1,6 @@
 ## 0.0.4 (draft)
 
+- Sign in and out of model providers in Settings › Providers, on each of your hosts ([#96])
 - `dirigent pi …` runs the bundled pi (install extensions, sign in) ([#105])
 - Pi's settings live in `<config dir>/agent`, copied from `~/.pi/agent` once ([#105])
 - A message to a thread that just finished no longer strands in the queue and shows twice ([#106])
@@ -7,6 +8,7 @@
 - The new-thread project menu has a search ([#107])
 - Pi 1.5.0: faster streaming of big tool calls and code-heavy answers, GPT-6.1 Terra ([#109])
 
+[#96]: https://forge.sebba.dev/izvir/dirigent/changes/96
 [#105]: https://forge.sebba.dev/izvir/dirigent/changes/105
 [#106]: https://forge.sebba.dev/izvir/dirigent/changes/106
 [#107]: https://forge.sebba.dev/izvir/dirigent/changes/107

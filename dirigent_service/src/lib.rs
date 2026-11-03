@@ -19,9 +19,12 @@ mod title;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs};
+use dirigent_protocol::{
+    AuthMethod, ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs,
+};
 use runtime::{Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
+use server::Conn;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -56,9 +59,20 @@ pub struct Service {
     /// Threads being created with their first prompt, until it is delivered: they take no
     /// other prompt meanwhile. `Some(Workspace)` while their workspace is being made.
     starting: Mutex<HashMap<String, Option<Setup>>>,
+    /// Logins (`ClientMessage::Login`), by the connection and request id that started them.
+    logins: Mutex<Logins>,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
+}
+
+#[derive(Default)]
+struct Logins {
+    /// In progress: their runtime request id, which answers and cancels go to.
+    running: HashMap<(u64, u64), u64>,
+    /// Cancelled before they started: requests are handled side by side, so a `LoginCancel`
+    /// sent right after its `Login` may get here first.
+    cancelled: std::collections::HashSet<(u64, u64)>,
 }
 
 impl Service {
@@ -125,7 +139,7 @@ impl Service {
     }
 
     /// Handle one client request; the reply is sent back on the requesting connection.
-    pub async fn handle(self: &Arc<Self>, req: ClientMessage) -> ServerMessage {
+    pub async fn handle(self: &Arc<Self>, req: ClientMessage, conn: &Conn) -> ServerMessage {
         let id = match &req {
             ClientMessage::ListProjects { id }
             | ClientMessage::AddProject { id, .. }
@@ -154,12 +168,17 @@ impl Service {
             | ClientMessage::SearchThreads { id, .. }
             | ClientMessage::DeleteThread { id, .. }
             | ClientMessage::ListModels { id }
+            | ClientMessage::ListProviders { id }
+            | ClientMessage::Login { id, .. }
+            | ClientMessage::LoginAnswer { id, .. }
+            | ClientMessage::LoginCancel { id, .. }
+            | ClientMessage::Logout { id, .. }
             | ClientMessage::ListHosts { id }
             | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
             | ClientMessage::ListUsage { id, .. } => *id,
         };
-        match self.try_handle(req).await {
+        match self.try_handle(req, conn).await {
             Ok(reply) => reply,
             Err(e) => {
                 warn!("request {id} failed: {e:#}");
@@ -168,7 +187,7 @@ impl Service {
         }
     }
 
-    async fn try_handle(self: &Arc<Self>, req: ClientMessage) -> Result<ServerMessage> {
+    async fn try_handle(self: &Arc<Self>, req: ClientMessage, conn: &Conn) -> Result<ServerMessage> {
         Ok(match req {
             ClientMessage::ListProjects { id } => {
                 ServerMessage::Projects { reply_to: Some(id), projects: self.storage.lock().unwrap().list_projects()? }
@@ -342,6 +361,46 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListModels { id } => ServerMessage::Models { reply_to: id, models: self.runtime.list_models().await? },
+            ClientMessage::ListProviders { id } => {
+                let p = self.runtime.list_providers().await?;
+                ServerMessage::Providers { reply_to: id, providers: p.providers, auth_path: p.auth_path }
+            }
+            ClientMessage::Login { id, provider, method } => match self.login(conn, id, &provider, method).await {
+                Ok(()) => {
+                    info!(%provider, "logged in");
+                    ServerMessage::Ok { reply_to: id }
+                }
+                // Logged once, here: a cancel or a mistyped key is no failure of the service.
+                Err(e) => {
+                    info!(%provider, "login ended: {e:#}");
+                    ServerMessage::Error { reply_to: Some(id), message: format!("{e:#}") }
+                }
+            },
+            ClientMessage::LoginAnswer { id, login, prompt, value } => {
+                let login = self.logins.lock().unwrap().running.get(&(conn.id, login)).copied().ok_or_else(|| anyhow!("no such login"))?;
+                self.runtime.login_answer(login, prompt, &value)?;
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::LoginCancel { id, login } => {
+                let key = (conn.id, login);
+                let running = {
+                    let mut logins = self.logins.lock().unwrap();
+                    let running = logins.running.get(&key).copied();
+                    if running.is_none() {
+                        logins.cancelled.insert(key);
+                    }
+                    running
+                };
+                if let Some(login) = running {
+                    self.runtime.login_cancel(login)?;
+                }
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::Logout { id, provider } => {
+                self.runtime.logout(&provider).await?;
+                info!(%provider, "logged out");
+                ServerMessage::Ok { reply_to: id }
+            }
             // Read on every request, so edits to the file apply at once.
             ClientMessage::ListHosts { id } => {
                 ServerMessage::Hosts { reply_to: id, hosts: hosts::load()?.into_iter().map(|(name, url)| HostInfo { name, url }).collect() }
@@ -440,6 +499,39 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
         })
+    }
+
+    /// Run login `id` of connection `conn` to its end, its steps going to that connection.
+    async fn login(&self, conn: &Conn, id: u64, provider: &str, method: AuthMethod) -> Result<()> {
+        let (key, login) = ((conn.id, id), self.runtime.next_id());
+        {
+            let mut logins = self.logins.lock().unwrap();
+            anyhow::ensure!(!logins.cancelled.remove(&key), "Login cancelled");
+            logins.running.insert(key, login);
+        }
+        info!(%provider, ?method, "login started");
+        // Straight into the connection, in order: the steps all come before the reply.
+        let out = conn.out.clone();
+        let steps = Box::new(move |step| {
+            let _ = out.send(ServerMessage::LoginStep { login: id, step });
+        });
+        let result = self.runtime.login(login, provider, method, steps).await;
+        self.logins.lock().unwrap().running.remove(&key);
+        result
+    }
+
+    /// A connection is gone: the logins it started are cancelled, as nobody is left to
+    /// finish them (and a browser sign-in's callback server would hold its port).
+    fn disconnected(&self, conn: u64) {
+        let logins: Vec<u64> = {
+            let mut logins = self.logins.lock().unwrap();
+            logins.cancelled.retain(|(c, _)| *c != conn);
+            logins.running.iter().filter(|((c, _), _)| *c == conn).map(|(_, l)| *l).collect()
+        };
+        for login in logins {
+            info!("login cancelled: its client left");
+            let _ = self.runtime.login_cancel(login);
+        }
     }
 
     /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
@@ -778,7 +870,8 @@ impl Service {
                 };
                 self.push(ServerMessage::Error { reply_to: None, message });
             }
-            RuntimeMessage::Models { .. } | RuntimeMessage::Title { .. } | RuntimeMessage::TitleFailed { .. } => {}
+            // `Runtime` hands these to whoever waits on them.
+            RuntimeMessage::Reply { .. } | RuntimeMessage::Failed { .. } | RuntimeMessage::LoginStep { .. } => {}
             RuntimeMessage::Crashed => {
                 self.push(ServerMessage::Error { reply_to: None, message: "runtime restarted".into() });
                 self.push_threads();
@@ -946,6 +1039,7 @@ pub async fn run(port: u16) -> Result<()> {
         runtime,
         missing: Mutex::new(Default::default()),
         starting: Mutex::new(Default::default()),
+        logins: Mutex::new(Default::default()),
         push: broadcast::channel(1024).0,
         host_name,
     });

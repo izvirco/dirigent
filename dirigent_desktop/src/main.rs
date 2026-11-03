@@ -22,6 +22,7 @@ mod net;
 mod orchestra;
 mod picker;
 mod projects;
+mod providers;
 mod ruler;
 mod select;
 mod settings;

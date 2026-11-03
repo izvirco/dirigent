@@ -7,6 +7,7 @@
 
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { main as piMain } from "@earendil-works/pi-coding-agent";
+import { Logins, type Method } from "./auth";
 import { type Attachment, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
 
@@ -49,12 +50,25 @@ type Inbound =
     }
   | { type: "abort"; thread_id: string }
   | { type: "cancel_queued"; thread_id: string; text: string }
-  | { type: "list_models" }
-  | { type: "generate_title"; id: number; title: TitleGen; text: string };
+  | { type: "list_models"; id: number }
+  | { type: "generate_title"; id: number; title: TitleGen; text: string }
+  | { type: "list_providers"; id: number }
+  | { type: "login"; id: number; provider: string; method: Method }
+  | { type: "login_answer"; id: number; n: number; value: string }
+  | { type: "login_cancel"; id: number }
+  | { type: "logout"; id: number; provider: string };
 
 const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
+/** Answer request `id` with what `work` gives (`reply`), or why it failed (`failed`). The
+ *  service waits on these by id: they run side by side and finish in any order. */
+function reply(id: number, work: Promise<unknown>): Promise<void> {
+  return work.then(
+    (value) => void send({ type: "reply", id, value: value ?? null }),
+    (e) => void send({ type: "failed", id, message: (e as Error).message ?? String(e) }),
+  );
+}
 
-async function handle(sessions: Sessions, msg: Inbound): Promise<void> {
+async function handle(sessions: Sessions, logins: Logins, msg: Inbound): Promise<void> {
   switch (msg.type) {
     case "load":
       return sessions.load(
@@ -88,17 +102,20 @@ async function handle(sessions: Sessions, msg: Inbound): Promise<void> {
     case "cancel_queued":
       return sessions.cancelQueued(msg.thread_id, msg.text);
     case "list_models":
-      return sessions.listModels();
-    // Answered by `id`: titles are generated side by side and finish in any order.
+      return reply(msg.id, sessions.listModels());
     case "generate_title":
-      return sessions.generateTitle(msg.title, msg.text).then(
-        (r) => {
-          send({ type: "title", id: msg.id, ...r });
-        },
-        (e) => {
-          send({ type: "title_failed", id: msg.id, message: (e as Error).message ?? String(e) });
-        },
-      );
+      return reply(msg.id, sessions.generateTitle(msg.title, msg.text));
+    case "list_providers":
+      return reply(msg.id, logins.providers());
+    // Its steps go out as `login_step`s under its id until the reply ends it.
+    case "login":
+      return reply(msg.id, logins.login(msg.id, msg.provider, msg.method));
+    case "login_answer":
+      return logins.answer(msg.id, msg.n, msg.value);
+    case "login_cancel":
+      return logins.cancel(msg.id);
+    case "logout":
+      return reply(msg.id, logins.logout(msg.provider));
     default:
       throw new Error(`unknown message type: ${(msg as { type: string }).type}`);
   }
@@ -111,6 +128,9 @@ async function handle(sessions: Sessions, msg: Inbound): Promise<void> {
 // is decoded only once complete, so no UTF-8 character is split across chunks.
 async function serve(): Promise<void> {
   const sessions = new Sessions(send);
+  const logins = new Logins(sessions.modelRuntime, (id, step) =>
+    send({ type: "login_step", id, step }),
+  );
   let partial: Uint8Array[] = [];
   const decoder = new TextDecoder();
   for await (const chunk of Bun.stdin.stream()) {
@@ -129,7 +149,7 @@ async function serve(): Promise<void> {
         send({ type: "error", message: `bad json: ${line.slice(0, 80)}` });
         continue;
       }
-      handle(sessions, msg).catch((e) => {
+      handle(sessions, logins, msg).catch((e) => {
         const threadId = "thread_id" in msg ? msg.thread_id : undefined;
         console.error(`${msg.type} ${threadId ?? ""} failed:`, e);
         send({ type: "error", thread_id: threadId, message: (e as Error).message ?? String(e) });

@@ -256,6 +256,39 @@ pub enum ClientMessage {
     ListModels {
         id: u64,
     },
+    /// The model providers this host's pi knows, and how each is set up (Settings › Providers).
+    ListProviders {
+        id: u64,
+    },
+    /// Sign in to a model provider on this host, as pi's `/login` does: with an account
+    /// (`Oauth`) or a key (`ApiKey`: or whatever setup the provider asks for). Its steps
+    /// come to this connection only, as `LoginStep`s under this request's id; the prompts
+    /// among them are answered with `LoginAnswer`. The reply (`Ok`, or `Error`) ends it.
+    /// The connection dropping cancels it.
+    Login {
+        id: u64,
+        provider: String,
+        method: AuthMethod,
+    },
+    /// The answer to prompt `prompt` of the login started by request `login` (see
+    /// `LoginStep::Prompt`).
+    LoginAnswer {
+        id: u64,
+        login: u64,
+        prompt: u32,
+        value: String,
+    },
+    /// Stop the login started by request `login`; its reply is an `Error`.
+    LoginCancel {
+        id: u64,
+        login: u64,
+    },
+    /// Remove the credential a `Login` stored for the provider. Environment variables and
+    /// pi's `models.json` stay as they are.
+    Logout {
+        id: u64,
+        provider: String,
+    },
     /// The other hosts this host's `hosts.toml` lists (what its agents can reach).
     ListHosts {
         id: u64,
@@ -333,6 +366,18 @@ pub enum ServerMessage {
         reply_to: u64,
         models: Vec<ModelInfo>,
     },
+    /// Reply to `ListProviders`: by name; `auth_path` is the file logins are saved to.
+    Providers {
+        reply_to: u64,
+        providers: Vec<ProviderInfo>,
+        auth_path: String,
+    },
+    /// A step of the login started by request `login` (`ClientMessage::Login`), to the
+    /// connection that started it.
+    LoginStep {
+        login: u64,
+        step: LoginStep,
+    },
     /// Base64 bytes of a blob.
     Blob {
         reply_to: u64,
@@ -379,6 +424,108 @@ pub enum ServerMessage {
         reply_to: u64,
         hosts: Vec<HostInfo>,
     },
+}
+
+/// How to sign in to a model provider: with an account, or a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    Oauth,
+    ApiKey,
+}
+
+/// A model provider and how it is set up on a host (see `ClientMessage::ListProviders`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderInfo {
+    pub id: String,
+    pub name: String,
+    /// Signing in with an account is offered: what that is ("Anthropic (Claude Pro/Max)").
+    #[serde(default)]
+    pub oauth: Option<String>,
+    /// A key (or the provider's other setup: a profile, an account id) can be entered: what
+    /// it is ("Anthropic API key").
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Where its credentials come from now ("Signed in", "From ANTHROPIC_API_KEY"); `None`:
+    /// it has none, so it offers no models.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// What a `Login` stored for it: what `Logout` removes.
+    #[serde(default)]
+    pub stored: Option<AuthMethod>,
+}
+
+/// A step of a login (`ServerMessage::LoginStep`): pi's prompts and notices, in order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LoginStep {
+    /// Sign in at `url` in a browser.
+    AuthUrl {
+        url: String,
+        #[serde(default)]
+        instructions: Option<String>,
+    },
+    /// Enter `user_code` at `verification_uri`; the login goes on once that is done.
+    DeviceCode {
+        user_code: String,
+        verification_uri: String,
+    },
+    Info {
+        message: String,
+        #[serde(default)]
+        links: Vec<AuthLink>,
+    },
+    Progress {
+        message: String,
+    },
+    /// A question, answered with `ClientMessage::LoginAnswer { prompt: n }`: the text typed
+    /// for `Text` / `Secret` / `ManualCode`, the picked option's `id` for `Select`.
+    Prompt {
+        n: u32,
+        kind: PromptKind,
+        message: String,
+        #[serde(default)]
+        placeholder: Option<String>,
+        #[serde(default)]
+        options: Vec<AuthOption>,
+    },
+    /// Prompt `n` needs no answer any more (the browser sign-in got there first).
+    PromptClosed {
+        n: u32,
+    },
+    /// A step a newer host knows: nothing to show, rather than the whole message dropped.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    Text,
+    /// Text not to show (a key).
+    Secret,
+    Select,
+    /// The code or redirect url the provider shows after a browser sign-in, pasted: the way
+    /// in when the browser can't reach the host (a remote one).
+    ManualCode,
+    /// A kind a newer host knows: answered as text.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthLink {
+    pub url: String,
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AuthOption {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A host in a `hosts.toml`: its name there and its normalized `ws://` url.
@@ -814,6 +961,11 @@ mod tests {
         roundtrip(ClientMessage::ArchiveThread { id: 7, thread_id: "t".into(), archived: true });
         roundtrip(ClientMessage::DeleteThread { id: 8, thread_id: "t".into() });
         roundtrip(ClientMessage::ListModels { id: 6 });
+        roundtrip(ClientMessage::ListProviders { id: 26 });
+        roundtrip(ClientMessage::Login { id: 27, provider: "anthropic".into(), method: AuthMethod::ApiKey });
+        roundtrip(ClientMessage::LoginAnswer { id: 28, login: 27, prompt: 1, value: "sk-x".into() });
+        roundtrip(ClientMessage::LoginCancel { id: 29, login: 27 });
+        roundtrip(ClientMessage::Logout { id: 30, provider: "anthropic".into() });
         roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
         roundtrip(ClientMessage::ListUsage { id: 11, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         assert_eq!(
@@ -920,6 +1072,39 @@ mod tests {
         roundtrip(ServerMessage::ProjectAdded { reply_to: 1, project: p });
         roundtrip(ServerMessage::Dirs { reply_to: 1, dirs: vec![Dir { name: "work".into(), repo: true }] });
         roundtrip(ServerMessage::Models { reply_to: 1, models: vec![m] });
+        roundtrip(ServerMessage::Providers {
+            reply_to: 2,
+            providers: vec![ProviderInfo {
+                id: "anthropic".into(),
+                name: "Anthropic".into(),
+                oauth: Some("Anthropic (Claude Pro/Max)".into()),
+                api_key: Some("Anthropic API key".into()),
+                status: Some("Signed in".into()),
+                stored: Some(AuthMethod::Oauth),
+            }],
+            auth_path: "/home/x/.pi/agent/auth.json".into(),
+        });
+        // As the runtime writes them.
+        let step: LoginStep = serde_json::from_value(json!({"type":"prompt","n":2,"kind":"manual_code","message":"Paste it"})).unwrap();
+        assert_eq!(
+            step,
+            LoginStep::Prompt { n: 2, kind: PromptKind::ManualCode, message: "Paste it".into(), placeholder: None, options: vec![] }
+        );
+        // What a newer host may send.
+        let newer: LoginStep = serde_json::from_value(json!({"type":"qr_code","data":"x"})).unwrap();
+        assert_eq!(newer, LoginStep::Unknown);
+        let newer: LoginStep = serde_json::from_value(json!({"type":"prompt","n":3,"kind":"date","message":"m"})).unwrap();
+        assert!(matches!(newer, LoginStep::Prompt { kind: PromptKind::Other, .. }));
+        for step in [
+            step,
+            LoginStep::AuthUrl { url: "https://x".into(), instructions: None },
+            LoginStep::DeviceCode { user_code: "AB-12".into(), verification_uri: "https://x/device".into() },
+            LoginStep::Info { message: "m".into(), links: vec![AuthLink { url: "https://x".into(), label: None }] },
+            LoginStep::Progress { message: "p".into() },
+            LoginStep::PromptClosed { n: 2 },
+        ] {
+            roundtrip(ServerMessage::LoginStep { login: 27, step });
+        }
         let e = Entry::from_pi(0, json!({"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"hi"}}));
         assert_eq!(e.kind, "message");
         assert_eq!(e.parent_id, None);

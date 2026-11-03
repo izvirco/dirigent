@@ -53,6 +53,8 @@ const MAX_HEIGHT_FRACTION: f32 = 0.7;
 const CARD_CHROME: f32 = 90.;
 /// Right inset (design pixels) reserved for the scrollbar so text never runs under it.
 const BAR_GUTTER: f32 = 12.;
+/// What a secret input shows for each character.
+const MASK: char = '\u{2022}';
 /// Edits of one kind closer together than this join the same undo step.
 const UNDO_GROUP: Duration = Duration::from_secs(1);
 const UNDO_DEPTH: usize = 200;
@@ -91,6 +93,16 @@ pub fn image_numbers(text: &str) -> Vec<u32> {
     ns
 }
 
+/// Where byte `offset` of `text` falls in its mask (a `MASK` per char).
+fn mask_offset(text: &str, offset: usize) -> usize {
+    text[..offset].chars().count() * MASK.len_utf8()
+}
+
+/// The byte offset of `text` at `offset` of its mask; inside a `MASK`, the char's start.
+fn unmask_offset(text: &str, offset: usize) -> usize {
+    text.char_indices().nth(offset / MASK.len_utf8()).map_or(text.len(), |(i, _)| i)
+}
+
 /// Byte ranges of every `[image-N]` token in `text`.
 fn image_tokens(text: &str) -> Vec<Range<usize>> {
     let mut out = vec![];
@@ -113,6 +125,9 @@ pub struct TextInput {
     content: SharedString,
     placeholder: SharedString,
     single_line: bool,
+    /// Shows a `MASK` per character instead of the text (a key), and keeps it off the
+    /// clipboards (`set_secret`).
+    secret: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
@@ -268,6 +283,7 @@ impl TextInput {
             content: "".into(),
             placeholder: placeholder.into(),
             single_line,
+            secret: false,
             selected_range: 0..0,
             selection_reversed: false,
             marked_range: None,
@@ -285,6 +301,36 @@ impl TextInput {
 
     pub fn text(&self) -> &str {
         &self.content
+    }
+
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.placeholder = placeholder.into();
+        cx.notify();
+    }
+
+    /// Mask the text (an API key) or show it again. Either way the undo history goes: it
+    /// may hold a secret.
+    pub fn set_secret(&mut self, secret: bool, cx: &mut Context<Self>) {
+        self.secret = secret;
+        self.undo.clear();
+        self.redo.clear();
+        self.last_edit = None;
+        cx.notify();
+    }
+
+    /// The text as painted: a secret's masked.
+    fn shown(&self) -> SharedString {
+        if self.secret { MASK.to_string().repeat(self.content.chars().count()).into() } else { self.content.clone() }
+    }
+
+    /// Where a byte offset of the text falls in `shown`.
+    fn shown_offset(&self, offset: usize) -> usize {
+        if self.secret { mask_offset(&self.content, offset) } else { offset }
+    }
+
+    /// The byte offset of the text at an offset of `shown`.
+    fn text_offset(&self, offset: usize) -> usize {
+        if self.secret { unmask_offset(&self.content, offset) } else { offset }
     }
 
     pub fn set_text(&mut self, text: &str, window: &Window, cx: &mut Context<Self>) {
@@ -321,6 +367,11 @@ impl TextInput {
 
     /// Before an edit: remember the state to undo to, unless the edit joins the last one.
     fn record(&mut self, kind: Edit) {
+        // A secret keeps no history: undo would bring it back after the input is cleared,
+        // and unmasked once the input shows text again.
+        if self.secret {
+            return;
+        }
         let now = Instant::now();
         let joins = self.last_edit.is_some_and(|(last, at)| last.joins(kind) && now.duration_since(at) < UNDO_GROUP);
         if !joins {
@@ -426,10 +477,10 @@ impl TextInput {
 
     /// Move the cursor one visual row up/down using the last layout.
     fn move_vertical(&mut self, rows: f32, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(layout) = self.last_layout.as_ref().filter(|l| l.text == self.content) else { return };
-        let pos = layout.position(self.cursor_offset());
+        let Some(layout) = self.last_layout.as_ref().filter(|l| l.text == self.shown()) else { return };
+        let pos = layout.position(self.shown_offset(self.cursor_offset()));
         let target = point(pos.x, pos.y + layout.line_height * rows + layout.line_height * 0.5);
-        let idx = if target.y < px(0.) { 0 } else { layout.index(target) };
+        let idx = if target.y < px(0.) { 0 } else { self.text_offset(layout.index(target)) };
         self.move_to(idx, window, cx);
     }
 
@@ -507,7 +558,7 @@ impl TextInput {
 
     /// Ends a drag; what it selected goes to the primary selection.
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.drag_anchor.take().is_some() && !self.selected_range.is_empty() {
+        if self.drag_anchor.take().is_some() && !self.selected_range.is_empty() && !self.secret {
             write_to_primary(self.content[self.selected_range.clone()].to_string(), cx);
         }
     }
@@ -552,13 +603,13 @@ impl TextInput {
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             cx.propagate();
-        } else {
+        } else if !self.secret {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
         }
     }
 
     fn cut(&mut self, _: &Cut, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.selected_range.is_empty() {
+        if !self.selected_range.is_empty() && !self.secret {
             cx.write_to_clipboard(ClipboardItem::new_string(self.content[self.selected_range.clone()].to_string()));
             self.replace_text_in_range(None, "", window, cx)
         }
@@ -579,7 +630,9 @@ impl TextInput {
 
     fn index_for_mouse_position(&self, position: Point<Pixels>) -> usize {
         match (self.last_bounds.as_ref(), self.last_layout.as_ref()) {
-            (Some(bounds), Some(layout)) if layout.text == self.content => layout.index(position - self.text_origin(bounds)),
+            (Some(bounds), Some(layout)) if layout.text == self.shown() => {
+                self.text_offset(layout.index(position - self.text_origin(bounds)))
+            }
             _ => 0,
         }
     }
@@ -777,10 +830,10 @@ impl EntityInputHandler for TextInput {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        let layout = self.last_layout.as_ref().filter(|l| l.text == self.content)?;
+        let layout = self.last_layout.as_ref().filter(|l| l.text == self.shown())?;
         let range = self.range_from_utf16(&range_utf16);
-        let start = layout.position(range.start);
-        let end = layout.position(range.end);
+        let start = layout.position(self.shown_offset(range.start));
+        let end = layout.position(self.shown_offset(range.end));
         let o = self.text_origin(&bounds);
         Some(Bounds::from_corners(o + start, o + point(end.x, end.y + layout.line_height)))
     }
@@ -797,8 +850,8 @@ impl EntityInputHandler for TextInput {
 
     fn character_index_for_point(&mut self, point: Point<Pixels>, _window: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
         let bounds = self.last_bounds?;
-        let layout = self.last_layout.as_ref().filter(|l| l.text == self.content)?;
-        Some(self.offset_to_utf16(layout.index(point - self.text_origin(&bounds))))
+        let layout = self.last_layout.as_ref().filter(|l| l.text == self.shown())?;
+        Some(self.offset_to_utf16(self.text_offset(layout.index(point - self.text_origin(&bounds)))))
     }
 }
 
@@ -889,7 +942,7 @@ impl Element for TextElement {
             let max = point((width - bounds.size.width).max(px(0.)), (layout.height() - bounds.size.height).max(px(0.)));
             if input.follow_cursor && !placeholder {
                 input.follow_cursor = false;
-                let p = layout.position(input.cursor_offset());
+                let p = layout.position(input.shown_offset(input.cursor_offset()));
                 if p.y < input.scroll_y {
                     input.scroll_y = p.y;
                 } else if p.y + lh > input.scroll_y + bounds.size.height {
@@ -910,11 +963,12 @@ impl Element for TextElement {
         let (cursor, selection) = if placeholder {
             (Some(Bounds::new(bounds.origin, size(px(2.), lh))), vec![])
         } else if input.selected_range.is_empty() {
-            let p = layout.position(input.cursor_offset());
+            let p = layout.position(input.shown_offset(input.cursor_offset()));
             (Some(Bounds::new(o + p, size(px(2.), lh))), vec![])
         } else {
             let lines = layout.lines.iter().map(|l| &***l);
-            (None, select::selection_rows(lines, o, lh, input.selected_range.clone()))
+            let range = input.shown_offset(input.selected_range.start)..input.shown_offset(input.selected_range.end);
+            (None, select::selection_rows(lines, o, lh, range))
         };
         Prepaint { layout, cursor, selection, scroll }
     }
@@ -992,7 +1046,7 @@ pub fn write_to_primary(text: String, cx: &mut App) {
 /// Text to shape, and whether it is the placeholder.
 fn display_text(input: &Entity<TextInput>, cx: &App) -> (SharedString, bool) {
     let input = input.read(cx);
-    if input.content.is_empty() { (input.placeholder.clone(), true) } else { (input.content.clone(), false) }
+    if input.content.is_empty() { (input.placeholder.clone(), true) } else { (input.shown(), false) }
 }
 
 impl Render for TextInput {
@@ -1091,6 +1145,18 @@ mod tests {
         assert_eq!(found, ["[image-1]", "[image-23]"]);
         assert_eq!(image_numbers("[image-23] [image-1] [image-23]"), [1, 23]);
         assert_eq!(image_token(7), "[image-7]");
+    }
+
+    /// A secret's mask has a char per char of the text, whatever its byte length.
+    #[test]
+    fn mask_offsets() {
+        let text = "a\u{e9}\u{20ac}b"; // 1 + 2 + 3 + 1 bytes
+        let ends = [0, 1, 3, 6, 7];
+        for (i, end) in ends.into_iter().enumerate() {
+            assert_eq!(mask_offset(text, end), i * MASK.len_utf8());
+            assert_eq!(unmask_offset(text, i * MASK.len_utf8()), end);
+        }
+        assert_eq!(unmask_offset(text, MASK.len_utf8() + 1), 1);
     }
 
     #[test]

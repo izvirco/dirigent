@@ -4,10 +4,14 @@
 //!   `<name> <provider/id> <effort>` row with a hover-revealed ✕. The header saves the
 //!   current combo or links to the second page.
 //! - `Menu::AllModels`: back button, search input, and every model the host offers.
+//!
+//! A host that offers no models has no provider set up: both pages then lead to
+//! Settings › Providers, to sign in to one there.
 
 use crate::app::{Dirigent, Menu, Preset};
 use crate::icons::icon;
 use crate::menu::{self, ROW_H, Side};
+use crate::net::HostStatus;
 use crate::theme::{self, text, u};
 use dirigent_protocol::ModelInfo;
 use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, rgba};
@@ -43,6 +47,8 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     );
 
     let mut rows = vec![header.into_any(), menu::separator()];
+    // First: nothing here runs without it.
+    rows.extend(sign_in(this, cx));
     if let Some(c) = &current
         && !saved
     {
@@ -56,6 +62,17 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
         rows.push(menu::header("No presets yet. Pick a model, then save the combo."));
     }
     rows
+}
+
+/// When the composer's host is up but offers no models: a row to Settings › Providers, to
+/// sign in to a provider there.
+fn sign_in(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+    let host = this.composer_host()?.to_owned();
+    let up = this.host(&host).is_some_and(|h| h.status == HostStatus::Connected);
+    (up && this.models().is_empty()).then(|| {
+        let open = move |this: &mut Dirigent, cx: &mut Context<Dirigent>| this.open_providers(Some(host.clone()), cx);
+        menu::item("sign-in", "Sign in to a provider", "this host has no models yet", false, open, cx)
+    })
 }
 
 /// `‹ [search]`, a hairline, then the matching models in a fixed-height scroll.
@@ -89,7 +106,7 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
             (false, true) => "No models yet. Waiting for the host.",
             (false, false) => "No models match",
         };
-        vec![menu::header(hint)]
+        vec![sign_in(this, cx).unwrap_or_else(|| menu::header(hint))]
     } else {
         models.iter().map(|m| model_row(m, this, cx)).collect()
     };

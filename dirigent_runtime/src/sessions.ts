@@ -122,9 +122,6 @@ Images the user attaches to a message are also saved as files on this machine: t
 
 export type Outbound =
   | { type: "loaded"; thread_id: string; model?: string; thinking_level: string; header: unknown }
-  | { type: "models"; models: ModelInfo[] }
-  | ({ type: "title"; id: number } & TitleResult)
-  | { type: "title_failed"; id: number; message: string }
   | { type: "entry"; thread_id: string; entry: unknown }
   | { type: "event"; thread_id: string; event: unknown }
   | { type: "ask"; thread_id: string; ask: Ask }
@@ -143,8 +140,8 @@ interface Live extends ToolHost {
 
 export class Sessions {
   private live = new Map<string, Live>();
-  // Shared across sessions; also answers `list_models`.
-  private modelRuntime = ModelRuntime.create();
+  // Shared across sessions; also answers `list_models` and signs in (`Logins`).
+  readonly modelRuntime = ModelRuntime.create();
 
   constructor(private send: (msg: Outbound) => void) {}
 
@@ -271,16 +268,15 @@ export class Sessions {
   }
 
   /** Models this host has credentials for. */
-  async listModels(): Promise<void> {
+  async listModels(): Promise<ModelInfo[]> {
     const rt = await this.modelRuntime;
-    const models = (await rt.getAvailable()).map((m) => ({
+    return (await rt.getAvailable()).map((m) => ({
       provider: m.provider,
       id: m.id,
       name: m.name,
       context_window: m.contextWindow,
       thinking_levels: getSupportedThinkingLevels(m),
     }));
-    this.send({ type: "models", models });
   }
 
   /**
