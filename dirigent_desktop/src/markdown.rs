@@ -9,13 +9,14 @@
 //! link, see `view::blob_links`) is drawn by the caller's `ImageFn` after its paragraph's
 //! text; any other image shows its alt text. The caller can also make literal tokens in
 //! the text links (`Tokens`: a user bubble's `[image-N]`), drawn in the accent color
-//! without the underline.
+//! without the underline. Given a `CopyFn`, every code block gets a copy button, revealed
+//! in its top-right corner on hover.
 
-use crate::select::{Block, Keys};
+use crate::select::{Block, Key, Keys};
 use crate::theme::{self, text, u};
 use gpui::{
-    AnyElement, Div, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div, prelude::*,
-    px, rgba,
+    AnyElement, Div, ElementId, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div,
+    prelude::*, px, rgba,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, TextMergeStream};
 use std::iter::Peekable;
@@ -24,17 +25,30 @@ use std::ops::Range;
 /// How a document shows a `blob:` image, given the id. `None` leaves such links as alt text.
 pub type ImageFn<'a> = Option<&'a mut (dyn FnMut(&str) -> AnyElement + 'a)>;
 
+/// How a document makes a code block's copy button, given an id unique to the block and
+/// the code it shows. `None` leaves code blocks without one.
+pub type CopyFn<'a> = Option<&'a dyn Fn(ElementId, SharedString) -> AnyElement>;
+
 /// Literal tokens of plain text (not code) that link somewhere, with their URLs.
 pub type Tokens<'a> = &'a [(String, SharedString)];
 
+/// The markdown extensions we render.
+const OPTS: Options = Options::ENABLE_TABLES.union(Options::ENABLE_STRIKETHROUGH).union(Options::ENABLE_TASKLISTS);
+
 /// Render `text` as a column of blocks. `mono` is the font for code; `keys` places the
 /// text blocks in their document for selection.
-pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, tokens: Tokens) -> Div {
-    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, copy: CopyFn, tokens: Tokens) -> Div {
     // Merged so a bare URL (or a token) the parser split into several text events is found whole.
-    let mut events = TextMergeStream::new(Parser::new_ext(text, opts)).peekable();
-    let mut r = Renderer { mono, keys, image, tokens };
+    let mut events = TextMergeStream::new(Parser::new_ext(text, OPTS)).peekable();
+    let mut r = Renderer { mono, keys, image, copy, tokens };
     div().flex().flex_col().gap_2().children(r.blocks(&mut events))
+}
+
+/// Whether `text` opens with a code block (possibly in a list or quote): its copy button
+/// then sits where a message's corner buttons go.
+pub fn starts_with_code(text: &str) -> bool {
+    let container = |e: &Event| matches!(e, Event::Start(Tag::List(_) | Tag::Item | Tag::BlockQuote(_)));
+    matches!(Parser::new_ext(text, OPTS).find(|e| !container(e)), Some(Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock)))
 }
 
 /// The prefix of `text` that ends at its last newline — what streams get rendered as, so
@@ -49,6 +63,7 @@ struct Renderer<'m, 'i> {
     mono: &'m SharedString,
     keys: &'m mut Keys,
     image: ImageFn<'i>,
+    copy: CopyFn<'m>,
     tokens: Tokens<'m>,
 }
 
@@ -219,8 +234,19 @@ impl<'m> Renderer<'m, '_> {
         }
     }
 
+    /// `code` in a box, with the `CopyFn`'s button in its top-right corner (over the end of
+    /// the first line) while hovered.
     fn code_block(&mut self, code: String) -> Div {
+        let code = SharedString::from(code);
+        let block = self.keys.plain(code.clone());
+        let copy = self.copy.map(|copy| {
+            let Key { doc, item, seq } = block.key();
+            let id = ElementId::Name(format!("code-copy/{doc:?}/{item}/{seq}").into());
+            div().absolute().top_1().right_1().opacity(0.).group_hover("code", |d| d.opacity(1.)).child(copy(id, code))
+        });
         div()
+            .group("code")
+            .relative()
             .w_full()
             .rounded_md()
             .bg(rgba(theme::t().raised))
@@ -231,7 +257,8 @@ impl<'m> Renderer<'m, '_> {
             .font_family(self.mono.clone())
             .text_size(text::sm())
             .line_height(u(19.))
-            .child(self.keys.plain(code))
+            .child(block)
+            .children(copy)
     }
 }
 
@@ -467,8 +494,32 @@ mod tests {
     fn list_item_opening_with_inline_tag_is_one_paragraph() {
         let sel = crate::select::Selection::default();
         let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
-        render("- **Label:** text\n- [a](https://x.dev) *b* c\n", &"Mono".into(), &mut keys, None, &[]);
+        render("- **Label:** text\n- [a](https://x.dev) *b* c\n", &"Mono".into(), &mut keys, None, None, &[]);
         assert_eq!(sel.texts(), ["Label: text", "a b c"]);
+    }
+
+    #[test]
+    fn code_blocks_copy_what_they_show() {
+        let sel = crate::select::Selection::default();
+        let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
+        let made = std::cell::RefCell::new(vec![]);
+        let copy = |id: ElementId, code: SharedString| {
+            made.borrow_mut().push((id, code));
+            div().into_any()
+        };
+        render("```sh\nls -la  \n```\n\ntext\n\n```\nexit 0\n```\n", &"Mono".into(), &mut keys, None, Some(&copy), &[]);
+        let made = made.into_inner();
+        assert_eq!(made.iter().map(|(_, code)| code.to_string()).collect::<Vec<_>>(), ["ls -la", "exit 0"]);
+        assert_ne!(made[0].0, made[1].0);
+        assert_eq!(sel.texts(), ["ls -la", "text", "exit 0"]);
+    }
+
+    #[test]
+    fn opening_code_block() {
+        assert!(starts_with_code("```sh\nls\n```\nthen"));
+        assert!(starts_with_code("- ```\n  ls\n  ```\n"));
+        assert!(!starts_with_code("Run:\n```\nls\n```\n"));
+        assert!(!starts_with_code("`ls` inline"));
     }
 
     /// The links of `md`'s first paragraph, as (link text, url).

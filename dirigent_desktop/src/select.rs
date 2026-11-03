@@ -259,6 +259,11 @@ pub struct Block {
 }
 
 impl Block {
+    /// Its place in its document: unique per block, so it also makes unique element ids.
+    pub fn key(&self) -> Key {
+        self.key
+    }
+
     /// Clickable spans of the text and the URLs they open.
     pub fn links(mut self, links: Vec<(Range<usize>, SharedString)>) -> Self {
         self.links = links;
