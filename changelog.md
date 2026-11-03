@@ -1,4 +1,6 @@
-## 0.0.4 (draft)
+## 0.0.4
+
+Sign in to providers without a terminal, put your projects in order, and race everyone on the usage leaderboard.
 
 - Sign in and out of model providers in Settings › Providers, on each of your hosts ([#96])
 - `dirigent pi …` runs the bundled pi (install extensions, sign in) ([#105])
