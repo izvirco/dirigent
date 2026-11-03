@@ -25,6 +25,7 @@ mod net;
 mod onboarding;
 mod orchestra;
 mod picker;
+mod placement;
 mod projects;
 mod providers;
 mod ruler;
@@ -42,7 +43,7 @@ mod working;
 use app::{Dirigent, Dismiss, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
 use cache::Cache;
 use dirigent_service::hosts;
-use gpui::{App, AppContext, Bounds, Focusable, KeyBinding, QuitMode, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Focusable, KeyBinding, QuitMode, TitlebarOptions, WindowOptions};
 use gpui_platform::application;
 
 fn main() {
@@ -110,11 +111,12 @@ fn main() {
         // After the input's: in one, the open menu's arrows and Enter win.
         cx.bind_keys(menu::key_bindings());
 
-        let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
+        // As it was when last used (`placement`).
+        let window_bounds = placement::initial(&cache, cx);
         let window = cx
             .open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(window_bounds),
                     window_background,
                     // app_id/title are what testing.md keys on to find this window.
                     app_id: Some("dirigent".into()),
@@ -135,6 +137,7 @@ fn main() {
         window
             .update(cx, |view, window, cx| {
                 window.focus(&view.focus_handle(cx), cx);
+                placement::remember(window, cx);
                 view.serve_launches(open, launches, cx);
             })
             .unwrap();
