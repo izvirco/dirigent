@@ -10,6 +10,7 @@
 //! grows. While a run goes on, the model's latest prose streams below its work line a line
 //! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
 //! over the column's left edge, transcript and composer: one mark per message, hover to preview, click to jump.
+//! Scrolled up from the end, a small pill above the composer brings you back (`jump_button`).
 //! Messages can be pinned (the button next to `copy`); pins colour their marks. Any message
 //! can start a fork (a new thread with the history up to there), and a user message can be
 //! edited in place: its bubble takes the composer (`edit_bubble`), and sending runs the
@@ -32,12 +33,13 @@ use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
 use crate::working;
 use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
 use gpui::{
-    Anchor, AnyElement, Bounds, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, Pixels, SharedString, Stateful,
-    Window, anchored, deferred, div, img, list, point, prelude::*, px, relative, rgba,
+    Anchor, Animation, AnimationExt, AnyElement, Bounds, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, Pixels,
+    SharedString, Stateful, Window, anchored, canvas, deferred, div, img, list, point, prelude::*, px, relative, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Work key for the run in progress while it has no persisted item yet.
 pub const TAIL: usize = usize::MAX;
@@ -49,6 +51,12 @@ pub const LOG_WIDTH: f32 = 400.;
 
 pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
+    // Back at the end: what arrived while scrolled up has been seen (`jump_button`).
+    if let Pane::Thread(t) = &mut this.pane
+        && t.list.is_following_tail()
+    {
+        t.new_output = false;
+    }
     let Pane::Thread(t) = &this.pane else {
         return match &this.pane {
             Pane::Draft { target } => draft_page(pane, target.clone(), this, cx),
@@ -58,6 +66,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let list_state = t.list.clone();
     let (host, id) = (t.host.clone(), t.id.clone());
     let asks: Vec<Div> = t.asks.iter().map(|form| ask_card(form, cx)).collect();
+    let jump = jump_button(t, cx);
     let summary = this.summary(&host, &id).cloned();
     let missing = summary.as_ref().is_some_and(|s| s.workspace_missing);
     let banner = summary
@@ -202,6 +211,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                         }))
                         .children(asks),
                 )
+                .children(jump)
                 .children(banner)
                 .child(composer(this, cx)),
         )
@@ -240,6 +250,63 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .children(branch);
     pane.child(header(crumb, Some(actions)))
         .child(div().relative().flex_1().min_h_0().flex().flex_row().child(column).children(side_panel(this, cx)))
+}
+
+/// Back to the end: a small pill (`↓ Latest`) floating over the transcript just above the
+/// composer's top edge, centered on the column, while the transcript is scrolled up from its
+/// end. Ask cards lift it (`ask_h`) so it sits above their stack. Output that arrived
+/// meanwhile (`OpenThread::new_output`) turns it into an accent `↓ New output`. The list stops following its tail as
+/// soon as you scroll up, but only picks it up again in its layout, after this render,
+/// once you're back at the end (or everything fits): the canvas, prepainted after the
+/// list, asks for one more render then, which drops the button.
+fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
+    if t.list.is_following_tail() {
+        return None;
+    }
+    let th = theme::t();
+    let list = t.list.clone();
+    let recheck = canvas(
+        move |_, window, _| {
+            if list.is_following_tail() {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    );
+    let (label, color) = if t.new_output { ("New output", th.accent_ink) } else { ("Latest", th.fg_1) };
+    let button = div()
+        .id("jump-latest")
+        .relative()
+        .h(u(22.))
+        .flex_shrink_0()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .pl_1p5()
+        .pr_2()
+        .rounded_full()
+        .cursor_pointer()
+        .bg(rgba(th.raised))
+        .border_1()
+        .border_color(rgba(th.line))
+        .shadow_md()
+        .text_size(text::xs())
+        .text_color(rgba(color))
+        .hover(|d| d.bg(rgba(th.hover)))
+        // It floats over the transcript: clicks must not reach the text under it.
+        .block_mouse_except_scroll()
+        .on_click(cx.listener(|this, _, _, cx| this.jump_to_end(cx)))
+        .child(icon("arrow-down", color).size(u(12.)))
+        .child(label)
+        .child(recheck.absolute().size_0())
+        // Fades in (at once with reduce motion: gpui's animations honour it); gone at once
+        // when you're back at the end.
+        .with_animation("jump-latest-in", Animation::new(Duration::from_millis(150)), |d, v| d.opacity(v));
+    // A zero-height layer `lift` above the composer block's top edge (the ask stack's base,
+    // over the banner and composer), growing upward like the ask stack.
+    let lift = if t.ask_h > px(0.) { t.ask_h + u(8.) } else { u(8.) };
+    Some(div().absolute().top(-lift).left_0().right_0().h_0().flex().flex_col().items_center().justify_end().child(button))
 }
 
 /// The right panel, split off the pane by a hairline, `log_width` wide, with a drag

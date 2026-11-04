@@ -104,6 +104,9 @@ pub struct OpenThread {
     pub stats_hover: bool,
     /// A `jump_to` in progress: the item to center and the frames left to get it there.
     center_on: Option<(usize, u8)>,
+    /// Output arrived while the transcript was scrolled up from its end: the jump-to-latest
+    /// pill reads `New output` (`thread::jump_button`). Cleared once the list follows its end again.
+    pub new_output: bool,
     /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
     pub asks: Vec<AskForm>,
     /// The ask stack's height as last painted (`set_ask_height`): the transcript's tail
@@ -183,6 +186,7 @@ impl OpenThread {
             ruler: Default::default(),
             stats_hover: false,
             center_on: None,
+            new_output: false,
             asks: vec![],
             ask_h: px(0.),
             panel: None,
@@ -1572,6 +1576,7 @@ impl Dirigent {
                     if let Some(c) = changed {
                         t.list.remeasure_items(c..n.min(m));
                     }
+                    t.new_output |= (m != n || changed.is_some()) && !t.list.is_following_tail();
                     t.list.remeasure_items(m..m + 1);
                     if t.log.is_some() {
                         t.log_list.remeasure();
@@ -1590,6 +1595,7 @@ impl Dirigent {
                     && t.id == thread_id
                     && t.streaming.apply(&event, now_ms())
                 {
+                    t.new_output |= !t.list.is_following_tail();
                     let tail = t.timeline.items.len();
                     t.list.remeasure_items(tail..tail + 1);
                     if t.log.is_some() {
@@ -3977,6 +3983,16 @@ impl Dirigent {
         cx.notify();
     }
 
+    /// The jump-to-latest button (`thread::jump_button`): back to the transcript's end,
+    /// following it again. Focus stays where it was: the button blocks the mouse, so its
+    /// click doesn't blur the composer (or an ask's field).
+    pub fn jump_to_end(&mut self, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        t.center_on = None;
+        t.list.set_follow_mode(FollowMode::Tail);
+        cx.notify();
+    }
+
     /// Each frame after a `jump_to`: shift the item to the viewport's middle (a tall one
     /// stays at its top). Items above it may be unmeasured (0px to `scroll_by`) until
     /// they've been laid out, so this nudges and re-checks until it lands, a few frames
@@ -4108,6 +4124,9 @@ impl Dirigent {
         };
         t.timeline = timeline;
         t.list.reset(t.timeline.items.len() + 1);
+        // The edit is the newest message now: show it and the run it starts, even if the
+        // transcript was scrolled up to reach its bubble (a reset alone lands at the top).
+        t.list.set_follow_mode(FollowMode::Tail);
         t.rewound = Some(Rewound { request: id, entry_id: e.entry_id.clone(), text: text.clone(), images: images.clone() });
         let (host, thread_id) = (t.host.clone(), t.id.clone());
         self.net.send(

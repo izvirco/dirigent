@@ -15,6 +15,7 @@ macro_rules! icons {
 icons!(
     "archive",
     "archive-restore",
+    "arrow-down",
     "arrow-up",
     "chart-no-axes-combined",
     "check",
