@@ -1167,6 +1167,18 @@ fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context
     }
 }
 
+/// How markdown makes a code block's copy button (`markdown::CopyFn`): the code it shows
+/// to the clipboard, with a toast.
+fn copy_code<'a>(cx: &'a Context<Dirigent>) -> impl Fn(ElementId, SharedString) -> AnyElement + 'a {
+    move |id, code| raised(theme::icon_button(id, "copy", cx, move |this, cx| this.copy(code.to_string(), "Code copied", cx))).into_any()
+}
+
+/// An icon button that floats over text (a message's corner buttons, a code block's copy):
+/// raised, with a border.
+fn raised(b: Stateful<Div>) -> Stateful<Div> {
+    b.bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line))
+}
+
 /// Thumbnails of the images in a tool's result (`read` on an image file); click for full size.
 fn result_images(images: &[String], blobs: &HashMap<String, Blob>, seed: u64, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_row().flex_wrap().gap_3().children(images.iter().enumerate().map(|(i, id)| {
@@ -1462,17 +1474,22 @@ fn reply_block(
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
-    let body = markdown::render(text, &fonts.mono, keys, Some(&mut inline_image(blobs, ix as u64, cx)), &[]);
+    let body = markdown::render(text, &fonts.mono, keys, Some(&mut inline_image(blobs, ix as u64, cx)), Some(&copy_code(cx)), &[]);
+    // A reply opening with a code block gives its corner buttons (26 px) a row of their own
+    // above it, off the block's copy button (the live tail too, so it doesn't jump); its
+    // pin bar starts at the block.
+    let top = if markdown::starts_with_code(text) { 30. } else { 4. };
     div()
         .group("msg")
         .relative()
         .w_full()
-        .py_1()
+        .pt(u(top))
+        .pb_1()
         .font_family(fonts.prose.clone())
         .text_size(text::lg())
         .line_height(u(22.))
         .child(body)
-        .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP))
+        .children(pin_bar(ix, t, BUBBLE_PAD + PIN_GAP).map(|b| b.top(u(top))))
         .children(corner_buttons(ix, text, t, true, false, cx))
 }
 
@@ -1496,17 +1513,16 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, fork: bool, edit: bool,
     }
     let (copied, pinned) = (t.copied == Some(ix), t.is_pinned(ix));
     let text = text.to_owned();
-    let button = |b: Stateful<Div>| b.bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line));
     let tint = if pinned { theme::t().warn } else { theme::t().fg_1 };
     let edit = edit.then(|| {
-        button(theme::icon_button(("edit", ix), "pencil", cx, move |this, cx| this.start_edit(ix, cx)))
+        raised(theme::icon_button(("edit", ix), "pencil", cx, move |this, cx| this.start_edit(ix, cx)))
             .tooltip(theme::tooltip("Edit and send again from here"))
     });
     let fork = fork.then(|| {
-        button(theme::icon_button(("fork", ix), "git-fork", cx, move |this, _| this.fork_at(ix))).tooltip(theme::tooltip("Fork from here"))
+        raised(theme::icon_button(("fork", ix), "git-fork", cx, move |this, _| this.fork_at(ix))).tooltip(theme::tooltip("Fork from here"))
     });
-    let pin = button(theme::tinted_icon_button(("pin", ix), "pin", tint, cx, move |this, cx| this.toggle_pin(ix, cx)));
-    let copy = button(theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| {
+    let pin = raised(theme::tinted_icon_button(("pin", ix), "pin", tint, cx, move |this, cx| this.toggle_pin(ix, cx)));
+    let copy = raised(theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| {
         this.copy_item(ix, text.clone(), cx)
     }));
     Some(
@@ -1599,7 +1615,7 @@ fn user_bubble(
         .font_family(fonts.prose.clone())
         .text_size(text::lg())
         .line_height(u(22.))
-        .child(markdown::render(body, &fonts.mono, keys, None, &image_links(body, &refs, images)))
+        .child(markdown::render(body, &fonts.mono, keys, None, None, &image_links(body, &refs, images)))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
         .children(corner_buttons(ix, body, t, fork, edit, cx).map(|b| b.top_2().right_2()))
@@ -1766,7 +1782,7 @@ fn steer_bubble(
         .text_size(text::lg())
         .line_height(u(22.))
         .child(label)
-        .child(markdown::render(body, &fonts.mono, keys, None, &image_links(body, &refs, images)))
+        .child(markdown::render(body, &fonts.mono, keys, None, None, &image_links(body, &refs, images)))
         .children(thumbs(images, blobs, |i| ElementId::NamedInteger("steer-img".into(), step_id_n(key) << 8 | i as u64), cx))
 }
 
@@ -1897,11 +1913,14 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
     let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Log, six);
     match step {
-        Step::Thinking(text) => {
-            div().py_0p5().text_color(rgba(theme::t().fg_1)).child(markdown::render(text, mono, keys, None, &[])).into_any()
-        }
+        Step::Thinking(text) => div()
+            .py_0p5()
+            .text_color(rgba(theme::t().fg_1))
+            .child(markdown::render(text, mono, keys, None, Some(&copy_code(cx)), &[]))
+            .into_any(),
         Step::Text(text) => {
-            let body = markdown::render(text, mono, keys, Some(&mut inline_image(blobs, step_id_n((key, six)), cx)), &[]);
+            let body =
+                markdown::render(text, mono, keys, Some(&mut inline_image(blobs, step_id_n((key, six)), cx)), Some(&copy_code(cx)), &[]);
             div().py_0p5().text_color(rgba(theme::t().fg)).child(body).into_any()
         }
         Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),

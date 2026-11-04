@@ -1,8 +1,10 @@
 ## 0.0.5 (draft)
 
 - Threads that leave a dev server running land in the Inbox; archiving stops the server ([#112])
+- Code blocks in replies and the work log have a copy button on hover ([#117])
 
 [#112]: https://forge.sebba.dev/izvir/dirigent/changes/112
+[#117]: https://forge.sebba.dev/izvir/dirigent/changes/117
 
 ## 0.0.4
 

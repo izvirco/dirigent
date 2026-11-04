@@ -44,7 +44,7 @@ fn updated(cache: &Cache, current: &Version) -> bool {
 /// again to read them).
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let keys = &mut Keys::new(&this.selection, Doc::Changelog, 0);
-    let column = div().px_8().py_6().child(markdown::render(CHANGELOG, &this.fonts.mono, keys, None, &[]));
+    let column = div().px_8().py_6().child(markdown::render(CHANGELOG, &this.fonts.mono, keys, None, None, &[]));
     let body = div().id("changelog").min_h_0().overflow_y_scroll().child(column);
     modal::frame(div().w(u(WIDTH)).max_w_full().max_h_full().child(body), cx)
 }

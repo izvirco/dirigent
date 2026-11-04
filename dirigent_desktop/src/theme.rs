@@ -375,7 +375,7 @@ pub fn dot(color: u32) -> Div {
 pub fn icon_button(
     id: impl Into<ElementId>,
     name: &'static str,
-    cx: &mut Context<Dirigent>,
+    cx: &Context<Dirigent>,
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
 ) -> Stateful<Div> {
     tinted_icon_button(id, name, t().fg_1, cx, on_click)
@@ -386,7 +386,7 @@ pub fn tinted_icon_button(
     id: impl Into<ElementId>,
     name: &'static str,
     color: u32,
-    cx: &mut Context<Dirigent>,
+    cx: &Context<Dirigent>,
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
 ) -> Stateful<Div> {
     div()

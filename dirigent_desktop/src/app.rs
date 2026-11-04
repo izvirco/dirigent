@@ -1901,7 +1901,8 @@ impl Dirigent {
     }
 
     /// `text` to the clipboard, with a `toast` saying what was copied; closes any menu.
-    /// The workspace menu's `Copy path`, the thread header's copy-id button.
+    /// The workspace menu's `Copy path`, the thread header's copy-id button, code blocks'
+    /// copy buttons (`thread::copy_code`).
     pub fn copy(&mut self, text: String, toast: &str, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         self.menu = None;
