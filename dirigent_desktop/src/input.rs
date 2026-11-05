@@ -3,8 +3,17 @@
 //! text with wrapping, grows with content up to a share of the window, then scrolls
 //! (wheel, and automatically to keep the cursor in view) and paints cursor/selection.
 //! Mouse selection (double click = word, triple = all) keeps following the mouse once it
-//! leaves the input, and every edit is undoable (typing a word is one step). Ctrl+backspace /
-//! ctrl+delete (alt on macOS) delete a word (`word_boundary`).
+//! leaves the input, and every edit is undoable (typing a word is one step).
+//!
+//! Keys (`key_bindings`; "word" is ctrl, alt on macOS):
+//! - moves (`Move`): left / right a character, up / down a visual row (a single-line input
+//!   emits `Arrow` instead, for a list under it), word+left / right a word, home / end
+//!   (cmd+left / right on macOS) the line's start / end, ctrl+home / end (cmd+up / down on
+//!   macOS) the whole text's; with shift, each selects to there (shift+up / down too in a
+//!   single-line input: there they reach its start / end);
+//! - word+backspace / delete delete a word, stopping where word+left / right do
+//!   (`word_boundary`); secondary+a selects all.
+//!
 //! Adapted from zed's `gpui/examples/input.rs`, extended to multiple lines.
 
 use crate::select::{self, word_at};
@@ -19,32 +28,34 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
-actions!(
-    input,
-    [
-        Backspace,
-        Delete,
-        BackspaceWord,
-        DeleteWord,
-        Left,
-        Right,
-        Up,
-        Down,
-        SelectLeft,
-        SelectRight,
-        SelectAll,
-        Home,
-        End,
-        Paste,
-        Cut,
-        Copy,
-        Undo,
-        Redo,
-        Newline,
-        Submit,
-        SubmitQueued
-    ]
-);
+actions!(input, [Backspace, Delete, BackspaceWord, DeleteWord, SelectAll, Paste, Cut, Copy, Undo, Redo, Newline, Submit, SubmitQueued]);
+
+/// A motion key: moves the cursor `to` somewhere, or with `select` (shift) extends the
+/// selection to there (`TextInput::move_cursor`).
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = input, no_json)]
+struct Move {
+    to: To,
+    select: bool,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum To {
+    /// A character.
+    Left,
+    Right,
+    /// A visual row: -1 up, 1 down.
+    Row(i32),
+    /// Where `prev_word` / `next_word` say.
+    WordLeft,
+    WordRight,
+    /// The `\n`-separated line's start / end (Home / End).
+    LineStart,
+    LineEnd,
+    /// The whole text's.
+    Start,
+    End,
+}
 
 pub const KEY_CONTEXT: &str = "Input";
 /// A multiline input grows with its text up to this share of the window height, then scrolls.
@@ -445,67 +456,45 @@ impl TextInput {
         }
     }
 
-    fn left(&mut self, _: &Left, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.move_to(self.previous_boundary(self.cursor_offset()), window, cx);
-        } else {
-            self.move_to(self.selected_range.start, window, cx)
-        }
+    /// Every motion key. Without shift a selection collapses: left / right to the end they
+    /// head to, a word jump goes on from that end. Everything else moves from the cursor.
+    fn move_cursor(&mut self, m: &Move, window: &mut Window, cx: &mut Context<Self>) {
+        let c = self.cursor_offset();
+        let collapse = !m.select && !self.selected_range.is_empty();
+        let (left, right) = if m.select { (c, c) } else { (self.selected_range.start, self.selected_range.end) };
+        let to = match m.to {
+            To::Left if collapse => left,
+            To::Right if collapse => right,
+            To::Left => self.previous_boundary(c),
+            To::Right => self.next_boundary(c),
+            To::WordLeft => prev_word(&self.content, left),
+            To::WordRight => next_word(&self.content, right),
+            To::Row(rows) if self.single_line && !m.select => return cx.emit(Arrow(rows)),
+            To::Row(rows) => {
+                let Some(to) = self.vertical_target(rows) else { return };
+                to
+            }
+            To::LineStart => line_start(&self.content, c),
+            To::LineEnd => line_end(&self.content, c),
+            To::Start => 0,
+            To::End => self.content.len(),
+        };
+        if m.select { self.select_to(to, window, cx) } else { self.move_to(to, window, cx) }
     }
 
-    fn right(&mut self, _: &Right, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_range.is_empty() {
-            self.move_to(self.next_boundary(self.selected_range.end), window, cx);
-        } else {
-            self.move_to(self.selected_range.end, window, cx)
-        }
-    }
-
-    fn up(&mut self, _: &Up, window: &mut Window, cx: &mut Context<Self>) {
-        if self.single_line {
-            return cx.emit(Arrow(-1));
-        }
-        self.move_vertical(-1., window, cx);
-    }
-
-    fn down(&mut self, _: &Down, window: &mut Window, cx: &mut Context<Self>) {
-        if self.single_line {
-            return cx.emit(Arrow(1));
-        }
-        self.move_vertical(1., window, cx);
-    }
-
-    /// Move the cursor one visual row up/down using the last layout.
-    fn move_vertical(&mut self, rows: f32, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(layout) = self.last_layout.as_ref().filter(|l| l.text == self.shown()) else { return };
+    /// Where the cursor lands `rows` visual rows down (up if negative) in the last layout;
+    /// past the first / last row, at the text's start / end (all a single line has). None
+    /// while the layout is stale.
+    fn vertical_target(&self, rows: i32) -> Option<usize> {
+        let layout = self.last_layout.as_ref().filter(|l| l.text == self.shown())?;
         let pos = layout.position(self.shown_offset(self.cursor_offset()));
-        let target = point(pos.x, pos.y + layout.line_height * rows + layout.line_height * 0.5);
-        let idx = if target.y < px(0.) { 0 } else { self.text_offset(layout.index(target)) };
-        self.move_to(idx, window, cx);
-    }
-
-    fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.previous_boundary(self.cursor_offset()), window, cx);
-    }
-
-    fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        self.select_to(self.next_boundary(self.cursor_offset()), window, cx);
+        let target = point(pos.x, pos.y + layout.line_height * (rows as f32 + 0.5));
+        Some(self.text_offset(layout.index(target)))
     }
 
     fn select_all(&mut self, _: &SelectAll, window: &mut Window, cx: &mut Context<Self>) {
         self.move_to(0, window, cx);
         self.select_to(self.content.len(), window, cx)
-    }
-
-    fn home(&mut self, _: &Home, window: &mut Window, cx: &mut Context<Self>) {
-        let line_start = self.content[..self.cursor_offset()].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        self.move_to(line_start, window, cx);
-    }
-
-    fn end(&mut self, _: &End, window: &mut Window, cx: &mut Context<Self>) {
-        let c = self.cursor_offset();
-        let line_end = self.content[c..].find('\n').map(|i| c + i).unwrap_or(self.content.len());
-        self.move_to(line_end, window, cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -517,13 +506,11 @@ impl TextInput {
     }
 
     fn backspace_word(&mut self, _: &BackspaceWord, window: &mut Window, cx: &mut Context<Self>) {
-        let c = self.cursor_offset();
-        self.delete_to(word_boundary(self.content[..c].grapheme_indices(true).rev(), c), window, cx)
+        self.delete_to(prev_word(&self.content, self.cursor_offset()), window, cx)
     }
 
     fn delete_word(&mut self, _: &DeleteWord, window: &mut Window, cx: &mut Context<Self>) {
-        let c = self.cursor_offset();
-        self.delete_to(word_boundary(self.content[c..].grapheme_indices(true).map(|(i, g)| (c + i + g.len(), g)), c), window, cx)
+        self.delete_to(next_word(&self.content, self.cursor_offset()), window, cx)
     }
 
     /// Delete the selection, or with none, from the cursor to `to` (either side of it).
@@ -701,10 +688,31 @@ impl TextInput {
     }
 }
 
-/// How far a word delete reaches from `from`: over spaces, then over one run of word
+/// Where a word move (ctrl+left / right) lands and a word delete (ctrl+backspace / delete)
+/// reaches, before `from` in `text`.
+fn prev_word(text: &str, from: usize) -> usize {
+    word_boundary(text[..from].grapheme_indices(true).rev(), from)
+}
+
+/// Like `prev_word`, but after `from`.
+fn next_word(text: &str, from: usize) -> usize {
+    word_boundary(text[from..].grapheme_indices(true).map(|(i, g)| (from + i + g.len(), g)), from)
+}
+
+/// The start of the `\n`-separated line `at` is on (Home).
+fn line_start(text: &str, at: usize) -> usize {
+    text[..at].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// The end of the `\n`-separated line `at` is on (End).
+fn line_end(text: &str, at: usize) -> usize {
+    text[at..].find('\n').map_or(text.len(), |i| at + i)
+}
+
+/// How far a word move or delete reaches from `from`: over spaces, then over one run of word
 /// characters or of punctuation. A line break is a word of its own, and spaces before it
 /// stop there. `graphemes` walks away from `from` (backwards for ctrl+backspace), each with
-/// the offset the deletion reaches once it is included.
+/// the offset the cursor reaches once it is included.
 fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: usize) -> usize {
     #[derive(PartialEq, Clone, Copy)]
     enum Class {
@@ -1059,15 +1067,8 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::backspace_word))
             .on_action(cx.listener(Self::delete_word))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::up))
-            .on_action(cx.listener(Self::down))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
+            .on_action(cx.listener(Self::move_cursor))
             .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
@@ -1103,17 +1104,33 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     let mac = cfg!(target_os = "macos");
     // A word at a time: alt on macOS, where cmd+backspace deletes the whole line.
     let word = if mac { "alt" } else { "ctrl" };
+    // The motion keys; each with shift too, selecting.
+    let mut motions: Vec<(String, To)> = vec![
+        ("left".into(), To::Left),
+        ("right".into(), To::Right),
+        ("up".into(), To::Row(-1)),
+        ("down".into(), To::Row(1)),
+        (format!("{word}-left"), To::WordLeft),
+        (format!("{word}-right"), To::WordRight),
+        ("home".into(), To::LineStart),
+        ("end".into(), To::LineEnd),
+    ];
+    if mac {
+        // A MacBook has no Home / End keys; cmd+up / down take the whole text's start / end.
+        motions.extend([
+            ("cmd-left".into(), To::LineStart),
+            ("cmd-right".into(), To::LineEnd),
+            ("cmd-up".into(), To::Start),
+            ("cmd-down".into(), To::End),
+        ]);
+    } else {
+        motions.extend([("ctrl-home".into(), To::Start), ("ctrl-end".into(), To::End)]);
+    }
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, c),
         KeyBinding::new("delete", Delete, c),
         KeyBinding::new(&format!("{word}-backspace"), BackspaceWord, c),
         KeyBinding::new(&format!("{word}-delete"), DeleteWord, c),
-        KeyBinding::new("left", Left, c),
-        KeyBinding::new("right", Right, c),
-        KeyBinding::new("up", Up, c),
-        KeyBinding::new("down", Down, c),
-        KeyBinding::new("shift-left", SelectLeft, c),
-        KeyBinding::new("shift-right", SelectRight, c),
         KeyBinding::new("secondary-a", SelectAll, c),
         KeyBinding::new("secondary-v", Paste, c),
         KeyBinding::new("secondary-c", Copy, c),
@@ -1121,15 +1138,13 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new("secondary-z", Undo, c),
         KeyBinding::new("secondary-shift-z", Redo, c),
         KeyBinding::new("secondary-y", Redo, c),
-        KeyBinding::new("home", Home, c),
-        KeyBinding::new("end", End, c),
         KeyBinding::new("enter", Newline, c),
         KeyBinding::new("secondary-enter", Submit, c),
         KeyBinding::new("shift-enter", SubmitQueued, c),
     ];
-    if mac {
-        // A MacBook has no Home / End keys.
-        bindings.extend([KeyBinding::new("cmd-left", Home, c), KeyBinding::new("cmd-right", End, c)]);
+    for (keys, to) in motions {
+        bindings.push(KeyBinding::new(&keys, Move { to, select: false }, c));
+        bindings.push(KeyBinding::new(&format!("shift-{keys}"), Move { to, select: true }, c));
     }
     bindings
 }
@@ -1162,14 +1177,8 @@ mod tests {
     #[test]
     fn word_boundaries() {
         // What ctrl+backspace leaves of `text` with the cursor at its end, and ctrl+delete at its start.
-        let back = |text: &str| {
-            let to = word_boundary(text.grapheme_indices(true).rev(), text.len());
-            text[..to].to_string()
-        };
-        let fwd = |text: &str| {
-            let to = word_boundary(text.grapheme_indices(true).map(|(i, g)| (i + g.len(), g)), 0);
-            text[to..].to_string()
-        };
+        let back = |text: &str| text[..prev_word(text, text.len())].to_string();
+        let fwd = |text: &str| text[next_word(text, 0)..].to_string();
         assert_eq!(back("hello world"), "hello ");
         assert_eq!(back("hello world  "), "hello ");
         assert_eq!(back("src/main.rs"), "src/main.");
@@ -1181,5 +1190,29 @@ mod tests {
         assert_eq!(fwd("hello world"), " world");
         assert_eq!(fwd("  hello world"), " world");
         assert_eq!(fwd("\nline"), "line");
+    }
+
+    /// Where ctrl+left / ctrl+right stop, pressed over and over from the end / start.
+    #[test]
+    fn word_jumps() {
+        let stops = |text: &str, step: fn(&str, usize) -> usize, from: usize| {
+            std::iter::successors(Some(from), |&at| Some(step(text, at)).filter(|&next| next != at)).collect::<Vec<_>>()
+        };
+        let text = "fix src/main.rs  now\n  then";
+        assert_eq!(stops(text, next_word, 0), [0, 3, 7, 8, 12, 13, 15, 20, 21, 27]);
+        assert_eq!(stops(text, prev_word, text.len()), [27, 23, 21, 20, 17, 13, 12, 8, 7, 4, 0]);
+        // Multi-byte graphemes count as one word character / one punctuation mark.
+        assert_eq!(next_word("caf\u{e9} \u{2014} x", 0), 5);
+        assert_eq!(prev_word("caf\u{e9} \u{2014}", 9), 6);
+    }
+
+    #[test]
+    fn line_ends() {
+        let text = "one\ntwo\n";
+        assert_eq!((line_start(text, 0), line_end(text, 0)), (0, 3));
+        assert_eq!((line_start(text, 3), line_end(text, 3)), (0, 3));
+        assert_eq!((line_start(text, 5), line_end(text, 5)), (4, 7));
+        assert_eq!((line_start(text, 8), line_end(text, 8)), (8, 8));
+        assert_eq!((line_start("", 0), line_end("", 0)), (0, 0));
     }
 }
