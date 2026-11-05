@@ -92,7 +92,7 @@ projects sit right under the title, the first at (43, 53) and the next ones 32 p
 new-thread `+` (217); drag one onto another row's y to reorder. Nothing is pinned on a fresh db, and an added project
 isn't either (its pin toggle on the Projects page). The Inbox and Workpool rows only show once they have a thread: Inbox right under
 the pins (at (35, 53) with none) with its cards below it; the Workpool row sits above the bottom bar (its cards stack
-up on it; folded by default, the chevron at x = 217 on a hovered nav row folds / unfolds, remembered across restarts).
+up on it; folded by default, the chevron at x = 217 on a nav row folds / unfolds, the counts just left of it, remembered across restarts).
 Right click a card: `Rename thread` (its title turns into a field, Enter or a click elsewhere saves, Esc cancels) and
 `Regenerate title`, at the click.
 Projects page (folder): a row per project, pin toggle at x ≈ 333 (first row y = 81, rows 40 px apart; `drag` one onto another
