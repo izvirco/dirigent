@@ -451,6 +451,10 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
 /// Height of the project list in the `Create thread in` popup (~10 rows).
 const TARGET_LIST_H: f32 = 270.;
 
+/// About how many characters (name + hosts) a row of that popup fits in the default font;
+/// past it the hosts collapse to `n hosts`.
+const TARGET_ROW_CHARS: usize = 44;
+
 /// The new-thread page: `Create thread in <project>` above the composer, both centered in
 /// the pane. Projects linked across hosts are one entry; `on <host>` then picks the host.
 /// Leaving the page (sidebar, a thread) keeps whatever was typed.
@@ -465,22 +469,27 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             return menu::popup(Side::Below(26.), vec![menu::header("No projects yet. Add one with the folder in the sidebar.")], cx);
         }
         let search = menu::search(this.target_search.clone());
+        let multi_host = this.hosts.len() > 1;
         let list = menu::results("target-list", TARGET_LIST_H, cx, |cx| {
             let mut items = Vec::new();
             for g in &this.filtered_targets(cx) {
                 let selected = group.is_some_and(|s| s.key == g.key);
                 // Keep the host when switching to a group that also lives there.
                 let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
-                // Hosts are picked in the `on <host>` chip; linked projects' paths differ per host.
-                let detail = if g.members.len() > 1 { String::new() } else { g.members[0].project.path.clone() };
-                items.push(menu::item(
-                    format!("t/{}", g.key),
-                    g.name.clone(),
-                    detail,
-                    selected,
-                    move |this, cx| this.set_target(t.clone(), cx),
-                    cx,
-                ));
+                // The name, and on the right the hosts it lives on (with more than one host;
+                // the `on <host>` chip picks among them), or their count when they don't fit.
+                let hosts = multi_host.then(|| {
+                    let names = g.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ");
+                    let fits = g.name.chars().count() + names.chars().count() <= TARGET_ROW_CHARS;
+                    if fits { names } else { format!("{} hosts", g.members.len()) }
+                });
+                let row = menu::stop(menu::row(format!("t/{}", g.key)), selected, move |this, _, cx| this.set_target(t.clone(), cx), cx)
+                    .child(div().flex_shrink_0().child(g.name.clone()))
+                    .children(
+                        hosts
+                            .map(|h| div().ml_auto().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(text::sm()).child(h)),
+                    );
+                items.push(row.into_any());
             }
             if items.is_empty() {
                 items.push(menu::header("No projects match"));
