@@ -162,7 +162,7 @@ pub enum ClientMessage {
     /// question with the picked options and / or typed text, or `None` when dismissed.
     /// The host hands them to the model, starting a turn if it is idle. `silent` only drops
     /// the ask and tells the model nothing: the user answers in a message of their own (the
-    /// form's `Insert`).
+    /// form's `Insert into composer`).
     Answer {
         id: u64,
         thread_id: String,

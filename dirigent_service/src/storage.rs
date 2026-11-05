@@ -271,7 +271,7 @@ impl Storage {
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
-        let mut stmt = self.conn.prepare("SELECT thread_id, json FROM asks ORDER BY created_at")?;
+        let mut stmt = self.conn.prepare("SELECT thread_id, json FROM asks ORDER BY created_at, rowid")?;
         for row in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
             let (thread_id, json) = row?;
             if let Ok(ask) = serde_json::from_str(&json) {
