@@ -891,6 +891,21 @@ impl Dirigent {
         self.hosts.iter().find(|h| h.name == name)
     }
 
+    /// `host` is up: requests to it get through (`request` drops them otherwise).
+    pub fn connected(&self, host: &str) -> bool {
+        self.host(host).is_some_and(|h| h.status == HostStatus::Connected)
+    }
+
+    /// The composer's host is down: send stays grey and says so (`thread::composer`, `edit_bubble`).
+    pub fn composer_offline(&self) -> bool {
+        self.composer_host().is_some_and(|h| !self.connected(h))
+    }
+
+    /// A host's name as pickers show it: `name (offline)` while it is down.
+    pub fn host_label(&self, host: &str) -> String {
+        if self.connected(host) { host.to_owned() } else { format!("{host} (offline)") }
+    }
+
     pub fn open(&self) -> Option<&OpenThread> {
         match &self.pane {
             Pane::Thread(t) => Some(t),
@@ -3533,7 +3548,7 @@ impl Dirigent {
                 return;
             }
             // A request to an offline host is dropped: keep the draft instead.
-            if self.host(&target.host).is_none_or(|h| h.status != HostStatus::Connected) {
+            if !self.connected(&target.host) {
                 self.toast(format!("{} is offline", target.host), cx);
                 return;
             }
@@ -3612,6 +3627,10 @@ impl Dirigent {
             // The text stays in the composer until the thread can take it.
             if let Some(why) = self.not_ready(&t.host, &t.id) {
                 self.toast(why, cx);
+                return;
+            }
+            if !self.connected(&t.host) {
+                self.toast(format!("{} is offline", t.host), cx);
                 return;
             }
             let (host, thread_id) = (t.host.clone(), t.id.clone());
@@ -4082,7 +4101,7 @@ impl Dirigent {
             return self.toast(why, cx);
         }
         // A request to an offline host is dropped: the edit stays open instead.
-        if self.host(&t.host).is_none_or(|h| h.status != HostStatus::Connected) {
+        if !self.connected(&t.host) {
             return self.toast(format!("{} is offline", t.host), cx);
         }
         let id = self.next_id();
