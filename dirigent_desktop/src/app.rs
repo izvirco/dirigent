@@ -3972,14 +3972,13 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A ruler mark was clicked: scroll the transcript so that item is in the middle of
-    /// the viewport. It goes to the top now; `settle_jump` centers it once it's measured.
+    /// A ruler mark was pressed or dragged to: scroll the transcript so that item is in the
+    /// middle of the viewport. It goes to the top now; `settle_jump` centers it once it's
+    /// measured. Focus stays where it was (the ruler keeps its press from taking it).
     pub fn jump_to(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &mut self.pane else { return };
         t.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
         t.center_on = Some((ix, 10));
-        // The click blurred the composer; keep typing working.
-        self.focus_composer(cx);
         cx.notify();
     }
 
