@@ -14,7 +14,7 @@ use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{changelog, config, hosts, images, instance, settings, update};
-use crate::{leaderboard, lists, menu, ruler, sidebar, thread, titlebar, usage};
+use crate::{leaderboard, lists, menu, onboarding, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
     Ask, ClientMessage, Entry, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary,
@@ -566,6 +566,8 @@ pub struct Dirigent {
     pub pane: Pane,
     /// Settings or Usage, over the pane (the Add project modal is `add_project`).
     pub modal: Option<Modal>,
+    /// The setup, over everything until it's done (`onboarding.rs`).
+    pub onboarding: Option<onboarding::State>,
     pub menu: Option<Menu>,
     /// The current mouse press closed a menu (clicked outside it). Suppresses `toggle_menu`
     /// for that click, so pressing a menu's own trigger closes it rather than reopening it.
@@ -699,6 +701,7 @@ impl Dirigent {
         };
         // First, before anything is kept in `kv`: it tells a new data dir from an old one.
         let updated = changelog::after_update(&cache);
+        let onboard = onboarding::needed(&cache);
         let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
@@ -787,6 +790,7 @@ impl Dirigent {
             unfolded: HashSet::new(),
             pane: Pane::Inbox,
             modal: None,
+            onboarding: None,
             menu: None,
             menu_dismissed: false,
             caption_press: false,
@@ -850,7 +854,10 @@ impl Dirigent {
             Err(e) => this.toast(format!("{e:#}"), cx),
         }
         this.restore_pane(cx);
-        if updated {
+        // The setup goes first; the changelog is a click on the version away.
+        if onboard {
+            this.open_onboarding(cx);
+        } else if updated {
             this.open_changelog(cx);
         }
         this.tick(cx);
@@ -2025,7 +2032,7 @@ impl Dirigent {
     }
 
     pub fn new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
-        if self.add_project.is_some() || self.modal.is_some() {
+        if self.add_project.is_some() || self.modal.is_some() || self.onboarding_open() {
             return; // modal: nothing happens under it
         }
         self.new_draft(None, cx);
@@ -2048,13 +2055,13 @@ impl Dirigent {
         }
     }
 
-    fn last_target(&self) -> Option<Target> {
+    pub(crate) fn last_target(&self) -> Option<Target> {
         let v = self.cache.lock().unwrap().get(LAST_TARGET_KEY)?;
         let (host, project_id) = v.split_once('\n')?;
         Some(Target { host: host.into(), project_id: project_id.into() })
     }
 
-    fn target_valid(&self, t: &Target) -> bool {
+    pub(crate) fn target_valid(&self, t: &Target) -> bool {
         self.host(&t.host).is_some_and(|h| h.projects.iter().any(|p| p.id == t.project_id))
     }
 
@@ -2328,7 +2335,7 @@ impl Dirigent {
 
     /// Esc or a press outside the card: the browse page just closes, the link page means
     /// "don't link".
-    fn close_add_project(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_add_project(&mut self, cx: &mut Context<Self>) {
         if self.add_project.as_ref().is_some_and(|s| s.link.is_some()) {
             return self.finish_add_project(None, cx);
         }
@@ -2368,13 +2375,7 @@ impl Dirigent {
             self.sync_hosts(cx);
             self.focus(self.host_name_input.focus_handle(cx), cx);
         } else if tab == settings::Tab::Providers {
-            // A host since removed shows `local` instead.
-            if self.host(&self.providers.host).is_none() {
-                self.providers.host = hosts::LOCAL.to_owned();
-                self.providers.list = None;
-            }
-            self.request_providers();
-            self.focus_providers(cx);
+            self.enter_providers(cx);
         } else {
             self.focus(self.focus_handle.clone(), cx);
         }
@@ -2555,9 +2556,11 @@ impl Dirigent {
             return None;
         }
         let view = window.viewport_size();
-        let width = match bg.reach {
-            Reach::Full => view.width,
-            Reach::Edge => u(self.sidebar_width + 2. * theme::GUTTER).min(view.width),
+        // The setup has it across the whole window.
+        let width = if self.onboarding.is_some() || bg.reach == Reach::Full {
+            view.width
+        } else {
+            u(self.sidebar_width + 2. * theme::GUTTER).min(view.width)
         };
         Some(ambient::Spec::new(bg.pattern, f32::from(width), f32::from(view.height), window.scale_factor(), theme::t().pattern))
     }
@@ -3726,6 +3729,11 @@ impl Dirigent {
         if self.add_project.is_some() {
             return self.close_add_project(cx);
         }
+        // The setup stays until it's finished or skipped; in it Esc only stops a login (its
+        // project browser is closed above).
+        if self.onboarding_open() {
+            return self.cancel_login(cx);
+        }
         if self.modal.is_some() {
             return self.close_modal(cx);
         }
@@ -3752,7 +3760,8 @@ impl Dirigent {
 
     /// `[`: toggles the sidebar, unless it types a bracket (`typed_bracket`).
     pub fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        if self.typed_bracket("[", window, cx) {
+        // Under the setup nothing would show it.
+        if self.typed_bracket("[", window, cx) || self.onboarding_open() {
             return;
         }
         self.set_sidebar_hidden(!self.sidebar_hidden, cx);
@@ -3766,7 +3775,7 @@ impl Dirigent {
 
     /// `]`: toggle the right panel (see `toggle_panel`).
     pub fn toggle_log_key(&mut self, _: &ToggleLog, window: &mut Window, cx: &mut Context<Self>) {
-        if self.typed_bracket("]", window, cx) {
+        if self.typed_bracket("]", window, cx) || self.onboarding_open() {
             return;
         }
         self.toggle_panel(cx);
@@ -4510,10 +4519,6 @@ impl Render for Dirigent {
         self.field.want = self.field_spec(window);
         self.redraw_field(false, cx);
         let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
-        let main = match &self.pane {
-            Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, cx),
-            _ => lists::render(self, cx),
-        };
         let docked = !self.sidebar_hidden;
         // The main pane fills the window right of the sidebar, edge to edge. With the
         // background pattern under it (`Reach::Full`) its fill lets some of it through.
@@ -4522,19 +4527,50 @@ impl Render for Dirigent {
         if bg.pattern != Pattern::Off && bg.reach == Reach::Full {
             fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE).round() as u32);
         }
-        let panel = div()
-            .relative()
-            .flex_1()
-            .min_w_0()
-            .bg(rgba(fill))
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .when(titlebar::CUSTOM, |d| d.child(titlebar::strip(cx)))
-            .child(main);
-        // With a menu open, the arrows and Enter are its (`menu::key_bindings`).
-        let key_context = match self.menu {
+        // The sidebar and the pane, in one box: none of it under the setup (`onboarding.rs`),
+        // fading in as the setup leaves.
+        let shown = self.app_shown();
+        if self.onboarding.as_ref().is_some_and(|s| s.leaving.is_some()) {
+            window.request_animation_frame();
+        }
+        let app = (shown > 0.).then(|| {
+            let main = match &self.pane {
+                Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, cx),
+                _ => lists::render(self, cx),
+            };
+            let panel = div()
+                .relative()
+                .flex_1()
+                .min_w_0()
+                .bg(rgba(fill))
+                .overflow_hidden()
+                .flex()
+                .flex_col()
+                .when(titlebar::CUSTOM, |d| d.child(titlebar::strip(cx)))
+                .child(main);
+            div()
+                .relative()
+                .size_full()
+                .flex()
+                .flex_row()
+                .when(shown < 1., |d| d.opacity(shown))
+                .when(docked, |d| d.child(sidebar::docked(self, cx)))
+                .child(panel)
+                .when(!docked, |d| d.child(sidebar::peek(self, cx)))
+        });
+        // The background pattern, on the canvas under everything (`ambient.rs`); behind the
+        // sidebar only, the sidebar draws it itself, clipped to it. The setup has it across
+        // the window.
+        let field = self.field.layer(px(0.));
+        let field = match &self.onboarding {
+            Some(_) => field.map(|l| onboarding::curtain(self, l)),
+            None => field.filter(|_| bg.reach == Reach::Full).map(IntoElement::into_any_element),
+        };
+        // With a menu open, the arrows and Enter are its (`menu::key_bindings`); else in the
+        // setup, Enter continues.
+        let key_context = match &self.menu {
             Some(_) => format!("{KEY_CONTEXT} {}", menu::KEY_CONTEXT),
+            None if self.onboarding_open() => format!("{KEY_CONTEXT} {}", onboarding::KEY_CONTEXT),
             None => KEY_CONTEXT.to_owned(),
         };
         div()
@@ -4555,6 +4591,7 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::text_reset))
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::open_app_link))
+            .on_action(cx.listener(Self::onboarding_continue))
             .child(reset_menu_dismissed(cx))
             .child(track_mouse(cx))
             .relative()
@@ -4567,13 +4604,11 @@ impl Render for Dirigent {
             // No ligatures, anywhere: `calt` is what Lilex uses for them, `liga` for good measure.
             .font_features(FontFeatures(Arc::new(vec![("calt".into(), 0), ("liga".into(), 0)])))
             .text_size(text::base())
-            // The background pattern, on the canvas under everything (`ambient.rs`); behind
-            // the sidebar only, the sidebar draws it itself, clipped to it.
-            .when(bg.reach == Reach::Full, |d| d.children(self.field.layer(px(0.))))
-            .when(docked, |d| d.child(sidebar::docked(self, cx)))
-            .child(panel)
-            .when(!docked, |d| d.child(sidebar::peek(self, cx)))
-            .children(self.add_project.as_ref().map(|s| add_project::render(self, s, cx)))
+            .children(field)
+            .children(app)
+            // The setup's project step has the Add project browser in it.
+            .children(self.onboarding.is_some().then(|| onboarding::render(self, cx)))
+            .children(self.add_project.as_ref().filter(|_| self.onboarding.is_none()).map(|s| add_project::render(self, s, cx)))
             .children(self.modal.map(|m| match m {
                 Modal::Settings => settings::render(self, cx),
                 Modal::Usage => usage::render(self, cx),

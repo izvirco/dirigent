@@ -25,9 +25,11 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-/// The built-in themes: `(name, toml)`. The first is the default.
+/// The built-in themes: `(name, toml)`. The first is the default. Some are Linux's only
+/// (`LINUX_ONLY`).
 pub const BUILTIN: &[(&str, &str)] = &[
     ("vir-dark", include_str!("../assets/themes/vir-dark.toml")),
+    #[cfg(target_os = "linux")]
     ("vir-dark-transparent", include_str!("../assets/themes/vir-dark-transparent.toml")),
     ("vir-soft-dark", include_str!("../assets/themes/vir-soft-dark.toml")),
     ("midnight", include_str!("../assets/themes/midnight.toml")),
@@ -39,6 +41,11 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("gruvbox-light", include_str!("../assets/themes/gruvbox-light.toml")),
     ("rose-pine-dawn", include_str!("../assets/themes/rose-pine-dawn.toml")),
 ];
+
+/// Built-ins left out of `BUILTIN` off Linux, for now: the transparent theme's window doesn't
+/// come out see-through on Windows, and on macOS it's unverified. A config that still names
+/// one gets the default, with no error (it was offered there before).
+const LINUX_ONLY: &[&str] = if cfg!(target_os = "linux") { &[] } else { &["vir-dark-transparent"] };
 
 /// One palette. Colours are `0xRRGGBBAA`; the toml spells them `"#rrggbb"` (opaque) or
 /// `"#rrggbbaa"`. A translucent `canvas` makes the window itself see-through (`background`).
@@ -201,6 +208,7 @@ pub fn load(name: &str) -> Result<Theme> {
         Ok(text) => parse(&text).with_context(|| format!("theme {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => match BUILTIN.iter().find(|(n, _)| *n == name) {
             Some((_, text)) => parse(text),
+            None if LINUX_ONLY.contains(&name) => parse(BUILTIN[0].1),
             None => bail!("no theme named `{name}` (built-in or in {})", dir().display()),
         },
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
@@ -568,9 +576,11 @@ mod tests {
         }
         assert_eq!(parse(BUILTIN[0].1).unwrap().canvas, 0x060709ff);
         assert_eq!(parse(BUILTIN[0].1).unwrap().pattern, 0x2c32424d);
-        assert_eq!(parse(BUILTIN[1].1).unwrap().canvas, 0x000000f2);
+        // Off `BUILTIN` on some platforms, so read from its file.
+        let transparent = parse(include_str!("../assets/themes/vir-dark-transparent.toml")).unwrap();
+        assert_eq!(transparent.canvas, 0x000000f2);
         assert_eq!(background(&parse(BUILTIN[0].1).unwrap()), WindowBackgroundAppearance::Opaque);
-        assert_eq!(background(&parse(BUILTIN[1].1).unwrap()), WindowBackgroundAppearance::Blurred);
+        assert_eq!(background(&transparent), WindowBackgroundAppearance::Blurred);
         assert_eq!(alpha(0x11223344, 0x80), 0x11223380);
         assert!(parse("canvas = \"#123\"").is_err());
     }

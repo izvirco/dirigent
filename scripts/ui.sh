@@ -102,6 +102,20 @@ build() {
   fi
 }
 
+# The first-run setup (`onboarding.rs`) would cover the app: a session has it marked done,
+# and a fresh one this version kept too (else the app takes the db for an old install and
+# opens the changelog). UI_ONBOARDING=1 brings it back.
+onboarding() {
+  local sql version
+  version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
+  if [ "${UI_ONBOARDING:-}" = 1 ]; then
+    sql="DELETE FROM kv WHERE key = 'onboarded';"
+  else
+    sql="INSERT OR IGNORE INTO kv (key, value) VALUES ('onboarded', '1'), ('last_version', '$version');"
+  fi
+  sqlite3 "$DIR/data/desktop.db" "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); $sql"
+}
+
 # Launch the app on the session's display (it must be up). Dirs as flags, not XDG_*, so the
 # agents it runs keep the real git / jj config.
 launch() {
@@ -110,6 +124,7 @@ launch() {
   PORT=$(port)
   ! ss -ltnH "sport = :$PORT" | grep -q . || { echo "port $PORT is taken; scripts/ui.sh stop, then start" >&2; exit 1; }
   mkdir -p "$DIR/data" "$DIR/config"
+  onboarding
   env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" \
     DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 DIRIGENT_RUNTIME="$ROOT/dirigent_runtime/src/index.ts" \
     DIRIGENT_PREFIX="$PREFIX" setsid "$BIN" --data-dir "$DIR/data" --config-dir "$DIR/config" >"$DIR/app.log" 2>&1 </dev/null &

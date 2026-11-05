@@ -1,3 +1,12 @@
+## 0.0.6 (draft)
+
+A first-run setup.
+
+- A setup on first launch: theme, provider and project ([#136])
+- The transparent theme is Linux-only for now ([#136])
+
+[#136]: https://forge.sebba.dev/izvir/dirigent/changes/136
+
 ## 0.0.5
 
 Keyboard-driven menus and inputs, a ruler for long threads, and no more stray dev servers.

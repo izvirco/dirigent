@@ -63,6 +63,7 @@ impl Login {
 impl State {
     pub fn new(cx: &mut Context<Dirigent>) -> Self {
         let search = cx.new(|cx| TextInput::new(cx, "Search providers", true));
+        cx.subscribe(&search, |this, _, _: &crate::input::Submitted, cx| this.submit_provider_search(cx)).detach();
         let answer = cx.new(|cx| TextInput::new(cx, "", true));
         cx.subscribe(&answer, |this, _, _: &crate::input::Submitted, cx| this.submit_login_answer(cx)).detach();
         Self {
@@ -88,6 +89,17 @@ impl Dirigent {
         }
         self.settings.tab = crate::settings::Tab::Providers;
         self.open_settings(cx);
+    }
+
+    /// The tab (or the setup's step) shows: a host since removed gives way to `local`, the
+    /// list is asked for anew and the keys go where the tab wants them.
+    pub fn enter_providers(&mut self, cx: &mut Context<Self>) {
+        if self.host(&self.providers.host).is_none() {
+            self.providers.host = hosts::LOCAL.to_owned();
+            self.providers.list = None;
+        }
+        self.request_providers();
+        self.focus_providers(cx);
     }
 
     /// Ask the shown host for its providers (on opening the tab, and after every change).
@@ -120,6 +132,11 @@ impl Dirigent {
         cx.notify();
     }
 
+    /// A login is up: in progress, or failed and not yet put away (the setup's Enter waits).
+    pub(crate) fn logging_in(&self) -> bool {
+        self.providers.login.is_some()
+    }
+
     /// Stop the login (Cancel, or the modal closing); a failed one is just put away.
     pub fn cancel_login(&mut self, cx: &mut Context<Self>) {
         let Some(login) = self.providers.login.take() else { return };
@@ -143,6 +160,14 @@ impl Dirigent {
         self.set_input(&self.providers.answer, "", cx);
         self.focus_providers(cx);
         cx.notify();
+    }
+
+    /// Enter in the search: in the setup with nothing typed, on to its next step (the search
+    /// has the keys there, so Enter would otherwise do nothing).
+    fn submit_provider_search(&mut self, cx: &mut Context<Self>) {
+        if self.onboarding_open() && self.providers.search.read(cx).text().trim().is_empty() {
+            self.onboarding_next(cx);
+        }
     }
 
     fn submit_login_answer(&mut self, cx: &mut Context<Self>) {
@@ -288,8 +313,10 @@ impl Dirigent {
         }
     }
 
+    /// Settings › Providers or the setup's providers step is showing.
     fn providers_open(&self) -> bool {
-        self.modal == Some(crate::app::Modal::Settings) && self.settings.tab == crate::settings::Tab::Providers
+        let tab = self.modal == Some(crate::app::Modal::Settings) && self.settings.tab == crate::settings::Tab::Providers;
+        tab || self.onboarding.as_ref().is_some_and(|s| s.step == crate::onboarding::Step::Providers)
     }
 }
 
@@ -305,6 +332,17 @@ fn too_old(message: String) -> String {
 
 /// The tab: the host's providers (set up first), or the login in progress.
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
+    let mut out = vec![section("Providers", body(this, true, cx))];
+    if let Some(Ok((_, path))) = &this.providers.list {
+        out.push(saved_to(Path::new(path)));
+    }
+    out
+}
+
+/// The tab's content, also the setup's providers step: what it's for (`intro`; the setup
+/// says it itself) and the host chip (a row left out when it would be empty), then the list
+/// or the login.
+pub fn body(this: &Dirigent, intro: bool, cx: &mut Context<Dirigent>) -> Div {
     let p = &this.providers;
     let up = this.host(&p.host).is_some_and(|h| h.status == HostStatus::Connected);
     let body = match (&p.login, &p.list) {
@@ -314,21 +352,25 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
         (None, Some(Err(e))) => div().text_size(text::sm()).text_color(rgba(theme::t().error)).child(e.clone()),
         (None, Some(Ok((providers, _)))) => list(providers, this, cx),
     };
-    let header = div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .justify_between()
-        .child(
-            div().text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child("Sign in to the providers whose models you want to use."),
-        )
-        // Not during a login: it is the host's it started on.
-        .children((this.hosts.len() > 1 && p.login.is_none()).then(|| host_chip(this, cx)));
-    let mut out = vec![section("Providers", div().flex().flex_col().gap_3().child(header).child(body))];
-    if let Some(Ok((_, path))) = &p.list {
-        out.push(saved_to(Path::new(path)));
-    }
-    out
+    // Not during a login: it is the host's it started on.
+    let chip = this.hosts.len() > 1 && p.login.is_none();
+    let header = (intro || chip).then(|| {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .when(intro, |d| {
+                d.child(
+                    div()
+                        .text_size(text::sm())
+                        .text_color(rgba(theme::t().fg_1))
+                        .child("Sign in to the providers whose models you want to use."),
+                )
+            })
+            .children(chip.then(|| host_chip(this, cx)))
+    });
+    div().flex().flex_col().gap_3().children(header).child(body)
 }
 
 /// `Host  local ▾`: whose providers show.
@@ -387,7 +429,11 @@ fn list(providers: &[ProviderInfo], this: &Dirigent, cx: &mut Context<Dirigent>)
         .children(empty)
 }
 
-/// `● Name   status            [Sign in] [API key]` (or `[Sign out]` for what a login stored).
+/// `● Name  From ANTHROPIC_API_KEY      [Sign in] [API key]` (or `[Sign out]` for what a login
+/// stored). The dot says it's set up; the grey source after the name only shows when the
+/// credentials come from outside `auth.json` (the environment, `models.json`), which the
+/// buttons can't remove. A stored one is what pi uses whenever there is one, and its button
+/// already says what it is.
 fn provider_row(p: &ProviderInfo, signing_out: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     let mut actions: Vec<AnyElement> = vec![];
@@ -425,8 +471,22 @@ fn provider_row(p: &ProviderInfo, signing_out: bool, cx: &mut Context<Dirigent>)
         .h(u(38.))
         .px_2()
         .child(theme::dot(if p.status.is_some() { t.done } else { theme::alpha(t.fg_2, 0x00) }))
-        .child(div().w(u(200.)).flex_shrink_0().truncate().font_weight(FontWeight::MEDIUM).child(p.name.clone()))
-        .child(div().flex_1().min_w_0().truncate().text_size(text::sm()).text_color(rgba(t.fg_1)).children(p.status.clone()))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).child(p.name.clone()))
+                .children(
+                    p.status
+                        .clone()
+                        .filter(|_| p.stored.is_none())
+                        .map(|from| div().min_w_0().truncate().text_size(text::sm()).text_color(rgba(t.fg_2)).child(from)),
+                ),
+        )
         .child(div().flex().flex_row().gap_1p5().flex_shrink_0().children(actions))
 }
 
