@@ -280,7 +280,7 @@ pub enum Side {
     Below(f32),
     /// Drops down below, right edge aligned with the trigger's right edge (header buttons).
     BelowRight(f32),
-    /// Floats to the right of the trigger, top-aligned (sidebar card specs).
+    /// Floats to the right of the trigger, top-aligned unless lifted to fit (sidebar card specs).
     Right,
     /// Its top-left corner at a window position (a right click's), wherever the trigger is.
     At(Point<Pixels>),
@@ -290,6 +290,8 @@ pub enum Side {
 pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> AnyElement {
     // `right`: the canvas is pinned to the trigger's top-right corner instead of top-left.
     // `at`: the popup goes there instead, in window coordinates.
+    // `beside`: it covers no trigger when it slides, so it may take the window's height.
+    let beside = matches!(side, Side::Right | Side::At(_));
     let (anchor, dx, dy, right, at) = match side {
         Side::Above => (Anchor::BottomLeft, 0., -GAP, false, None),
         Side::Below(h) => (Anchor::TopLeft, 0., h + GAP, false, None),
@@ -313,16 +315,19 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
     // take the flex "static position", e.g. centered). Its prepaint knows the trigger's window
     // position, so it caps the popup's height to the room on its side (the popup stays put and
     // scrolls instead of sliding over the trigger), then lays it out and defers it so it draws
-    // above everything else. A popup at a position (`Side::At`) has no trigger to keep clear: it gets the
-    // window's height, and snapping lifts it from a click near the bottom.
+    // above everything else. A popup beside its trigger (`Side::Right`, a hover popup that can't be
+    // scrolled) or at a position (`Side::At`) has none to keep clear: it gets the window's height,
+    // and snapping lifts it from a card or click near the bottom.
     canvas(
         move |bounds, window, cx| {
             let height = window.viewport_size().height;
             let y = bounds.origin.y + u(dy);
-            let room = match at {
-                Some(_) => height - u(MARGIN) * 2.,
-                None if dy < 0. => y - u(MARGIN),
-                None => height - y - u(MARGIN),
+            let room = if beside {
+                height - u(MARGIN) * 2.
+            } else if dy < 0. {
+                y - u(MARGIN)
+            } else {
+                height - y - u(MARGIN)
             };
             let anchored = anchored().anchor(anchor).offset(point(u(dx), u(dy))).snap_to_window_with_margin(u(MARGIN));
             let mut popup = match at {
