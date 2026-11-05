@@ -609,7 +609,7 @@ fn answer_markdown<'a>(questions: impl Iterator<Item = &'a str>, answers: Option
         .join("\n\n")
 }
 
-/// An ask as a draft reply for the composer (the form's `Insert`): each question quoted,
+/// An ask as a draft reply for the composer (the form's `Insert into composer`): each question quoted,
 /// the answer so far under it (after a blank line, or markdown folds it into the quote).
 /// Returns the text and where the cursor goes: the first missing answer, else the end.
 pub fn draft_reply(questions: &[dirigent_protocol::Question], answers: &[Vec<String>]) -> (String, usize) {

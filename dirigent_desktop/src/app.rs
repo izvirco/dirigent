@@ -107,7 +107,8 @@ pub struct OpenThread {
     /// Output arrived while the transcript was scrolled up from its end: the jump-to-latest
     /// pill reads `New output` (`thread::jump_button`). Cleared once the list follows its end again.
     pub new_output: bool,
-    /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`.
+    /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`,
+    /// oldest first. Only the first shows (`thread::ask_card`).
     pub asks: Vec<AskForm>,
     /// The ask stack's height as last painted (`set_ask_height`): the transcript's tail
     /// gets as much extra room, so it scrolls clear of the stack that covers it.
@@ -1195,6 +1196,12 @@ impl Dirigent {
                     if self.open().is_some_and(|t| t.host == host) {
                         self.settle_open();
                         self.unrewind(cx);
+                        // An answer may be lost with the connection: its form takes input
+                        // again, or it would hold back the asks behind it. One the host got
+                        // leaves with the reconnect's refresh.
+                        if let Pane::Thread(t) = &mut self.pane {
+                            t.asks.iter_mut().for_each(|f| f.sent = false);
+                        }
                     }
                 }
                 // The open thread is fetched once its host connects (`fetch_open` doesn't ask
@@ -2781,7 +2788,7 @@ impl Dirigent {
         self.send_ask(ask_id, false, cx);
     }
 
-    /// `Insert`: the questions, with the answers so far, go into the composer as a draft
+    /// `Insert into composer`: the questions, with the answers so far, go into the composer as a draft
     /// reply (`view::draft_reply`, after what it holds), and the ask goes without a word
     /// to the model: the message the user sends is the reply.
     pub fn insert_ask(&mut self, ask_id: &str, window: &Window, cx: &mut Context<Self>) {
