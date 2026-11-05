@@ -6,12 +6,14 @@
 - Text inputs move and select by word (ctrl+←/→, with shift to select; alt on macOS), select with shift+home/end/↑/↓, and jump to the start / end with ctrl+home/end (cmd+↑/↓ on macOS) ([#113])
 - Every menu works from the keyboard: ↑/↓ to move, Enter to pick, Esc to close ([#125])
 - The new-thread project search lists projects whose name matches before those that only match by path ([#125])
+- Images in replies no longer turn into empty boxes after a thread was reopened or the app restarted ([#128])
 
 [#112]: https://forge.sebba.dev/izvir/dirigent/changes/112
 [#117]: https://forge.sebba.dev/izvir/dirigent/changes/117
 [#115]: https://forge.sebba.dev/izvir/dirigent/changes/115
 [#113]: https://forge.sebba.dev/izvir/dirigent/changes/113
 [#125]: https://forge.sebba.dev/izvir/dirigent/changes/125
+[#128]: https://forge.sebba.dev/izvir/dirigent/changes/128
 
 ## 0.0.4
 

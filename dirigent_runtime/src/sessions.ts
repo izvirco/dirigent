@@ -111,9 +111,9 @@ function linkAttachments(text: string, attachments: Attachment[]): string {
 const TITLE_FALLBACKS = ["anthropic/claude-haiku-5-5", "openai/gpt-6-luna"];
 
 /**
- * Appended to pi's system prompt. The service reads the linked file into its blobs and
- * rewrites the link to `blob:<id>` when it persists the reply (`blobs.rs`); the desktop
- * renders those inline. The last paragraph explains `linkAttachments`.
+ * Appended to pi's system prompt. The service reads the linked file into its blobs when it
+ * persists the reply, recording the blob next to the text it leaves as written (`blobs.rs`);
+ * the desktop renders those inline. The last paragraph explains `linkAttachments`.
  */
 const IMAGES_PROMPT = `## Showing images
 Your replies are rendered as markdown in a desktop app. To show the user an image file on this machine (a screenshot you took, a chart you rendered), put it in your reply as a markdown image with its path: \`![what it shows](/absolute/path.png)\`. It appears inline in the reply. png, jpg, gif, webp and bmp work; a relative path is taken from the working directory.

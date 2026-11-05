@@ -5,8 +5,8 @@
 //! Links are clickable: markdown links with a scheme (`https:`, `mailto:`, ...) and bare
 //! `http(s)://` / `dirigent://` URLs in the text. `dirigent://` links stay in the app
 //! (`dirigent://thread/<id>` opens that thread), the rest go to the OS (see `select::Block`).
-//! An image whose target is `blob:<id>` (a reply showing a local file; the host rewrote the
-//! link, see `view::blob_links`) is drawn by the caller's `ImageFn` after its paragraph's
+//! An image whose target is `blob:<id>` (a reply showing a local file, its link made a
+//! `blob:` one, see `view::step_of`) is drawn by the caller's `ImageFn` after its paragraph's
 //! text; any other image shows its alt text. The caller can also make literal tokens in
 //! the text links (`Tokens`: a user bubble's `[image-N]`), drawn in the accent color
 //! without the underline. Given a `CopyFn`, every code block gets a copy button, revealed
@@ -14,11 +14,13 @@
 
 use crate::select::{Block, Key, Keys};
 use crate::theme::{self, text, u};
+use dirigent_protocol::images::image_targets;
 use gpui::{
     AnyElement, Div, ElementId, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div,
     prelude::*, px, rgba,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, TextMergeStream};
+use serde_json::{Map, Value};
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -42,6 +44,32 @@ pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, 
     let mut events = TextMergeStream::new(Parser::new_ext(text, OPTS)).peekable();
     let mut r = Renderer { mono, keys, image, copy, tokens };
     div().flex().flex_col().gap_2().children(r.blocks(&mut events))
+}
+
+/// `text` with the target of each image whose target `blobs` knows (a reply's text block's
+/// map, see `dirigent_protocol::images`) made `blob:<id>`, for `render` to draw. Images
+/// only: a link quoted in code stays as written.
+pub fn link_blobs(text: &str, blobs: &Map<String, Value>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    for (event, source) in Parser::new_ext(text, OPTS).into_offset_iter() {
+        let Event::Start(Tag::Image { .. }) = event else { continue };
+        // The image's source is its `![alt](target)`.
+        let Some(target) = image_targets(&text[source.clone()]).into_iter().next() else { continue };
+        let target = source.start + target.start..source.start + target.end;
+        // Skips an image nested in another's alt text that was already replaced.
+        if let Some(id) = blobs.get(&text[target.clone()]).and_then(Value::as_str)
+            && target.start >= done
+        {
+            // Without the space before the target: `view::blob_links` looks for `](blob:`.
+            out.push_str(text[done..target.start].trim_end());
+            out.push_str("blob:");
+            out.push_str(id);
+            done = target.end;
+        }
+    }
+    out.push_str(&text[done..]);
+    out
 }
 
 /// Whether `text` opens with a code block (possibly in a list or quote): its copy button
@@ -454,6 +482,16 @@ mod tests {
         assert_eq!(committed("a\nb\nc"), "a\nb\n");
         assert_eq!(committed("abc"), "");
         assert_eq!(committed(""), "");
+    }
+
+    #[test]
+    fn images_link_their_blobs() {
+        let text = "![a](shot.png) ![b]( /abs/b.png \"t\") ![c](other.png)\n\n```\n![a](shot.png)\n```\n\n`![a](shot.png)`";
+        let blobs = serde_json::json!({"shot.png": "aa", "/abs/b.png": "bb"});
+        assert_eq!(
+            link_blobs(text, blobs.as_object().unwrap()),
+            "![a](blob:aa) ![b](blob:bb \"t\") ![c](other.png)\n\n```\n![a](shot.png)\n```\n\n`![a](shot.png)`"
+        );
     }
 
     #[test]
