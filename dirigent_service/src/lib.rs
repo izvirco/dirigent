@@ -32,7 +32,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use storage::Storage;
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub use agent::dir as agent_dir;
 pub use logging::init_logging;
@@ -121,9 +121,10 @@ impl Service {
             .collect();
         let changed = {
             let mut missing = self.missing.lock().unwrap();
-            // Explains a `Recreate` / `Back to project` banner after the fact.
+            // Explains a `Recreate` / `Back to project` banner after the fact. Debug: removing
+            // workspaces by hand is normal, and the banner already tells the user.
             for id in now.difference(&missing) {
-                warn!(thread = %id, "workspace missing");
+                debug!(thread = %id, "workspace missing");
             }
             let changed = *missing != now;
             *missing = now;
