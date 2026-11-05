@@ -4508,7 +4508,7 @@ impl Render for Dirigent {
             .flex_col()
             .when(titlebar::CUSTOM, |d| d.child(titlebar::strip(cx)))
             .child(main);
-        // With a menu open, Up / Down / Enter are its (`menu::key_bindings`).
+        // With a menu open, the arrows and Enter are its (`menu::key_bindings`).
         let key_context = match self.menu {
             Some(_) => format!("{KEY_CONTEXT} {}", menu::KEY_CONTEXT),
             None => KEY_CONTEXT.to_owned(),
@@ -4518,6 +4518,8 @@ impl Render for Dirigent {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(menu::up))
             .on_action(cx.listener(menu::down))
+            .on_action(cx.listener(menu::left))
+            .on_action(cx.listener(menu::right))
             .on_action(cx.listener(menu::pick))
             .on_action(cx.listener(Self::new_thread))
             .on_action(cx.listener(Self::dismiss))

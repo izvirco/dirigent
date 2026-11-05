@@ -37,13 +37,13 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let saved = current.as_ref().is_some_and(|c| this.presets.contains(c));
     let left: AnyElement = match &current {
         Some(_) if !saved => {
-            menu::stop(header_button("save-preset", "Save preset", None, theme::t().accent_ink), |this, _, cx| this.save_preset(cx), cx)
-                .into_any()
+            let save = header_button("save-preset", "Save preset", None, theme::t().accent_ink);
+            menu::header_stop(save, |this, _, cx| this.save_preset(cx), cx).into_any()
         }
         _ => div().px_1p5().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child("Saved presets").into_any(),
     };
     let all = header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1);
-    let all = menu::stop(all, |this, window, cx| this.open_all_models(window, cx), cx);
+    let all = menu::header_stop(all, |this, window, cx| this.open_all_models(window, cx), cx);
     let header = div().flex().flex_row().items_center().justify_between().h(u(ROW_H)).flex_shrink_0().px_0p5().child(left).child(all);
 
     let mut rows = vec![header.into_any(), menu::separator()];
@@ -77,6 +77,7 @@ fn sign_in(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
 
 /// `‹ [search]`, a hairline, then the matching models in a fixed-height scroll.
 fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
+    // Mouse only, not a `menu::header_stop`: Left / Right are the search's.
     let back = div()
         .id("models-back")
         .size(u(ROW_H))
@@ -86,8 +87,9 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .justify_center()
         .rounded_md()
         .cursor_pointer()
+        .hover(|d| d.bg(rgba(theme::t().line)))
+        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
         .child(icon("chevron-left", theme::t().fg_1));
-    let back = menu::stop(back, |this, _, cx| this.toggle_menu(Menu::Model, cx), cx);
     let header = div()
         .flex()
         .flex_row()
@@ -137,7 +139,7 @@ fn preset_row(
         .map(|m| m.name.clone())
         .unwrap_or_else(|| theme::short_model(&p.model).to_owned());
     let preset = p.clone();
-    menu::stop(menu::row(id, selected), move |this, _, cx| this.use_preset(&preset, cx), cx)
+    menu::stop(menu::row(id), selected, move |this, _, cx| this.use_preset(&preset, cx), cx)
         .group("preset")
         .child(div().flex_shrink_0().child(name))
         .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(text::sm()).child(p.model.clone()))
@@ -164,7 +166,7 @@ fn preset_row(
 }
 
 /// A quiet text button for the presets header, optionally with a trailing icon. A
-/// `menu::stop` lights it.
+/// `menu::header_stop` lights it.
 fn header_button(id: &'static str, label: &'static str, trailing: Option<&'static str>, color: u32) -> Stateful<Div> {
     div()
         .id(id)
