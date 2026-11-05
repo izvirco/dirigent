@@ -503,7 +503,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
                     let selected = *t == mt;
                     menu::item(
                         format!("h/{}", m.host),
-                        m.host.clone(),
+                        this.host_label(&m.host),
                         m.project.path.clone(),
                         selected,
                         move |this, cx| this.set_target(mt.clone(), cx),
@@ -514,7 +514,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             menu::popup(Side::Below(26.), items, cx)
         });
         if members.len() > 1 {
-            theme::labeled_chip("host-chip", "on", t.host.clone(), false, host_open)
+            theme::labeled_chip("host-chip", "on", this.host_label(&t.host), false, host_open)
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::TargetHost, cx)))
                 .children(host_menu)
                 .into_any_element()
@@ -532,7 +532,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
                 .border_color(rgba(theme::t().line))
                 .text_size(text::sm())
                 .child(div().text_color(rgba(theme::t().fg_1)).child("on"))
-                .child(div().font_weight(FontWeight::MEDIUM).child(t.host.clone()))
+                .child(div().font_weight(FontWeight::MEDIUM).child(this.host_label(&t.host)))
                 .into_any_element()
         }
     });
@@ -822,6 +822,12 @@ fn send_button(id: &'static str, ready: bool, cx: &mut Context<Dirigent>) -> Sta
         .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))
 }
 
+/// `host offline`, left of a send button that is grey for it.
+fn offline_note(this: &Dirigent) -> Option<Div> {
+    this.composer_offline()
+        .then(|| div().flex_shrink_0().px_1().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child("host offline"))
+}
+
 /// In the composer's place while a bubble holds it (`edit_bubble`).
 fn editing_note() -> Div {
     div()
@@ -837,8 +843,9 @@ fn editing_note() -> Div {
 }
 
 /// The composer card: text on top, chips (model / effort / context) and the send or stop
-/// button in the footer. Sized by its parent (reading column or draft page). While an edit
-/// bubble holds the composer, a note in its place.
+/// button in the footer (`host offline` left of it while its host is down). Sized by its
+/// parent (reading column or draft page). While an edit bubble holds the composer, a note
+/// in its place.
 fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     if this.open().is_some_and(|t| t.editing.is_some()) {
         return editing_note();
@@ -877,8 +884,9 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     // One round button in the corner: send, or stop while running. While running, ctrl+Enter
     // steers and shift+Enter queues a follow-up (see `input::Submitted`).
     // A thread its host is still setting up can't take a message (`not_ready`), nor be
-    // stopped: the send button stays, grey, and says why when pressed.
-    let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some());
+    // stopped, and nothing reaches an offline host: the send button stays, grey, and says
+    // why when pressed (offline, `offline_note` beside it says so from the start).
+    let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some()) || this.composer_offline();
     let action = if running && !blocked {
         div()
             .id("stop")
@@ -950,6 +958,7 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                         )
                         .children(usage),
                 )
+                .children(offline_note(this))
                 .child(action.flex_shrink_0()),
         )
 }
@@ -1693,10 +1702,11 @@ fn user_bubble(
 
 /// The user bubble being edited (`Dirigent::start_edit`): it holds the composer, the
 /// edited message's images under it, then the model and effort chips, `Cancel` and send
-/// (ctrl+Enter sends too, Esc cancels). Sending rewrites the message and runs from there.
+/// (ctrl+Enter sends too, Esc cancels; grey with `host offline` while the host is down).
+/// Sending rewrites the message and runs from there.
 fn edit_bubble(this: &Dirigent, bubble: u32, fonts: &Fonts, cx: &mut Context<Dirigent>) -> Div {
     let (model, effort) = model_chips(this, true, cx);
-    let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some());
+    let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some()) || this.composer_offline();
     let ready = !this.composer.read(cx).text().trim().is_empty() && this.model.is_some() && !this.is_running() && !blocked;
     let cancel = div()
         .id("edit-cancel")
@@ -1740,6 +1750,7 @@ fn edit_bubble(this: &Dirigent, bubble: u32, fonts: &Fonts, cx: &mut Context<Dir
                 .px_2()
                 .pb_2()
                 .child(div().flex_1().min_w_0().flex().flex_row().items_center().gap_1().child(model).child(effort))
+                .children(offline_note(this))
                 .child(cancel.flex_shrink_0())
                 .child(send_button("edit-send", ready, cx).flex_shrink_0()),
         )
