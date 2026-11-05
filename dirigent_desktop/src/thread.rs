@@ -402,7 +402,7 @@ pub fn archive_confirm(host: &str, id: &str, at: ArchiveAt, side: Side, this: &D
 }
 
 /// A workspace's name is its directory's basename: the host names the directory, the git
-/// branch and the jj workspace alike (`dirigent-<last 8 of the thread id>`, see `vcs.rs`).
+/// branch and the jj workspace alike (`dirigent_protocol::workspace_name`).
 fn workspace_name(dir: &str) -> String {
     crate::projects::basename(dir).to_owned()
 }
@@ -617,13 +617,15 @@ fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
 /// - `in project` (a draft, or a thread still in its project directory): opens the
 ///   `New workspace from` popup (`base_picker`); picking a base makes the draft start its
 ///   thread in a workspace there (the chip then reads `workspace from <base>`), or moves the
-///   thread there at once. A thread in a dirty checkout can't move (its changes would stay
-///   behind): the chevron goes faint, the popup stays shut, and hovering says why.
+///   thread there at once. A running thread, or one in a dirty checkout (its changes would
+///   stay behind), can't move: the chevron goes faint, the popup stays shut, and hovering
+///   says why.
 /// - `dirigent-abcd1234` in the accent colour: the thread works in that workspace; opens
-///   the copy path / back to project menu.
+///   the copy path / back to project menu. While the thread runs, only `Copy path` works.
+///   While the host is still making it (a draft sent into a workspace), its name already
+///   shows, with a faint chevron and no menu.
 ///
-/// Nothing while the thread runs (it can't move then) or its workspace is missing (the
-/// banner takes over).
+/// Nothing while its workspace is missing (the banner takes over).
 fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let t = theme::t();
     let picker_open = this.menu == Some(Menu::Base);
@@ -648,14 +650,26 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
             let repo = this.project_path(&open.host, s)?;
             let info = this.vcs_of(&open.host, &repo)?;
             let vcs = info.vcs?;
-            if s.running() || s.workspace_missing {
+            if s.workspace_missing {
                 return None;
             }
+            let running = s.running();
             let (host, id) = (open.host.clone(), open.id.clone());
             Some(match &s.workspace {
-                None if info.dirty => theme::chip_in("ws-chip", "in project", t.fg_1, theme::alpha(t.fg_2, 0x50), false)
-                    .tooltip(theme::tooltip("The working copy has uncommitted changes. Commit them to move the thread into a workspace."))
-                    .into_any_element(),
+                None if s.setup == Some(Setup::Workspace) => {
+                    theme::chip_in("ws-chip", dirigent_protocol::workspace_name(&id), t.accent_ink, theme::alpha(t.fg_2, 0x50), false)
+                        .tooltip(theme::tooltip("Creating the workspace…"))
+                        .into_any_element()
+                }
+                None if running || info.dirty => {
+                    let why = match running {
+                        true => "The thread is working. Stop it to move it into a workspace.",
+                        false => "The working copy has uncommitted changes. Commit them to move the thread into a workspace.",
+                    };
+                    theme::chip_in("ws-chip", "in project", t.fg_1, theme::alpha(t.fg_2, 0x50), false)
+                        .tooltip(theme::tooltip(why))
+                        .into_any_element()
+                }
                 None => theme::chip("ws-chip", "in project", false, picker_open)
                     .on_click(cx.listener(move |this, _, window, cx| open_picker(this, window, cx)))
                     .children(picker_open.then(|| base_picker(this, vcs, cx)))
@@ -671,25 +685,27 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                         let (h, i) = (host.clone(), id.clone());
                         let (h2, i2) = (host.clone(), id.clone());
                         let path = w.clone();
-                        let items = vec![
-                            menu::header(if dirty { "The workspace has uncommitted changes." } else { "The workspace is clean." }),
+                        let remove = format!("Back to project, remove the {kind}");
+                        let detach = "Back to project, keep it on disk";
+                        // While it runs the thread can't leave: the header says so in place
+                        // of the clean / dirty state, which only matters for leaving.
+                        let header = match (running, dirty) {
+                            (true, _) => "The thread is working. Stop it to leave the workspace.",
+                            (false, true) => "The workspace has uncommitted changes.",
+                            (false, false) => "The workspace is clean.",
+                        };
+                        let mut items = vec![
+                            menu::header(header),
                             menu::item("ws-copy", "Copy path", "", false, move |this, cx| this.copy(path.clone(), "Path copied", cx), cx),
                             menu::separator(),
-                            menu::danger(
-                                "ws-rm",
-                                format!("Back to project, remove the {kind}"),
-                                move |this, cx| this.remove_workspace(&h, &i, false, cx),
-                                cx,
-                            ),
-                            menu::item(
-                                "ws-detach",
-                                "Back to project, keep it on disk",
-                                "",
-                                false,
-                                move |this, cx| this.remove_workspace(&h2, &i2, true, cx),
-                                cx,
-                            ),
                         ];
+                        match running {
+                            true => items.extend([menu::disabled("ws-rm", remove), menu::disabled("ws-detach", detach)]),
+                            false => items.extend([
+                                menu::danger("ws-rm", remove, move |this, cx| this.remove_workspace(&h, &i, false, cx), cx),
+                                menu::item("ws-detach", detach, "", false, move |this, cx| this.remove_workspace(&h2, &i2, true, cx), cx),
+                            ]),
+                        }
                         menu::popup(Side::Above, items, cx)
                     });
                     theme::chip_in("ws-chip", workspace_name(w), t.accent_ink, t.fg_2, open_menu)

@@ -673,7 +673,7 @@ impl Service {
 
     /// `<data dir>/workspaces/<name>`: the directory is named like its branch.
     fn workspace_dir(&self, thread_id: &str) -> PathBuf {
-        data_dir().join("workspaces").join(vcs::workspace_name(thread_id))
+        data_dir().join("workspaces").join(dirigent_protocol::workspace_name(thread_id))
     }
 
     /// The repo a thread's project lives in and which system drives it.

@@ -1352,6 +1352,12 @@ impl Dirigent {
                     }
                 }
                 self.request_sidebar_vcs(&host, &ran);
+                // A run started under the open base picker (a sub-agent's report, another
+                // client): the thread can't move now and the chip drops the picker, so close it
+                // rather than leave it open unseen, to pop back when the run ends.
+                if !was_running && self.is_running() && self.menu == Some(Menu::Base) {
+                    self.close_menu(cx);
+                }
                 if let Pane::Thread(t) = &self.pane
                     && t.host == host
                 {

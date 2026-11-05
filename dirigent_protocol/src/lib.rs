@@ -790,6 +790,15 @@ pub enum Setup {
     NixShell,
 }
 
+/// The one name a thread's workspace goes by: its directory, its git branch, its jj
+/// workspace. `dirigent-` + the last 8 characters of the thread id (the random part of a
+/// v7 uuid), short enough to read in a branch list. The desktop shows it while the host is
+/// still making the workspace (`Setup::Workspace`).
+pub fn workspace_name(thread_id: &str) -> String {
+    let short: String = thread_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("dirigent-{short}")
+}
+
 /// Tokens and dollars summed over a thread's assistant messages, as pi reports them.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
