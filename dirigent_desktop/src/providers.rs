@@ -557,7 +557,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
                     .flex_col()
                     .children(options.iter().map(|o| {
                         let id = o.id.clone();
-                        menu::row(format!("auth-option/{}", o.id), false)
+                        menu::row(format!("auth-option/{}", o.id))
                             .hover(|d| d.bg(rgba(t.line)))
                             .on_click(cx.listener(move |this, _, _, cx| this.answer_login(Some(id.clone()), cx)))
                             .child(div().flex_shrink_0().child(o.label.clone()))

@@ -3,9 +3,11 @@
 //! but a right click opens its context menu).
 //!
 //! Keys, wherever the focus is (an input too): Up / Down move a cursor over the open
-//! menu's stops (its items, `stop`), round the ends, Enter clicks the lit one, Escape
-//! closes the menu (`Dirigent::dismiss`). The mouse moves the cursor too, so one stop is
-//! lit at a time. Under a search (`results`) the top match is lit until the cursor moves.
+//! menu's rows (`stop`), round the ends, from the selected one when none is lit. Left /
+//! Right move it over the buttons in its header (`header_stop`); a menu without any leaves
+//! them to the focused input. Enter clicks the lit stop, Escape closes the menu
+//! (`Dirigent::dismiss`). The mouse moves the cursor too, so one stop is lit at a time.
+//! Under a search (`results`) the top match is lit until the cursor moves.
 
 use crate::app::{Dirigent, Menu};
 use crate::input::{self, TextInput};
@@ -16,18 +18,26 @@ use gpui::{
 };
 use std::rc::Rc;
 
-actions!(menu, [Up, Down, Pick]);
+actions!(menu, [Up, Down, Left, Right, Pick]);
 
 /// What the root's key context has while a menu is open (`Dirigent::render`).
 pub const KEY_CONTEXT: &str = "menu";
 
-/// Up / Down / Enter for the open menu. Bound after `input::key_bindings`, so in an input
-/// (`menu > Input`, the same depth as the input's own) these win.
+/// The arrows and Enter for the open menu. Bound after `input::key_bindings`, so in an
+/// input (`menu > Input`, the same depth as the input's own) these win.
 pub fn key_bindings() -> Vec<KeyBinding> {
     let in_input = format!("{KEY_CONTEXT} > {}", input::KEY_CONTEXT);
     [KEY_CONTEXT, &in_input]
         .into_iter()
-        .flat_map(|c| [KeyBinding::new("up", Up, Some(c)), KeyBinding::new("down", Down, Some(c)), KeyBinding::new("enter", Pick, Some(c))])
+        .flat_map(|c| {
+            [
+                KeyBinding::new("up", Up, Some(c)),
+                KeyBinding::new("down", Down, Some(c)),
+                KeyBinding::new("left", Left, Some(c)),
+                KeyBinding::new("right", Right, Some(c)),
+                KeyBinding::new("enter", Pick, Some(c)),
+            ]
+        })
         .collect()
 }
 
@@ -47,6 +57,8 @@ pub struct Nav {
     /// the composer doesn't pick a row the mouse only passed over.
     by_mouse: bool,
     stops: Vec<Stop>,
+    /// The first selected row: Up / Down step from it while nothing is lit.
+    selected: Option<usize>,
     /// The first stop in `results`: lit while `cursor` is `None`.
     results_start: Option<usize>,
     /// `results` is building: the stops built now scroll in `results_scroll`, the others in
@@ -62,6 +74,8 @@ impl Global for Nav {}
 
 struct Stop {
     action: Action,
+    /// A button in the header (Left / Right), not a row (Up / Down).
+    header: bool,
     /// What it scrolls in: the results list or the popup.
     scroll: ScrollHandle,
     /// Its top and bottom in its scroller's content, where it was painted last (`reveal`).
@@ -77,6 +91,7 @@ impl Nav {
             *nav = Nav { menu: menu.cloned(), ..Default::default() };
         }
         nav.stops.clear();
+        nav.selected = None;
         nav.results_start = None;
         nav.claimed = 0;
     }
@@ -92,17 +107,20 @@ impl Nav {
         self.cursor.or(self.results_start).filter(|&i| i < self.stops.len())
     }
 
-    /// Up / Down: the cursor to the stop `by` away, round the ends; from none, the first or the
-    /// last. False without stops.
-    fn step(&mut self, by: i32) -> bool {
-        let n = self.stops.len();
-        if n == 0 {
+    /// Up / Down over the rows, Left / Right over the `header`'s stops: the cursor to the
+    /// one `by` away, round the ends. It steps from the lit stop, or the selected row when
+    /// none is lit; from outside the lane, Down / Right enter it at its first, Up / Left at
+    /// its last. False when the lane is empty.
+    fn step(&mut self, by: i32, header: bool) -> bool {
+        let lane: Vec<usize> = (0..self.stops.len()).filter(|&i| self.stops[i].header == header).collect();
+        if lane.is_empty() {
             return false;
         }
-        let i = match self.lit() {
-            Some(i) => (i as i32 + by).rem_euclid(n as i32) as usize,
-            None if by > 0 => 0,
-            None => n - 1,
+        let from = self.lit().or(self.selected).and_then(|i| lane.iter().position(|&j| j == i));
+        let i = match from {
+            Some(p) => lane[(p as i32 + by).rem_euclid(lane.len() as i32) as usize],
+            None if by > 0 => lane[0],
+            None => lane[lane.len() - 1],
         };
         self.cursor = Some(i);
         self.by_mouse = false;
@@ -129,16 +147,24 @@ impl Nav {
 }
 
 pub fn up(_: &mut Dirigent, _: &Up, _: &mut Window, cx: &mut Context<Dirigent>) {
-    step(-1, cx);
+    step(-1, false, cx);
 }
 
 pub fn down(_: &mut Dirigent, _: &Down, _: &mut Window, cx: &mut Context<Dirigent>) {
-    step(1, cx);
+    step(1, false, cx);
 }
 
-/// A menu without stops leaves the key to whatever else wants it (the cursor of an input).
-fn step(by: i32, cx: &mut Context<Dirigent>) {
-    if cx.default_global::<Nav>().step(by) {
+pub fn left(_: &mut Dirigent, _: &Left, _: &mut Window, cx: &mut Context<Dirigent>) {
+    step(-1, true, cx);
+}
+
+pub fn right(_: &mut Dirigent, _: &Right, _: &mut Window, cx: &mut Context<Dirigent>) {
+    step(1, true, cx);
+}
+
+/// A menu without stops for the key leaves it to whatever else wants it (the cursor of an input).
+fn step(by: i32, header: bool, cx: &mut Context<Dirigent>) {
+    if cx.default_global::<Nav>().step(by, header) {
         cx.notify();
     } else {
         cx.propagate();
@@ -156,19 +182,39 @@ pub fn pick(this: &mut Dirigent, _: &Pick, window: &mut Window, cx: &mut Context
     }
 }
 
-/// Make `el` a stop of the open menu: a click or Enter runs `action`, and it's lit while
-/// the cursor is on it (moving the mouse over it puts the cursor there).
+/// Make `el` a row of the open menu (Up / Down): a click or Enter runs `action`, and it's
+/// lit while the cursor is on it (moving the mouse over it puts the cursor there).
+/// `selected` (the current choice) fills it.
 pub fn stop(
+    el: Stateful<Div>,
+    selected: bool,
+    action: impl Fn(&mut Dirigent, &mut Window, &mut Context<Dirigent>) + 'static,
+    cx: &mut Context<Dirigent>,
+) -> Stateful<Div> {
+    if selected {
+        let nav = cx.default_global::<Nav>();
+        nav.selected.get_or_insert(nav.stops.len());
+    }
+    add(el.when(selected, |d| d.bg(rgba(theme::t().accent_active))), false, Rc::new(action), cx)
+}
+
+/// Make `el` a button in the open menu's header: a stop like `stop`'s, but Left / Right
+/// reach it, not Up / Down. Not in a menu with a search: its input wants those keys.
+pub fn header_stop(
     el: Stateful<Div>,
     action: impl Fn(&mut Dirigent, &mut Window, &mut Context<Dirigent>) + 'static,
     cx: &mut Context<Dirigent>,
 ) -> Stateful<Div> {
-    let action: Action = Rc::new(action);
+    add(el, true, Rc::new(action), cx)
+}
+
+/// Register `el` as the menu's next stop, in the header's lane or the rows'.
+fn add(el: Stateful<Div>, header: bool, action: Action, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let nav = cx.default_global::<Nav>();
     let i = nav.stops.len();
     let lit = nav.cursor.or(nav.results_start) == Some(i);
     let scroll = if nav.in_results { nav.results_scroll.clone() } else { nav.popup_scroll.clone() };
-    nav.stops.push(Stop { action: action.clone(), scroll: scroll.clone(), span: None });
+    nav.stops.push(Stop { action: action.clone(), header, scroll: scroll.clone(), span: None });
     // Where it sits in its scroller's content, for `reveal`; its scroller laid out first.
     let measure = canvas(
         move |bounds, _, cx| {
@@ -328,16 +374,16 @@ pub fn item(
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
-    stop(row(id, selected), move |this, _, cx| on_click(this, cx), cx)
+    stop(row(id), selected, move |this, _, cx| on_click(this, cx), cx)
         .child(div().flex_shrink_0().child(label.into()))
         .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(text::sm()).child(detail.into()))
         .into_any()
 }
 
-/// The bare clickable row every item is built on: fixed height, the selected fill (`stop`
-/// adds the lit one). `flex_shrink_0` keeps rows from being squashed when the popup is
-/// height-capped.
-pub fn row(id: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
+/// The bare clickable row every item is built on, at a fixed height (`stop` adds the
+/// selected and lit fills). `flex_shrink_0` keeps rows from being squashed when the popup
+/// is height-capped.
+pub fn row(id: impl Into<SharedString>) -> Stateful<Div> {
     div()
         .id(ElementId::Name(id.into()))
         .flex()
@@ -349,7 +395,6 @@ pub fn row(id: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
         .px_2()
         .rounded_md()
         .cursor_pointer()
-        .when(selected, |d| d.bg(rgba(theme::t().accent_active)))
 }
 
 /// A destructive action: same row, red label.
@@ -359,7 +404,7 @@ pub fn danger(
     on_click: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
-    stop(row(id, false), move |this, _, cx| on_click(this, cx), cx).text_color(rgba(theme::t().error)).child(label.into()).into_any()
+    stop(row(id), false, move |this, _, cx| on_click(this, cx), cx).text_color(rgba(theme::t().error)).child(label.into()).into_any()
 }
 
 /// A non-interactive section label.
@@ -390,12 +435,12 @@ pub fn search(input: Entity<TextInput>) -> Div {
 mod tests {
     use super::*;
 
-    /// `n` stops, the results starting at `results_start`.
-    fn nav(n: usize, results_start: Option<usize>) -> Nav {
+    /// `headers` header stops, then `rows` rows; the results starting at `results_start`.
+    fn nav(headers: usize, rows: usize, results_start: Option<usize>) -> Nav {
         let mut nav = Nav { results_start, ..Default::default() };
-        for _ in 0..n {
+        for i in 0..headers + rows {
             let action: Action = Rc::new(|_: &mut Dirigent, _: &mut Window, _: &mut Context<Dirigent>| {});
-            nav.stops.push(Stop { action, scroll: ScrollHandle::new(), span: None });
+            nav.stops.push(Stop { action, header: i < headers, scroll: ScrollHandle::new(), span: None });
         }
         nav
     }
@@ -403,32 +448,70 @@ mod tests {
     #[test]
     fn steps_round_the_ends() {
         // Nothing lit: Down takes the first, Up the last; then round the ends.
-        let mut n = nav(3, None);
+        let mut n = nav(0, 3, None);
         assert_eq!(n.lit(), None);
-        n.step(1);
+        n.step(1, false);
         assert_eq!(n.lit(), Some(0));
-        n.step(-1);
+        n.step(-1, false);
         assert_eq!(n.lit(), Some(2));
-        n.step(1);
+        n.step(1, false);
         assert_eq!(n.lit(), Some(0));
-        let mut n = nav(3, None);
-        n.step(-1);
+        let mut n = nav(0, 3, None);
+        n.step(-1, false);
         assert_eq!(n.lit(), Some(2));
         // No stops: the key goes on to the input.
-        assert!(!nav(0, None).step(1));
+        assert!(!nav(0, 0, None).step(1, false));
+    }
+
+    #[test]
+    fn steps_from_the_selected_row() {
+        // `xhigh` selected in low / medium / high / xhigh / max.
+        let mut n = nav(0, 5, None);
+        n.selected = Some(3);
+        n.step(1, false);
+        assert_eq!(n.lit(), Some(4));
+        n.cursor = None;
+        n.step(-1, false);
+        assert_eq!(n.lit(), Some(2));
+    }
+
+    #[test]
+    fn header_and_rows_are_separate_lanes() {
+        // `Save preset`, `All models`, then three presets, the second selected.
+        let mut n = nav(2, 3, None);
+        n.selected = Some(3);
+        // Up / Down skip the header, round the rows' ends.
+        n.step(1, false);
+        assert_eq!(n.lit(), Some(4));
+        n.step(1, false);
+        assert_eq!(n.lit(), Some(2));
+        // Left / Right enter the header at its ends and stay in it.
+        n.step(1, true);
+        assert_eq!(n.lit(), Some(0));
+        n.step(1, true);
+        assert_eq!(n.lit(), Some(1));
+        n.step(1, true);
+        assert_eq!(n.lit(), Some(0));
+        // Down from the header: the first row.
+        n.step(1, false);
+        assert_eq!(n.lit(), Some(2));
+        n.step(-1, true);
+        assert_eq!(n.lit(), Some(1));
+        // No header: Left / Right go on to the input.
+        assert!(!nav(0, 3, None).step(1, true));
     }
 
     #[test]
     fn results_light_their_first_until_the_cursor_moves() {
         // `in project` above the base picker's results.
-        let mut n = nav(4, Some(1));
+        let mut n = nav(0, 4, Some(1));
         assert_eq!(n.lit(), Some(1));
-        n.step(-1);
+        n.step(-1, false);
         assert_eq!(n.lit(), Some(0));
         // A cursor past the stops (the list shrank) lights nothing.
         n.cursor = Some(9);
         assert_eq!(n.lit(), None);
-        n.step(1);
+        n.step(1, false);
         assert_eq!(n.lit(), Some(0));
     }
 }
