@@ -1165,18 +1165,17 @@ fn readout(model: &Model, i: usize, mouse: Point<Pixels>, layout: &Layout) -> An
     };
     let mut lines: Vec<&Series> = model.visible().filter(|s| i >= s.from).collect();
     lines.sort_by(|x, y| y.at(i, model.metric).total_cmp(&x.at(i, model.metric)));
-    let rows = lines.into_iter().map(|s| {
+    // A grid, so each column is as wide as its widest cell: a value never wraps, and the
+    // splits stay aligned however many digits it has.
+    let rows = div().grid().grid_cols_max_content(4).gap_x_2().gap_y_1().items_center().children(lines.iter().flat_map(|s| {
         let t = s.slots[i];
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_2()
-            .child(div().size(u(7.)).rounded_full().bg(rgba(s.color)).flex_shrink_0())
-            .child(div().w(u(140.)).truncate().child(s.label.clone()))
-            .child(div().w(u(56.)).flex_shrink_0().text_color(rgba(theme::t().fg)).child(model.metric.fmt(model.metric.of(&t))))
-            .child(div().text_color(rgba(theme::t().fg_1)).child(t.split()))
-    });
+        [
+            div().size(u(7.)).rounded_full().bg(rgba(s.color)),
+            div().w(u(140.)).truncate().child(s.label.clone()),
+            div().min_w(u(56.)).whitespace_nowrap().text_color(rgba(theme::t().fg)).child(model.metric.fmt(model.metric.of(&t))),
+            div().whitespace_nowrap().text_color(rgba(theme::t().fg_1)).child(t.split()),
+        ]
+    }));
     let card = div()
         .flex()
         .flex_col()
@@ -1191,7 +1190,7 @@ fn readout(model: &Model, i: usize, mouse: Point<Pixels>, layout: &Layout) -> An
         .text_size(text::sm())
         .line_height(u(17.))
         .child(div().text_color(rgba(theme::t().fg_2)).child(when))
-        .children(rows);
+        .when(!lines.is_empty(), |d| d.child(rows));
     let right_half = mouse.x > layout.plot.left() + layout.plot.size.width / 2.;
     let (anchor, dx) = if right_half { (Anchor::TopRight, u(-16.)) } else { (Anchor::TopLeft, u(16.)) };
     // Zero-size absolute wrapper so the anchored card takes a window position, not the
