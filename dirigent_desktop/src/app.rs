@@ -654,10 +654,11 @@ pub struct Dirigent {
     /// Images referenced from entries, by blob id: filled from the cache db, else fetched
     /// from the host (`blob_requests`) when the thread shows them.
     pub blobs: HashMap<String, Blob>,
-    /// Blob ids asked of each host and not in yet. A dropped connection (or a host removed
-    /// from `hosts.toml`) loses the answers: its host's set goes, so the open thread's fetch
-    /// on reconnect asks again.
-    blob_requests: HashMap<String, HashSet<String>>,
+    /// Blob ids asked of each host and not in yet, by request id. One the host doesn't have
+    /// stays, so it isn't asked again. A dropped connection (or a host removed from
+    /// `hosts.toml`) loses the answers: its host's map goes, so the open thread's fetch on
+    /// reconnect asks again.
+    blob_requests: HashMap<String, HashMap<u64, String>>,
     /// A draft was sent (`CreateThread` with its first prompt), not yet confirmed.
     pending: Option<PendingDraft>,
     /// `ForkThread` requests not answered yet, by request id: the host, and the draft the
@@ -1421,9 +1422,9 @@ impl Dirigent {
                     self.titling.remove(&thread);
                 }
             }
-            ServerMessage::Blob { blob_id, mime_type, data, .. } => {
+            ServerMessage::Blob { reply_to, blob_id, mime_type, data } => {
                 if let Some(asked) = self.blob_requests.get_mut(&host) {
-                    asked.remove(&blob_id);
+                    asked.remove(&reply_to);
                 }
                 if let Some(blob) = decode_blob(&mime_type, &data) {
                     self.blobs.insert(blob_id, blob);
@@ -1481,6 +1482,11 @@ impl Dirigent {
                 }
             }
             ServerMessage::Error { reply_to, message } => {
+                // A missing image is the transcript's to show (or not), not worth a toast.
+                if let Some(blob) = reply_to.and_then(|id| self.blob_requests.get(&host)?.get(&id)) {
+                    tracing::info!(%host, %blob, "blob fetch failed: {message}");
+                    return;
+                }
                 if self.settings.test_request.take_if(|(id, _)| Some(*id) == reply_to).is_some() {
                     self.settings.test_result = Some(Err(message));
                     return;
@@ -3470,7 +3476,7 @@ impl Dirigent {
         let asked = self.blob_requests.get(&host);
         let ids: Vec<String> = view::blobs_shown(&t.timeline.items)
             .into_iter()
-            .filter(|id| !self.blobs.contains_key(id) && !asked.is_some_and(|a| a.contains(id)))
+            .filter(|id| !self.blobs.contains_key(id) && !asked.is_some_and(|a| a.values().any(|b| b == id)))
             .collect();
         for id in ids {
             let cached = self.cache.lock().unwrap().blob(&id);
@@ -3480,7 +3486,7 @@ impl Dirigent {
                 }
                 None => {
                     let rid = self.next_id();
-                    self.blob_requests.entry(host.clone()).or_default().insert(id.clone());
+                    self.blob_requests.entry(host.clone()).or_default().insert(rid, id.clone());
                     self.net.send(&host, ClientMessage::GetBlob { id: rid, blob_id: id });
                 }
             }
