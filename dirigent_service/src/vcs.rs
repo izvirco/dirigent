@@ -2,11 +2,11 @@
 //! colocated repo is driven by jj), whether its working copy is dirty, and per-thread
 //! isolated workspaces (a git worktree or a jj workspace) under
 //! `<data dir>/workspaces/<name>`, where the name is also the git branch /
-//! jj workspace name (`workspace_name`). Everything shells out to `git` / `jj`;
+//! jj workspace name (`dirigent_protocol::workspace_name`). Everything shells out to `git` / `jj`;
 //! nothing else about the repo is managed. Branches are never deleted.
 
 use anyhow::{Context, Result, anyhow};
-use dirigent_protocol::Vcs;
+use dirigent_protocol::{Vcs, workspace_name};
 use std::path::Path;
 
 /// Run a vcs command in `dir`, returning stdout on success and stderr as the error. A jj
@@ -100,14 +100,6 @@ pub fn default_base(vcs: Vcs) -> &'static str {
         Vcs::Git => "HEAD",
         Vcs::Jj => "@-",
     }
-}
-
-/// The one name a thread's workspace goes by: its directory, its git branch, its jj
-/// workspace. `dirigent-` + the last 8 characters of the thread id (the random part of a
-/// v7 uuid), short enough to read in a branch list.
-pub fn workspace_name(thread_id: &str) -> String {
-    let short: String = thread_id.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect();
-    format!("dirigent-{short}")
 }
 
 /// Create the thread's workspace at `dest`, checked out at `base` (see `default_base`;

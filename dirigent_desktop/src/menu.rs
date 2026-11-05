@@ -412,6 +412,11 @@ pub fn danger(
     stop(row(id), false, move |this, _, cx| on_click(this, cx), cx).text_color(rgba(theme::t().error)).child(label.into()).into_any()
 }
 
+/// A row that can't be picked right now: faint, no click, skipped by the keys (no `stop`).
+pub fn disabled(id: impl Into<SharedString>, label: impl Into<SharedString>) -> AnyElement {
+    row(id).cursor_default().text_color(rgba(theme::t().fg_2)).child(label.into()).into_any()
+}
+
 /// A non-interactive section label.
 pub fn header(text: impl Into<SharedString>) -> AnyElement {
     div()
