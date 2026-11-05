@@ -137,6 +137,36 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
     (groups, orphans)
 }
 
+/// The groups matching every word of `query` (in a name, a path or a host), best first:
+/// a word the name starts with beats one inside it, which beats one only a path or a host
+/// has (most paths share a `/home` or a `/work`). Ties keep the groups' order.
+pub fn search(groups: Vec<Group>, query: &str) -> Vec<Group> {
+    let query = query.to_lowercase();
+    let words: Vec<&str> = query.split_whitespace().collect();
+    let mut ranked: Vec<(usize, Group)> = groups
+        .into_iter()
+        .filter_map(|g| {
+            let name = g.name.to_lowercase();
+            let rest = g.members.iter().map(|m| format!("{} {} ", m.host, m.project.path)).collect::<String>().to_lowercase();
+            let mut rank = 0;
+            for w in &words {
+                rank += if name.starts_with(w) {
+                    0
+                } else if name.contains(w) {
+                    1
+                } else if rest.contains(w) {
+                    2
+                } else {
+                    return None;
+                };
+            }
+            Some((rank, g))
+        })
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank); // stable
+    ranked.into_iter().map(|(_, g)| g).collect()
+}
+
 /// The pinned groups (`pins`: group keys), in the groups' order.
 pub fn pinned<'a>(groups: &'a [Group], pins: &[String]) -> Vec<&'a Group> {
     groups.iter().filter(|g| pins.contains(&g.key)).collect()
@@ -274,6 +304,29 @@ mod tests {
         // Pins follow that order.
         let pins = ["local/c".into(), "local/a".into()];
         assert_eq!(names_of(&pinned(&groups, &pins)), ["a", "c"]);
+    }
+
+    #[test]
+    fn search_puts_names_before_paths() {
+        let hosts = vec![host(
+            "local",
+            vec![
+                project("a", "/home/me/work/sebba.dev", None),
+                project("b", "/home/me/work/homework", None),
+                project("c", "/home/me/workspace", None),
+                project("d", "/home/me/notes", None),
+            ],
+            vec![],
+        )];
+        let names = |query: &str| {
+            let (groups, _) = groups(&hosts, &Links::new(), &Names::new(), &[]); // by name
+            search(groups, query).into_iter().map(|g| g.name).collect::<Vec<_>>()
+        };
+        assert_eq!(names(""), ["homework", "notes", "sebba.dev", "workspace"]);
+        // The name starts with it, has it, only the path has it.
+        assert_eq!(names("Work"), ["workspace", "homework", "sebba.dev"]);
+        // Every word has to match; a host counts.
+        assert_eq!(names("local no"), ["notes"]);
     }
 
     #[test]

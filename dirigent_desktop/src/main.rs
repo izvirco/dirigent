@@ -101,6 +101,8 @@ fn main() {
             KeyBinding::new("secondary--", TextSmaller, Some(app::KEY_CONTEXT)),
             KeyBinding::new("secondary-0", TextReset, Some(app::KEY_CONTEXT)),
         ]);
+        // After the input's: in one, the open menu's Up / Down / Enter win.
+        cx.bind_keys(menu::key_bindings());
 
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let window = cx

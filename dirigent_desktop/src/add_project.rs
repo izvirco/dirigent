@@ -117,26 +117,29 @@ pub fn render(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Any
 fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Div {
     let host = this.new_project_host().unwrap_or_default();
     let host_open = this.menu == Some(Menu::NewProjectHost);
-    let items = this
-        .hosts
-        .iter()
-        .map(|h| {
-            let name = h.name.clone();
-            let status = format!("{:?}", h.status).to_lowercase();
-            menu::item(
-                format!("nph/{name}"),
-                name.clone(),
-                status,
-                name == host,
-                move |this, cx| this.pick_new_project_host(name.clone(), cx),
-                cx,
-            )
-        })
-        .collect();
+    let host_menu = host_open.then(|| {
+        let items = this
+            .hosts
+            .iter()
+            .map(|h| {
+                let name = h.name.clone();
+                let status = format!("{:?}", h.status).to_lowercase();
+                menu::item(
+                    format!("nph/{name}"),
+                    name.clone(),
+                    status,
+                    name == host,
+                    move |this, cx| this.pick_new_project_host(name.clone(), cx),
+                    cx,
+                )
+            })
+            .collect();
+        menu::popup(Side::Below(24.), items, cx)
+    });
     let host_chip = theme::chip("new-project-host", host.clone(), false, host_open)
         .flex_shrink_0()
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::NewProjectHost, cx)))
-        .children(host_open.then(|| menu::popup(Side::Below(24.), items, cx)));
+        .children(host_menu);
     let add = theme::button("add-project-confirm", "plus", "Add").on_click(cx.listener(|this, _, _, cx| this.confirm_add_project(cx)));
     let top = div()
         .flex()

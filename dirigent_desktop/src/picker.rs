@@ -36,15 +36,15 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let current = this.current_preset();
     let saved = current.as_ref().is_some_and(|c| this.presets.contains(c));
     let left: AnyElement = match &current {
-        Some(_) if !saved => header_button("save-preset", "Save preset", None, theme::t().accent_ink)
-            .on_click(cx.listener(|this, _, _, cx| this.save_preset(cx)))
-            .into_any(),
+        Some(_) if !saved => {
+            menu::stop(header_button("save-preset", "Save preset", None, theme::t().accent_ink), |this, _, cx| this.save_preset(cx), cx)
+                .into_any()
+        }
         _ => div().px_1p5().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child("Saved presets").into_any(),
     };
-    let header = div().flex().flex_row().items_center().justify_between().h(u(ROW_H)).flex_shrink_0().px_0p5().child(left).child(
-        header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1)
-            .on_click(cx.listener(|this, _, window, cx| this.open_all_models(window, cx))),
-    );
+    let all = header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1);
+    let all = menu::stop(all, |this, window, cx| this.open_all_models(window, cx), cx);
+    let header = div().flex().flex_row().items_center().justify_between().h(u(ROW_H)).flex_shrink_0().px_0p5().child(left).child(all);
 
     let mut rows = vec![header.into_any(), menu::separator()];
     // First: nothing here runs without it.
@@ -86,9 +86,8 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .hover(|d| d.bg(rgba(theme::t().line)))
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Model, cx)))
         .child(icon("chevron-left", theme::t().fg_1));
+    let back = menu::stop(back, |this, _, cx| this.toggle_menu(Menu::Model, cx), cx);
     let header = div()
         .flex()
         .flex_row()
@@ -99,18 +98,19 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
         .child(back)
         .child(div().flex_1().min_w_0().text_size(text::base()).child(this.model_search.clone()));
 
-    let models = this.filtered_models(cx);
-    let items: Vec<AnyElement> = if models.is_empty() {
-        let hint = match (no_target, this.models().is_empty()) {
-            (true, _) => "Pick a project first",
-            (false, true) => "No models yet. Waiting for the host.",
-            (false, false) => "No models match",
-        };
-        vec![sign_in(this, cx).unwrap_or_else(|| menu::header(hint))]
-    } else {
-        models.iter().map(|m| model_row(m, this, cx)).collect()
-    };
-    let list = div().id("models-list").flex().flex_col().max_h(u(LIST_H)).overflow_y_scroll().children(items).into_any();
+    let list = menu::results("models-list", LIST_H, cx, |cx| {
+        let models = this.filtered_models(cx);
+        if models.is_empty() {
+            let hint = match (no_target, this.models().is_empty()) {
+                (true, _) => "Pick a project first",
+                (false, true) => "No models yet. Waiting for the host.",
+                (false, false) => "No models match",
+            };
+            vec![sign_in(this, cx).unwrap_or_else(|| menu::header(hint))]
+        } else {
+            models.iter().map(|m| model_row(m, this, cx)).collect()
+        }
+    });
     vec![header.into_any(), menu::separator(), list]
 }
 
@@ -137,9 +137,8 @@ fn preset_row(
         .map(|m| m.name.clone())
         .unwrap_or_else(|| theme::short_model(&p.model).to_owned());
     let preset = p.clone();
-    menu::row(id, selected)
+    menu::stop(menu::row(id, selected), move |this, _, cx| this.use_preset(&preset, cx), cx)
         .group("preset")
-        .on_click(cx.listener(move |this, _, _, cx| this.use_preset(&preset, cx)))
         .child(div().flex_shrink_0().child(name))
         .child(div().min_w_0().truncate().text_color(rgba(theme::t().fg_1)).text_size(text::sm()).child(p.model.clone()))
         .children(p.effort.clone().map(|e| div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).text_size(text::sm()).child(e)))
@@ -164,7 +163,8 @@ fn preset_row(
         .into_any()
 }
 
-/// A quiet text button for the presets header, optionally with a trailing icon.
+/// A quiet text button for the presets header, optionally with a trailing icon. A
+/// `menu::stop` lights it.
 fn header_button(id: &'static str, label: &'static str, trailing: Option<&'static str>, color: u32) -> Stateful<Div> {
     div()
         .id(id)
@@ -178,7 +178,7 @@ fn header_button(id: &'static str, label: &'static str, trailing: Option<&'stati
         .cursor_pointer()
         .text_size(text::sm())
         .text_color(rgba(color))
-        .hover(|d| d.bg(rgba(theme::t().line)).text_color(rgba(theme::t().fg)))
+        .hover(|d| d.text_color(rgba(theme::t().fg)))
         .child(label)
         .children(trailing.map(|name| icon(name, color).size(u(12.))))
 }
