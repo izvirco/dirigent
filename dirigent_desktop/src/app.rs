@@ -14,7 +14,7 @@ use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{changelog, config, hosts, images, instance, settings, update};
-use crate::{leaderboard, lists, ruler, sidebar, thread, titlebar, usage};
+use crate::{leaderboard, lists, menu, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
     Ask, ClientMessage, Entry, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary,
@@ -744,12 +744,13 @@ impl Dirigent {
         for input in [&host_name_input, &host_url_input] {
             cx.subscribe_in(input, window, |this, _, _: &Submitted, window, cx| this.add_host(window, cx)).detach();
         }
+        // The menus' searches; Enter in one takes the lit result (`menu::pick`).
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
-        cx.subscribe(&model_search, |this, _, _: &Submitted, cx| this.pick_first_model(cx)).detach();
         let base_search = cx.new(|cx| TextInput::new(cx, "Branch, commit or revset", true));
-        cx.subscribe(&base_search, |this, _, _: &Submitted, cx| this.pick_first_base(cx)).detach();
         let target_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
-        cx.subscribe(&target_search, |this, _, _: &Submitted, cx| this.pick_first_target(cx)).detach();
+        for input in [&model_search, &base_search, &target_search] {
+            cx.subscribe(input, |_, _, _: &input::Changed, cx| menu::Nav::restart(cx)).detach();
+        }
         let usage_from = cx.new(|cx| TextInput::new(cx, "2026-01-01", true));
         let usage_to = cx.new(|cx| TextInput::new(cx, "2026-01-31", true));
         for input in [&usage_from, &usage_to] {
@@ -1860,18 +1861,6 @@ impl Dirigent {
         self.base_refs().into_iter().filter(|r| r.to_lowercase().contains(&query)).collect()
     }
 
-    /// Enter in the base search: the top match, or the typed text as is (a commit, `main~3`,
-    /// a revset: anything the vcs resolves). Empty means the default.
-    fn pick_first_base(&mut self, cx: &mut Context<Self>) {
-        let typed = self.base_search.read(cx).text().trim().to_owned();
-        let base = match self.filtered_refs(cx).into_iter().next() {
-            Some(r) if !typed.is_empty() => Some(r),
-            _ if typed.is_empty() => None,
-            _ => Some(typed),
-        };
-        self.pick_base(base, cx);
-    }
-
     /// A base was picked in the `New workspace from` popup (`None` = the vcs default): a
     /// draft will start its thread in a workspace there; an open thread moves there now.
     pub fn pick_base(&mut self, base: Option<String>, cx: &mut Context<Self>) {
@@ -2060,33 +2049,9 @@ impl Dirigent {
         self.focus(self.target_search.focus_handle(cx), cx);
     }
 
-    /// The project groups matching every word of the target search (in a name, a path or a
-    /// host), in the groups' order.
+    /// The project groups matching the target search, best first (`projects::search`).
     pub fn filtered_targets(&self, cx: &App) -> Vec<projects::Group> {
-        let query = self.target_search.read(cx).text().to_lowercase();
-        let words: Vec<&str> = query.split_whitespace().collect();
-        let (groups, _) = self.groups();
-        groups
-            .into_iter()
-            .filter(|g| {
-                let mut hay = g.name.to_lowercase();
-                for m in &g.members {
-                    hay += &format!(" {} {}", m.host, m.project.path).to_lowercase();
-                }
-                words.iter().all(|w| hay.contains(w))
-            })
-            .collect()
-    }
-
-    /// Enter in the target search: the top match, on the draft's host if it has one there.
-    fn pick_first_target(&mut self, cx: &mut Context<Self>) {
-        let host = match &self.pane {
-            Pane::Draft { target: Some(t) } => Some(t.host.clone()),
-            _ => None,
-        };
-        if let Some(g) = self.filtered_targets(cx).first() {
-            self.set_target(g.member_for(host.as_deref()).into(), cx);
-        }
+        projects::search(self.groups().0, self.target_search.read(cx).text())
     }
 
     pub fn set_target(&mut self, target: Target, cx: &mut Context<Self>) {
@@ -3369,13 +3334,6 @@ impl Dirigent {
             .collect()
     }
 
-    /// Enter in the search: pick the top match.
-    fn pick_first_model(&mut self, cx: &mut Context<Self>) {
-        if let Some(key) = self.filtered_models(cx).first().map(|m| m.key()) {
-            self.set_model(key, cx);
-        }
-    }
-
     // ---- attachments ----
 
     /// A pasted image, once shrunk to what a prompt carries (`images::fit`; off the UI
@@ -4256,6 +4214,11 @@ impl Dirigent {
         {
             self.request_thread_vcs(&host, &id);
         }
+        // A menu in place of one with a search (All models' back button): the composer gets
+        // the keys back, as on `close_menu`; the search's input is gone.
+        if matches!(self.menu, Some(Menu::AllModels | Menu::Base | Menu::Target)) {
+            self.focus_composer(cx);
+        }
         self.menu = Some(menu);
         cx.notify();
         true
@@ -4510,6 +4473,7 @@ impl Render for Dirigent {
         // gpui's spacing (`p_2`, `gap_1`, ...) is in rems: 16px, zoomed like every `u` size.
         window.set_rem_size(u(16.));
         self.selection.begin_frame();
+        menu::Nav::begin(self.menu.as_ref(), cx);
         self.settle_jump(window);
         self.settle_panel();
         self.field.want = self.field_spec(window);
@@ -4537,9 +4501,17 @@ impl Render for Dirigent {
             .flex_col()
             .when(titlebar::CUSTOM, |d| d.child(titlebar::strip(cx)))
             .child(main);
+        // With a menu open, Up / Down / Enter are its (`menu::key_bindings`).
+        let key_context = match self.menu {
+            Some(_) => format!("{KEY_CONTEXT} {}", menu::KEY_CONTEXT),
+            None => KEY_CONTEXT.to_owned(),
+        };
         div()
-            .key_context(KEY_CONTEXT)
+            .key_context(key_context.as_str())
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(menu::up))
+            .on_action(cx.listener(menu::down))
+            .on_action(cx.listener(menu::pick))
             .on_action(cx.listener(Self::new_thread))
             .on_action(cx.listener(Self::dismiss))
             .on_action(cx.listener(Self::toggle_sidebar))

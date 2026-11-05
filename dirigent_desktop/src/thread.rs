@@ -458,32 +458,34 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
     let group = target.as_ref().and_then(|t| groups.iter().find(|g| g.has(&t.host, &t.project_id)));
     let project = group.map(|g| g.name.clone());
     let target_open = this.menu == Some(Menu::Target);
-    // A search over the groups (in the user's order, `projects::groups`), then their rows.
+    // A search over the groups, then the matching ones' rows (`projects::search`).
     let target_menu = target_open.then(|| {
         if groups.is_empty() {
             return menu::popup(Side::Below(26.), vec![menu::header("No projects yet. Add one with the folder in the sidebar.")], cx);
         }
-        let mut items = Vec::new();
-        for g in &this.filtered_targets(cx) {
-            let selected = group.is_some_and(|s| s.key == g.key);
-            // Keep the host when switching to a group that also lives there.
-            let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
-            // Hosts are picked in the `on <host>` chip; linked projects' paths differ per host.
-            let detail = if g.members.len() > 1 { String::new() } else { g.members[0].project.path.clone() };
-            items.push(menu::item(
-                format!("t/{}", g.key),
-                g.name.clone(),
-                detail,
-                selected,
-                move |this, cx| this.set_target(t.clone(), cx),
-                cx,
-            ));
-        }
-        if items.is_empty() {
-            items.push(menu::header("No projects match"));
-        }
         let search = menu::search(this.target_search.clone());
-        let list = div().id("target-list").flex().flex_col().max_h(u(TARGET_LIST_H)).overflow_y_scroll().children(items);
+        let list = menu::results("target-list", TARGET_LIST_H, cx, |cx| {
+            let mut items = Vec::new();
+            for g in &this.filtered_targets(cx) {
+                let selected = group.is_some_and(|s| s.key == g.key);
+                // Keep the host when switching to a group that also lives there.
+                let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
+                // Hosts are picked in the `on <host>` chip; linked projects' paths differ per host.
+                let detail = if g.members.len() > 1 { String::new() } else { g.members[0].project.path.clone() };
+                items.push(menu::item(
+                    format!("t/{}", g.key),
+                    g.name.clone(),
+                    detail,
+                    selected,
+                    move |this, cx| this.set_target(t.clone(), cx),
+                    cx,
+                ));
+            }
+            if items.is_empty() {
+                items.push(menu::header("No projects match"));
+            }
+            items
+        });
         let body = div().w(u(360.)).flex().flex_col().child(search).child(menu::separator()).child(list).into_any();
         menu::popup(Side::Below(26.), vec![body], cx)
     });
@@ -722,30 +724,37 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
         "in project",
         "no workspace",
         !isolated,
-        move |this, cx| if drafting { this.set_isolate(false, cx) } else { this.close_menu(cx) },
+        move |this, cx| {
+            if drafting {
+                this.set_isolate(false, cx);
+            }
+            this.close_menu(cx);
+        },
         cx,
     );
-    let mut items = vec![];
-    if typed.is_empty() {
-        let d = default_base(vcs);
-        items.push(menu::item("base/default", d, "default", isolated && current.is_none(), |this, cx| this.pick_base(None, cx), cx));
-    }
-    for r in &refs {
-        let base = r.clone();
-        items.push(menu::item(
-            format!("base/{r}"),
-            r.clone(),
-            "",
-            current.as_deref() == Some(r),
-            move |this, cx| this.pick_base(Some(base.clone()), cx),
-            cx,
-        ));
-    }
-    if !typed.is_empty() && !refs.contains(&typed) {
-        let base = typed.clone();
-        items.push(menu::item("base/typed", typed, "as typed", false, move |this, cx| this.pick_base(Some(base.clone()), cx), cx));
-    }
-    let list = div().id("base-list").flex().flex_col().max_h(u(BASE_LIST_H)).overflow_y_scroll().children(items).into_any();
+    let list = menu::results("base-list", BASE_LIST_H, cx, |cx| {
+        let mut items = vec![];
+        if typed.is_empty() {
+            let d = default_base(vcs);
+            items.push(menu::item("base/default", d, "default", isolated && current.is_none(), |this, cx| this.pick_base(None, cx), cx));
+        }
+        for r in &refs {
+            let base = r.clone();
+            items.push(menu::item(
+                format!("base/{r}"),
+                r.clone(),
+                "",
+                current.as_deref() == Some(r),
+                move |this, cx| this.pick_base(Some(base.clone()), cx),
+                cx,
+            ));
+        }
+        if !typed.is_empty() && !refs.contains(&typed) {
+            let base = typed.clone();
+            items.push(menu::item("base/typed", typed, "as typed", false, move |this, cx| this.pick_base(Some(base.clone()), cx), cx));
+        }
+        items
+    });
     let body = div()
         .w(u(360.))
         .flex()
