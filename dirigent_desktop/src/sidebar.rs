@@ -241,7 +241,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         || Pane::Workpool,
         theme::t().working,
         (n_working, 0),
-        ["chevron-up", "chevron-down"],
+        ["chevron-right", "chevron-up"],
         this,
         cx,
     );
@@ -316,8 +316,8 @@ fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyEleme
 }
 
 /// A selectable sidebar row (`ROW` tall). `selected` lifts the background. It has no right
-/// padding: the trailing child supplies it (a `trailing` box flush with the nav padding
-/// like the title's `+`, so icons line up with it; text in it keeps an inset).
+/// padding: the trailing child supplies it (a `trailing` box, placed so icons line up with
+/// the title's `+`; text in it keeps an inset).
 fn row(
     id: impl Into<SharedString>,
     selected: bool,
@@ -343,10 +343,10 @@ fn row(
 /// Inbox / Workpool row: opens the page. Label and count are in the section's `color`
 /// (amber for the Inbox, the working blue for the Workpool); the count is the section's
 /// cards. `counts` is (cards, snoozed): the snoozed threads (Inbox only), not among the
-/// cards, get a faint moon and their own number just before it, so a row always shows a
-/// number. While the row is hovered a chevron replaces the numbers; clicking it folds the
-/// cards.
-/// `chevrons` is its icon while folded / open: they point to where the cards go.
+/// cards, get a faint moon and their own number after it, so a row always shows a
+/// number. The chevron at the end folds the cards.
+/// `chevrons` is its icon while folded / open: right while folded, open they point to
+/// where the cards go.
 #[allow(clippy::too_many_arguments)]
 fn header(
     id: &'static str,
@@ -361,34 +361,27 @@ fn header(
 ) -> Div {
     let open = !this.collapsed.contains(&section);
     let selected = std::mem::discriminant(&this.pane) == std::mem::discriminant(&pane());
-    // The numbers and the chevron are stacked in one box so swapping them doesn't shift
-    // layout; the numbers keep the text inset (and spill out of the box to the left), the
-    // chevron is centered like the title's `+`.
-    let fill = || div().absolute().inset_0().flex().items_center();
     let small = |color: u32| div().flex().flex_row().items_center().gap_0p5().text_size(text::xs()).text_color(rgba(color));
-    let numbers = fill()
-        .justify_end()
+    let numbers = div()
+        .flex()
+        .flex_row()
+        .items_center()
         .gap_1p5()
-        .pr_2()
-        .group_hover("row", |d| d.opacity(0.))
-        .when(snoozed > 0, |d| d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(u(11.))).child(snoozed.to_string())))
-        .when(n > 0, |d| d.child(small(color).child(n.to_string())));
+        .when(n > 0, |d| d.child(small(color).child(n.to_string())))
+        .when(snoozed > 0, |d| {
+            d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(u(11.))).child(snoozed.to_string()))
+        });
+    // Centered like the title's `+`.
     let fold = trailing(SharedString::from(format!("fold/{id}")))
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_section(section, cx)
         }))
-        .child(numbers)
-        .child(
-            fill()
-                .justify_center()
-                .opacity(0.)
-                .group_hover("row", |d| d.opacity(1.))
-                .child(icon(chevrons[open as usize], theme::t().fg_2).size(u(14.))),
-        );
+        .child(icon(chevrons[open as usize], theme::t().fg_2).size(u(14.)));
     div().flex_shrink_0().px_2().child(
         row(id, selected, cx, move |this, cx| this.show(pane(), cx))
             .child(div().flex_1().text_color(rgba(color)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
+            .child(numbers)
             .child(fold),
     )
 }
@@ -692,14 +685,15 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
     rows
 }
 
-/// Trailing control box on a `row`: as wide as the title's `+` button and flush with the
-/// nav padding, so a centered icon lines up with it. Highlights on hover.
+/// Trailing control box on a `row`: a 20px square centered where the title's 26px `+`
+/// button is (3px in from the nav padding), so a centered icon lines up with it.
+/// Highlights on hover.
 fn trailing(id: SharedString) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
-        .w(u(26.))
-        .h(u(20.))
+        .size(u(20.))
+        .mr(u(3.))
         .flex()
         .items_center()
         .justify_center()
