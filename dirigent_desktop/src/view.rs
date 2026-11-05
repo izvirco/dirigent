@@ -3,6 +3,7 @@
 //! thinking, interim prose, tool calls), replies, and notices. Anything unrecognised
 //! becomes a `Notice`, so pi format changes degrade gracefully instead of breaking the UI.
 
+use crate::markdown;
 use dirigent_protocol::PromptMode;
 use serde_json::Value;
 
@@ -551,10 +552,14 @@ impl Timeline {
     }
 }
 
-/// A content block of an assistant message as a work step.
+/// A content block of an assistant message as a work step. The images a text links to
+/// become `blob:` links (`markdown::link_blobs`), for markdown to draw.
 fn step_of(b: &Value) -> Option<Step> {
     Some(match b.get("type")?.as_str()? {
-        "text" => Step::Text(b.get("text")?.as_str()?.to_owned()),
+        "text" => {
+            let text = b.get("text")?.as_str()?;
+            Step::Text(b.get("blobs").and_then(Value::as_object).map_or_else(|| text.to_owned(), |blobs| markdown::link_blobs(text, blobs)))
+        }
         "thinking" => Step::Thinking(b.get("thinking").and_then(Value::as_str).unwrap_or("(redacted)").to_owned()),
         "toolCall" => {
             let args = b.get("arguments");
@@ -731,8 +736,8 @@ pub fn images_of(content: Option<&Value>) -> Vec<String> {
         .collect()
 }
 
-/// Blob ids of the `blob:<id>` links in markdown text (a reply showing a local image; the
-/// host rewrote the link). Ids are sha256 hex, so the scan stops at the first other byte.
+/// Blob ids of the `blob:<id>` links in markdown text (a reply showing a local image, see
+/// `step_of`). Ids are sha256 hex, so the scan stops at the first other byte.
 pub fn blob_links(text: &str) -> impl Iterator<Item = &str> {
     text.match_indices("](blob:").filter_map(|(i, m)| {
         let rest = &text[i + m.len()..];
@@ -1210,21 +1215,23 @@ mod tests {
 
     #[test]
     fn images_read_and_shown() {
-        let id = "a".repeat(64);
+        let (id, old) = ("a".repeat(64), "b".repeat(64));
         let entries = [
             json!({"type":"message","message":{"role":"user","content":"look","timestamp":1}}),
             json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":2,"stopReason":"toolUse","content":[
                 {"type":"toolCall","id":"c1","name":"read","arguments":{"path":"shot.png"}}]}}),
             json!({"type":"message","message":{"role":"toolResult","toolCallId":"c1","timestamp":3,"content":[
                 {"type":"text","text":"Read image file [image/png]"},{"type":"image","mimeType":"image/png","blob":"read1"}]}}),
+            // A link the host stored a blob for, and one from before text blocks had `blobs`.
             json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":4,"stopReason":"stop","content":[
-                {"type":"text","text":format!("Here it is:\n\n![home](blob:{id})\n\nand not ![x](blob:short)")}]}}),
+                {"type":"text","text":format!("Here it is:\n\n![home]( /s/home.png)\n![old](blob:{old})\n\nand not ![x](blob:short)"),
+                 "blobs":{"/s/home.png":id}}]}}),
         ];
         let t = Timeline::from_entries(entries.iter());
         let Item::Work(w) = &t.items[1] else { panic!() };
         let Step::Tool(c) = &w.steps[0] else { panic!() };
         assert_eq!(c.result.as_ref().unwrap().images, vec!["read1".to_owned()]);
-        assert_eq!(blobs_shown(&t.items), vec!["read1".to_owned(), id.clone()]);
+        assert_eq!(blobs_shown(&t.items), vec!["read1".to_owned(), id.clone(), old.clone()]);
     }
 
     #[test]

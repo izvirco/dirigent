@@ -8,11 +8,13 @@
 //!
 //! A reply can also *show* an image: the model writes `![caption](/path/on/host.png)` (the
 //! runtime's system prompt tells it so) and `link_images` reads the file into `blobs` here,
-//! on the host where it lives, rewriting the link to `blob:<id>` so any client can fetch it.
+//! on the host where it lives, recording its id on the text block so any client can fetch
+//! it (`dirigent_protocol::images`). `inflate` drops that record again.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use serde_json::Value;
+use dirigent_protocol::images::image_targets;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -32,28 +34,36 @@ pub fn strip(value: &mut Value, store: &mut impl FnMut(&str, &str, &[u8])) {
     });
 }
 
-/// In an assistant message's text, turn every markdown image link to a local image file
-/// (absolute, or relative to `cwd`) into a `blob:<id>` link, handing the file's bytes to
-/// `store`. Links to URLs, missing files, non-images or files over `MAX_LINKED_IMAGE`
-/// stay as written.
+/// For every markdown image link in an assistant message's text to a local image file
+/// (absolute, or relative to `cwd`), hand the file's bytes to `store` and record the
+/// link's blob id in the text block's `blobs` (link target → id). The text is left as
+/// written. Links to URLs, missing files, non-images or files over `MAX_LINKED_IMAGE`
+/// get no blob.
 pub fn link_images(value: &mut Value, cwd: &Path, store: &mut impl FnMut(&str, &str, &[u8])) {
-    let Some(msg) = value.get_mut("message") else { return };
-    if msg.get("role").and_then(Value::as_str) != Some("assistant") {
-        return;
-    }
-    let Some(blocks) = msg.get_mut("content").and_then(Value::as_array_mut) else { return };
-    for block in blocks.iter_mut().filter(|b| b.get("type").and_then(Value::as_str) == Some("text")) {
+    for block in assistant_text_blocks(value) {
         let Some(text) = block.get("text").and_then(Value::as_str) else { continue };
-        if !text.contains("![") {
-            continue;
+        let mut blobs = Map::new();
+        for target in image_targets(text) {
+            let path = &text[target];
+            if blobs.contains_key(path) {
+                continue;
+            }
+            if let Some((id, mime, bytes)) = read_image(cwd, path) {
+                store(&id, mime, &bytes);
+                blobs.insert(path.to_owned(), Value::String(id));
+            }
         }
-        let rewritten = rewrite_image_links(text, |path| {
-            let (id, mime, bytes) = read_image(cwd, path)?;
-            store(&id, mime, &bytes);
-            Some(format!("blob:{id}"))
-        });
-        block["text"] = Value::String(rewritten);
+        if !blobs.is_empty() {
+            block.insert("blobs".into(), Value::Object(blobs));
+        }
     }
+}
+
+/// The text blocks of `value`'s message, if it is an assistant's.
+fn assistant_text_blocks(value: &mut Value) -> impl Iterator<Item = &mut Map<String, Value>> {
+    let msg = value.get_mut("message").filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"));
+    let blocks = msg.and_then(|m| m.get_mut("content")).and_then(Value::as_array_mut);
+    blocks.into_iter().flatten().filter_map(Value::as_object_mut).filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
 }
 
 /// `(blob id, mime, bytes)` of the image file at `path`, if it is one we can show.
@@ -77,40 +87,17 @@ fn read_image(cwd: &Path, path: &str) -> Option<(String, &'static str, Vec<u8>)>
     Some((blob_id(&bytes), mime, bytes))
 }
 
-/// `text` with every `![alt](target)` target that `resolve` maps replaced. The target is
-/// the part before any title (`![a](p.png "title")`); the title is kept.
-fn rewrite_image_links(text: &str, mut resolve: impl FnMut(&str) -> Option<String>) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(start) = rest.find("![") {
-        // Alt text up to `](`, target up to `)`; neither spans a line in a link.
-        let link = rest[start..].find("](").map(|j| start + j + 2).filter(|&j| !rest[start..j].contains('\n'));
-        let (Some(target_start), Some(target_end)) = (link, link.and_then(|j| rest[j..].find(')').map(|k| j + k))) else {
-            out.push_str(&rest[..start + 2]);
-            rest = &rest[start + 2..];
-            continue;
-        };
-        let target = &rest[target_start..target_end];
-        let (path, title) = target.trim().split_once(char::is_whitespace).unwrap_or((target.trim(), ""));
-        out.push_str(&rest[..target_start]);
-        match resolve(path) {
-            Some(new) if title.is_empty() => out.push_str(&new),
-            Some(new) => out.push_str(&format!("{new} {title}")),
-            None => out.push_str(target),
-        }
-        rest = &rest[target_end..];
-    }
-    out.push_str(rest);
-    out
-}
-
 fn blob_id(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// The inverse: put `data` back for every `blob` that `load` knows. Unknown blobs are
-/// dropped from the block (pi would reject a missing `data`).
+/// The inverse, the entry as pi wrote it: put `data` back for every `blob` that `load`
+/// knows (unknown ones get an empty `data`: pi would reject a missing one) and drop the
+/// text blocks' `blobs`.
 pub fn inflate(value: &mut Value, load: &mut impl FnMut(&str) -> Option<Vec<u8>>) {
+    for block in assistant_text_blocks(value) {
+        block.remove("blobs");
+    }
     walk(value, &mut |obj| {
         let Some(id) = obj.get("blob").and_then(Value::as_str) else { return };
         match load(id) {
@@ -170,30 +157,32 @@ mod tests {
     }
 
     #[test]
-    fn links_to_local_images_become_blobs() {
+    fn links_to_local_images_get_blobs() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("shot.png"), [1, 2, 3]).unwrap();
         let abs = dir.path().join("shot.png").display().to_string();
         let text = format!(
-            "Here:\n\n![home](shot.png)\n![again]({abs} \"t\")\nnot ![a](missing.png) nor ![b](https://x/y.png) nor ![c](notes.txt)\n![\nstray"
+            "Here:\n\n![home](shot.png)\n![again]({abs} \"t\")\n![twice](shot.png)\nnot ![a](missing.png) nor ![b](https://x/y.png) nor ![c](notes.txt)"
         );
-        let mut v = json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":text}]}});
+        let original = json!({"type":"message","message":{"role":"assistant","content":[{"type":"text","text":text}]}});
+        let mut v = original.clone();
         let mut stored = vec![];
         link_images(&mut v, dir.path(), &mut |id, mime, bytes| stored.push((id.to_owned(), mime.to_owned(), bytes.to_vec())));
-        // The same file twice is one blob, stored twice (the table ignores duplicates).
+        // Each link target is read once; two targets naming the same file store it twice
+        // (the table ignores duplicates).
         assert_eq!(stored.len(), 2);
         assert_eq!(stored[0], stored[1]);
         assert_eq!((stored[0].1.as_str(), stored[0].2.as_slice()), ("image/png", &[1, 2, 3][..]));
+        // The text stays as the model wrote it; the block records the blobs.
         let id = &stored[0].0;
-        assert_eq!(
-            v["message"]["content"][0]["text"].as_str().unwrap(),
-            format!(
-                "Here:\n\n![home](blob:{id})\n![again](blob:{id} \"t\")\nnot ![a](missing.png) nor ![b](https://x/y.png) nor ![c](notes.txt)\n![\nstray"
-            )
-        );
+        assert_eq!(v["message"]["content"][0]["text"], text);
+        assert_eq!(v["message"]["content"][0]["blobs"], json!({"shot.png": id, abs: id}));
+        // The replay gets back what pi wrote.
+        inflate(&mut v, &mut |_| None);
+        assert_eq!(v, original);
         // Only assistant text is looked at.
         let mut u = json!({"type":"message","message":{"role":"user","content":[{"type":"text","text":"![u](shot.png)"}]}});
-        link_images(&mut u, dir.path(), &mut |_, _, _| panic!("user text is not rewritten"));
-        assert_eq!(u["message"]["content"][0]["text"], "![u](shot.png)");
+        link_images(&mut u, dir.path(), &mut |_, _, _| panic!("user text is not linked"));
+        assert!(u["message"]["content"][0].get("blobs").is_none());
     }
 }

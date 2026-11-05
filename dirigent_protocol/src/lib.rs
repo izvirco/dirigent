@@ -4,6 +4,7 @@
 //! Pi entries and events stay opaque `serde_json::Value`s so this crate is pi-version-agnostic.
 //! `release` and `leaderboard` are the other wire: the update api's (`dirigent_api`).
 
+pub mod images;
 pub mod leaderboard;
 pub mod release;
 
@@ -358,6 +359,7 @@ pub enum ServerMessage {
     },
     /// Pushed to all clients whenever an entry is persisted for a thread. Image blocks in
     /// entries carry `blob` (a content hash) instead of `data`; fetch them with `GetBlob`.
+    /// A reply's text blocks carry the blobs of the images they link to (`images`).
     Entry {
         thread_id: String,
         entry: Entry,
