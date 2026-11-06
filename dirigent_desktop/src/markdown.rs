@@ -9,8 +9,8 @@
 //! `blob:` one, see `view::step_of`) is drawn by the caller's `ImageFn` after its paragraph's
 //! text; any other image shows its alt text. The caller can also make literal tokens in
 //! the text links (`Tokens`: a user bubble's `[image-N]`), drawn in the accent color
-//! without the underline. Given a `CopyFn`, every code block gets a copy button, revealed
-//! in its top-right corner on hover.
+//! without the underline. Given a `CopyFn`, every code block gets a copy button in its
+//! top-right corner.
 
 use crate::select::{Block, Key, Keys};
 use crate::theme::{self, text, u};
@@ -28,8 +28,12 @@ use std::ops::Range;
 pub type ImageFn<'a> = Option<&'a mut (dyn FnMut(&str) -> AnyElement + 'a)>;
 
 /// How a document makes a code block's copy button, given an id unique to the block and
-/// the code it shows. `None` leaves code blocks without one.
+/// the code it shows. `None` leaves code blocks without one. The button is always drawn:
+/// it hides itself, `group_hover(CODE_GROUP, ..)` reveals it while the block is hovered.
 pub type CopyFn<'a> = Option<&'a dyn Fn(ElementId, SharedString) -> AnyElement>;
+
+/// The hover group of a code block, for its copy button.
+pub const CODE_GROUP: &str = "code";
 
 /// Literal tokens of plain text (not code) that link somewhere, with their URLs.
 pub type Tokens<'a> = &'a [(String, SharedString)];
@@ -263,17 +267,17 @@ impl<'m> Renderer<'m, '_> {
     }
 
     /// `code` in a box, with the `CopyFn`'s button in its top-right corner (over the end of
-    /// the first line) while hovered.
+    /// the first line).
     fn code_block(&mut self, code: String) -> Div {
         let code = SharedString::from(code);
         let block = self.keys.plain(code.clone());
         let copy = self.copy.map(|copy| {
             let Key { doc, item, seq } = block.key();
             let id = ElementId::Name(format!("code-copy/{doc:?}/{item}/{seq}").into());
-            div().absolute().top_1().right_1().opacity(0.).group_hover("code", |d| d.opacity(1.)).child(copy(id, code))
+            div().absolute().top_1().right_1().child(copy(id, code))
         });
         div()
-            .group("code")
+            .group(CODE_GROUP)
             .relative()
             .w_full()
             .rounded_md()
