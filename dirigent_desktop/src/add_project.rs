@@ -105,11 +105,15 @@ impl State {
 
 /// The modal (see `modal.rs`).
 pub fn render(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> AnyElement {
-    let page = match &state.link {
+    modal::frame(div().w(u(WIDTH)).child(page(this, state, cx)), cx)
+}
+
+/// The page showing: in the modal, or in the setup's project step (`onboarding.rs`).
+pub fn page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Div {
+    match &state.link {
         Some(offer) => link_page(offer, cx),
         None => browse_page(this, state, cx),
-    };
-    modal::frame(div().w(u(WIDTH)).child(page), cx)
+    }
 }
 
 /// `<host ▾> <path> [Add]`, a hairline, then the directory list (or a note in its place:

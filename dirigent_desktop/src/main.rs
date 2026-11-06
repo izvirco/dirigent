@@ -20,6 +20,7 @@ mod markdown;
 mod menu;
 mod modal;
 mod net;
+mod onboarding;
 mod orchestra;
 mod picker;
 mod projects;
@@ -100,6 +101,7 @@ fn main() {
             KeyBinding::new("secondary-+", TextBigger, Some(app::KEY_CONTEXT)),
             KeyBinding::new("secondary--", TextSmaller, Some(app::KEY_CONTEXT)),
             KeyBinding::new("secondary-0", TextReset, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("enter", onboarding::Continue, Some(onboarding::KEY_CONTEXT)),
         ]);
         // After the input's: in one, the open menu's arrows and Enter win.
         cx.bind_keys(menu::key_bindings());

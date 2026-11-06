@@ -145,6 +145,21 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
 
 ## Launches and updates
 
+- **The setup** (`onboarding.rs`): a data dir that hasn't finished or skipped it launches into it, over the whole
+  window (no changelog then). `ui.sh` marks it done in every session, so the landmarks above hold;
+  `UI_ONBOARDING=1 scripts/ui.sh start` brings it back, on its welcome. At 1100×720 the welcome has `Set up`
+  (512, 432) and its skip (671, 432); then each step's `Continue` (782, 670) and `Back` (285, 670), and `Skip setup`
+  (1039, 19). Enter continues while no input has the keys (and from the empty provider search), but not during a
+  login; Esc only stops a login (or closes the project browser). Providers is Settings › Providers' list;
+  Project, the last step, has the Add project browser in it, path field focused, while there is no project yet,
+  and ends the setup: `Start a thread` (a draft in the newest project) or, with no project, `Done` (the Inbox),
+  both at Continue's right edge.
+  It moves: the welcome is a title card for its first ~2 s, a step glides in for ~0.6 s, and the way out (either
+  skip, or the last button) fades the app in over ~1 s, taking no presses meanwhile. `sleep` that long before a
+  shot that should show it settled. To look at a frame, scale `ms()` and `LEAVE_MS` in `onboarding.rs` up for the
+  build. The app isn't drawn under the setup: it lies on the window's canvas like the sidebar, so a translucent
+  theme stays see-through (on Xvfb, as everywhere there, that's black).
+
 - **The changelog**: the first launch of a session whose `desktop.db` last ran an older version (after a version
   bump) opens the changelog modal over the pane, with keys going to it, not the composer: Esc closes it, and later
   launches (`setup` relaunches) don't show it. To see it, set `kv.last_version` in `data/desktop.db` lower and

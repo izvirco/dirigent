@@ -264,8 +264,8 @@ fn background_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div>
 }
 
 /// `−  13  +`: the UI's text size, a px at a time (also ctrl - / ctrl =, ctrl 0 resets; cmd
-/// on macOS). Everything else scales with it.
-fn text_size(size: f32, cx: &mut Context<Dirigent>) -> Div {
+/// on macOS). Everything else scales with it. The setup's look step has it too.
+pub fn text_size(size: f32, cx: &mut Context<Dirigent>) -> Div {
     let step = |id: &'static str, icon: &'static str, delta: f32, tip: String, cx: &mut Context<Dirigent>| {
         theme::icon_button(id, icon, cx, move |this, cx| this.step_text_size(delta, cx)).tooltip(theme::tooltip(tip))
     };
