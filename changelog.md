@@ -1,11 +1,25 @@
-## 0.0.6 (draft)
+## 0.0.6
 
-A first-run setup.
+A first-run setup, offline hosts you can see, and quieter copy buttons.
 
 - A setup on first launch: theme, provider and project ([#136])
 - The transparent theme is Linux-only for now ([#136])
+- Send shows `host offline` while the host is down, and keeps your message ([#135])
+- The workspace chip stays put while a thread runs ([#134])
+- The project picker lists names, with their hosts on the right ([#133])
+- Inbox and Workpool chevrons always show, counts beside them ([#131])
+- Copy buttons show a check instead of a toast ([#138])
+- No more toasts for images the host doesn't have ([#130])
+- Usage chart values no longer wrap ([#137])
 
 [#136]: https://forge.sebba.dev/izvir/dirigent/changes/136
+[#135]: https://forge.sebba.dev/izvir/dirigent/changes/135
+[#134]: https://forge.sebba.dev/izvir/dirigent/changes/134
+[#133]: https://forge.sebba.dev/izvir/dirigent/changes/133
+[#131]: https://forge.sebba.dev/izvir/dirigent/changes/131
+[#138]: https://forge.sebba.dev/izvir/dirigent/changes/138
+[#130]: https://forge.sebba.dev/izvir/dirigent/changes/130
+[#137]: https://forge.sebba.dev/izvir/dirigent/changes/137
 
 ## 0.0.5
 
