@@ -34,8 +34,8 @@ use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
 use crate::working;
 use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
 use gpui::{
-    Anchor, Animation, AnimationExt, AnyElement, Bounds, Context, Div, ElementId, Focusable, FontWeight, MouseButton, ObjectFit, Pixels,
-    SharedString, Stateful, Window, anchored, canvas, deferred, div, img, list, point, prelude::*, px, relative, rgba,
+    Anchor, Animation, AnimationExt, AnyElement, Bounds, ClipboardItem, Context, Div, ElementId, Focusable, FontWeight, MouseButton,
+    ObjectFit, Pixels, SharedString, Stateful, Window, anchored, canvas, deferred, div, img, list, point, prelude::*, px, relative, rgba,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -87,7 +87,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (h1, i1) = (host.clone(), id.clone());
     let (h3, i3) = (host.clone(), id.clone());
     let (h4, i4) = (host.clone(), id.clone());
-    let copy_id = id.clone();
+    let (thread_id, copy_btn) = (id.clone(), ElementId::from("hdr-copy-id"));
+    let id_copied = t.copied.as_ref() == Some(&copy_btn);
     let snoozed = status == Status::Snoozed;
     let pinned = this.pinned(&host, &id);
     let panel_open = this.panel_open();
@@ -124,10 +125,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .gap_1()
         .font_weight(FontWeight::NORMAL)
         .children(fork_source)
-        // The thread's id (its full uuid), e.g. to point an agent at it.
+        // The thread's id (its full uuid), e.g. to point an agent at it; a check for a moment once copied.
         .child(
-            theme::icon_button("hdr-copy-id", "copy", cx, move |this, cx| this.copy(copy_id.clone(), "Thread id copied", cx))
-                .tooltip(theme::tooltip("Copy thread id")),
+            theme::icon_button(copy_btn.clone(), if id_copied { "check" } else { "copy" }, cx, move |this, cx| {
+                this.copy_item(copy_btn.clone(), thread_id.clone(), cx)
+            })
+            .tooltip(theme::tooltip("Copy thread id")),
         )
         .when(summary.as_ref().is_some_and(|s| this.snoozable(&host, s)), |d| {
             // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
@@ -694,6 +697,12 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                         let (h, i) = (host.clone(), id.clone());
                         let (h2, i2) = (host.clone(), id.clone());
                         let path = w.clone();
+                        // A toast, not a check: the menu closes on the click.
+                        let copy_path = move |this: &mut Dirigent, cx: &mut Context<Dirigent>| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
+                            this.menu = None;
+                            this.toast("Path copied", cx);
+                        };
                         let remove = format!("Back to project, remove the {kind}");
                         let detach = "Back to project, keep it on disk";
                         // While it runs the thread can't leave: the header says so in place
@@ -703,11 +712,8 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                             (false, true) => "The workspace has uncommitted changes.",
                             (false, false) => "The workspace is clean.",
                         };
-                        let mut items = vec![
-                            menu::header(header),
-                            menu::item("ws-copy", "Copy path", "", false, move |this, cx| this.copy(path.clone(), "Path copied", cx), cx),
-                            menu::separator(),
-                        ];
+                        let mut items =
+                            vec![menu::header(header), menu::item("ws-copy", "Copy path", "", false, copy_path, cx), menu::separator()];
                         match running {
                             true => items.extend([menu::disabled("ws-rm", remove), menu::disabled("ws-detach", detach)]),
                             false => items.extend([
@@ -1272,9 +1278,19 @@ fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context
 }
 
 /// How markdown makes a code block's copy button (`markdown::CopyFn`): the code it shows
-/// to the clipboard, with a toast.
-fn copy_code<'a>(cx: &'a Context<Dirigent>) -> impl Fn(ElementId, SharedString) -> AnyElement + 'a {
-    move |id, code| raised(theme::icon_button(id, "copy", cx, move |this, cx| this.copy(code.to_string(), "Code copied", cx))).into_any()
+/// to the clipboard, and a check on the button for a moment, like a message's copy
+/// (`copied` is `OpenThread::copied`). Revealed while the block is hovered or it shows the check.
+fn copy_code<'a>(copied: Option<&'a ElementId>, cx: &'a Context<Dirigent>) -> impl Fn(ElementId, SharedString) -> AnyElement + 'a {
+    move |id, code| {
+        let done = copied == Some(&id);
+        let click = id.clone();
+        raised(theme::icon_button(id, if done { "check" } else { "copy" }, cx, move |this, cx| {
+            this.copy_item(click.clone(), code.to_string(), cx)
+        }))
+        .opacity(if done { 1. } else { 0. })
+        .group_hover(markdown::CODE_GROUP, |d| d.opacity(1.))
+        .into_any()
+    }
 }
 
 /// An icon button that floats over text (a message's corner buttons, a code block's copy):
@@ -1578,7 +1594,14 @@ fn reply_block(
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
-    let body = markdown::render(text, &fonts.mono, keys, Some(&mut inline_image(blobs, ix as u64, cx)), Some(&copy_code(cx)), &[]);
+    let body = markdown::render(
+        text,
+        &fonts.mono,
+        keys,
+        Some(&mut inline_image(blobs, ix as u64, cx)),
+        Some(&copy_code(t.copied.as_ref(), cx)),
+        &[],
+    );
     // A reply opening with a code block gives its corner buttons (26 px) a row of their own
     // above it, off the block's copy button (the live tail too, so it doesn't jump); its
     // pin bar starts at the block.
@@ -1615,7 +1638,8 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, fork: bool, edit: bool,
     if ix == TAIL {
         return None;
     }
-    let (copied, pinned) = (t.copied == Some(ix), t.is_pinned(ix));
+    let copy_id = ElementId::from(("copy", ix));
+    let (copied, pinned) = (t.copied.as_ref() == Some(&copy_id), t.is_pinned(ix));
     let text = text.to_owned();
     let tint = if pinned { theme::t().warn } else { theme::t().fg_1 };
     let edit = edit.then(|| {
@@ -1626,8 +1650,8 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, fork: bool, edit: bool,
         raised(theme::icon_button(("fork", ix), "git-fork", cx, move |this, _| this.fork_at(ix))).tooltip(theme::tooltip("Fork from here"))
     });
     let pin = raised(theme::tinted_icon_button(("pin", ix), "pin", tint, cx, move |this, cx| this.toggle_pin(ix, cx)));
-    let copy = raised(theme::icon_button(("copy", ix), if copied { "check" } else { "copy" }, cx, move |this, cx| {
-        this.copy_item(ix, text.clone(), cx)
+    let copy = raised(theme::icon_button(copy_id.clone(), if copied { "check" } else { "copy" }, cx, move |this, cx| {
+        this.copy_item(copy_id.clone(), text.clone(), cx)
     }));
     Some(
         div()
@@ -2022,11 +2046,17 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         Step::Thinking(text) => div()
             .py_0p5()
             .text_color(rgba(theme::t().fg_1))
-            .child(markdown::render(text, mono, keys, None, Some(&copy_code(cx)), &[]))
+            .child(markdown::render(text, mono, keys, None, Some(&copy_code(t.copied.as_ref(), cx)), &[]))
             .into_any(),
         Step::Text(text) => {
-            let body =
-                markdown::render(text, mono, keys, Some(&mut inline_image(blobs, step_id_n((key, six)), cx)), Some(&copy_code(cx)), &[]);
+            let body = markdown::render(
+                text,
+                mono,
+                keys,
+                Some(&mut inline_image(blobs, step_id_n((key, six)), cx)),
+                Some(&copy_code(t.copied.as_ref(), cx)),
+                &[],
+            );
             div().py_0p5().text_color(rgba(theme::t().fg)).child(body).into_any()
         }
         Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),

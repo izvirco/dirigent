@@ -23,8 +23,9 @@ use dirigent_protocol::{
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
-    AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment, ListOffset,
-    ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Window, actions, div, prelude::*, px, rgba,
+    AnyWindowHandle, App, ClipboardItem, Context, ElementId, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment,
+    ListOffset, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Window, actions, div, prelude::*, px,
+    rgba,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -58,7 +59,7 @@ const SIDEBAR_MAX: f32 = 420.;
 const LOG_WIDTH_KEY: &str = "log_width";
 const LOG_MIN: f32 = 280.;
 const LOG_MAX: f32 = 800.;
-/// How long a message's copy button shows its check.
+/// How long a copy button shows its check (`Dirigent::copy_item`).
 const COPIED_TTL: Duration = Duration::from_millis(1200);
 /// How often the Usage modal re-asks the hosts while it shows a window that ends now.
 const USAGE_REFRESH_SECS: u64 = 30;
@@ -93,8 +94,9 @@ pub struct OpenThread {
     pub log: Option<usize>,
     /// The log panel's steps, one item each; follows the end unless the user scrolled up.
     pub log_list: ListState,
-    /// The item whose copy button was just clicked (it shows a check for a moment).
-    pub copied: Option<usize>,
+    /// The copy button just clicked, a message's, a code block's or the header's copy id (it
+    /// shows a check for a moment, see `Dirigent::copy_item`).
+    pub copied: Option<ElementId>,
     /// Entry ids of the pinned messages (amber in the ruler; the host keeps them, see
     /// `ThreadSummary::pinned_entries`), kept in step on every `Threads` push.
     pub pins: HashSet<String>,
@@ -1927,15 +1929,6 @@ impl Dirigent {
         self.net.send(host, ClientMessage::RemoveWorkspace { id, thread_id: thread_id.to_owned(), detach });
         self.menu = None;
         cx.notify();
-    }
-
-    /// `text` to the clipboard, with a `toast` saying what was copied; closes any menu.
-    /// The workspace menu's `Copy path`, the thread header's copy-id button, code blocks'
-    /// copy buttons (`thread::copy_code`).
-    pub fn copy(&mut self, text: String, toast: &str, cx: &mut Context<Self>) {
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.menu = None;
-        self.toast(toast, cx);
     }
 
     /// Archive a thread with a workspace, after `ConfirmArchive` decided its fate.
@@ -3946,17 +3939,17 @@ impl Dirigent {
         }
     }
 
-    /// A message's copy button: its markdown to the clipboard, and a check on the button
-    /// for a moment.
-    pub fn copy_item(&mut self, ix: usize, text: String, cx: &mut Context<Self>) {
+    /// A copy button in the thread pane (a message's, a code block's, the header's copy id):
+    /// `text` to the clipboard, and a check on button `id` for a moment.
+    pub fn copy_item(&mut self, id: ElementId, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         let Pane::Thread(t) = &mut self.pane else { return };
-        t.copied = Some(ix);
+        t.copied = Some(id.clone());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPIED_TTL).await;
             this.update(cx, |this, cx| {
                 if let Pane::Thread(t) = &mut this.pane
-                    && t.copied == Some(ix)
+                    && t.copied == Some(id)
                 {
                     t.copied = None;
                     cx.notify();
