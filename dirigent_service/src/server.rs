@@ -1,11 +1,13 @@
 //! WebSocket endpoint: one task per connection, requests handled concurrently,
-//! pushes fanned out from a broadcast channel.
+//! pushes fanned out from a broadcast channel. The open listeners (loopback, tailscale)
+//! take anyone; the public one (`auth.rs`) only a known bearer token.
 
 use crate::Service;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
 use dirigent_protocol::{ClientMessage, ServerMessage};
@@ -17,21 +19,32 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-/// Bind every address, all before serving, so a taken port fails fast.
-pub async fn bind(addrs: &[SocketAddr]) -> anyhow::Result<Vec<TcpListener>> {
+/// Bind every address, all before serving, so a taken port fails fast. `true` marks the
+/// public listener.
+pub async fn bind(addrs: &[(SocketAddr, bool)]) -> anyhow::Result<Vec<(TcpListener, bool)>> {
     let mut listeners = Vec::new();
-    for addr in addrs {
-        listeners.push(TcpListener::bind(addr).await?);
-        info!("listening on ws://{addr}/ws");
+    for &(addr, public) in addrs {
+        listeners.push((TcpListener::bind(addr).await?, public));
+        info!("listening on ws://{addr}/ws{}", if public { " (public: bearer token required)" } else { "" });
     }
     Ok(listeners)
 }
 
+/// What a listener's requests are handled with.
+#[derive(Clone)]
+struct Listener {
+    svc: Arc<Service>,
+    /// Every upgrade needs a bearer token (`auth::admit`).
+    public: bool,
+}
+
 /// Serve on the bound listeners until one fails.
-pub async fn serve(svc: Arc<Service>, listeners: Vec<TcpListener>) -> anyhow::Result<()> {
-    let app = Router::new().route("/ws", get(upgrade)).with_state(svc);
+pub async fn serve(svc: Arc<Service>, listeners: Vec<(TcpListener, bool)>) -> anyhow::Result<()> {
     // With each connection's peer address, for the log.
-    let serve = |l: TcpListener| axum::serve(l.tap_io(tune), app.clone().into_make_service_with_connect_info::<SocketAddr>()).into_future();
+    let serve = |(l, public): (TcpListener, bool)| {
+        let app = Router::new().route("/ws", get(upgrade)).with_state(Listener { svc: svc.clone(), public });
+        axum::serve(l.tap_io(tune), app.into_make_service_with_connect_info::<SocketAddr>()).into_future()
+    };
     futures_util::future::try_join_all(listeners.into_iter().map(serve)).await?;
     Ok(())
 }
@@ -66,7 +79,22 @@ pub struct Conn {
     pub out: mpsc::UnboundedSender<ServerMessage>,
 }
 
-async fn upgrade(ws: WebSocketUpgrade, State(svc): State<Arc<Service>>, ConnectInfo(peer): ConnectInfo<SocketAddr>) -> Response {
+/// Checked before the upgrade: a public listener's request without a known bearer gets a
+/// 401 and never reaches the service.
+async fn upgrade(
+    ws: WebSocketUpgrade,
+    State(Listener { svc, public }): State<Listener>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    match crate::auth::admit(public, &svc.storage, &headers) {
+        Ok(Some(who)) => debug!(%peer, %who, "authorized"),
+        Ok(None) => {}
+        Err(why) => {
+            warn!(%peer, "refused: {why}");
+            return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], why).into_response();
+        }
+    }
     ws.max_frame_size(MAX_MESSAGE).max_message_size(MAX_MESSAGE).on_upgrade(move |socket| connection(socket, svc, peer))
 }
 

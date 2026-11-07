@@ -1,7 +1,8 @@
 // A ws client of a `dirigent_service` (the `dirigent_protocol` messages, typed loosely
 // here) and `Dirigent`, the orchestration helpers on top of it. Used by the `dirigent`
 // tool: a thread acting on its host, and on the hosts that host reaches (`local`, its
-// own service at `DIRIGENT_URL`, plus its `hosts.toml`, from `list_hosts`).
+// own service at `DIRIGENT_URL`, plus its `hosts.toml`, from `list_hosts`, which hands out
+// each host as it is reached now: an ssh host's tunnel end, a public host's bearer token).
 
 export interface ThreadSummary {
   id: string;
@@ -40,6 +41,10 @@ export interface Project {
 export interface HostInfo {
   name: string;
   url: string;
+  /** Sent as `Authorization: Bearer` on connect (a public host's API key). */
+  bearer?: string | null;
+  /** Why the host can't be reached now (its ssh tunnel failed). */
+  error?: string | null;
 }
 
 export interface SearchHit {
@@ -95,9 +100,12 @@ export class Client {
 
   private constructor(private ws: WebSocket) {}
 
-  static connect(url: string, timeoutMs = CONNECT_MS): Promise<Client> {
+  static connect(url: string, bearer?: string | null, timeoutMs = CONNECT_MS): Promise<Client> {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(
+        url,
+        bearer ? { headers: { Authorization: `Bearer ${bearer}` } } : undefined,
+      );
       const client = new Client(ws);
       const timer = setTimeout(() => {
         reject(new TimeoutError(`cannot reach ${url} (no answer in ${timeoutMs / 1000}s)`));
@@ -109,7 +117,8 @@ export class Client {
       });
       ws.addEventListener("error", () => {
         clearTimeout(timer);
-        reject(new Error(`cannot reach ${url}`));
+        // A refused bearer looks the same from here (Bun doesn't say why).
+        reject(new Error(`cannot reach ${url}${bearer ? " (or it refused the key)" : ""}`));
       });
       ws.addEventListener("message", (ev) => client.receive(String(ev.data)));
       ws.addEventListener("close", () => {
@@ -204,8 +213,9 @@ export interface NewOptions {
 /** The answer of each host to one request: its value, or why it had none. */
 type Each<T> = { host: HostInfo; value?: T; error?: string };
 
-/** Which host each thread lives on, as learned; threads never move, so it can't go stale. */
-const owners = new Map<string, HostInfo>();
+/** Which host (by name) each thread lives on, as learned; threads never move, so it can't go
+ *  stale. By name: how the host is reached (an ssh tunnel's port) can change between calls. */
+const owners = new Map<string, string>();
 
 /**
  * Orchestration helpers, acting as the calling thread. Connects to hosts as it needs them;
@@ -231,12 +241,28 @@ export class Dirigent {
   }
 
   private req<T = Reply>(host: HostInfo, msg: Record<string, unknown>): Promise<T & Reply> {
-    let client = this.clients.get(host.url);
+    return this.connect(host).then((c) => c.request<T>(msg));
+  }
+
+  /**
+   * The connection to `host`, made once per call. One that can't be made asks `list_hosts`
+   * again, once: the host may be reached differently since the list was made (an ssh tunnel
+   * restarted on another port, a new key).
+   */
+  private connect(host: HostInfo): Promise<Client> {
+    let client = this.clients.get(host.name);
     if (!client) {
-      client = Client.connect(host.url);
-      this.clients.set(host.url, client);
+      client = open(host).catch(async (e) => {
+        if (host.name === LOCAL) throw e;
+        this.hostList = undefined;
+        const fresh = (await this.hosts()).find((h) => h.name === host.name);
+        if (!fresh || (fresh.url === host.url && fresh.bearer === host.bearer && !fresh.error))
+          throw e;
+        return open(fresh);
+      });
+      this.clients.set(host.name, client);
     }
-    return client.then((c) => c.request<T>(msg));
+    return client;
   }
 
   /**
@@ -278,17 +304,17 @@ export class Dirigent {
 
   async threads(host = this.local): Promise<ThreadSummary[]> {
     const r = await this.req<{ threads: ThreadSummary[] }>(host, { type: "list_threads" });
-    for (const t of r.threads) owners.set(t.id, host);
+    for (const t of r.threads) owners.set(t.id, host.name);
     return r.threads;
   }
 
   projects(host = this.local): Promise<Project[]> {
-    let p = this.projectLists.get(host.url);
+    let p = this.projectLists.get(host.name);
     if (!p) {
       p = this.req<{ projects: Project[] }>(host, { type: "list_projects" }).then(
         (r) => r.projects,
       );
-      this.projectLists.set(host.url, p);
+      this.projectLists.set(host.name, p);
     }
     return p;
   }
@@ -302,7 +328,8 @@ export class Dirigent {
   /** The thread with `id` (or its `dirigent://thread/` link) and the host it lives on. Every host is asked at once; the first that has it answers. */
   async locate(id: string): Promise<Found> {
     id = threadId(id);
-    const known = owners.get(id);
+    const name = owners.get(id);
+    const known = name === undefined ? undefined : await this.host(name).catch(() => undefined);
     if (known) {
       const t = (await this.threads(known)).find((t) => t.id === id);
       if (t) return this.found(known, t);
@@ -391,7 +418,7 @@ export class Dirigent {
       ),
     });
     const t = created.thread;
-    owners.set(t.id, host);
+    owners.set(t.id, host.name);
     return { host, thread: t, project };
   }
 
@@ -564,6 +591,12 @@ export class Dirigent {
     await this.req(f.host, { type: "focus_thread", thread_id: f.thread.id });
     return f;
   }
+}
+
+/** Connect to `host` as `list_hosts` gave it. */
+function open(host: HostInfo): Promise<Client> {
+  if (host.error) return Promise.reject(new Error(host.error));
+  return Client.connect(host.url, host.bearer);
 }
 
 /** A thread id, also accepted as its `dirigent://thread/<id>` link. */

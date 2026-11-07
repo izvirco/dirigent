@@ -1,3 +1,13 @@
+## 0.0.7 (draft)
+
+Hosts over ssh, and public hosts behind a TLS proxy with API keys.
+
+- `ssh://` hosts: Dirigent tunnels to them with your ssh, no tailscale needed ([#140])
+- A public listener for a reverse proxy (`service.toml`), with API keys (`dirigent_service key …`) ([#140])
+- Settings › Hosts: add a host by how it authenticates (none, an API key), edit any host, and hover a failing one for why ([#140])
+
+[#140]: https://forge.sebba.dev/izvir/dirigent/changes/140
+
 ## 0.0.6
 
 A first-run setup, offline hosts you can see, and quieter copy buttons.

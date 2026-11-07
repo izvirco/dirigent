@@ -18,13 +18,16 @@ sha2 = "0.10"
 base64 = "0.22"
 chrono = "0.4"
 toml = "0.8"
+# `auth.rs`: API keys.
+getrandom = "0.4"
 # `logging.rs`: the log setup both binaries share.
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# `server.rs`: `TCP_NOTSENT_LOWAT` on connections.
+# `server.rs`: `TCP_NOTSENT_LOWAT` on connections; `tunnel.rs`: `PR_SET_PDEATHSIG`.
 [target.'cfg(target_os = "linux")'.dependencies]
 socket2 = { version = "0.6", features = ["all"] }
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

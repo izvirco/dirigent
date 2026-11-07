@@ -1,15 +1,16 @@
 //! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
 //! sections on the right. General, Thread titles and Agent tools are the UI over
-//! `config.toml` (`config.rs`), Hosts over `hosts.toml`, Providers over a host's pi
-//! credentials (`providers.rs`, which has its own flow). Everything else saves as it is
-//! changed: the text fields (fonts, title prompt) 300ms after the last keystroke, with a
-//! warning mark on a font field whose family isn't installed; theme, text size, background,
-//! title model, reasoning, the agent tools and telemetry are chips, a stepper and switches
-//! that save at once; a host on Enter. `Test` opens a sample first message, runs it through
+//! `config.toml` (`config.rs`); Hosts over `hosts.toml` and Providers over a host's pi
+//! credentials have their own flows (`hosts_tab.rs`, `providers.rs`). Everything else saves
+//! as it is changed: the text fields (fonts, title prompt) 300ms after the last keystroke,
+//! with a warning mark on a font field whose family isn't installed; theme, text size,
+//! background, title model, reasoning, the agent tools and telemetry are chips, a stepper
+//! and switches that save at once. `Test` opens a sample first message, runs it through
 //! the title settings on the local host, and shows the title with what it cost.
 
 use crate::ambient::{Pattern, Reach};
 use crate::app::{Dirigent, Menu};
+use crate::hosts_tab;
 use crate::icons::icon;
 use crate::input::{self, TextInput};
 use crate::lists::scroll;
@@ -148,7 +149,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         Tab::Providers => crate::providers::render(this, cx),
         Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
         Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
-        Tab::Hosts => vec![hosts(this, cx), saved_to(&hosts::path())],
+        Tab::Hosts => hosts_tab::render(this, cx),
     };
     let column = div().flex().flex_col().gap_8().px_8().py_6().children(sections);
     let body = div().flex().flex_row().child(nav).child(div().flex_1().min_w_0().flex().flex_col().child(scroll("settings", column)));
@@ -442,64 +443,34 @@ fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     section("Telemetry", row("Usage data", switch))
 }
 
-/// Every host with its url and status (hover reveals remove; `local` stays), then the
-/// form to add one: name and address, Enter adds.
-fn hosts(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+/// A small bordered button with a label only (a form's Cancel).
+pub fn text_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     let t = theme::t();
-    let rows = this.hosts.iter().map(|h| {
-        let (dot, status) = match h.status {
-            HostStatus::Connected => (t.done, "connected"),
-            HostStatus::Connecting => (t.warn, "connecting"),
-            HostStatus::Disconnected => (t.error, "disconnected"),
-        };
-        let name = h.name.clone();
-        div()
-            .id(SharedString::from(format!("host/{name}")))
-            .group("row")
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .h(u(38.))
-            .px_2()
-            .child(div().size(u(6.)).rounded_full().bg(rgba(dot)))
-            .child(div().w(u(110.)).truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(this.fonts.mono.clone())
-                    .text_size(text::sm())
-                    .text_color(rgba(t.fg_1))
-                    .child(h.url.clone()),
-            )
-            .child(div().w(u(90.)).flex_shrink_0().text_size(text::sm()).text_color(rgba(t.fg_2)).child(status))
-            .child(if name == hosts::LOCAL {
-                div().size(u(24.)).into_any_element()
-            } else {
-                div()
-                    .id(SharedString::from(format!("rm-host/{name}")))
-                    .size(u(24.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .opacity(0.)
-                    .group_hover("row", |d| d.opacity(1.))
-                    .hover(|d| d.bg(rgba(t.hover)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.remove_host(&name, cx)))
-                    .child(icon("x", t.fg_1))
-                    .into_any_element()
-            })
-    });
-    let form = div()
+    label_button(id, label, t.raised, t.line, t.hover)
+}
+
+/// `text_button` on the accent fill (as send): the one action a form is for (Save).
+pub fn primary_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
+    let t = theme::t();
+    label_button(id, label, t.accent, t.accent, t.accent_active)
+}
+
+fn label_button(id: impl Into<SharedString>, label: impl Into<SharedString>, bg: u32, border: u32, hover: u32) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .h(u(26.))
+        .px_2p5()
         .flex()
-        .flex_row()
-        .gap_2()
-        .pt_4()
-        .child(field(this.host_name_input.clone()).w(u(150.)))
-        .child(field(this.host_url_input.clone()).flex_1());
-    section("Hosts", div().flex().flex_col().children(rows).child(form))
+        .items_center()
+        .flex_shrink_0()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(rgba(bg))
+        .border_1()
+        .border_color(rgba(border))
+        .text_size(text::sm())
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgba(theme::t().fg))
+        .hover(move |d| d.bg(rgba(hover)))
+        .child(label.into())
 }

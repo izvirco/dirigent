@@ -19,7 +19,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", branch = "main"
   "wayland",
   "x11",
 ] }
-tokio-tungstenite = "0.28"
+# wss: hosts behind a TLS proxy (a public listener, `dirigent_service` `auth.rs`).
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 base64 = "0.22"
 unicode-segmentation = "1"
