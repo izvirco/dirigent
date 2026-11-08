@@ -5,6 +5,8 @@
 //!                         `pi config`, a terminal session)
 //!   dirigent key …        the public listener's API keys (`key add <name>`, `key list`,
 //!                         `key revoke <name>`), for the service the desktop embeds
+//!   dirigent login        sign this data dir in to the forge with a device code (`logout`,
+//!                         `whoami`): the account forge-auth hosts and the leaderboard use
 //!
 //! `--data-dir` / `--config-dir` (`dirigent_service::init_dirs`) go before the command and
 //! apply to both. The desktop and the runtime are found next to this binary, as an install,
@@ -23,6 +25,11 @@ fn main() -> Result<()> {
     }
     if operands.first().map(String::as_str) == Some("key") {
         return dirigent_service::key_command(&operands[1..]);
+    }
+    if let [cmd] = &operands[..]
+        && ["login", "logout", "whoami"].contains(&cmd.as_str())
+    {
+        return dirigent_service::forge::command(cmd);
     }
     let exe = std::env::current_exe()?;
     let exe = if cfg!(windows) { exe } else { exe.canonicalize()? };

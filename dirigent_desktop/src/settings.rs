@@ -1,7 +1,8 @@
 //! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
 //! sections on the right. General, Thread titles and Agent tools are the UI over
-//! `config.toml` (`config.rs`); Hosts over `hosts.toml` and Providers over a host's pi
-//! credentials have their own flows (`hosts_tab.rs`, `providers.rs`). Everything else saves
+//! `config.toml` (`config.rs`); Hosts over `hosts.toml`, Providers over a host's pi
+//! credentials and Forge providers over the forge sign-in have their own flows
+//! (`hosts_tab.rs`, `providers.rs`, `account.rs`). Everything else saves
 //! as it is changed: the text fields (fonts, title prompt) 300ms after the last keystroke,
 //! with a warning mark on a font field whose family isn't installed; theme, text size,
 //! background, title model, reasoning, the agent tools and telemetry are chips, a stepper
@@ -36,10 +37,12 @@ pub enum Tab {
     Titles,
     Tools,
     Hosts,
+    /// The forge sign-in (`account.rs`).
+    Forge,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [Tab::General, Tab::Providers, Tab::Titles, Tab::Tools, Tab::Hosts];
+    const ALL: [Tab; 6] = [Tab::General, Tab::Providers, Tab::Titles, Tab::Tools, Tab::Hosts, Tab::Forge];
 
     fn label(self) -> &'static str {
         match self {
@@ -48,6 +51,7 @@ impl Tab {
             Tab::Titles => "Thread titles",
             Tab::Tools => "Agent tools",
             Tab::Hosts => "Hosts",
+            Tab::Forge => "Forge providers",
         }
     }
 }
@@ -150,6 +154,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
         Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
         Tab::Hosts => hosts_tab::render(this, cx),
+        Tab::Forge => crate::account::render(this, cx),
     };
     let column = div().flex().flex_col().gap_8().px_8().py_6().children(sections);
     let body = div().flex().flex_row().child(nav).child(div().flex_1().min_w_0().flex().flex_col().child(scroll("settings", column)));

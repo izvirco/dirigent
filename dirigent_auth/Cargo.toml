@@ -1,0 +1,21 @@
+[package]
+name = "dirigent_auth"
+version.workspace = true
+edition.workspace = true
+
+# Dirigent's side of the forge's OAuth: the public app's token requests (the service lib's
+# account, `dirigent_service` `forge.rs`) and checking the forge's JWTs (the service's
+# public listener, `dirigent_api`'s leaderboard).
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+base64 = "0.22"
+form_urlencoded = "1"
+# RS256 signatures, PKCE's SHA-256 and randomness; already in the tree through rustls.
+ring = "0.17"
+
+[features]
+# `testing`: a fixed RSA key that signs tokens like the forge does, for other crates' tests.
+testing = []

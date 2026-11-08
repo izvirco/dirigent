@@ -16,6 +16,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{error, info, warn};
@@ -123,7 +124,21 @@ async fn connect(host: &Host) -> Result<WebSocket> {
         request.headers_mut().insert(AUTHORIZATION, format!("Bearer {bearer}").parse()?);
     }
     let config = WebSocketConfig::default().max_frame_size(Some(MAX_MESSAGE)).max_message_size(Some(MAX_MESSAGE));
-    Ok(tokio_tungstenite::connect_async_with_config(request, Some(config), false).await?.0)
+    match tokio_tungstenite::connect_async_with_config(request, Some(config), false).await {
+        Ok((ws, _)) => Ok(ws),
+        // A refusal says why in its body (a public listener's 401: `auth.rs`).
+        Err(tokio_tungstenite::tungstenite::Error::Http(res)) => {
+            let body = res.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default();
+            let why: String = body.trim().chars().take(300).collect();
+            match res.status() {
+                // Its body says why, and what to fix.
+                StatusCode::UNAUTHORIZED if !why.is_empty() => anyhow::bail!("refused: {why}"),
+                status if why.is_empty() => anyhow::bail!("{status}"),
+                status => anyhow::bail!("{status}: {why}"),
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 type WebSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;

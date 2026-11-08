@@ -1,5 +1,9 @@
-//! The leaderboard's sqlite db (`DIRIGENT_API_DB`): who joined, their sign-ins (tokens),
-//! the services they upload and each service's usage per UTC hour.
+//! The leaderboard's sqlite db (`DIRIGENT_API_DB`): who joined, the services they upload and
+//! each service's usage per UTC hour.
+//!
+//! Dbs made before 0.0.7 also have a `tokens` table: the api's own sign-in tokens (hashed),
+//! which desktops up to 0.0.6 uploaded with. Nothing reads or writes it now and it's left as
+//! is (tables aren't dropped in code); `DROP TABLE tokens` by hand is safe.
 //!
 //! Counting each service once, however many desktops upload it:
 //! - A service belongs to the first player who uploads it; anyone else's uploads of it are
@@ -15,7 +19,6 @@
 use anyhow::Result;
 use dirigent_protocol::leaderboard::{Account, Board, DAY, HOUR, Player, Range, Slot, Upload};
 use rusqlite::{Connection, OptionalExtension, params};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -25,11 +28,6 @@ CREATE TABLE IF NOT EXISTS users (
     name TEXT NOT NULL,
     picture TEXT NOT NULL,
     joined_at INTEGER NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tokens (
-    hash TEXT PRIMARY KEY,
-    user TEXT NOT NULL,
-    created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS services (
     id TEXT PRIMARY KEY,
@@ -85,29 +83,27 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn in_memory() -> Self {
+    pub(crate) fn in_memory() -> Self {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(SCHEMA).unwrap();
         Self { conn }
     }
 
-    /// A forge user signed in: join them if they're new, else take their current name and
-    /// picture, and give them a fresh token (one per sign-in, so per desktop).
-    pub fn sign_in(&self, id: &str, name: &str, picture: &str, now: i64) -> Result<Account> {
+    /// A forge user joins if they're new, else takes their current name and picture (and
+    /// keeps their join time).
+    pub fn join(&self, id: &str, name: &str, picture: &str, now: i64) -> Result<Account> {
         self.conn.execute(
             "INSERT INTO users (id, name, picture, joined_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT (id) DO UPDATE SET name = excluded.name, picture = excluded.picture",
             params![id, name, picture, now],
         )?;
         let joined_at = self.conn.query_row("SELECT joined_at FROM users WHERE id = ?1", [id], |r| r.get(0))?;
-        let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-        self.conn.execute("INSERT INTO tokens (hash, user, created_at) VALUES (?1, ?2, ?3)", params![hash(&token), id, now])?;
-        Ok(Account { token, id: id.to_owned(), name: name.to_owned(), picture: picture.to_owned(), joined_at })
+        Ok(Account { id: id.to_owned(), name: name.to_owned(), picture: picture.to_owned(), joined_at })
     }
 
-    /// Whose token this is.
-    pub fn user(&self, token: &str) -> Result<Option<String>> {
-        Ok(self.conn.query_row("SELECT user FROM tokens WHERE hash = ?1", [hash(token)], |r| r.get(0)).optional()?)
+    /// Whether `id` is on the board.
+    pub fn joined(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
     }
 
     /// Save `user`'s upload of a service: its hours that are on the hour, from the hour they
@@ -161,13 +157,11 @@ impl Store {
         Ok(Uploaded::Saved(saved))
     }
 
-    /// `user` leaves: gone from the board with all their usage, signed out everywhere.
+    /// `user` leaves: gone from the board with all their usage.
     pub fn leave(&mut self, user: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM usage WHERE service IN (SELECT id FROM services WHERE user = ?1)", [user])?;
-        for table in ["services", "tokens"] {
-            tx.execute(&format!("DELETE FROM {table} WHERE user = ?1"), [user])?;
-        }
+        tx.execute("DELETE FROM services WHERE user = ?1", [user])?;
         tx.execute("DELETE FROM users WHERE id = ?1", [user])?;
         tx.commit()?;
         Ok(())
@@ -234,11 +228,6 @@ fn floor(t: i64, step: i64) -> i64 {
     t - t.rem_euclid(step)
 }
 
-/// Tokens are kept hashed: a leaked db signs nobody in.
-fn hash(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,9 +246,8 @@ mod tests {
     #[test]
     fn a_service_counts_once() {
         let mut s = Store::in_memory();
-        let seb = s.sign_in("u1", "seb", "", T0 + 10).unwrap();
-        s.sign_in("u2", "ana", "", T0).unwrap();
-        assert_eq!(s.user(&seb.token).unwrap().as_deref(), Some("u1"));
+        s.join("u1", "seb", "", T0 + 10).unwrap();
+        s.join("u2", "ana", "", T0).unwrap();
         let up = |hours: Vec<Slot>| Upload { service: "svc".into(), hours };
         let now = T0 + 5 * HOUR;
         // The laptop's later snapshot of hour 1 lands first, the desktop's older one after:
@@ -274,7 +262,7 @@ mod tests {
     #[test]
     fn uploads_stay_within_bounds() {
         let mut s = Store::in_memory();
-        s.sign_in("u1", "seb", "", T0).unwrap();
+        s.join("u1", "seb", "", T0).unwrap();
         let now = T0 + 5 * HOUR;
         // Numbers past any real hour would overflow (or turn to inf in) every board's sums.
         let huge = Slot { start: T0 + HOUR, input: u64::MAX, messages: 1, ..Slot::default() };
@@ -292,13 +280,13 @@ mod tests {
     #[test]
     fn only_counts_from_joining_on() {
         let mut s = Store::in_memory();
-        s.sign_in("u1", "seb", "", T0 + 2 * HOUR + 5).unwrap();
+        s.join("u1", "seb", "", T0 + 2 * HOUR + 5).unwrap();
         let now = T0 + 5 * HOUR;
         let hours = vec![hour(T0 + HOUR, 1, 1.), hour(T0 + 2 * HOUR, 1, 2.), hour(T0 + 3 * HOUR + 1, 1, 4.), hour(T0 + 9 * HOUR, 1, 8.)];
         // Before joining, off the hour, and in the future: dropped.
         assert!(matches!(s.upload("u1", &Upload { service: "a".into(), hours }, now), Ok(Uploaded::Saved(1))));
-        // Signing in again keeps the join time.
-        assert_eq!(s.sign_in("u1", "seb2", "", now).unwrap().joined_at, T0 + 2 * HOUR + 5);
+        // Joining again keeps the join time.
+        assert_eq!(s.join("u1", "seb2", "", now).unwrap().joined_at, T0 + 2 * HOUR + 5);
         assert_eq!(costs(&s, now), [("seb2".to_owned(), 2.)]);
         s.leave("u1").unwrap();
         assert!(s.board(Range::All, now).unwrap().players.is_empty());
@@ -307,7 +295,7 @@ mod tests {
     #[test]
     fn board_slots() {
         let mut s = Store::in_memory();
-        s.sign_in("u1", "seb", "", T0 - 10 * DAY).unwrap();
+        s.join("u1", "seb", "", T0 - 10 * DAY).unwrap();
         let now = T0 + 5 * HOUR;
         // Usage on three days before today, and two hours of today in one 3h slot.
         let mut hours: Vec<Slot> = (1..=3).map(|d| hour(T0 - d * DAY, 1, 1.)).collect();

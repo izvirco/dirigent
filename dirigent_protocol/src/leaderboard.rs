@@ -12,12 +12,11 @@ use serde::{Deserialize, Serialize};
 pub const HOUR: i64 = 3_600_000;
 pub const DAY: i64 = 24 * HOUR;
 
-/// Who signed in, and the token that uploads as them. `POST /api/v0/auth/claim` hands it to
-/// the desktop at the end of a sign-in; the desktop keeps it in its data dir, as JSON: a
-/// field added later needs `#[serde(default)]`, or reading the old one fails and signs out.
+/// Who joined: `POST /api/v0/join`'s answer. The desktop keeps it in its data dir, as JSON:
+/// a field added later needs `#[serde(default)]`, or reading the old one fails and it's out
+/// of the board; one dropped is ignored (desktops up to 0.0.6 saved a `token` too).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Account {
-    pub token: String,
     /// The forge user id: survives renames.
     pub id: String,
     pub name: String,
@@ -27,7 +26,7 @@ pub struct Account {
     pub joined_at: i64,
 }
 
-/// `PUT /api/v0/usage` (bearer token): one service's usage per hour.
+/// `PUT /api/v0/usage` (bearer: a forge JWT): one service's usage per hour.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Upload {
     pub service: String,

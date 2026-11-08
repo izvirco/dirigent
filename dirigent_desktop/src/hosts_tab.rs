@@ -2,7 +2,10 @@
 //! the form that adds or edits one.
 //!
 //! A row is the host's name, address, auth and state; a failing host says `error` and
-//! shows why on hover, so every row keeps one line. Clicking a row (or its pencil) opens
+//! shows why on hover, so every row keeps one line. A forge host that fails for want of
+//! the forge sign-in says `not signed in` instead, a link to Settings › Forge providers
+//! (`account.rs`), the only place that signs in; the form links there too while it has
+//! forge auth picked and nobody is signed in. Clicking a row (or its pencil) opens
 //! the form in its place, filled in; `Add host` asks for the auth first (its menu), then
 //! opens the same form empty under the rows. The form has the fields its auth needs and
 //! its auth chip changes that; Enter saves, Esc cancels, and what's wrong (a bad address,
@@ -18,33 +21,41 @@ use crate::net::HostStatus;
 use crate::projects::HostState;
 use crate::settings::{self, field, saved_to, section};
 use crate::theme::{self, text, u};
-use dirigent_service::hosts::{self, Host};
+use dirigent_service::hosts::{self, Auth, Host};
 use gpui::{AnyElement, Context, Div, Entity, Focusable, FontWeight, SharedString, Stateful, div, prelude::*, rgba};
 use std::collections::BTreeMap;
 
 /// A host row's height, in design px.
 const ROW_H: f32 = 38.;
 
-/// How a host is authenticated to, as the form picks it (`Host::key` comes from its field).
+/// How a host is authenticated to, as the form picks it: `hosts::Auth` before it has
+/// its key (from the key field).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HostAuth {
     /// Tailscale, ssh or a private network: nothing to send.
     None,
     /// An API key of the host's public listener.
     Key,
+    /// A token from the forge account (Settings › Forge providers).
+    Forge,
 }
 
 impl HostAuth {
-    const ALL: [HostAuth; 2] = [HostAuth::None, HostAuth::Key];
+    const ALL: [HostAuth; 3] = [HostAuth::None, HostAuth::Key, HostAuth::Forge];
 
     fn of(host: &Host) -> Self {
-        if host.key.is_some() { HostAuth::Key } else { HostAuth::None }
+        match host.auth {
+            Auth::None => HostAuth::None,
+            Auth::Key(_) => HostAuth::Key,
+            Auth::Forge => HostAuth::Forge,
+        }
     }
 
     fn label(self) -> &'static str {
         match self {
             HostAuth::None => "none",
             HostAuth::Key => "API key",
+            HostAuth::Forge => "forge account",
         }
     }
 
@@ -53,6 +64,16 @@ impl HostAuth {
         match self {
             HostAuth::None => "tailscale, ssh or plain ws",
             HostAuth::Key => "a public host's key",
+            HostAuth::Forge => "a public host signed in as you",
+        }
+    }
+
+    /// A row's word for it (none says nothing).
+    fn tag(self) -> Option<&'static str> {
+        match self {
+            HostAuth::None => None,
+            HostAuth::Key => Some("API key"),
+            HostAuth::Forge => Some("forge"),
         }
     }
 
@@ -60,7 +81,7 @@ impl HostAuth {
     fn placeholder(self) -> &'static str {
         match self {
             HostAuth::None => "host, ssh://user@host or ws://host:7777/ws",
-            HostAuth::Key => "wss://host/ws",
+            HostAuth::Key | HostAuth::Forge => "wss://host/ws",
         }
     }
 }
@@ -118,7 +139,10 @@ impl Dirigent {
     /// A row's click: the form for host `name`, filled in.
     pub fn edit_host_form(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(host) = self.host(name).map(|h| h.config.clone()) else { return };
-        let key = host.key.clone().unwrap_or_default();
+        let key = match &host.auth {
+            Auth::Key(key) => key.clone(),
+            _ => String::new(),
+        };
         self.open_host_form(Some(name.to_owned()), HostAuth::of(&host), [name, &host.url, &key], cx);
     }
 
@@ -226,12 +250,13 @@ fn host_from(name: &str, address: &str, auth: HostAuth, key: &str) -> Result<(St
         return Err("Enter the host's address".into());
     }
     let url = hosts::normalize(address).map_err(|e| format!("Address: {e}"))?;
-    let key = match (auth, key.trim()) {
-        (HostAuth::None, _) => None,
+    let auth = match (auth, key.trim()) {
+        (HostAuth::None, _) => Auth::None,
         (HostAuth::Key, "") => return Err("Paste the host's API key".into()),
-        (HostAuth::Key, key) => Some(key.to_owned()),
+        (HostAuth::Key, key) => Auth::Key(key.to_owned()),
+        (HostAuth::Forge, _) => Auth::Forge,
     };
-    Ok((name.to_owned(), Host { url, key }))
+    Ok((name.to_owned(), Host { url, auth }))
 }
 
 /// Put `host` in `list` as `name`, in place of `editing` (the name it had: a rename drops
@@ -275,8 +300,8 @@ fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<D
     let t = theme::t();
     let name = h.name.clone();
     let local = name == hosts::LOCAL;
-    let (dot, status, why) = state(h);
-    let auth = (HostAuth::of(&h.config) != HostAuth::None).then(|| HostAuth::of(&h.config).label());
+    let (dot, status, why) = state(this, h, cx);
+    let auth = HostAuth::of(&h.config).tag();
     let edit = name.clone();
     div()
         .id(SharedString::from(format!("host/{name}")))
@@ -319,11 +344,15 @@ fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<D
 
 /// The row's dot colour, its state word and what its cell shows on hover: `error` (red)
 /// while it can't connect, kept through its retries so the row doesn't flicker, with why.
-fn state(h: &HostState) -> (u32, AnyElement, Option<String>) {
+/// A forge host that can't connect for want of the forge sign-in says `not signed in`
+/// instead (amber): a link to where that's done.
+fn state(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> (u32, AnyElement, Option<String>) {
     let t = theme::t();
     let word = |text: &'static str, color: u32| div().text_size(text::sm()).text_color(rgba(color)).child(text).into_any_element();
+    let signed_out = h.config.auth == Auth::Forge && this.forge.status.signed_in().is_none();
     match (&h.error, h.status) {
         (_, HostStatus::Connected) => (t.done, word("connected", t.fg_2), None),
+        _ if signed_out => (t.warn, forge_link("not signed in", h.name.clone(), t.warn, cx).into_any_element(), None),
         (Some(e), _) => (t.error, word("error", t.error), Some(e.clone())),
         (None, HostStatus::Connecting) => (t.warn, word("connecting", t.fg_2), None),
         (None, HostStatus::Disconnected) => (t.error, word("disconnected", t.fg_2), None),
@@ -404,7 +433,21 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
             .child(div().w(u(72.)).flex_shrink_0().text_color(rgba(t.fg_1)).child(label))
             .child(field(input.clone()).flex_1())
     };
-    let note = f.error.clone().map(|e| div().truncate().text_color(rgba(t.error)).child(e).into_any_element());
+    // Forge auth needs the forge sign-in, which is done on its own tab.
+    let signed_out = f.auth == HostAuth::Forge && this.forge.status.signed_in().is_none();
+    let note = match &f.error {
+        Some(e) => Some(div().truncate().text_color(rgba(t.error)).child(e.clone()).into_any_element()),
+        None if signed_out => Some(
+            div()
+                .flex()
+                .flex_row()
+                .gap_1p5()
+                .child(div().text_color(rgba(t.warn)).child("Not signed in to the forge."))
+                .child(forge_link("Open Forge providers", "form".into(), t.accent_ink, cx))
+                .into_any_element(),
+        ),
+        None => None,
+    };
     let save = if f.editing.is_some() { "Save" } else { "Add host" };
     let footer = div()
         .flex()
@@ -429,6 +472,22 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
         .child(line("Address", &tab.url))
         .when(f.auth == HostAuth::Key, |d| d.child(line("API key", &tab.key)))
         .child(footer)
+}
+
+/// A link to Settings › Forge providers (`id`: what it's on), where the forge sign-in is.
+fn forge_link(label: &'static str, id: String, color: u32, cx: &mut Context<Dirigent>) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(format!("forge-link/{id}")))
+        .cursor_pointer()
+        .text_size(text::sm())
+        .text_color(rgba(color))
+        .hover(|d| d.underline())
+        .tooltip(theme::tooltip("Sign in to the forge in Settings › Forge providers"))
+        .on_click(cx.listener(|this, _, _, cx| {
+            cx.stop_propagation();
+            this.open_forge_settings(cx)
+        }))
+        .child(label)
 }
 
 /// `Auth  API key ▾`: the form's auth, changeable.
@@ -468,7 +527,9 @@ mod tests {
         let (name, host) = host_from(" box ", "ssh://seb@box/7800", HostAuth::None, "dk_ignored").unwrap();
         assert_eq!((name.as_str(), host), ("box", Host::new("ssh://seb@box/7800".into())));
         let (_, host) = host_from("prod", "wss://d.example.com", HostAuth::Key, " dk_abc ").unwrap();
-        assert_eq!(host, Host { url: "wss://d.example.com/ws".into(), key: Some("dk_abc".into()) });
+        assert_eq!(host, Host { url: "wss://d.example.com/ws".into(), auth: Auth::Key("dk_abc".into()) });
+        let (_, host) = host_from("home", "wss://h.example.com/ws", HostAuth::Forge, "dk_ignored").unwrap();
+        assert_eq!(host, Host { url: "wss://h.example.com/ws".into(), auth: Auth::Forge });
         for (name, address, auth, key) in [
             ("", "h", HostAuth::None, ""),
             ("local", "h", HostAuth::None, ""),

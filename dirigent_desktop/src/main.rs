@@ -4,6 +4,7 @@
 // file). Debug builds keep theirs for the stderr log.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account;
 mod add_project;
 mod ambient;
 mod app;

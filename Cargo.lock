@@ -1322,20 +1322,31 @@ version = "0.0.6"
 dependencies = [
  "anyhow",
  "axum",
+ "dirigent_auth",
  "dirigent_protocol",
- "form_urlencoded",
  "minisign",
  "rusqlite",
  "rusty-s3",
  "semver",
  "serde",
  "serde_json",
- "sha2 0.10.9",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "ureq",
- "uuid",
+]
+
+[[package]]
+name = "dirigent_auth"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "form_urlencoded",
+ "ring",
+ "serde",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]
@@ -1393,7 +1404,9 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "dirigent_auth",
  "dirigent_protocol",
+ "form_urlencoded",
  "futures-util",
  "getrandom 0.4.3",
  "libc",
