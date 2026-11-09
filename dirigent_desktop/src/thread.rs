@@ -21,7 +21,7 @@
 //! Steers (typed, or the answers to an ask) are user bubbles: `steer · pending` below the
 //! work line while pi holds them, `steer` above it once the model has them.
 
-use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, Pane, Resize, Target, default_base};
+use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, Pane, PanelPart, Resize, Target, default_base};
 use crate::icons::icon;
 use crate::lists::{Via, breadcrumb, header};
 use crate::markdown;
@@ -327,15 +327,19 @@ fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
 }
 
 /// The right panel, split off the pane by a full-height hairline, `log_width` wide, with
-/// a drag handle on its left edge below the header: the thread's header `actions` on
-/// top, then the thread's family (`orchestra::tree`, at most half the height, scrolling
-/// past that) over the work log (`log_body`), each only when there is one; a word about
-/// sub-agents when there is neither. Untitled: the header's button shows its state. On
-/// screen while `panel_open`.
+/// a drag handle on its left edge below the header. Its header: a toggle per section on
+/// the left, the thread's header `actions` on the right. Below it the thread's family
+/// (`orchestra::tree`; over the log, at most half the height, scrolling past that) and
+/// the work log (`log_body`), each when there is one and it isn't hidden
+/// (`Dirigent::panel_hidden`); a word on what would show when neither does. Untitled:
+/// the header's button shows its state. On screen while `panel_open`.
 fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) -> Div {
-    let tree = crate::orchestra::tree(this, cx);
+    let lineage = this.panel_shows(PanelPart::Lineage);
+    let tree = if lineage { crate::orchestra::tree(this, cx) } else { None };
+    // A hidden log has no work to show (`Dirigent::set_panel_hidden`).
     let log = log_body(this, cx);
     let empty = (tree.is_none() && log.is_none()).then(|| {
+        let what = if lineage { "Sub-agents this thread spawns show up here." } else { "Tool calls and thinking show up here." };
         div()
             .flex_1()
             .flex()
@@ -344,19 +348,36 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
             .px_6()
             .text_size(text::sm())
             .text_color(rgba(theme::t().fg_2))
-            .child(div().w_full().text_center().child("Sub-agents this thread spawns show up here."))
+            .child(div().w_full().text_center().child(what))
     });
     let tree = tree.map(|tree| {
         div()
             .id("orchestra")
-            .flex_shrink_0()
-            .max_h(relative(0.5))
             .overflow_y_scroll()
             .px_2()
             .pb_2()
-            .when(log.is_some(), |d| d.border_b_1().border_color(rgba(theme::t().line_soft)))
+            .when(log.is_some(), |d| d.flex_shrink_0().max_h(relative(0.5)).border_b_1().border_color(rgba(theme::t().line_soft)))
+            .when(log.is_none(), |d| d.flex_1().min_h_0())
             .child(tree)
     });
+    // Lit while its section shows. Clicking the only one lit does nothing: one always shows.
+    let toggle = |id: &'static str, part: PanelPart, glyph: &'static str, tip: &'static str| {
+        let on = this.panel_shows(part);
+        let color = if on { theme::t().fg } else { theme::t().fg_2 };
+        theme::tinted_icon_button(id, glyph, color, cx, move |this, cx| this.toggle_panel_part(part, cx))
+            .when(on, |d| d.bg(rgba(theme::t().hover)))
+            .tooltip(theme::tooltip(tip))
+    };
+    let toggles = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        // Clipped, not over the actions, in a panel too narrow for both.
+        .min_w_0()
+        .overflow_hidden()
+        .child(toggle("panel-lineage", PanelPart::Lineage, "network", "Agent lineage"))
+        .child(toggle("panel-log", PanelPart::Log, "logs", "Tool calls and thinking"));
     let handle = div()
         .id("panel-resize")
         .absolute()
@@ -381,7 +402,7 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
         .flex_col()
         // `justify_end`: actions wider than a narrow panel spill left, over the hairline,
         // not right under the caption buttons.
-        .child(header(div(), Some(actions)).justify_end())
+        .child(header(toggles, Some(actions)).justify_end())
         .children(tree)
         .children(log)
         .children(empty)
