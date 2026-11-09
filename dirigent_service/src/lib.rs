@@ -6,6 +6,7 @@
 //! is a thin wrapper for remote hosts.
 
 mod agent;
+mod auth;
 mod blobs;
 mod dirs;
 mod git;
@@ -16,6 +17,7 @@ mod runtime;
 mod server;
 mod storage;
 mod title;
+pub mod tunnel;
 mod vcs;
 
 use anyhow::{Result, anyhow};
@@ -35,6 +37,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 pub use agent::dir as agent_dir;
+pub use auth::{KEY_USAGE, key_command};
 pub use logging::init_logging;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
@@ -405,9 +408,20 @@ impl Service {
                 info!(%provider, "logged out");
                 ServerMessage::Ok { reply_to: id }
             }
-            // Read on every request, so edits to the file apply at once.
+            // Read on every request, so edits to the file apply at once. Each host as its
+            // agents connect to it: an `ssh://` one through its tunnel, started now if need
+            // be (all at once: one slow ssh doesn't hold up the others), with its bearer.
             ClientMessage::ListHosts { id } => {
-                ServerMessage::Hosts { reply_to: id, hosts: hosts::load()?.into_iter().map(|(name, url)| HostInfo { name, url }).collect() }
+                let hosts = hosts::load()?;
+                tunnel::retain(hosts.values().map(|h| h.url.as_str()));
+                let hosts = futures_util::future::join_all(hosts.into_iter().map(|(name, host)| async move {
+                    match host.endpoint().await {
+                        Ok(e) => HostInfo { name, url: e.url, bearer: e.bearer, error: None },
+                        Err(e) => HostInfo { name, url: host.url, bearer: None, error: Some(format!("{e:#}")) },
+                    }
+                }))
+                .await;
+                ServerMessage::Hosts { reply_to: id, hosts }
             }
             ClientMessage::GenerateTitle { id, title, text } => self.runtime.generate_title(&title, &text).await?.reply(id),
             ClientMessage::RetitleThread { id, thread_id, model, reasoning } => {
@@ -1008,9 +1022,10 @@ pub fn runtime_env() -> [(&'static str, PathBuf); 2] {
     [("DIRIGENT_DATA_DIR", data_dir()), ("PI_CODING_AGENT_DIR", agent_dir())]
 }
 
-/// Where the service listens: `DIRIGENT_BIND` (comma-separated IPs) if set, else loopback
-/// plus this machine's tailscale addresses, so a host is reachable from the tailnet and
-/// nowhere else. Never a wildcard: there is no auth.
+/// Where the service listens openly: `DIRIGENT_BIND` (comma-separated IPs) if set, else
+/// loopback plus this machine's tailscale addresses, so a host is reachable from the
+/// tailnet (and over ssh, `tunnel.rs`) and nowhere else. Never a wildcard: these take
+/// anyone. Reaching it from elsewhere is the public listener's job (`auth.rs`).
 fn bind_addrs(port: u16) -> Vec<SocketAddr> {
     let ips: Vec<IpAddr> = match std::env::var("DIRIGENT_BIND") {
         Ok(list) => list.split(',').filter_map(|s| s.trim().parse().ok()).collect(),
@@ -1038,7 +1053,12 @@ pub async fn run(port: u16) -> Result<()> {
     let cmd = runtime_cmd()?;
     // Bound before the runtime starts: a service that can't listen leaves no runtime behind
     // (the desktop retries its embedded one) and logs nothing more.
-    let listeners = server::bind(&bind_addrs(port)).await?;
+    let mut addrs: Vec<(SocketAddr, bool)> = bind_addrs(port).into_iter().map(|a| (a, false)).collect();
+    if let Some(public) = auth::load()?.public {
+        info!(url = public.url.as_deref().unwrap_or("?"), "public listener on {}", public.listen);
+        addrs.push((public.listen, true));
+    }
+    let listeners = server::bind(&addrs).await?;
     let host_name = platform::host_name();
     info!(host = %host_name, data = %data_dir().display(), version = env!("CARGO_PKG_VERSION"), "service started");
     let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));

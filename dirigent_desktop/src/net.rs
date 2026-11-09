@@ -1,10 +1,12 @@
 //! One WebSocket connection per host, on a dedicated tokio thread. Incoming
 //! messages update the cache and are forwarded to the UI through a channel;
 //! outgoing requests come from the UI through a per-host channel. Hosts can be
-//! added and removed while running (`hosts.toml` edits).
+//! added and removed while running (`hosts.toml` edits). Each (re)connect resolves its host
+//! afresh (`Host::endpoint`): an `ssh://` host through its tunnel, which a dead ssh restarts,
+//! and with its bearer token, if any.
 
 use crate::cache::Cache;
-use crate::hosts::LOCAL;
+use crate::hosts::{Host, LOCAL};
 use anyhow::Result;
 use dirigent_protocol::{ClientMessage, ServerMessage};
 use futures::{SinkExt, StreamExt};
@@ -13,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{error, info, warn};
 
@@ -31,8 +35,16 @@ pub enum HostStatus {
 }
 
 pub enum Incoming {
-    Status { host: String, status: HostStatus },
-    Message { host: String, msg: Box<ServerMessage> },
+    /// With why the last connect failed (ssh's stderr, a 401), until one succeeds.
+    Status {
+        host: String,
+        status: HostStatus,
+        error: Option<String>,
+    },
+    Message {
+        host: String,
+        msg: Box<ServerMessage>,
+    },
 }
 
 pub type UiSender = futures::channel::mpsc::UnboundedSender<Incoming>;
@@ -44,14 +56,14 @@ pub struct Net {
 
 /// To the net thread: start or stop a host's connection task.
 enum Control {
-    Add { name: String, url: String, rx: mpsc::UnboundedReceiver<ClientMessage> },
+    Add { name: String, host: Host, rx: mpsc::UnboundedReceiver<ClientMessage> },
     Remove(String),
 }
 
 impl Net {
-    /// Spawn the tokio thread and one connection task per `(name, url)`.
+    /// Spawn the tokio thread and one connection task per `(name, host)`.
     /// The `local` host gets an in-process service started for it if nothing is listening.
-    pub fn start(hosts: Vec<(String, String)>, cache: Arc<Mutex<Cache>>, ui: UiSender) -> Self {
+    pub fn start(hosts: Vec<(String, Host)>, cache: Arc<Mutex<Cache>>, ui: UiSender) -> Self {
         let (control, mut control_rx) = mpsc::unbounded_channel::<Control>();
         std::thread::Builder::new()
             .name("net".into())
@@ -61,8 +73,8 @@ impl Net {
                     let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
                     while let Some(cmd) = control_rx.recv().await {
                         match cmd {
-                            Control::Add { name, url, rx } => {
-                                let task = tokio::spawn(host_loop(name.clone(), url, rx, cache.clone(), ui.clone()));
+                            Control::Add { name, host, rx } => {
+                                let task = tokio::spawn(host_loop(name.clone(), host, rx, cache.clone(), ui.clone()));
                                 tasks.insert(name, task);
                             }
                             Control::Remove(name) => {
@@ -76,17 +88,17 @@ impl Net {
             })
             .expect("spawn net thread");
         let mut net = Self { hosts: HashMap::new(), control };
-        for (name, url) in hosts {
-            net.add(name, url);
+        for (name, host) in hosts {
+            net.add(name, host);
         }
         net
     }
 
-    pub fn add(&mut self, name: String, url: String) {
-        info!(host = %name, %url, "host added");
+    pub fn add(&mut self, name: String, host: Host) {
+        info!(host = %name, url = %host.url, "host added");
         let (tx, rx) = mpsc::unbounded_channel();
         self.hosts.insert(name.clone(), tx);
-        let _ = self.control.send(Control::Add { name, url, rx });
+        let _ = self.control.send(Control::Add { name, host, rx });
     }
 
     /// Drops the connection; the UI gets no final status for it.
@@ -103,22 +115,35 @@ impl Net {
     }
 }
 
-async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<ClientMessage>, cache: Arc<Mutex<Cache>>, ui: UiSender) {
-    let status = |s: HostStatus| {
-        let _ = ui.unbounded_send(Incoming::Status { host: name.clone(), status: s });
+/// Connect to `host` as it resolves now, with its bearer token if it has one.
+async fn connect(host: &Host) -> Result<WebSocket> {
+    let endpoint = host.endpoint().await?;
+    let mut request = endpoint.url.as_str().into_client_request()?;
+    if let Some(bearer) = &endpoint.bearer {
+        request.headers_mut().insert(AUTHORIZATION, format!("Bearer {bearer}").parse()?);
+    }
+    let config = WebSocketConfig::default().max_frame_size(Some(MAX_MESSAGE)).max_message_size(Some(MAX_MESSAGE));
+    Ok(tokio_tungstenite::connect_async_with_config(request, Some(config), false).await?.0)
+}
+
+type WebSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn host_loop(name: String, host: Host, mut rx: mpsc::UnboundedReceiver<ClientMessage>, cache: Arc<Mutex<Cache>>, ui: UiSender) {
+    let url = &host.url;
+    let status = |s: HostStatus, error: Option<String>| {
+        let _ = ui.unbounded_send(Incoming::Status { host: name.clone(), status: s, error });
     };
     let mut backoff = Duration::from_millis(300);
     let mut embedded: Option<tokio::task::JoinHandle<()>> = None;
     // A host that stays unreachable is logged once, not on every retry.
     let mut failing = false;
     loop {
-        status(HostStatus::Connecting);
-        let config = WebSocketConfig::default().max_frame_size(Some(MAX_MESSAGE)).max_message_size(Some(MAX_MESSAGE));
-        match tokio_tungstenite::connect_async_with_config(&url, Some(config), false).await {
-            Ok((ws, _)) => {
+        status(HostStatus::Connecting, None);
+        match connect(&host).await {
+            Ok(ws) => {
                 backoff = Duration::from_millis(300);
                 failing = false;
-                status(HostStatus::Connected);
+                status(HostStatus::Connected, None);
                 let (mut sink, mut stream) = ws.split();
                 // Refresh everything we cache for this host.
                 for req in [
@@ -164,13 +189,14 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                 // gives back what it had pending once it sees `Disconnected`.
                 while rx.try_recv().is_ok() {}
                 info!(host = %name, "disconnected");
-                status(HostStatus::Disconnected);
+                status(HostStatus::Disconnected, None);
             }
             Err(e) => {
                 // `local` refusing before we ever started the service is the normal start-up,
-                // not worth a line in the log.
-                if !(name == LOCAL && embedded.is_none()) && !std::mem::replace(&mut failing, true) {
-                    warn!(host = %name, "connect {url}: {e} (retrying)");
+                // not worth a line in the log or an error in Settings.
+                let starting = name == LOCAL && embedded.is_none();
+                if !starting && !std::mem::replace(&mut failing, true) {
+                    warn!(host = %name, "connect {url}: {e:#} (retrying)");
                 }
                 // Nothing listening locally: run the service in-process. It lives and dies
                 // with the desktop. If it exits (e.g. bind failed), the next refusal retries,
@@ -190,7 +216,7 @@ async fn host_loop(name: String, url: String, mut rx: mpsc::UnboundedReceiver<Cl
                 }
                 // Requests made while offline are dropped, not queued for a later reconnect.
                 while rx.try_recv().is_ok() {}
-                status(HostStatus::Disconnected);
+                status(HostStatus::Disconnected, (!starting).then(|| format!("{e:#}")));
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(10));
             }

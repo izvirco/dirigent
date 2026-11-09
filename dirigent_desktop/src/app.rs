@@ -5,6 +5,7 @@
 use crate::add_project;
 use crate::ambient::{self, Pattern, Reach};
 use crate::cache::Cache;
+use crate::hosts_tab;
 use crate::input::{self, Arrow, ImagePasted, Submitted, TextInput, image_token};
 use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
@@ -487,6 +488,9 @@ pub enum Menu {
     TitleModel,
     TitleEffort,
     ProvidersHost,
+    /// Settings › Hosts: `Add host`'s choice of auth, and the form's auth chip.
+    AddHost,
+    HostAuth,
     /// Sidebar: the update button's restart menu (`update.rs`).
     Update,
     /// Sidebar: a thread card's right-click menu (rename, regenerate title), at the click
@@ -599,9 +603,8 @@ pub struct Dirigent {
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
-    /// Settings › Hosts' add-host form.
-    pub host_name_input: Entity<TextInput>,
-    pub host_url_input: Entity<TextInput>,
+    /// Settings › Hosts: the add / edit form and its fields.
+    pub hosts_tab: hosts_tab::State,
     /// Filter for the model picker's all-models page.
     pub model_search: Entity<TextInput>,
     /// Filter (or free text) for the workspace base picker.
@@ -691,7 +694,7 @@ pub struct Dirigent {
 impl Dirigent {
     pub fn new(cache: Cache, config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // `local` is the embedded service; the rest come from hosts.toml.
-        let mut hosts = vec![(hosts::LOCAL.to_owned(), format!("ws://127.0.0.1:{}/ws", dirigent_service::port()))];
+        let mut hosts = vec![(hosts::LOCAL.to_owned(), hosts::Host::new(format!("ws://127.0.0.1:{}/ws", dirigent_service::port())))];
         let hosts_error = match hosts::load() {
             Ok(remote) => {
                 hosts.extend(remote);
@@ -702,7 +705,7 @@ impl Dirigent {
         // First, before anything is kept in `kv`: it tells a new data dir from an old one.
         let updated = changelog::after_update(&cache);
         let onboard = onboarding::needed(&cache);
-        let host_states = hosts.iter().map(|(name, url)| host_state(&cache, name, url)).collect();
+        let host_states = hosts.iter().map(|(name, host)| host_state(&cache, name, host)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
         let pinned_projects: Vec<String> = cache.get(PINNED_PROJECTS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -746,11 +749,7 @@ impl Dirigent {
         cx.subscribe(&path_input, |this, _, a: &Arrow, cx| this.move_dir_selection(a.0, cx)).detach();
         let rename_input = cx.new(|cx| TextInput::new(cx, "name", true));
         cx.subscribe(&rename_input, |this, _, _: &Submitted, cx| this.finish_rename(true, cx)).detach();
-        let host_name_input = cx.new(|cx| TextInput::new(cx, "name", true));
-        let host_url_input = cx.new(|cx| TextInput::new(cx, "host:7777 or ws://host:7777/ws", true));
-        for input in [&host_name_input, &host_url_input] {
-            cx.subscribe_in(input, window, |this, _, _: &Submitted, window, cx| this.add_host(window, cx)).detach();
-        }
+        let hosts_tab = hosts_tab::State::new(cx);
         // The menus' searches; Enter in one takes the lit result (`menu::pick`).
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
         let base_search = cx.new(|cx| TextInput::new(cx, "Branch, commit or revset", true));
@@ -806,8 +805,7 @@ impl Dirigent {
             resizing: None,
             composer,
             path_input,
-            host_name_input,
-            host_url_input,
+            hosts_tab,
             model_search,
             base_search,
             target_search,
@@ -1200,9 +1198,13 @@ impl Dirigent {
 
     fn on_incoming(&mut self, msg: Incoming, cx: &mut Context<Self>) {
         match msg {
-            Incoming::Status { host, status } => {
+            Incoming::Status { host, status, error } => {
                 if let Some(h) = self.host_mut(&host) {
                     h.status = status;
+                    // Kept while it tries again, so Settings doesn't flicker.
+                    if status != HostStatus::Connecting {
+                        h.error = error;
+                    }
                 }
                 // Images asked for and not in yet won't come over a dropped connection, nor
                 // forks or an edit (which, if its host got it, comes back with the thread's
@@ -2368,12 +2370,15 @@ impl Dirigent {
     }
 
     /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
-    /// form; the others take focus off the inputs, so keys don't type under the modal.
+    /// form, if open; the others take focus off the inputs, so keys don't type under the modal.
     pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
         self.settings.tab = tab;
         if tab == settings::Tab::Hosts {
             self.sync_hosts(cx);
-            self.focus(self.host_name_input.focus_handle(cx), cx);
+            match self.hosts_tab.form {
+                Some(_) => self.focus(self.hosts_tab.name.focus_handle(cx), cx),
+                None => self.focus_root(cx),
+            }
         } else if tab == settings::Tab::Providers {
             self.enter_providers(cx);
         } else {
@@ -2408,6 +2413,8 @@ impl Dirigent {
         self.modal = None;
         self.menu = None;
         self.cancel_login(cx);
+        // A host form left open is cancelled: reopened, the tab shows the hosts as they are.
+        self.hosts_tab.form = None;
         // The chart's hover-out never fires once it's gone; a reopen would show a stale readout.
         self.usage.hover = None;
         // The changelog's (any other went with the press that opened the modal).
@@ -2895,15 +2902,20 @@ impl Dirigent {
         self.titling.contains_key(&(host.to_owned(), id.to_owned()))
     }
 
-    /// Make the connections match `hosts.toml`: drop hosts that are gone or whose url
-    /// changed (with everything cached for them), connect the new ones.
-    fn sync_hosts(&mut self, cx: &mut Context<Self>) {
+    /// Make the connections match `hosts.toml`: drop hosts that are gone or whose url or
+    /// key changed (with everything cached for them, and their ssh tunnels), connect the new ones.
+    pub(crate) fn sync_hosts(&mut self, cx: &mut Context<Self>) {
         let wanted = match hosts::load() {
             Ok(h) => h,
             Err(e) => return self.toast(format!("{e:#}"), cx),
         };
-        let stale: Vec<String> =
-            self.hosts.iter().filter(|h| h.name != hosts::LOCAL && wanted.get(&h.name) != Some(&h.url)).map(|h| h.name.clone()).collect();
+        dirigent_service::tunnel::retain(wanted.values().map(|h| h.url.as_str()));
+        let stale: Vec<String> = self
+            .hosts
+            .iter()
+            .filter(|h| h.name != hosts::LOCAL && wanted.get(&h.name) != Some(&h.config))
+            .map(|h| h.name.clone())
+            .collect();
         for name in stale {
             self.net.remove(&name);
             self.hosts.retain(|h| h.name != name);
@@ -2916,59 +2928,36 @@ impl Dirigent {
             }
             let _ = self.cache.lock().unwrap().remove_host(&name);
         }
-        for (name, url) in wanted {
+        for (name, host) in wanted {
             if self.host(&name).is_none() {
-                self.hosts.push(host_state(&self.cache.lock().unwrap(), &name, &url));
-                self.net.add(name, url);
+                self.hosts.push(host_state(&self.cache.lock().unwrap(), &name, &host));
+                self.net.add(name, host);
             }
         }
         cx.notify();
     }
 
-    fn add_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let name = self.host_name_input.read(cx).text().trim().to_owned();
-        let url = self.host_url_input.read(cx).text().trim().to_owned();
-        if name.is_empty() || url.is_empty() {
-            return;
+    /// Host `old` is called `new` in `hosts.toml` now (Settings › Hosts): what's cached for it
+    /// (threads, drafts, pins, links) moves to the new name before `sync_hosts` swaps the
+    /// connection, and a thread open on it opens again under the new name. Projects without
+    /// a git origin are grouped by `old/<id>`: their custom names and places don't follow.
+    pub(crate) fn rename_host(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
+        let open = self.open().filter(|t| t.host == old).map(|t| t.id.clone());
+        if open.is_some() {
+            // Saves its draft, under the old name, so it moves with the rest.
+            self.set_pane(Pane::Inbox, cx);
         }
-        if name == hosts::LOCAL {
-            return self.toast("`local` is this machine", cx);
+        let moved = self.cache.lock().unwrap().rename_host(old, new);
+        if let Err(e) = moved {
+            self.toast(format!("{e:#}"), cx);
         }
-        let url = match hosts::normalize(&url) {
-            Ok(u) => u,
-            Err(e) => return self.toast(e.to_string(), cx),
-        };
-        self.edit_hosts(
-            |h| {
-                h.insert(name, url);
-            },
-            cx,
-        );
-        for input in [&self.host_name_input, &self.host_url_input] {
-            input.update(cx, |input, cx| input.set_text("", window, cx));
-        }
-        self.focus(self.host_name_input.focus_handle(cx), cx);
-    }
-
-    pub fn remove_host(&mut self, name: &str, cx: &mut Context<Self>) {
-        let name = name.to_owned();
-        self.edit_hosts(
-            |h| {
-                h.remove(&name);
-            },
-            cx,
-        );
-    }
-
-    /// Rewrite `hosts.toml` through `f`, then apply it.
-    fn edit_hosts(&mut self, f: impl FnOnce(&mut std::collections::BTreeMap<String, String>), cx: &mut Context<Self>) {
-        let result = hosts::load().and_then(|mut h| {
-            f(&mut h);
-            hosts::save(&h)
-        });
-        match result {
-            Ok(()) => self.sync_hosts(cx),
-            Err(e) => self.toast(format!("{e:#}"), cx),
+        self.links = std::mem::take(&mut self.links)
+            .into_iter()
+            .map(|((host, project), group)| ((if host == old { new.to_owned() } else { host }, project), group))
+            .collect();
+        self.sync_hosts(cx);
+        if let Some(id) = open {
+            self.select_thread(new, &id, cx);
         }
     }
 
@@ -3734,6 +3723,9 @@ impl Dirigent {
         if self.onboarding_open() {
             return self.cancel_login(cx);
         }
+        if self.host_form_escape(cx) {
+            return;
+        }
         if self.modal.is_some() {
             return self.close_modal(cx);
         }
@@ -3787,9 +3779,7 @@ impl Dirigent {
         let mut inputs = vec![
             self.composer.clone(),
             self.path_input.clone(),
-            self.host_name_input.clone(),
             self.rename_input.clone(),
-            self.host_url_input.clone(),
             self.model_search.clone(),
             self.base_search.clone(),
             self.target_search.clone(),
@@ -3801,6 +3791,7 @@ impl Dirigent {
             self.settings.prompt.clone(),
             self.settings.sample.clone(),
         ];
+        inputs.extend(self.hosts_tab.inputs());
         if let Pane::Thread(t) = &self.pane {
             inputs.extend(t.asks.iter().flat_map(|f| f.custom.iter().flatten().cloned()));
         }
@@ -4411,11 +4402,12 @@ pub fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
 }
 
 /// A host as the cache last saw it; the connection fills in the rest.
-fn host_state(cache: &Cache, name: &str, url: &str) -> HostState {
+fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
     HostState {
         name: name.to_owned(),
-        url: url.to_owned(),
+        config: host.clone(),
         status: HostStatus::Disconnected,
+        error: None,
         projects: cache.projects(name).unwrap_or_default(),
         threads: cache.threads(name).unwrap_or_default(),
         models: cache.models(name),

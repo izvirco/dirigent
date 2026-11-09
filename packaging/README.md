@@ -72,6 +72,7 @@ None of it is tested by us (no Mac): CI only proves it builds.
 ```
 dirigent [dir]        start the desktop (a running one gets the folder)
 dirigent pi [args…]   the bundled pi's own CLI: `dirigent pi install npm:…`, `dirigent pi config`, a terminal session
+dirigent key …        API keys of the embedded service's public listener (below): add <name>, list, revoke <name>
 ```
 
 `--data-dir` / `--config-dir` go first and apply to both. It finds the desktop and `runtime/` next to its own
@@ -81,6 +82,57 @@ Pi (the runtime and `dirigent pi` alike) keeps its agent dir (`auth.json`, `sett
 extensions, skills…) in `<config dir>/agent`, apart from `~/.pi/agent`. The first start without one copies
 `~/.pi/agent` (minus `sessions/` and caches; `dirigent_service/src/agent.rs`), so nothing needs signing in again;
 a `--config-dir` instance copies the real install's instead.
+
+## Remote hosts
+
+A remote host runs `dirigent_service` (the nix package below; a desktop's embedded service works the same) and a
+desktop lists it in its `hosts.toml` (Settings › Hosts, or `<config dir>/hosts.toml` by hand; the file's header
+has the forms). The service's agents reach the hosts in its own `hosts.toml` (the `dirigent` tool). Three ways to
+reach one:
+
+**Tailscale, no auth.** The service listens on loopback and its tailscale addresses, port 7777 (`DIRIGENT_PORT`;
+`DIRIGENT_BIND` replaces the addresses), never on a wildcard: anyone on the tailnet can use it. In `hosts.toml`:
+`hetzner = "hetzner"` (or `"ws://hetzner.tail1234.ts.net:7777/ws"`).
+
+**Over ssh, no auth: ssh is the auth.** `box = "ssh://[user@]host[:ssh port][/service port]"` (an ssh_config alias
+works; the service port defaults to 7777). Dirigent runs the system `ssh -N -L 127.0.0.1:<free port>:127.0.0.1:7777
+… host` (`BatchMode`, keepalives every 15 s, `ExitOnForwardFailure`) and connects through it to the service's
+loopback listener, so nothing on the remote listens beyond loopback. `ssh host` has to work without prompts first: a
+key (or agent), and the host in `known_hosts`. A desktop and its agents share one ssh per host; when ssh exits its
+last stderr line shows in Settings › Hosts (hover the host's `error`) and the next connect starts it again. It
+stops when the host is removed and when Dirigent quits (`dirigent_service/src/tunnel.rs`).
+
+**Public, with a reverse proxy: an API key per client.** On the remote, `<config dir>/service.toml` adds a listener
+for a TLS proxy to forward to (we don't terminate TLS):
+
+```toml
+[public]
+listen = "127.0.0.1:7778"
+url = "wss://dirigent.example.com/ws"
+```
+
+and the proxy, e.g. Caddy (it passes websockets through as is):
+
+```
+dirigent.example.com {
+    reverse_proxy 127.0.0.1:7778
+}
+```
+
+Every upgrade on that listener needs `Authorization: Bearer <key>`, else 401; the loopback and tailscale listeners
+stay open, whatever address the proxy connects from. Keys live in the service's `service.db`, as their sha256:
+
+```sh
+dirigent_service key add laptop   # prints dk_… once
+dirigent_service key list
+dirigent_service key revoke laptop
+```
+
+(`--data-dir` / `--config-dir` first, as for the service; `dirigent key …` for a desktop's embedded service.) A
+revoked key is refused from its next connect; connections already open stay until they close (restart the service
+to drop them). On the client: `prod = { url = "wss://dirigent.example.com/ws", key = "dk_…" }`, or Settings › Hosts ›
+Add host › API key. `hosts.toml` is then a secret: Dirigent writes it owner-only (unix). A service hands its agents
+the keys of the hosts its `hosts.toml` lists, so whoever can use a service can use those too.
 
 ## Updates
 

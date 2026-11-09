@@ -10,6 +10,7 @@ mod app;
 mod cache;
 mod changelog;
 mod config;
+mod hosts_tab;
 mod icons;
 mod images;
 mod input;
@@ -85,6 +86,8 @@ fn main() {
     // running, which every later launch would hand its folder to (`instance.rs`) and vanish.
     application().with_assets(icons::Assets).with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut App| {
         config::add_bundled_fonts(cx);
+        // ssh tunnels to `ssh://` hosts are our children: they go with us.
+        cx.on_app_quit(|_| async { dirigent_service::tunnel::close_all() }).detach();
         cx.bind_keys(input::key_bindings());
         // `secondary-`: cmd on macOS, ctrl elsewhere.
         cx.bind_keys([

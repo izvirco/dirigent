@@ -53,6 +53,10 @@ pub type DraftImage = (u32, String, Vec<u8>);
 /// Tables keyed by thread that go with it when it is deleted.
 const PER_THREAD: [&str; 3] = ["entries", "drafts", "draft_images"];
 
+/// Tables keyed by host: what goes with a host removed, or moves with one renamed.
+const HOST_TABLES: [&str; 10] =
+    ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"];
+
 /// Columns added after the table first shipped: `(table, column, declaration)`.
 const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "workspace", "TEXT"),
@@ -109,9 +113,21 @@ impl Cache {
 
     /// Forget everything cached for a host that was removed from `hosts.toml`.
     pub fn remove_host(&self, host: &str) -> Result<()> {
-        for table in ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"] {
+        for table in HOST_TABLES {
             self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
         }
+        Ok(())
+    }
+
+    /// File everything cached for host `old` under `new`, its name from now on. Whatever
+    /// `new` still had (a host of that name removed by hand while we weren't running) goes.
+    pub fn rename_host(&mut self, old: &str, new: &str) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for table in HOST_TABLES {
+            tx.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [new])?;
+            tx.execute(&format!("UPDATE {table} SET host = ?2 WHERE host = ?1"), [old, new])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -412,6 +428,19 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renaming_a_host_keeps_its_cache() {
+        let mut c = Cache::in_memory().unwrap();
+        c.set_threads("old", &[thread("t1")]).unwrap();
+        c.set_link("old", "p1", Some("g")).unwrap();
+        // Left over from an earlier host called `new`: replaced, not merged.
+        c.set_threads("new", &[thread("stale")]).unwrap();
+        c.rename_host("old", "new").unwrap();
+        assert!(c.threads("old").unwrap().is_empty());
+        assert_eq!(c.threads("new").unwrap().iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["t1"]);
+        assert_eq!(c.links().unwrap(), [("new".to_owned(), "p1".to_owned(), "g".to_owned())]);
+    }
 
     fn thread(id: &str) -> ThreadSummary {
         ThreadSummary {

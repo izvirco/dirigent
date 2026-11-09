@@ -535,11 +535,18 @@ pub struct AuthOption {
     pub description: Option<String>,
 }
 
-/// A host in a `hosts.toml`: its name there and its normalized `ws://` url.
+/// A host in a `hosts.toml`, as an agent connects to it: its name there, its `ws(s)://`
+/// url (an `ssh://` host's local tunnel end) and the bearer token to send, if any.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostInfo {
     pub name: String,
     pub url: String,
+    /// Sent as `Authorization: Bearer` on connect (a public host's API key).
+    #[serde(default)]
+    pub bearer: Option<String>,
+    /// Why it can't be reached now (its ssh tunnel failed); `url` is then its address.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// What a parent is told when its sub-agent's run ends: the child's final reply, or only
@@ -1083,7 +1090,10 @@ mod tests {
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
-        roundtrip(ServerMessage::Hosts { reply_to: 1, hosts: vec![HostInfo { name: "h".into(), url: "ws://h:7777/ws".into() }] });
+        roundtrip(ServerMessage::Hosts {
+            reply_to: 1,
+            hosts: vec![HostInfo { name: "h".into(), url: "ws://h:7777/ws".into(), bearer: Some("dk_x".into()), error: None }],
+        });
         assert_eq!(serde_json::to_value(Notify::WhenIdle).unwrap(), json!(Notify::WhenIdle.as_str()));
         roundtrip(ServerMessage::Search { reply_to: 1, hits: vec![SearchHit { thread_id: "t".into(), snippet: "…sqlite…".into() }] });
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };

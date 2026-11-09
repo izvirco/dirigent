@@ -42,6 +42,9 @@ if [ ! -s "$ENV" ]; then
 fi
 # shellcheck disable=SC1090
 source "$ENV"
+# `UI_PATH`: directories put before the dev shell's PATH, for fakes the app should run instead
+# (`ssh`, `xdg-open`; see testing.md).
+[ -n "${UI_PATH:-}" ] && PATH="$UI_PATH:$PATH"
 
 # One session per agent thread unless told otherwise, so parallel agents never share one.
 if [ -n "${UI_SESSION:-}" ]; then

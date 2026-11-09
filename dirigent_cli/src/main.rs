@@ -3,6 +3,8 @@
 //!   dirigent [dir]        start the desktop (which hands `dir` to a running one)
 //!   dirigent pi [args…]   the bundled pi CLI on dirigent's agent dir (`pi install …`,
 //!                         `pi config`, a terminal session)
+//!   dirigent key …        the public listener's API keys (`key add <name>`, `key list`,
+//!                         `key revoke <name>`), for the service the desktop embeds
 //!
 //! `--data-dir` / `--config-dir` (`dirigent_service::init_dirs`) go before the command and
 //! apply to both. The desktop and the runtime are found next to this binary, as an install,
@@ -18,6 +20,9 @@ fn main() -> Result<()> {
         let mut pi = Command::new(&cmd[0]);
         pi.args(&cmd[1..]).arg("pi").args(&operands[1..]).envs(dirigent_service::runtime_env());
         return exec(pi, true);
+    }
+    if operands.first().map(String::as_str) == Some("key") {
+        return dirigent_service::key_command(&operands[1..]);
     }
     let exe = std::env::current_exe()?;
     let exe = if cfg!(windows) { exe } else { exe.canonicalize()? };

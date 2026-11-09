@@ -7,6 +7,7 @@
 //! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
 //! full-text index of every message's text (derived like `usage`, backfilled once), for
 //! `SearchThreads`. `meta` holds the service's own settings, like its id (`service_id`).
+//! `api_keys` holds the public listener's API keys, as hashes (`auth.rs`).
 //!
 //! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
 //! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open. Nothing
@@ -80,6 +81,11 @@ CREATE TABLE IF NOT EXISTS message_pins (
     PRIMARY KEY (thread_id, entry_id)
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS api_keys (
+    name TEXT PRIMARY KEY,
+    hash TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+);
 ";
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
@@ -756,6 +762,32 @@ impl Storage {
             _ => {}
         }
         Ok(entry)
+    }
+
+    /// Keep an API key (`auth.rs`) by the sha256 of its text; the text itself is never stored.
+    pub fn add_key(&self, name: &str, hash: &str, at: i64) -> Result<()> {
+        anyhow::ensure!(!name.trim().is_empty(), "a key needs a name");
+        let added =
+            self.conn.execute("INSERT OR IGNORE INTO api_keys (name, hash, created_at) VALUES (?1, ?2, ?3)", params![name, hash, at])?;
+        anyhow::ensure!(added == 1, "a key named {name:?} exists; revoke it first");
+        Ok(())
+    }
+
+    /// The name of the key whose text hashes to `hash`, if it hasn't been revoked.
+    pub fn key_name(&self, hash: &str) -> Result<Option<String>> {
+        Ok(self.conn.query_row("SELECT name FROM api_keys WHERE hash = ?1", [hash], |r| r.get(0)).optional()?)
+    }
+
+    /// Every key: name and when it was made (unix ms), oldest first.
+    pub fn keys(&self) -> Result<Vec<(String, i64)>> {
+        let mut stmt = self.conn.prepare("SELECT name, created_at FROM api_keys ORDER BY created_at")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Forget a key; false if there was none by that name.
+    pub fn revoke_key(&self, name: &str) -> Result<bool> {
+        Ok(self.conn.execute("DELETE FROM api_keys WHERE name = ?1", [name])? == 1)
     }
 
     /// This service's id (`ServerMessage::Hello`): random, made on first use and kept.

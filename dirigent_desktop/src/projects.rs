@@ -14,8 +14,11 @@ use std::collections::HashMap;
 
 pub struct HostState {
     pub name: String,
-    pub url: String,
+    /// Its `hosts.toml` entry (`local`: the embedded service's url).
+    pub config: dirigent_service::hosts::Host,
     pub status: HostStatus,
+    /// Why the last connect failed, until one succeeds.
+    pub error: Option<String>,
     pub projects: Vec<Project>,
     pub threads: Vec<ThreadSummary>,
     pub models: Vec<ModelInfo>,
@@ -242,7 +245,8 @@ mod tests {
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {
         HostState {
             name: name.into(),
-            url: String::new(),
+            config: dirigent_service::hosts::Host::new(String::new()),
+            error: None,
             status: HostStatus::Connected,
             projects,
             threads,
