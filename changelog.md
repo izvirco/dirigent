@@ -1,19 +1,25 @@
-## 0.0.7 (draft)
+## 0.0.7
 
-Hosts over ssh, and public hosts behind a TLS proxy with API keys or your forge account.
+Hosts over ssh or the internet, a forge sign-in, and long commands that don't block.
 
-- `ssh://` hosts: Dirigent tunnels to them with your ssh, no tailscale needed ([#140])
-- A public listener for a reverse proxy (`service.toml`), with API keys (`dirigent_service key …`) ([#140])
-- Settings › Hosts: add a host by how it authenticates (none, an API key, your forge account), edit any host, and hover a failing one for why ([#140], [#141])
-- Sign in to the forge once (Settings › Forge providers, or `dirigent login` / `dirigent_service login`): public hosts signed in to the same account let you in, no keys ([#141])
-- The leaderboard uses that sign-in: sign in to the forge and Join once more, keeping your place and usage (0.0.6 can't upload anymore) ([#141])
-- The window reopens where you left it: size, position, maximized or fullscreen ([#116])
-- Long `bash` commands move to the background after 10 s, so your messages reach the agent mid-build ([#145])
+- `ssh://` hosts, tunneled with your own ssh ([#140])
+- Public hosts behind a TLS proxy, with API keys or your forge account ([#140], [#144])
+- Settings › Hosts: add and edit hosts, hover a failing one for why ([#140])
+- Sign in to the forge in Settings › Forge providers, or with `dirigent login` ([#144])
+- The leaderboard uses that sign-in: sign in and Join again, your place and usage stay ([#144])
+- Long `bash` commands move to the background after 10 s, so the agent hears you mid-build ([#145])
+- Show or hide the lineage and the work log in the right panel ([#148])
+- The window reopens where you left it ([#116])
+- Windows: `dirigent` is on your PATH ([#142])
+- Shift+Backspace deletes like Backspace ([#143])
 
 [#140]: https://forge.sebba.dev/izvir/dirigent/changes/140
-[#141]: https://forge.sebba.dev/izvir/dirigent/changes/141
-[#116]: https://forge.sebba.dev/izvir/dirigent/changes/116
+[#144]: https://forge.sebba.dev/izvir/dirigent/changes/144
 [#145]: https://forge.sebba.dev/izvir/dirigent/changes/145
+[#148]: https://forge.sebba.dev/izvir/dirigent/changes/148
+[#116]: https://forge.sebba.dev/izvir/dirigent/changes/116
+[#142]: https://forge.sebba.dev/izvir/dirigent/changes/142
+[#143]: https://forge.sebba.dev/izvir/dirigent/changes/143
 
 ## 0.0.6
 
