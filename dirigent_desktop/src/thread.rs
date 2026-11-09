@@ -30,6 +30,7 @@ use crate::picker;
 use crate::ruler;
 use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
+use crate::titlebar;
 use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
 use crate::working;
 use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
@@ -252,8 +253,20 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .min_w_0()
         .child(breadcrumb(project, parent, Some(status), title, pinned, titling, cx))
         .children(branch);
-    pane.child(header(crumb, Some(actions)))
-        .child(div().relative().flex_1().min_h_0().flex().flex_row().child(column).children(side_panel(this, cx)))
+    // With the right panel open, its hairline runs the pane's full height: the header splits
+    // there, the crumb over the transcript (a long title stops short of the line) and the
+    // actions over the panel. The crumb's half then isn't at the window's right end: no room
+    // kept for the caption buttons.
+    let (actions, panel) = if panel_open { (None, Some(side_panel(this, actions, cx))) } else { (Some(actions), None) };
+    let main = div()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .flex()
+        .flex_col()
+        .child(header(crumb, actions).when(panel_open, |d| d.pr_4()))
+        .child(div().relative().flex_1().min_h_0().flex().flex_row().child(column));
+    pane.child(div().flex_1().min_h_0().flex().flex_row().child(main).children(panel))
 }
 
 /// Back to the end: a small pill (`↓ Latest`) floating over the transcript just above the
@@ -313,15 +326,13 @@ fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
     Some(div().absolute().top(-lift).left_0().right_0().h_0().flex().flex_col().items_center().justify_end().child(button))
 }
 
-/// The right panel, split off the pane by a hairline, `log_width` wide, with a drag
-/// handle on its left edge: the thread's family (`orchestra::tree`, at most half the
-/// height, scrolling past that) over the work log (`log_body`), each only when there
-/// is one; a word about sub-agents when there is neither. Untitled: the header's button
-/// shows its state. `panel_open` decides whether it is on screen.
-fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
-    if !this.panel_open() {
-        return None;
-    }
+/// The right panel, split off the pane by a full-height hairline, `log_width` wide, with
+/// a drag handle on its left edge below the header: the thread's header `actions` on
+/// top, then the thread's family (`orchestra::tree`, at most half the height, scrolling
+/// past that) over the work log (`log_body`), each only when there is one; a word about
+/// sub-agents when there is neither. Untitled: the header's button shows its state. On
+/// screen while `panel_open`.
+fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) -> Div {
     let tree = crate::orchestra::tree(this, cx);
     let log = log_body(this, cx);
     let empty = (tree.is_none() && log.is_none()).then(|| {
@@ -349,14 +360,15 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let handle = div()
         .id("panel-resize")
         .absolute()
-        .top_0()
+        // Below the header: on Windows that is the grab strip, which drags the window.
+        .top(u(titlebar::HEIGHT))
+        .bottom_0()
         .left(u(-3.))
         .w(u(6.))
-        .h_full()
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Log, cx)));
-    let panel = div()
+    div()
         .relative()
         .w(u(this.log_width))
         .flex_shrink_0()
@@ -367,11 +379,13 @@ fn side_panel(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         .border_color(rgba(theme::t().line_soft))
         .flex()
         .flex_col()
+        // `justify_end`: actions wider than a narrow panel spill left, over the hairline,
+        // not right under the caption buttons.
+        .child(header(div(), Some(actions)).justify_end())
         .children(tree)
         .children(log)
         .children(empty)
-        .child(handle);
-    Some(panel)
+        .child(handle)
 }
 
 /// The `ConfirmArchive` popup for this thread, if it is the one asking: archive it and

@@ -275,8 +275,6 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .flex_shrink_0()
         .px_4()
         .when(titlebar::CUSTOM, |d| d.pr(u(titlebar::CONTROLS_WIDTH)))
-        .border_b_1()
-        .border_color(rgba(theme::t().line_soft))
         .font_weight(FontWeight::MEDIUM)
         .child(div().flex_1().min_w_0().flex().flex_row().items_center().gap_1p5().child(title))
         .children(actions.map(|a| div().flex_shrink_0().occlude().child(a)))
