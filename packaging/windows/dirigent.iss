@@ -11,7 +11,7 @@
 ; Built by the release workflow (.github/workflows/release.yml):
 ;   iscc /DVersion=0.1.0 /DDist=<dir> packaging\windows\dirigent.iss
 ; <dir> holds dirigent_desktop.exe (the app), dirigent.exe (the command line: `dirigent pi`,
-; `dirigent [dir]`; not put on PATH), runtime\ (dirigent_runtime/build.ts) and licenses\;
+; `dirigent [dir]`; on the user's PATH unless the task is unticked), runtime\ (dirigent_runtime/build.ts) and licenses\;
 ; the installer is written there as Dirigent-Setup-<version>.exe.
 
 #ifndef Version
@@ -47,10 +47,15 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ; Files still in use once Dirigent has exited (its runtime shutting down) are closed.
 CloseApplications=force
 RestartApplications=no
+; Tells running programs (Explorer, so new terminals) that PATH changed, on install and uninstall.
+ChangesEnvironment=yes
 
 [Tasks]
 Name: contextmenu; Description: "Add ""Open in Dirigent"" to the folder right-click menu"
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
+; Older installs get this ticked on their next update: Inno restores each task's previous state, and a
+; task it hasn't seen before keeps its default.
+Name: addtopath; Description: "Add the dirigent command to PATH (dirigent pi install ...)"
 
 [InstallDelete]
 ; The runtime's files are replaced wholesale: nothing of an older pi lingers.
@@ -123,6 +128,56 @@ begin
   Result := FileExists(ExpandConstant('{commonpf64}\Git\bin\bash.exe'))
     or FileExists(ExpandConstant('{commonpf32}\Git\bin\bash.exe'))
     or ((OnPath <> '') and (Pos(LowerCase(ExpandConstant('{sys}')), LowerCase(OnPath)) <> 1));
+end;
+
+{ Puts the install dir on the user's PATH (HKCU\Environment, where a per-user install may write) or
+  takes it off, leaving the other entries as they are. A Path that isn't a string is left alone. }
+procedure SetOnPath(Add: Boolean);
+var
+  Paths, Dir, Padded: String;
+  P: Integer;
+begin
+  Dir := ExpandConstant('{app}');
+  if not RegQueryStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Paths) then
+  begin
+    if RegValueExists(HKEY_CURRENT_USER, 'Environment', 'Path') then
+      Exit;
+    Paths := '';
+  end;
+  Padded := ';' + Paths + ';';
+  P := Pos(';' + Uppercase(Dir) + ';', Uppercase(Padded));
+  if Add then
+  begin
+    if P = 0 then
+    begin
+      if Paths <> '' then
+        if Paths[Length(Paths)] <> ';' then
+          Paths := Paths + ';';
+      RegWriteExpandStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Paths + Dir);
+    end;
+  end
+  else if P <> 0 then
+  begin
+    { Drop ';<dir>' and the padding again. }
+    Delete(Padded, P, Length(Dir) + 1);
+    Paths := Copy(Padded, 2, Length(Padded) - 2);
+    if Paths = '' then
+      RegDeleteValue(HKEY_CURRENT_USER, 'Environment', 'Path')
+    else
+      RegWriteExpandStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Paths);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    SetOnPath(WizardIsTaskSelected('addtopath'));
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    SetOnPath(False);
 end;
 
 function InitializeSetup(): Boolean;

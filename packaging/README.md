@@ -7,7 +7,7 @@ into `%LOCALAPPDATA%\Programs\Dirigent`:
 
 ```
 dirigent_desktop.exe         the app, with Lilex, the icon and version info built in (build.rs)
-dirigent.exe                 the command line (below); not on PATH, so it's `%LOCALAPPDATA%\Programs\Dirigent\dirigent pi`
+dirigent.exe                 the command line (below), put on the user's PATH (a ticked installer task, applied again on each update; uninstalling takes it off)
 runtime\dirigent_runtime.exe the bun runtime compiled to one exe (dirigent_runtime/build.ts), no bun needed
 runtime\package.json, docs\, …   what a compiled pi reads next to its exe
 licenses\Lilex-OFL.txt
