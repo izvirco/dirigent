@@ -1,5 +1,6 @@
 // Dirigent's own tools: `async_bash` runs a command in the background and tells the model
-// when it ends; `ask_user` puts questions in front of the user as a form in the desktop;
+// when it ends (and `bash`, pi's, moves a command still running after 10 s there too:
+// `createBash`); `ask_user` puts questions in front of the user as a form in the desktop;
 // `dirigent` is the orchestrator: spawn sub-agent threads, start top-level threads,
 // message / read / find / manage threads on every host this one reaches and open one for
 // the user. All of them return at once. The outcome
@@ -12,11 +13,21 @@
 // its end and nothing waits on it, so its thread can finish (`reportJobs`).
 
 import { spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, readFileSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { homedir, constants as osConstants } from "node:os";
 import { join } from "node:path";
 import {
   type AgentSession,
+  type BashToolOptions,
+  createBashToolDefinition,
   defineTool,
   getShellConfig,
   type ToolDefinition,
@@ -58,7 +69,7 @@ interface Job {
   ended?: number;
   /** The model killed it: no notice, it knows. */
   killed?: boolean;
-  /** Outlived `GRACE_MS`: the model was told it runs on, and the host counts it (`reportJobs`). */
+  /** Outlived its grace window: the model was told it runs on, and the host counts it (`reportJobs`). */
   background?: boolean;
   notify: JobNotify;
   exited: Promise<number>;
@@ -72,6 +83,11 @@ export interface ToolHost {
   session: AgentSession;
   /** Captured nix dev-shell environment, once there is one. */
   env?: Record<string, string>;
+  /**
+   * The dirigent tools (`TOOL_NAMES`) the thread has on, as its last prompt named them, and
+   * the option `bash_background` (`createBash`). Sub-agents and new threads get the same.
+   */
+  tools: string[];
   jobs: Map<string, Job>;
   /** Notices queued in pi that it has not delivered yet, by job / ask id (see `requeueNotices`). */
   notices: Map<string, Notice>;
@@ -97,6 +113,10 @@ interface Notice {
 
 /** A started command that ends within this long is answered inline, with no notice. */
 const GRACE_MS = 2000;
+/** The same for a `bash` command: one still running after this long moves to the background. */
+const BASH_GRACE_MS = 10_000;
+/** The longest `setTimeout` takes (a longer one fires at once), so the longest `timeout`. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 const TAIL_LINES = 30;
 const TAIL_CHARS = 4000;
 /** How long `wait` blocks when the model gives no `timeout`. */
@@ -254,15 +274,16 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "async_bash",
     label: "Background command",
     description:
-      "Run a long command in the background (builds, test suites, servers) and keep working; a message tells you " +
-      'when it ends. Start a server or watcher you leave running with `notify: "never"`. Use `bash` when you\'d only ' +
-      "wait for the output. When you have nothing left to do but wait for jobs or sub-agents, use `wait`; never " +
-      "`sleep` or poll `status`.",
+      "Run a command in the background and keep working; a message tells you when it ends. Start a server or " +
+      'watcher you leave running with `notify: "never"`. Use `bash` when you\'d only wait for the output. When ' +
+      "you have nothing left to do but wait for jobs or sub-agents, use `wait`; never `sleep` or poll `status`.",
     promptGuidelines: [
+      // True with `bash_background` off too: then bash never returns a job id.
+      "If a bash call returns a job id instead of output, the command moved to the background: its output comes in a message when it ends.",
       "To wait for async_bash jobs or sub-agents, call async_bash `wait` instead of `sleep` / polling: it returns the moment one ends.",
     ],
     promptSnippet:
-      "Run long commands (builds, tests, servers) in the background while you keep working",
+      "Run commands in the background while you keep working, or leave servers and watchers running",
     parameters: asyncBashParams,
     async execute(_id, params, signal) {
       const action = params.action ?? "start";
@@ -313,11 +334,7 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     promptSnippet: "Spawn sub-agents, start threads, or manage other threads, when the user asks",
     parameters: dirigentParams,
     async execute(_id, p) {
-      const ours = new Set<string>(TOOL_NAMES);
-      const d = new Dirigent({
-        threadId: host.threadId,
-        tools: host.session.getActiveToolNames().filter((n) => ours.has(n)),
-      });
+      const d = new Dirigent({ threadId: host.threadId, tools: host.tools });
       const need = (v: string | undefined, what: string) => {
         if (!v) throw new Error(`\`${what}\` is required for ${p.action}`);
         return v;
@@ -510,28 +527,146 @@ export function killJobs(host: ToolHost): void {
   reportJobs(host);
 }
 
-async function startJob(host: ToolHost, command: string, notify: JobNotify): Promise<string> {
+/**
+ * Pi's `bash`, except that with `async_bash` and its option `bash_background` on (Settings ›
+ * Agent tools) a command still running after `BASH_GRACE_MS` moves to the background as a
+ * job: the call ends with the job's id, and pi's usual result comes as the job's notice once
+ * the command ends. Pi's tool does the rest (env, `timeout`, the output's format) through
+ * `operations`, which runs the command as a job and feeds pi its log when it ends. Plain pi
+ * `bash` otherwise (without `async_bash` the model could neither wait on nor kill a job).
+ */
+export function createBash(host: ToolHost, options: BashToolOptions) {
+  const plain = createBashToolDefinition(host.cwd, options);
+  const bash: typeof plain = {
+    ...plain,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      if (!host.tools.includes("async_bash") || !host.tools.includes("bash_background"))
+        return plain.execute(toolCallId, params, signal, onUpdate, ctx);
+      let job: Job | undefined;
+      const inner = createBashToolDefinition(host.cwd, {
+        ...options,
+        operations: {
+          exec: async (command, cwd, { onData, signal, timeout, env }) => {
+            // Pi's own checks and messages, before anything runs.
+            if (timeout !== undefined && !(timeout > 0 && Number.isFinite(timeout)))
+              throw new Error("Invalid timeout: must be a finite number of seconds");
+            if (timeout !== undefined && timeout * 1000 > MAX_TIMEOUT_MS)
+              throw new Error(`Invalid timeout: maximum is ${MAX_TIMEOUT_MS / 1000} seconds`);
+            if (signal?.aborted) throw new Error("aborted");
+            if (!existsSync(cwd))
+              throw new Error(
+                `Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
+              );
+            const j = (job = spawnJob(host, command, "asap", cwd, env));
+            // Stopping the run ends the command only while the call still waits on it.
+            const abort = () => {
+              if (!j.background) killJob(j);
+            };
+            signal?.addEventListener("abort", abort, { once: true });
+            // The model's `timeout` holds in the background too; its end still comes as a notice.
+            let timedOut = false;
+            const timer =
+              timeout === undefined
+                ? undefined
+                : setTimeout(() => {
+                    timedOut = true;
+                    stopJob(j);
+                  }, timeout * 1000);
+            try {
+              const exitCode = await j.exited;
+              for await (const chunk of createReadStream(j.log)) onData(chunk as Buffer);
+              if (signal?.aborted && !j.background) throw new Error("aborted");
+              if (timedOut) throw new Error(`timeout:${timeout}`);
+              return { exitCode };
+            } finally {
+              clearTimeout(timer);
+              signal?.removeEventListener("abort", abort);
+            }
+          },
+        },
+      });
+      // No `onUpdate`: the output comes in one go at the end, maybe after this call returned.
+      const run = inner.execute(toolCallId, params, signal, undefined, ctx);
+      await Promise.race([run.catch(() => {}), sleep(BASH_GRACE_MS)]);
+      // Ended (or never started) in time: pi's result, as plain `bash` gives it. Its log is
+      // in that result, so neither it nor the job is kept.
+      if (!job || job.exit !== undefined || signal?.aborted) {
+        try {
+          return await run;
+        } finally {
+          if (job) {
+            host.jobs.delete(job.id);
+            try {
+              rmSync(job.log, { force: true });
+            } catch {
+              // Windows: a process the command left running still holds it. It goes with the thread.
+            }
+          }
+        }
+      }
+      const j = job;
+      j.background = true;
+      reportJobs(host);
+      void run
+        .then(
+          (r) => r.content.map((c) => (c.type === "text" ? c.text : "")).join("\n"),
+          (e: unknown) => (e instanceof Error ? e.message : String(e)),
+        )
+        .then((output) => {
+          reportJobs(host);
+          if (j.killed) return;
+          return deliver(
+            host,
+            `job-${j.id}`,
+            jobNotice(j, `${describe(j, false)}\n${output}`, "asap"),
+          );
+        });
+      return text(
+        `Still running after ${BASH_GRACE_MS / 1000}s, so it moved to the background as job ${j.id} (log: ${j.log}). ` +
+          "You will be told when it ends, with its output; `async_bash wait` if you have nothing else to do.",
+      );
+    },
+  };
+  return bash;
+}
+
+/**
+ * Run `command` as one of the host's jobs: in its own process group, its output to a log
+ * file. `cwd` and `env` are the thread's unless given (`bash` passes pi's).
+ */
+function spawnJob(
+  host: ToolHost,
+  command: string,
+  notify: JobNotify,
+  cwd = host.cwd,
+  // PI_SESSION_ID as pi's bash tool sets it (scripts/ui.sh keys its default session on it).
+  env: NodeJS.ProcessEnv = { ...process.env, ...host.env, PI_SESSION_ID: host.threadId },
+): Job {
   // The shell pi's bash tool runs: bash, Git Bash on Windows (throws, saying how to get
-  // one, when there is none).
+  // one, when there is none). An old WSL bash reads the command from stdin.
   const shell = getShellConfig();
+  const viaStdin = shell.commandTransport === "stdin";
   const id = shortId();
   const dir = join(dataDir(), "jobs", host.threadId);
   mkdirSync(dir, { recursive: true });
   const log = join(dir, `${id}.log`);
   // One fd for both streams so their lines interleave in order; the child keeps its own copy.
   const fd = openSync(log, "w");
-  const child = spawn(shell.shell, [...shell.args, command], {
-    cwd: host.cwd,
-    // PI_SESSION_ID as pi's bash tool sets it (scripts/ui.sh keys its default session on it).
-    env: { ...process.env, ...host.env, PI_SESSION_ID: host.threadId },
-    // Its own process group, for `killJob`. Not on Windows: `taskkill /T` finds the tree
+  const child = spawn(shell.shell, viaStdin ? shell.args : [...shell.args, command], {
+    cwd,
+    env,
+    // Its own process group, for `stopJob`. Not on Windows: `taskkill /T` finds the tree
     // anyway, and a detached child has no console there, so every console program it
     // starts would open a window of its own.
     detached: !WINDOWS,
     windowsHide: true,
-    stdio: ["ignore", fd, fd],
+    stdio: [viaStdin ? "pipe" : "ignore", fd, fd],
   });
   closeSync(fd);
+  if (viaStdin) {
+    child.stdin?.on("error", () => {});
+    child.stdin?.end(command);
+  }
   const job: Job = {
     id,
     command,
@@ -548,6 +683,12 @@ async function startJob(host: ToolHost, command: string, notify: JobNotify): Pro
     }),
   };
   host.jobs.set(id, job);
+  return job;
+}
+
+/** `async_bash start`: a job, answered inline if it ends within `GRACE_MS`. */
+async function startJob(host: ToolHost, command: string, notify: JobNotify): Promise<string> {
+  const job = spawnJob(host, command, notify);
   const quick = await Promise.race([job.exited, sleep(GRACE_MS).then(() => undefined)]);
   if (quick !== undefined) return describe(job, true);
   job.background = true;
@@ -555,24 +696,29 @@ async function startJob(host: ToolHost, command: string, notify: JobNotify): Pro
   job.exited.then(() => {
     reportJobs(host);
     if (job.killed || notify === "never") return;
-    return deliver(host, `job-${id}`, {
-      customType: "dirigent:job",
-      content: describe(job, true),
-      details: {
-        job_id: id,
-        command,
-        exit_code: job.exit,
-        duration_ms: (job.ended ?? 0) - job.started,
-        log,
-      },
-      notify,
-    });
+    return deliver(host, `job-${job.id}`, jobNotice(job, describe(job, true), notify));
   });
   const then =
     notify === "never"
       ? "It runs on until killed; you won't be told when it ends."
       : "You will be told when it ends; `wait` if you have nothing else to do.";
-  return `job ${id} started: \`${command}\`\nlog: ${log}\n${then}`;
+  return `job ${job.id} started: \`${command}\`\nlog: ${job.log}\n${then}`;
+}
+
+/** The notice of a background job's end; `content` says how it went. */
+function jobNotice(job: Job, content: string, notify: Notify): Notice {
+  return {
+    customType: "dirigent:job",
+    content,
+    details: {
+      job_id: job.id,
+      command: job.command,
+      exit_code: job.exit,
+      duration_ms: (job.ended ?? 0) - job.started,
+      log: job.log,
+    },
+    notify,
+  };
 }
 
 /**
@@ -707,15 +853,20 @@ function getJob(host: ToolHost, id: string | undefined): Job {
   return job;
 }
 
+/** Stop a job for good: the model killed it, or its session went. No notice comes of it. */
+function killJob(job: Job): void {
+  job.killed = true;
+  stopJob(job);
+}
+
 /**
  * SIGTERM to the job's process group (`detached` made it one), SIGKILL if it lingers. On
  * Windows `taskkill /T /F` ends the whole tree at once: console programs have no gentler
  * stop to send them.
  */
-function killJob(job: Job): void {
+function stopJob(job: Job): void {
   const pid = job.pid;
   if (!pid) return;
-  job.killed = true;
   if (WINDOWS) {
     // From System32, like pi does: not whatever `taskkill` the PATH has.
     const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
