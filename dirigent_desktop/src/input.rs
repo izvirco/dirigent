@@ -1128,6 +1128,8 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     }
     let mut bindings = vec![
         KeyBinding::new("backspace", Backspace, c),
+        // Still holding shift after a capital: native text fields backspace anyway.
+        KeyBinding::new("shift-backspace", Backspace, c),
         KeyBinding::new("delete", Delete, c),
         KeyBinding::new(&format!("{word}-backspace"), BackspaceWord, c),
         KeyBinding::new(&format!("{word}-delete"), DeleteWord, c),
