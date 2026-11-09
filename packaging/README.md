@@ -73,6 +73,7 @@ None of it is tested by us (no Mac): CI only proves it builds.
 dirigent [dir]        start the desktop (a running one gets the folder)
 dirigent pi [args…]   the bundled pi's own CLI: `dirigent pi install npm:…`, `dirigent pi config`, a terminal session
 dirigent key …        API keys of the embedded service's public listener (below): add <name>, list, revoke <name>
+dirigent login        sign this data dir in to the forge with a code (below); `dirigent logout`, `dirigent whoami`
 ```
 
 `--data-dir` / `--config-dir` go first and apply to both. It finds the desktop and `runtime/` next to its own
@@ -87,7 +88,7 @@ a `--config-dir` instance copies the real install's instead.
 
 A remote host runs `dirigent_service` (the nix package below; a desktop's embedded service works the same) and a
 desktop lists it in its `hosts.toml` (Settings › Hosts, or `<config dir>/hosts.toml` by hand; the file's header
-has the forms). The service's agents reach the hosts in its own `hosts.toml` (the `dirigent` tool). Three ways to
+has the forms). The service's agents reach the hosts in its own `hosts.toml` (the `dirigent` tool). The ways to
 reach one:
 
 **Tailscale, no auth.** The service listens on loopback and its tailscale addresses, port 7777 (`DIRIGENT_PORT`;
@@ -134,6 +135,33 @@ to drop them). On the client: `prod = { url = "wss://dirigent.example.com/ws", k
 Add host › API key. `hosts.toml` is then a secret: Dirigent writes it owner-only (unix). A service hands its agents
 the keys of the hosts its `hosts.toml` lists, so whoever can use a service can use those too.
 
+**Public, with the forge account: no keys to hand around.** A data dir can be signed in to a forge account (one per
+data dir: a desktop and its embedded service share it; `dirigent_service/src/forge.rs`). Sign the remote service in
+with a device code, and the desktop in Settings › Forge providers (the browser; the only place in the app that signs
+in or out: the leaderboard's Join and forge hosts send you there), or with `dirigent login`:
+
+```sh
+dirigent_service login    # prints a url and a code to enter there, in any browser
+dirigent_service whoami
+dirigent_service logout   # forgets it here; revoke Dirigent on the forge's account page to end it there
+```
+
+With `[public] url` set, the public listener then also takes forge tokens of **that same account**, minted by the
+client for the host's address: `prod = { url = "wss://dirigent.example.com/ws", auth = "forge" }` (or Add host ›
+forge account in Settings › Hosts). A token is a ten-minute JWT the forge signs for that address (its audience): the
+service checks the forge's signature, the forge, Dirigent's app, the address and the account, so `[public] url`
+must be the address clients use. Both sides normalize it the same way (`wss://h/ws`, `wss://h:443/ws` and
+`WSS://H/ws` are one), but a different host name or path is a different audience: the 401 says which one the
+service expects. The service only takes forge tokens while it is signed in; signed out, API keys only. Revoking
+Dirigent on the forge stops new tokens at once; one already out lasts its ten minutes.
+
+The forge sign-in's refresh token is in `<data dir>/forge.json` (owner-only), written at sign-in. It stays good
+until Dirigent is revoked on the forge's account page or it goes 90 days unused (each use restarts the 90 days). A
+refresh the forge refuses signs the data dir out, said in Settings › Forge providers and in `whoami`, until someone
+signs in again. `forge.json` is a credential: a copy acts as that account wherever it is, so have each machine sign
+in itself.
+`DIRIGENT_FORGE_URL` and `DIRIGENT_FORGE_CLIENT_ID` point an instance at another forge or app (tests).
+
 ## Updates
 
 Release builds check `https://dirigent.sebba.dev/api/v0/updates/<channel>/<platform>` every 5 minutes
@@ -152,7 +180,16 @@ can change in any release. What installs in the field rely on, and must stay com
 - the update url and the `Release` JSON (`dirigent_protocol/src/release.rs`; add fields, don't change them),
 - the installer's `AppId` and the flags `update.rs` passes it,
 - the tarball's layout (`dirigent/install.sh` at its root) and `install.sh --update`'s arguments,
-- the signing keys (`release::KEYS`; rotate by shipping the new key next to the old one first).
+- the signing keys (`release::KEYS`; rotate by shipping the new key next to the old one first),
+- the leaderboard api (`join`, `usage`, `me`, `leaderboard` under `/api/v0/` and their statuses;
+  `dirigent_protocol/src/leaderboard.rs`'s types: add fields),
+- Dirigent's forge app id (`dirigent_auth::CLIENT_ID`) and its redirect URI `http://127.0.0.1/forge/callback`:
+  desktops in the field sign in as it.
+
+The leaderboard broke this once, on purpose: 0.0.7 dropped joining through the api. 0.0.6 desktops lose the
+leaderboard (their uploads get 401, they forget their player, Join fails; the board still shows) until they update,
+sign in to the forge and Join again; their usage in between is back-filled, up to 30 days back
+(`UPLOAD_DAYS` in `dirigent_desktop/src/leaderboard.rs`).
 
 ## Making a release
 
@@ -206,14 +243,15 @@ On NixOS: import the flake's `nixosModules.dirigent_api` and set `services.dirig
 `s3.region`, `s3.bucket`; `bind` defaults to `127.0.0.1:7790`).
 
 **The leaderboard** (the desktop's Usage modal, `dirigent_api/src/leaderboard.rs`) runs in the same api when it
-has a forge app to sign players in with. Register one on the forge's account page with the redirect URI
-`https://dirigent.sebba.dev/api/v0/auth/callback`, then give the api `FORGE_CLIENT_ID` and
-`FORGE_CLIENT_SECRET` (`FORGE_URL` defaults to `https://forge.sebba.dev`, `DIRIGENT_API_URL` to
-`https://dirigent.sebba.dev`) and a writable `DIRIGENT_API_DB` (default `leaderboard.db`): the one piece of
-state the server has, worth a backup. On NixOS: `leaderboard.forgeClientId`, and `environmentFile` for the
-secret; the db goes to `/var/lib/dirigent-api/`. Without a client id the leaderboard is off and the desktops
-show it can't be reached. Desktops use `https://dirigent.sebba.dev` (all builds, dev and nix too), or
-`DIRIGENT_API_URL` at run time for tests.
+has a db: a writable `DIRIGENT_API_DB`, the one piece of state the server has, worth a backup. On NixOS it's on,
+the db in `/var/lib/dirigent-api/`. Without a db it's off and the desktops show it can't be reached. It holds no
+secret: desktops sign in to the forge themselves (Dirigent's public app, `dirigent_auth::CLIENT_ID`) and send a
+forge JWT for the api's url (`DIRIGENT_API_URL`, default `https://dirigent.sebba.dev`: the url desktops use, no
+trailing slash), which the api checks against `FORGE_URL`'s keys (default `https://forge.sebba.dev`) and
+Dirigent's app (`DIRIGENT_FORGE_CLIENT_ID` overrides the compiled id). Its `sub`, the forge user id, is the
+player. An upload or leave with a valid token of someone not on the board is 403 (the desktop forgets its player
+then, and only then: a refused token is 401, no forge keys 503). Desktops use `https://dirigent.sebba.dev` (all
+builds, dev and nix too), or `DIRIGENT_API_URL` at run time for tests.
 
 ## Nix (x86_64-linux)
 

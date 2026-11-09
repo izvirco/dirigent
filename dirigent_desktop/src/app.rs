@@ -14,8 +14,8 @@ use crate::providers;
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
+use crate::{account, leaderboard, lists, menu, onboarding, ruler, sidebar, thread, titlebar, usage};
 use crate::{changelog, config, hosts, images, instance, settings, update};
-use crate::{leaderboard, lists, menu, onboarding, ruler, sidebar, thread, titlebar, usage};
 use base64::Engine;
 use dirigent_protocol::{
     Ask, ClientMessage, Entry, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary,
@@ -618,6 +618,8 @@ pub struct Dirigent {
     pub usage_to: Entity<TextInput>,
     /// The leaderboard: account, uploads, the board shown in the Usage modal.
     pub leaderboard: leaderboard::State,
+    /// The forge account (`account.rs`): forge-auth hosts and the leaderboard use it.
+    pub forge: account::State,
     /// Seconds since launch, from `tick`.
     ticks: u64,
     /// Model (`provider/id`) and thinking level the next prompt is sent with.
@@ -724,6 +726,7 @@ impl Dirigent {
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
         let collapsed = Section::parse_folded(cache.get(COLLAPSED_KEY).as_deref());
+        let forge = account::State::new();
         let leaderboard = leaderboard::State::new(&cache);
         let cache = Arc::new(Mutex::new(cache));
 
@@ -813,6 +816,7 @@ impl Dirigent {
             usage_from,
             usage_to,
             leaderboard,
+            forge,
             ticks: 0,
             model,
             effort,
@@ -1966,6 +1970,9 @@ impl Dirigent {
                             _ => {}
                         }
                     }
+                    if this.ticks % account::CHECK_EVERY == 0 {
+                        this.sync_forge(cx);
+                    }
                     if this.ticks % leaderboard::UPLOAD_EVERY == 0 {
                         this.upload_all();
                     }
@@ -2370,7 +2377,8 @@ impl Dirigent {
     }
 
     /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
-    /// form, if open; the others take focus off the inputs, so keys don't type under the modal.
+    /// form, if open; the others take focus off the inputs, so keys don't type under the modal
+    /// (Forge providers also loads the account's picture).
     pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
         self.settings.tab = tab;
         if tab == settings::Tab::Hosts {
@@ -2382,6 +2390,9 @@ impl Dirigent {
         } else if tab == settings::Tab::Providers {
             self.enter_providers(cx);
         } else {
+            if tab == settings::Tab::Forge {
+                self.fetch_forge_picture(cx);
+            }
             self.focus(self.focus_handle.clone(), cx);
         }
         cx.notify();

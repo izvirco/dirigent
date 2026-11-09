@@ -9,6 +9,7 @@ mod agent;
 mod auth;
 mod blobs;
 mod dirs;
+pub mod forge;
 mod git;
 pub mod hosts;
 mod logging;
@@ -1053,12 +1054,16 @@ pub async fn run(port: u16) -> Result<()> {
     let cmd = runtime_cmd()?;
     // Bound before the runtime starts: a service that can't listen leaves no runtime behind
     // (the desktop retries its embedded one) and logs nothing more.
-    let mut addrs: Vec<(SocketAddr, bool)> = bind_addrs(port).into_iter().map(|a| (a, false)).collect();
+    let mut addrs: Vec<(SocketAddr, Option<Arc<auth::Gate>>)> = bind_addrs(port).into_iter().map(|a| (a, None)).collect();
     if let Some(public) = auth::load()?.public {
         info!(url = public.url.as_deref().unwrap_or("?"), "public listener on {}", public.listen);
-        addrs.push((public.listen, true));
+        let gate = auth::Gate::new(&public);
+        if let Err(why) = gate.audience() {
+            warn!("public listener: API keys only, no forge tokens: {why}");
+        }
+        addrs.push((public.listen, Some(Arc::new(gate))));
     }
-    let listeners = server::bind(&addrs).await?;
+    let listeners = server::bind(addrs).await?;
     let host_name = platform::host_name();
     info!(host = %host_name, data = %data_dir().display(), version = env!("CARGO_PKG_VERSION"), "service started");
     let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));

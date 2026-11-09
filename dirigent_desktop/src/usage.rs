@@ -516,7 +516,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let lb = &this.leaderboard;
     let model = Rc::new(match s.tab {
         Tab::Mine => mine(s),
-        Tab::Board => board(lb.board.as_ref(), &s.board, lb.you(), &lb.avatars),
+        Tab::Board => board(lb.board.as_ref(), &s.board, lb.active(&this.forge.status).map(|a| a.id.as_str()), &lb.avatars),
     });
     let hover_slot = s.hover.and_then(|p| Layout::new(*s.plot.borrow(), model.labels).slot_at(p.x, model.slots));
     let (hero, list) = match s.tab {
@@ -572,12 +572,13 @@ fn tabs(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .children(account)
 }
 
-/// Signed in: your picture and name, with a menu to leave. Else the join button, or the
-/// join waiting for the browser.
+/// Joined: your picture and name, with a menu to leave. Else the join button (without the
+/// forge sign-in, a button to Settings › Forge providers, where you sign in), or the join
+/// waiting for the api.
 fn account(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let lb = &this.leaderboard;
     let t = theme::t();
-    if let Some(a) = &lb.account {
+    if let Some(a) = lb.active(&this.forge.status) {
         let open = this.menu == Some(Menu::BoardAccount);
         let menu = open.then(|| {
             let leave = menu::danger("board-leave", "Leave the leaderboard and delete my usage there", |this, cx| this.leave_board(cx), cx);
@@ -606,35 +607,25 @@ fn account(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             .children(menu)
             .into_any();
     }
-    if lb.joining.is_some() {
-        return div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
-            .text_size(text::sm())
-            .text_color(rgba(t.fg_1))
-            .child("Signing in in your browser…")
-            .child(
-                div()
-                    .id("board-join-cancel")
-                    .cursor_pointer()
-                    .text_color(rgba(t.fg_2))
-                    .hover(|d| d.text_color(rgba(t.fg)))
-                    .on_click(cx.listener(|this, _, _, cx| this.cancel_join(cx)))
-                    .child("Cancel"),
-            )
-            .into_any();
+    if lb.joining {
+        return div().text_size(text::sm()).text_color(rgba(t.fg_1)).child("Joining…").into_any();
     }
-    theme::button("board-join", "crown", "Join with your forge account")
+    let (label, tip) = match this.forge.status.signed_in() {
+        Some(_) => (
+            "Join with your forge account",
+            "Puts you on the public board and uploads your usage from now on (totals per hour, no prompts)",
+        ),
+        None => ("Sign in to join", "Opens Settings › Forge providers, where you sign in to the forge; then join here"),
+    };
+    theme::button("board-join", "crown", label)
         .text_size(text::sm())
-        .tooltip(theme::tooltip("Puts you on the public board and uploads your usage from now on (totals per hour, no prompts)"))
+        .tooltip(theme::tooltip(tip))
         .on_click(cx.listener(|this, _, _, cx| this.join_board(cx)))
         .into_any()
 }
 
 /// A round picture, or the name's initial on `color` until it's loaded.
-fn avatar(image: Option<Arc<Image>>, name: &str, color: u32, side: f32) -> AnyElement {
+pub fn avatar(image: Option<Arc<Image>>, name: &str, color: u32, side: f32) -> AnyElement {
     match image {
         Some(image) => img(image).size(u(side)).rounded_full().flex_shrink_0().into_any_element(),
         None => div()

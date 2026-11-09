@@ -1,11 +1,18 @@
-//! The leaderboard's desktop side: joining with a forge account, uploading every connected
+//! The leaderboard's desktop side: joining with the forge account, uploading every connected
 //! service's usage, and fetching the board the Usage modal's Leaderboard tab shows
-//! (`usage.rs`). The api is `dirigent_api`'s `leaderboard.rs`, which explains the sign-in.
+//! (`usage.rs`). The api is `dirigent_api`'s `leaderboard.rs`.
 //!
-//! Joining: a loopback listener on a random port, then the browser at the api's
-//! `auth/start` with that port and a random state. The browser comes back to the listener
-//! with a one-time code (or an error), which is traded for the `Account` (`claim`). The
-//! account is kept in `kv`: the data dir, so a test instance (`--data-dir`) starts out of it.
+//! Joining: signed in to the forge (`account.rs`; Join takes you to Settings › Forge
+//! providers first if need be), the desktop asks the api to `join` with a forge JWT made
+//! for the api's url, and keeps the `Account` it answers with in `kv`: the data dir, so a
+//! test instance (`--data-dir`) starts out of it. Uploads and leaving send a fresh JWT each
+//! time (`forge::token`, cached for its ten minutes). The account counts while the forge
+//! account it joined as is signed in (`active`): signed out, nothing is uploaded; signed in
+//! as someone else, it waits, and Join replaces it with that account.
+//!
+//! Desktops up to 0.0.6 joined through the api itself and saved an api token in the
+//! `Account`. The api takes no such token now and the field is ignored: a saved account
+//! counts like any other, while its forge user is signed in.
 //!
 //! Uploading: every `UPLOAD_EVERY` and whenever a service says hello, each connected
 //! service's usage since joining (at most `UPLOAD_DAYS` back) is asked for per hour, summed
@@ -14,17 +21,16 @@
 //! shares the service) counts nothing twice.
 
 use crate::app::{Dirigent, image_from};
+use crate::cache::Cache;
 use crate::net::HostStatus;
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use dirigent_protocol::leaderboard::{Account, Board, HOUR, Range, Slot, Upload};
 use dirigent_protocol::{ClientMessage, UsageBucket};
+use dirigent_service::forge;
 use gpui::Context;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{info, warn};
 
 const ACCOUNT_KEY: &str = "leaderboard_account";
@@ -32,10 +38,13 @@ const ACCOUNT_KEY: &str = "leaderboard_account";
 pub const UPLOAD_EVERY: u64 = 300;
 /// How far back an upload reaches: a desktop that was off longer misses what's older.
 const UPLOAD_DAYS: i64 = 30;
-/// How long a join waits for the browser.
-const JOIN_FOR: Duration = Duration::from_secs(600);
+/// What the api answers an upload or leave with a valid forge token of someone not on the
+/// board: the one status that means "left" (from another desktop). A token it refuses (401)
+/// or can't check (503) is no reason to forget the player.
+const NOT_ON_THE_BOARD: u16 = 403;
 
-/// The api: `DIRIGENT_API_URL`, for tests, or the real one.
+/// The api: `DIRIGENT_API_URL`, for tests, or the real one. Also the `resource` of the
+/// forge JWTs it takes (their audience, which the api checks against its own url).
 fn api() -> String {
     std::env::var("DIRIGENT_API_URL")
         .ok()
@@ -57,9 +66,10 @@ fn agent() -> ureq::Agent {
 /// The leaderboard's state, on `Dirigent`.
 #[derive(Default)]
 pub struct State {
-    pub account: Option<Account>,
-    /// A join waiting for the browser: set to cancel it.
-    pub joining: Option<Arc<AtomicBool>>,
+    /// The player this desktop joined as; `active` says if it counts.
+    account: Option<Account>,
+    /// A join waiting for the api.
+    pub joining: bool,
     pub range: Range,
     /// The board for `range`, as last fetched; `None` until one arrives.
     pub board: Option<Board>,
@@ -79,13 +89,15 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(cache: &crate::cache::Cache) -> Self {
+    pub fn new(cache: &Cache) -> Self {
         let account = cache.get(ACCOUNT_KEY).and_then(|s| serde_json::from_str(&s).ok());
         Self { account, ..Self::default() }
     }
 
-    pub fn you(&self) -> Option<&str> {
-        self.account.as_ref().map(|a| a.id.as_str())
+    /// The account, if it counts now: while the forge account it joined as is signed in.
+    pub fn active(&self, forge: &forge::Status) -> Option<&Account> {
+        let sub = forge.signed_in()?.sub.as_str();
+        self.account.as_ref().filter(|a| a.id == sub)
     }
 
     /// `host` disconnected: its uploads' answers won't come.
@@ -97,7 +109,7 @@ impl State {
 /// Run `work` (blocking HTTP) on a thread of its own, then `done` with its result on the UI
 /// thread. Not on gpui's background pool: a few slow requests would stall its other work
 /// (image decoding, the background pattern).
-fn http<T: Send + 'static>(
+pub fn http<T: Send + 'static>(
     cx: &mut Context<Dirigent>,
     work: impl FnOnce() -> T + Send + 'static,
     done: impl FnOnce(&mut Dirigent, T, &mut Context<Dirigent>) + 'static,
@@ -118,33 +130,29 @@ fn http<T: Send + 'static>(
 }
 
 impl Dirigent {
-    /// "Join": sign in with the forge in the browser (see the module doc).
+    /// "Join": as the forge account. Not signed in to the forge, it takes you where you sign
+    /// in (Settings › Forge providers); you join from here once you are.
     pub fn join_board(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
-        if self.leaderboard.joining.is_some() {
+        if self.leaderboard.joining {
             return;
         }
-        let (port, listener) = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).and_then(|l| Ok((l.local_addr()?.port(), l))) {
-            Ok(bound) => bound,
-            Err(e) => return self.toast(format!("Couldn't start the sign-in: {e}"), cx),
-        };
-        let state = uuid::Uuid::new_v4().simple().to_string();
-        let url = format!("{}/api/v0/auth/start?port={port}&state={state}", api());
-        info!(%url, "joining the leaderboard");
-        cx.open_url(&url);
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.leaderboard.joining = Some(cancel.clone());
-        let (tx, rx) = futures::channel::oneshot::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(wait_for_browser(listener, &state, &cancel));
-        });
-        cx.spawn(async move |this, cx| {
-            // Gone without an answer (it panicked): given up, like a cancel.
-            let joined = rx.await.unwrap_or(Ok(None));
-            this.update(cx, |this, cx| {
-                this.leaderboard.joining = None;
+        if self.forge.status.signed_in().is_none() {
+            return self.open_forge_settings(cx);
+        }
+        self.leaderboard.joining = true;
+        http(
+            cx,
+            || -> Result<Account> {
+                let token = forge::token(&api())?;
+                let url = format!("{}/api/v0/join", api());
+                let body = agent().post(&url).header("authorization", format!("Bearer {token}")).send_empty();
+                Ok(serde_json::from_str(&body.with_context(|| format!("POST {url}"))?.body_mut().read_to_string()?)?)
+            },
+            |this, joined, cx| {
+                this.leaderboard.joining = false;
                 match joined {
-                    Ok(Some(account)) => {
+                    Ok(account) => {
                         info!(player = %account.name, "joined the leaderboard");
                         let _ = this.cache.lock().unwrap().set(ACCOUNT_KEY, &serde_json::to_string(&account).unwrap_or_default());
                         this.leaderboard.account = Some(account);
@@ -152,46 +160,38 @@ impl Dirigent {
                         this.upload_all();
                         this.fetch_board(cx);
                     }
-                    Ok(None) => {}
                     Err(e) => this.toast(format!("Couldn't join the leaderboard: {e:#}"), cx),
                 }
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
+            },
+        );
         cx.notify();
     }
 
-    pub fn cancel_join(&mut self, cx: &mut Context<Self>) {
-        if let Some(cancel) = self.leaderboard.joining.take() {
-            cancel.store(true, Ordering::Relaxed);
-        }
-        cx.notify();
-    }
-
-    /// "Leave": off the board, usage and all; signed out on every desktop.
+    /// "Leave": off the board, usage and all; out of it on every desktop.
     pub fn leave_board(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
-        let Some(token) = self.leaderboard.account.as_ref().map(|a| a.token.clone()) else { return };
+        if self.leaderboard.active(&self.forge.status).is_none() {
+            return;
+        }
         http(
             cx,
             move || -> Result<()> {
+                let token = forge::token(&api())?;
                 agent().delete(format!("{}/api/v0/me", api())).header("authorization", format!("Bearer {token}")).call()?;
                 Ok(())
             },
-            |this, left, cx| match left {
-                // A sign-in the api no longer knows has left already.
-                Err(e) if status(&e) != Some(401) => this.toast(format!("Couldn't leave the leaderboard: {e:#}"), cx),
+            move |this, left, cx| match left {
+                // A player the api no longer knows has left already.
+                Err(e) if status(&e) != Some(NOT_ON_THE_BOARD) => this.toast(format!("Couldn't leave the leaderboard: {e:#}"), cx),
                 _ => {
-                    this.sign_out();
+                    this.forget_player();
                     this.fetch_board(cx);
                 }
             },
         );
     }
 
-    fn sign_out(&mut self) {
+    fn forget_player(&mut self) {
         self.leaderboard.account = None;
         self.leaderboard.not_ours.clear();
         let _ = self.cache.lock().unwrap().remove(ACCOUNT_KEY);
@@ -208,14 +208,15 @@ impl Dirigent {
     /// Ask `host` for its usage per hour since joining; `on_upload_usage` sends it on.
     /// Nothing while out of the leaderboard, or for a service that doesn't send its id.
     pub fn upload_usage(&mut self, host: &str) {
-        let Some(account) = &self.leaderboard.account else { return };
+        let Some(account) = self.leaderboard.active(&self.forge.status) else { return };
+        let joined_at = account.joined_at;
         let connected = self.host(host).filter(|h| h.status == HostStatus::Connected);
         let Some(service) = connected.and_then(|h| h.service_id.clone()) else { return };
         if self.leaderboard.not_ours.contains(&service) {
             return;
         }
         let now = now_ms();
-        let since = floor_hour(account.joined_at.max(now - UPLOAD_DAYS * 24 * HOUR));
+        let since = floor_hour(joined_at.max(now - UPLOAD_DAYS * 24 * HOUR));
         let until = floor_hour(now) + HOUR;
         let id = self.request(host, |id| ClientMessage::ListUsage { id, since, until, bucket_ms: HOUR });
         self.leaderboard.uploads.insert(host.to_owned(), (id, service));
@@ -225,11 +226,14 @@ impl Dirigent {
     pub fn on_upload_usage(&mut self, reply_to: u64, buckets: &[UsageBucket], cx: &mut Context<Self>) -> bool {
         let ours = self.leaderboard.uploads.iter().find(|(_, (id, _))| *id == reply_to).map(|(host, _)| host.clone());
         let Some((_, service)) = ours.and_then(|host| self.leaderboard.uploads.remove(&host)) else { return false };
-        let Some(token) = self.leaderboard.account.as_ref().map(|a| a.token.clone()) else { return true };
+        if self.leaderboard.active(&self.forge.status).is_none() {
+            return true;
+        }
         let up = Upload { service: service.clone(), hours: hours(buckets) };
         http(
             cx,
             move || -> Result<()> {
+                let token = forge::token(&api())?;
                 agent()
                     .put(format!("{}/api/v0/usage", api()))
                     .header("authorization", format!("Bearer {token}"))
@@ -239,12 +243,13 @@ impl Dirigent {
             },
             move |this, sent, cx| match sent {
                 Ok(()) => this.leaderboard.failing = false,
-                // The api forgot this sign-in (left from another desktop): out here too, said
-                // once however many hosts' uploads find out.
-                Err(e) if status(&e) == Some(401) => {
+                // The api doesn't know this player (left from another desktop): out here too,
+                // said once however many hosts' uploads find out.
+                Err(e) if status(&e) == Some(NOT_ON_THE_BOARD) => {
                     if this.leaderboard.account.is_some() {
-                        this.sign_out();
-                        this.toast("Signed out of the leaderboard: the sign-in is no longer valid", cx);
+                        warn!("leaderboard upload: {e:#}");
+                        this.forget_player();
+                        this.toast("Off the leaderboard: it no longer knows this player. Join again to come back.", cx);
                     }
                 }
                 Err(e) if status(&e) == Some(409) => {
@@ -308,10 +313,15 @@ impl Dirigent {
             .iter()
             .flat_map(|b| b.players.iter().map(|p| p.picture.clone()))
             .chain(lb.account.iter().map(|a| a.picture.clone()))
-            .filter(|u| u.starts_with("http") && !lb.avatars.contains_key(u))
-            .collect::<HashSet<_>>()
-            .into_iter()
             .collect();
+        self.fetch_pictures(urls, cx);
+    }
+
+    /// Load the pictures at `urls` not loaded (or loading) yet into `avatars`, which the
+    /// forge account's (Settings › Forge providers) shares.
+    pub fn fetch_pictures(&mut self, urls: impl IntoIterator<Item = String>, cx: &mut Context<Self>) {
+        let lb = &self.leaderboard;
+        let urls: HashSet<String> = urls.into_iter().filter(|u| u.starts_with("http") && !lb.avatars.contains_key(u)).collect();
         for url in urls {
             self.leaderboard.avatars.insert(url.clone(), None);
             let get = url.clone();
@@ -353,116 +363,6 @@ fn hours(buckets: &[UsageBucket]) -> Vec<Slot> {
     by_hour.into_values().collect()
 }
 
-/// Serve the browser's return from the sign-in on `listener` until it brings our `state`:
-/// then claim the account and tell the browser how it went. `None` if cancelled or given up.
-fn wait_for_browser(listener: TcpListener, state: &str, cancel: &AtomicBool) -> Result<Option<Account>> {
-    listener.set_nonblocking(true)?;
-    let deadline = Instant::now() + JOIN_FOR;
-    while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
-        let mut stream = match listener.accept() {
-            Ok((stream, _)) => stream,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(200));
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        };
-        // Anything else that finds the port (a favicon fetch) gets a 404.
-        let query = read_query(&mut stream).unwrap_or_default();
-        if query.get("state").map(String::as_str) != Some(state) {
-            let _ = respond(&mut stream, "404 Not Found", "Not found");
-            continue;
-        }
-        let joined = match (query.get("code"), query.get("error")) {
-            (Some(code), _) => claim(code),
-            (None, error) => Err(anyhow::anyhow!("the forge said {}", error.map_or("no", String::as_str))),
-        };
-        let page = match &joined {
-            Ok(a) => format!("You're on the leaderboard, {}. Back to Dirigent!", html(&a.name)),
-            Err(e) => format!("Couldn't join the leaderboard: {}", html(&format!("{e:#}"))),
-        };
-        let _ = respond(&mut stream, "200 OK", &page);
-        return joined.map(Some);
-    }
-    Ok(None)
-}
-
-/// The query of an HTTP request's target (`GET /?a=b HTTP/1.1`), decoded.
-fn read_query(stream: &mut TcpStream) -> Result<HashMap<String, String>> {
-    stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    let mut buf = vec![0; 8192];
-    let mut len = 0;
-    while len < buf.len() && !buf[..len].windows(4).any(|w| w == b"\r\n\r\n") {
-        let n = stream.read(&mut buf[len..])?;
-        if n == 0 {
-            break;
-        }
-        len += n;
-    }
-    let head = String::from_utf8_lossy(&buf[..len]);
-    let target = head.lines().next().and_then(|l| l.split(' ').nth(1)).unwrap_or("");
-    Ok(parse_query(target))
-}
-
-fn parse_query(target: &str) -> HashMap<String, String> {
-    let query = target.split_once('?').map_or("", |(_, q)| q);
-    query.split('&').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (unescape(k), unescape(v))).collect()
-}
-
-/// `a%20b+c` → `a b c`.
-fn unescape(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = b.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
-        match (b[i], hex) {
-            (b'%', Some(v)) => {
-                out.push(v);
-                i += 3;
-            }
-            (b'+', _) => {
-                out.push(b' ');
-                i += 1;
-            }
-            (c, _) => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-fn html(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
-
-fn respond(stream: &mut TcpStream, status: &str, text: &str) -> std::io::Result<()> {
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Dirigent</title>\
-         <body style=\"font:16px system-ui;display:grid;place-items:center;height:90vh\"><p>{text}</p>"
-    );
-    write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-}
-
-/// The sign-in's one-time code for the account.
-fn claim(code: &str) -> Result<Account> {
-    let url = format!("{}/api/v0/auth/claim", api());
-    let body = serde_json::json!({ "code": code }).to_string();
-    let mut res = match agent().post(&url).header("content-type", "application/json").send(body) {
-        Ok(res) => res,
-        Err(ureq::Error::StatusCode(404)) => bail!("the sign-in expired, try again"),
-        Err(e) => return Err(e).with_context(|| format!("POST {url}")),
-    };
-    Ok(serde_json::from_str(&res.body_mut().read_to_string()?)?)
-}
-
 fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
@@ -474,6 +374,7 @@ fn floor_hour(t: i64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dirigent_service::forge::{Account as ForgeAccount, Status};
 
     #[test]
     fn uploads_sum_models_per_hour() {
@@ -493,10 +394,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_return_query() {
-        let q = parse_query("/?state=abc&code=x%2Fy&error=access+denied");
-        assert_eq!((q["state"].as_str(), q["code"].as_str(), q["error"].as_str()), ("abc", "x/y", "access denied"));
-        assert!(parse_query("/favicon.ico").is_empty());
-        assert_eq!(unescape("100%"), "100%");
+    fn a_saved_account_counts_while_its_forge_account_is_signed_in() {
+        let cache = Cache::in_memory().unwrap();
+        let signed_in = |sub: &str| Status::SignedIn(ForgeAccount { sub: sub.into(), username: "seb".into(), picture: String::new() });
+        // As 0.0.6 saved it, with the api token it uploaded with: still read, the token ignored.
+        cache.set(ACCOUNT_KEY, r#"{"token":"old-token","id":"u1","name":"seb","picture":"","joined_at":7}"#).unwrap();
+        let s = State::new(&cache);
+        assert_eq!(s.active(&signed_in("u1")).map(|a| a.joined_at), Some(7));
+        assert_eq!(s.active(&signed_in("u2")), None);
+        assert_eq!(s.active(&Status::SignedOut), None);
     }
 }
