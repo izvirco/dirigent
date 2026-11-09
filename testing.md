@@ -179,6 +179,10 @@ serve`, the leaderboard). A fake `xdg-open` can approve the sign-in as a test us
   build. The app isn't drawn under the setup: it lies on the window's canvas like the sidebar, so a translucent
   theme stays see-through (on Xvfb, as everywhere there, that's black).
 
+- **Window placement**: the app reopens as it was last left (`kv.window` in `data/desktop.db`, e.g.
+  `windowed 200 100 900 600`; `placement.rs`), unless that no longer fits the screen; `start` still makes it fill
+  the screen right after. To see it come back, relaunch the binary as `launch` in `ui.sh` does, without its
+  `xdotool windowmove … windowsize …`, and check `xdotool getwindowgeometry` or the `window opens` line in `log`.
 - **The changelog**: the first launch of a session whose `desktop.db` last ran an older version (after a version
   bump) opens the changelog modal over the pane, with keys going to it, not the composer: Esc closes it, and later
   launches (`setup` relaunches) don't show it. To see it, set `kv.last_version` in `data/desktop.db` lower and

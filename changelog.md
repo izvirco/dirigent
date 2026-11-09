@@ -7,9 +7,11 @@ Hosts over ssh, and public hosts behind a TLS proxy with API keys or your forge 
 - Settings › Hosts: add a host by how it authenticates (none, an API key, your forge account), edit any host, and hover a failing one for why ([#140], [#141])
 - Sign in to the forge once (Settings › Forge providers, or `dirigent login` / `dirigent_service login`): public hosts signed in to the same account let you in, no keys ([#141])
 - The leaderboard uses that sign-in: sign in to the forge and Join once more, keeping your place and usage (0.0.6 can't upload anymore) ([#141])
+- The window reopens where you left it: size, position, maximized or fullscreen ([#116])
 
 [#140]: https://forge.sebba.dev/izvir/dirigent/changes/140
 [#141]: https://forge.sebba.dev/izvir/dirigent/changes/141
+[#116]: https://forge.sebba.dev/izvir/dirigent/changes/116
 
 ## 0.0.6
 
