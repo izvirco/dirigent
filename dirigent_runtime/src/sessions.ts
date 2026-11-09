@@ -22,7 +22,6 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
-  createBashToolDefinition,
   DefaultResourceLoader,
   type FileEntry,
   getAgentDir,
@@ -32,6 +31,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   type Ask,
+  createBash,
   createTools,
   dataDir,
   deliverAnswers,
@@ -172,6 +172,7 @@ export class Sessions {
       cwd,
       unsubscribe: () => {},
       forwarded: entries.filter((e) => e.type !== "session").length,
+      tools: [] as string[],
       jobs: new Map(),
       notices: new Map(),
       waiters: new Set(),
@@ -180,8 +181,9 @@ export class Sessions {
       onJobs: (running: number, free: number) =>
         this.send({ type: "jobs", thread_id: threadId, running, free }),
     } as Live;
-    // Bash runs through our spawnHook so a captured nix dev-shell env can be injected.
-    const bash = createBashToolDefinition(cwd, {
+    // Bash runs through our spawnHook so a captured nix dev-shell env can be injected, and
+    // moves a long command to the background (`createBash`).
+    const bash = createBash(live, {
       spawnHook: (ctx) => (live.env ? { ...ctx, env: { ...ctx.env, ...live.env } } : ctx),
     });
 
@@ -206,7 +208,7 @@ export class Sessions {
     // Hand every queued steer to the model in the next turn, not one per turn. Set on the
     // agent directly: `session.setSteeringMode` would also write pi's global settings.
     session.agent.steeringMode = "all";
-    applyTools(session, tools);
+    applyTools(live, tools);
 
     // Pi appends to the manager right *after* notifying listeners, so flush on a microtask.
     live.unsubscribe = session.subscribe((event) => {
@@ -348,7 +350,7 @@ export class Sessions {
     if (thinkingLevel && thinkingLevel !== session.thinkingLevel) {
       session.setThinkingLevel(thinkingLevel as ThinkingLevel);
     }
-    if (tools) applyTools(session, tools);
+    if (tools) applyTools(live, tools);
     if (title) {
       this.generateTitle(title, text, session.model)
         .then((r) => session.setSessionName(r.title))
@@ -531,8 +533,13 @@ function rewind(session: AgentSession, edit: string): () => void {
   };
 }
 
-/** Activate the dirigent tools in `tools` (and no other dirigent tool), leaving pi's own tools as they are. */
-function applyTools(session: AgentSession, tools: string[]): void {
+/**
+ * Activate the dirigent tools in `tools` (and no other dirigent tool), leaving pi's own tools
+ * as they are, and keep `tools` for the ones that read it (`ToolHost.tools`).
+ */
+function applyTools(live: Live, tools: string[]): void {
+  live.tools = tools;
+  const session = live.session;
   const ours = new Set<string>(TOOL_NAMES);
   const wanted = session
     .getActiveToolNames()

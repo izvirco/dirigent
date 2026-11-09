@@ -202,6 +202,20 @@ fn row(label: &'static str, control: impl IntoElement) -> Div {
         .child(div().flex_1().min_w_0().flex().flex_row().items_center().justify_end().child(control))
 }
 
+/// An option of the row above it: indented, its label in small print.
+fn sub_row(label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_3()
+        .min_h(u(28.))
+        .pb_2()
+        .pl(u(16.))
+        .child(div().flex_1().min_w_0().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(label))
+        .child(control)
+}
+
 /// A bordered text field.
 pub fn field(input: Entity<TextInput>) -> Div {
     let t = theme::t();
@@ -427,15 +441,18 @@ fn switch(
 }
 
 /// The agent tools dirigent adds to pi's: each a switch; the set goes out with every prompt,
-/// so a change reaches a thread with its next message.
+/// so a change reaches a thread with its next message. `async_bash` has an option under it,
+/// shown while it is on.
 fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let c = &this.config.tools;
+    let bash_background = switch("tool-bash-background", c.bash_background, cx, |this, cx| this.toggle_tool("bash_background", cx));
     section(
         "Agent tools",
         div()
             .flex()
             .flex_col()
             .child(row("async_bash", switch("tool-async-bash", c.async_bash, cx, |this, cx| this.toggle_tool("async_bash", cx))))
+            .when(c.async_bash, |d| d.child(sub_row("Move a bash command still running after 10 s to the background", bash_background)))
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
             .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx)))),
     )
