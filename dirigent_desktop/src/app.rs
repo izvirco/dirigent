@@ -58,6 +58,8 @@ const PANE_KEY: &str = "pane";
 const SIDEBAR_MIN: f32 = 180.;
 const SIDEBAR_MAX: f32 = 420.;
 const LOG_WIDTH_KEY: &str = "log_width";
+/// The right panel's hidden section: `lineage`, `log`, or empty for none (`PanelPart`).
+const PANEL_HIDDEN_KEY: &str = "panel_hidden";
 const LOG_MIN: f32 = 280.;
 const LOG_MAX: f32 = 800.;
 /// How long a copy button shows its check (`Dirigent::copy_item`).
@@ -72,6 +74,15 @@ const TITLING_TTL: Duration = Duration::from_secs(60);
 #[derive(Clone, Copy, PartialEq)]
 pub enum Resize {
     Sidebar,
+    Log,
+}
+
+/// A section of the right panel, each with a toggle in its header (`thread::side_panel`).
+#[derive(Clone, Copy, PartialEq)]
+pub enum PanelPart {
+    /// The thread's family (`orchestra::tree`).
+    Lineage,
+    /// The work log: tool calls and thinking.
     Log,
 }
 
@@ -598,6 +609,9 @@ pub struct Dirigent {
     /// latest work (`latest_work`). Set by opening a log by hand (a work line, the panel
     /// button), cleared by closing the panel.
     pub log_on: bool,
+    /// The right panel's section the user turned off, if any (`toggle_panel_part`): never
+    /// both, so the panel always has something to show. Sticks across threads and restarts.
+    pub panel_hidden: Option<PanelPart>,
     /// Per thread id, how the user left its log (in memory only).
     logs: HashMap<String, LogMemory>,
     resizing: Option<Resize>,
@@ -726,6 +740,11 @@ impl Dirigent {
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
         let collapsed = Section::parse_folded(cache.get(COLLAPSED_KEY).as_deref());
+        let panel_hidden = match cache.get(PANEL_HIDDEN_KEY).as_deref() {
+            Some("lineage") => Some(PanelPart::Lineage),
+            Some("log") => Some(PanelPart::Log),
+            _ => None,
+        };
         let forge = account::State::new();
         let leaderboard = leaderboard::State::new(&cache);
         let cache = Arc::new(Mutex::new(cache));
@@ -804,6 +823,7 @@ impl Dirigent {
             workpool_scroll: ScrollHandle::new(),
             log_width,
             log_on: false,
+            panel_hidden,
             logs: HashMap::new(),
             resizing: None,
             composer,
@@ -2618,10 +2638,52 @@ impl Dirigent {
     // ---- right panel ----
 
     /// Whether the right panel (lineage over the work log) is showing: the user's
-    /// choice, else whenever there is something to show (a log or a family).
+    /// choice, else whenever there is something to show (a log, or a family while the
+    /// lineage isn't hidden).
     pub fn panel_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
-        t.panel.unwrap_or_else(|| t.log.is_some() || !self.lineage(&t.host, &t.id).is_empty())
+        t.panel.unwrap_or_else(|| t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && !self.lineage(&t.host, &t.id).is_empty()))
+    }
+
+    /// Whether the right panel shows `part` while open.
+    pub fn panel_shows(&self, part: PanelPart) -> bool {
+        self.panel_hidden != Some(part)
+    }
+
+    /// The panel header's toggles: hide `part`, or show it again. The only section showing
+    /// stays, so the panel is never empty. Pins the panel open on this thread: it may have
+    /// been open only for the log that is now hidden.
+    pub fn toggle_panel_part(&mut self, part: PanelPart, cx: &mut Context<Self>) {
+        let hidden = match self.panel_hidden {
+            Some(p) if p == part => None,
+            Some(_) => return,
+            None => Some(part),
+        };
+        if let Pane::Thread(t) = &mut self.pane {
+            t.panel = Some(true);
+        }
+        self.set_panel_hidden(hidden);
+        self.focus_composer(cx);
+        cx.notify();
+    }
+
+    /// A hidden log lets go of its work (`t.log`), so no work line stays tinted and nothing
+    /// points it at one (`show_latest_log`); shown again, `settle_panel` points it at the
+    /// latest work.
+    fn set_panel_hidden(&mut self, hidden: Option<PanelPart>) {
+        self.panel_hidden = hidden;
+        let key = match hidden {
+            Some(PanelPart::Lineage) => "lineage",
+            Some(PanelPart::Log) => "log",
+            None => "",
+        };
+        let _ = self.cache.lock().unwrap().set(PANEL_HIDDEN_KEY, key);
+        if hidden == Some(PanelPart::Log) {
+            self.stash_log();
+            if let Pane::Thread(t) = &mut self.pane {
+                t.log = None;
+            }
+        }
     }
 
     /// The header's panel button and `]`: close the panel, or open it on the log of the
@@ -2669,8 +2731,11 @@ impl Dirigent {
         }
     }
 
-    /// Point the log at the latest work, when there is one.
+    /// Point the log at the latest work, when there is one and the log isn't hidden.
     fn show_latest_log(&mut self) {
+        if !self.panel_shows(PanelPart::Log) {
+            return;
+        }
         if let Some(key) = self.latest_work() {
             self.show_log(key);
         }
@@ -4282,8 +4347,8 @@ impl Dirigent {
         self.close_menu(cx);
     }
 
-    /// Clicking a work line: show its log in the panel (opening it), or close the panel
-    /// if that log is the one showing.
+    /// Clicking a work line: show its log in the panel (opening it, and the log section if
+    /// hidden), or close the panel if that log is the one showing.
     pub fn toggle_log(&mut self, key: usize, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &mut self.pane else { return };
         // A log only ever shows in an open panel (`close_panel` drops it).
@@ -4292,6 +4357,9 @@ impl Dirigent {
         } else {
             t.panel = None;
             self.log_on = true;
+            if !self.panel_shows(PanelPart::Log) {
+                self.set_panel_hidden(None);
+            }
             self.show_log(key);
         }
         self.focus_composer(cx);
