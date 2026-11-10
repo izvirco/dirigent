@@ -1,9 +1,11 @@
-## 0.0.9 (draft)
+## 0.0.9
 
 The CLIProxyAPI provider extension works on installs.
 
 - Fixed: models behind the CLIProxyAPI provider extension failed with "Codex protocol stream is unavailable" on installs ([#156])
+- The model picker lists saved presets by model, then effort ([#155])
 
+[#155]: https://forge.sebba.dev/izvir/dirigent/changes/155
 [#156]: https://forge.sebba.dev/izvir/dirigent/changes/156
 
 ## 0.0.8
