@@ -1,3 +1,11 @@
+## 0.0.8 (draft)
+
+A newer pi.
+
+- Pi 1.5.1: Claude Fable 5.2, prompt caches stay warm between runs ([#151])
+
+[#151]: https://forge.sebba.dev/izvir/dirigent/changes/151
+
 ## 0.0.7
 
 Hosts over ssh or the internet, a forge sign-in, and long commands that don't block.
