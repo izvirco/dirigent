@@ -210,9 +210,12 @@ impl Service {
                 anyhow::ensure!(path.is_dir(), "not a directory on this host: {}", path.display());
                 let origin = git::origin(&path);
                 let project_id = uuid::Uuid::now_v7().to_string();
+                // The one it already is, if that path is a project.
                 let project = self.storage.lock().unwrap().add_project(&project_id, &path.to_string_lossy(), origin.as_deref(), now())?;
-                info!(project = %project_id, path = %path.display(), "project added");
-                self.push_projects();
+                if project.id == project_id {
+                    info!(project = %project_id, path = %path.display(), "project added");
+                    self.push_projects();
+                }
                 ServerMessage::ProjectAdded { reply_to: id, project }
             }
             ClientMessage::ListDirs { id, path } => {

@@ -187,6 +187,7 @@ const dirigentParams = Type.Object({
       Type.Literal("list"),
       Type.Literal("search"),
       Type.Literal("projects"),
+      Type.Literal("add_project"),
       Type.Literal("archive"),
       Type.Literal("snooze"),
       Type.Literal("pin"),
@@ -203,6 +204,7 @@ const dirigentParams = Type.Object({
         "list: the latest top-level threads on every host. " +
         "search: threads on every host whose name or messages contain `query`. " +
         "projects: every host's projects. " +
+        "add_project: make the directory a project in dirigent. " +
         "archive / snooze / pin / abort / open (in the user's desktop): act on `thread_id`.",
     },
   ),
@@ -217,13 +219,15 @@ const dirigentParams = Type.Object({
   ),
   host: Type.Optional(
     Type.String({
-      description: 'new: a host name from `projects` (default "local", the host you run on).',
+      description:
+        'new / add_project: a host name from `projects` (default "local", the host you run on).',
     }),
   ),
   project: Type.Optional(
     Type.String({
       description:
-        "new: a project id or path on that host (default: your project; on another host, the one with the same git origin).",
+        "new: a project id or path on that host (default: your project; on another host, the one with the same git origin). " +
+        "add_project: the directory's path there, absolute or under `~/`.",
     }),
   ),
   report: Type.Optional(
@@ -329,9 +333,10 @@ export function createTools(host: ToolHost): ToolDefinition[] {
     name: "dirigent",
     label: "Dirigent",
     description:
-      "Work with dirigent threads when the user asks you to: spawn sub-agents, start a top-level thread (`new`), " +
-      "or find, read, message and manage other threads.",
-    promptSnippet: "Spawn sub-agents, start threads, or manage other threads, when the user asks",
+      "Work with dirigent threads and projects when the user asks you to: spawn sub-agents, start a top-level " +
+      "thread (`new`), find, read, message and manage other threads, or add a project.",
+    promptSnippet:
+      "Spawn sub-agents, start threads, manage other threads, or add projects, when the user asks",
     parameters: dirigentParams,
     async execute(_id, p) {
       const d = new Dirigent({ threadId: host.threadId, tools: host.tools });
@@ -439,6 +444,14 @@ export function createTools(host: ToolHost): ToolDefinition[] {
                         : "  (no projects)"),
                 )
                 .join("\n"),
+            );
+          }
+          case "add_project": {
+            const h = await d.host(p.host);
+            const project = await d.addProject(h, need(p.project, "project"));
+            return text(
+              `${project.path} is a project on ${h.name} (id=${project.id}): on the user's Projects page, ` +
+                "not pinned to their sidebar. `new` starts threads in it.",
             );
           }
           case "archive": {
