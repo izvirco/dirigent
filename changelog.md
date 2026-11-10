@@ -1,13 +1,15 @@
-## 0.0.8 (draft)
+## 0.0.8
 
 A newer pi, and your CLIProxyAPI accounts' limits.
 
-- Pi 1.5.1: Claude Fable 5.2, prompt caches stay warm between runs ([#151])
-- Usage › Proxy: the accounts behind your CLIProxyAPI and how much of their limits is used; set it up in Settings › Proxy ([#153])
-- Usage: a taller chart, with its window picked in the top corner on every tab ([#153])
-- Leaving the leaderboard is in Settings › Forge providers now ([#153])
+- Pi 1.5.1: Claude Fable 5.2, warmer prompt caches ([#151])
+- Extension providers show before a thread opens ([#152])
+- Usage › Proxy: your CLIProxyAPI accounts' limits, set up in Settings › Proxy ([#153])
+- Usage: a taller chart ([#153])
+- Leave the leaderboard in Settings › Forge providers ([#153])
 
 [#151]: https://forge.sebba.dev/izvir/dirigent/changes/151
+[#152]: https://forge.sebba.dev/izvir/dirigent/changes/152
 [#153]: https://forge.sebba.dev/izvir/dirigent/changes/153
 
 ## 0.0.7
