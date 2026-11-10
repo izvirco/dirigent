@@ -1,13 +1,14 @@
 //! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
 //! sections on the right. General, Thread titles and Agent tools are the UI over
 //! `config.toml` (`config.rs`); Hosts over `hosts.toml`, Providers over a host's pi
-//! credentials and Forge providers over the forge sign-in have their own flows
-//! (`hosts_tab.rs`, `providers.rs`, `account.rs`). Everything else saves
-//! as it is changed: the text fields (fonts, title prompt) 300ms after the last keystroke,
-//! with a warning mark on a font field whose family isn't installed; theme, text size,
-//! background, title model, reasoning, the agent tools and telemetry are chips, a stepper
-//! and switches that save at once. `Test` opens a sample first message, runs it through
-//! the title settings on the local host, and shows the title with what it cost.
+//! credentials, Proxy over a host's CLIProxyAPI and Forge providers over the forge sign-in
+//! have their own flows (`hosts_tab.rs`, `providers.rs`, `proxy.rs`, `account.rs`).
+//! Everything else saves as it is changed: the text fields (fonts, title prompt) 300ms
+//! after the last keystroke, with a warning mark on a font field whose family isn't
+//! installed; theme, text size, background, title model, reasoning, the agent tools and
+//! telemetry are chips, a stepper and switches that save at once. `Test` opens a sample
+//! first message, runs it through the title settings on the local host, and shows the title
+//! with what it cost.
 
 use crate::ambient::{Pattern, Reach};
 use crate::app::{Dirigent, Menu};
@@ -34,6 +35,8 @@ pub enum Tab {
     #[default]
     General,
     Providers,
+    /// A host's CLIProxyAPI (`proxy.rs`).
+    Proxy,
     Titles,
     Tools,
     Hosts,
@@ -42,12 +45,13 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [Tab::General, Tab::Providers, Tab::Titles, Tab::Tools, Tab::Hosts, Tab::Forge];
+    const ALL: [Tab; 7] = [Tab::General, Tab::Providers, Tab::Proxy, Tab::Titles, Tab::Tools, Tab::Hosts, Tab::Forge];
 
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
             Tab::Providers => "Providers",
+            Tab::Proxy => "Proxy",
             Tab::Titles => "Thread titles",
             Tab::Tools => "Agent tools",
             Tab::Hosts => "Hosts",
@@ -151,6 +155,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let sections = match open {
         Tab::General => vec![appearance(this, cx), telemetry(this, cx), saved_to(&config::path())],
         Tab::Providers => crate::providers::render(this, cx),
+        Tab::Proxy => crate::proxy::render(this, cx),
         Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
         Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
         Tab::Hosts => hosts_tab::render(this, cx),
@@ -190,7 +195,7 @@ pub fn saved_to(path: &Path) -> Div {
 }
 
 /// `label        control` on one line.
-fn row(label: &'static str, control: impl IntoElement) -> Div {
+pub fn row(label: &'static str, control: impl IntoElement) -> Div {
     div()
         .flex()
         .flex_row()

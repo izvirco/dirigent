@@ -308,6 +308,25 @@ pub enum ClientMessage {
         until: i64,
         bucket_ms: i64,
     },
+    /// This host's CLIProxyAPI (`Proxy`): its accounts, asked for anew when what the host
+    /// holds is more than a few seconds old, and their limits' history with
+    /// `since <= time < until`: the highest use per `bucket_ms`-wide slot (counted from
+    /// `since`). An empty window (`since == until`) asks for no history.
+    ListProxy {
+        id: u64,
+        since: i64,
+        until: i64,
+        bucket_ms: i64,
+    },
+    /// Point this host at its CLIProxyAPI's management API (Settings › Proxy): `url` is
+    /// the proxy's address, `key` its management key (empty: the one the host holds for that
+    /// address). An empty `url` forgets both. The host asks the proxy at once: the reply is
+    /// a `Proxy` with what it found (no history).
+    SetProxy {
+        id: u64,
+        url: String,
+        key: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -395,6 +414,11 @@ pub enum ServerMessage {
     Usage {
         reply_to: u64,
         buckets: Vec<UsageBucket>,
+    },
+    /// Reply to `ListProxy` and `SetProxy`.
+    Proxy {
+        reply_to: u64,
+        proxy: Proxy,
     },
     /// Reply to `VcsStatus`: `vcs` is `None` for a directory under neither git nor jj (or
     /// one that doesn't exist); `dirty` means uncommitted changes (for jj: `@` is not
@@ -644,6 +668,86 @@ pub struct UsageBucket {
     pub cost: f64,
     /// Assistant messages summed into this bucket.
     pub messages: u64,
+}
+
+/// A host's CLIProxyAPI as its service last saw it (`ServerMessage::Proxy`): the accounts
+/// behind the proxy and how much of each one's limits is used. The management key never
+/// comes back.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Proxy {
+    /// The proxy's address; empty: the host has none set.
+    pub url: String,
+    /// Why the host's last look at the proxy failed. The accounts are then as of the last
+    /// one that worked.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub accounts: Vec<ProxyAccount>,
+    /// The limits' history for the window asked for, oldest slot first.
+    #[serde(default)]
+    pub samples: Vec<ProxySample>,
+}
+
+/// An account (a credential) behind a CLIProxyAPI.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProxyAccount {
+    /// The proxy's id for it (its credential file's name): what `ProxySample::account` names.
+    pub id: String,
+    /// `claude`, `codex`, ...
+    pub provider: String,
+    /// Its email, or the credential's label.
+    pub name: String,
+    /// Switched off in the proxy.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Its sign-in ran out: it has to sign in again on the proxy.
+    #[serde(default)]
+    pub sign_in: bool,
+    /// What the proxy says is wrong with it, while it is failing. Being out of quota is no
+    /// failure: the `limits` say that.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Its limits as the provider last reported them. Empty until the proxy has sent a
+    /// request through the account (it keeps them in memory only), and for providers
+    /// whose limits the host can't read (it reads Anthropic's and Codex's).
+    #[serde(default)]
+    pub limits: Vec<ProxyLimit>,
+}
+
+/// One of an account's rate limits, as of the last reply the provider gave the proxy.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProxyLimit {
+    /// What it is called. Anthropic's own names: `5h`, `7d`, and `7d_oi`, the part of the
+    /// week's limit its top model may use. Codex's are named the same way, by how long
+    /// their window is: `5h` and `7d`.
+    pub name: String,
+    /// The share used: 0 to 1, a little over when the provider let the last request through.
+    pub used: f64,
+    /// When it starts over (unix ms).
+    #[serde(default)]
+    pub resets_at: Option<i64>,
+}
+
+impl ProxyLimit {
+    /// The share used as of `now`: nothing once the limit has started over. The proxy only
+    /// hears of a limit when the account answers a request, so a `used` from before the
+    /// reset means the account has done nothing since.
+    pub fn used_at(&self, now: i64) -> f64 {
+        if self.resets_at.is_some_and(|at| at <= now) { 0. } else { self.used }
+    }
+}
+
+/// A limit's use in one time slot (see `ClientMessage::ListProxy`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProxySample {
+    /// Unix millis the slot starts at: `since + n * bucket_ms`.
+    pub start: i64,
+    /// A `ProxyAccount::id`.
+    pub account: String,
+    /// A `ProxyLimit::name`.
+    pub limit: String,
+    /// The highest share used the host saw in the slot.
+    pub used: f64,
 }
 
 /// A thread's first prompt, sent along with `CreateThread`: the fields of a `Prompt`.
@@ -996,6 +1100,8 @@ mod tests {
         roundtrip(ClientMessage::Logout { id: 30, provider: "anthropic".into() });
         roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
         roundtrip(ClientMessage::ListUsage { id: 11, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
+        roundtrip(ClientMessage::ListProxy { id: 31, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
+        roundtrip(ClientMessage::SetProxy { id: 32, url: "http://127.0.0.1:8317".into(), key: "k".into() });
         assert_eq!(
             serde_json::to_value(ClientMessage::Prompt {
                 id: 4,
@@ -1186,6 +1292,27 @@ mod tests {
                 messages: 1,
             }],
         });
+        let limit = ProxyLimit { name: "7d_oi".into(), used: 0.42, resets_at: Some(2000) };
+        // Used up to its reset, started over from then on.
+        assert_eq!((limit.used_at(1999), limit.used_at(2000)), (0.42, 0.));
+        roundtrip(ServerMessage::Proxy {
+            reply_to: 7,
+            proxy: Proxy {
+                url: "http://127.0.0.1:8317".into(),
+                error: None,
+                accounts: vec![ProxyAccount {
+                    id: "a.json".into(),
+                    provider: "claude".into(),
+                    name: "a@example.com".into(),
+                    error: Some("token expired".into()),
+                    limits: vec![limit],
+                    ..ProxyAccount::default()
+                }],
+                samples: vec![ProxySample { start: 0, account: "a.json".into(), limit: "7d_oi".into(), used: 0.42 }],
+            },
+        });
+        // A host that has none answers with the url alone.
+        assert_eq!(serde_json::from_value::<Proxy>(json!({"url": ""})).unwrap(), Proxy::default());
     }
 
     #[test]

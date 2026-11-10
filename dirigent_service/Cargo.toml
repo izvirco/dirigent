@@ -26,6 +26,8 @@ getrandom = "0.4"
 # `logging.rs`: the log setup both binaries share.
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `proxy.rs`: the CLIProxyAPI management API.
+ureq.workspace = true
 
 # `server.rs`: `TCP_NOTSENT_LOWAT` on connections; `tunnel.rs`: `PR_SET_PDEATHSIG`.
 [target.'cfg(target_os = "linux")'.dependencies]

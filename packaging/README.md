@@ -160,6 +160,9 @@ until Dirigent is revoked on the forge's account page or it goes 90 days unused 
 refresh the forge refuses signs the data dir out, said in Settings › Forge providers and in `whoami`, until someone
 signs in again. `forge.json` is a credential: a copy acts as that account wherever it is, so have each machine sign
 in itself.
+
+A host's CLIProxyAPI (Settings › Proxy) is in `<data dir>/proxy.json` (owner-only): its address and management key.
+That is a credential too: the proxy's management API hands out the tokens of every account behind it.
 `DIRIGENT_FORGE_URL` and `DIRIGENT_FORGE_CLIENT_ID` point an instance at another forge or app (tests).
 
 ## Updates

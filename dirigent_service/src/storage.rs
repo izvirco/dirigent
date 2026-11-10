@@ -7,7 +7,9 @@
 //! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
 //! full-text index of every message's text (derived like `usage`, backfilled once), for
 //! `SearchThreads`. `meta` holds the service's own settings, like its id (`service_id`).
-//! `api_keys` holds the public listener's API keys, as hashes (`auth.rs`).
+//! `api_keys` holds the public listener's API keys, as hashes (`auth.rs`). `proxy_samples`
+//! is the history of the CLIProxyAPI accounts' limits (`proxy.rs`), a row per account and
+//! limit for every five minutes the service looked (the proxy's key is not in here).
 //!
 //! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
 //! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open. Nothing
@@ -15,7 +17,9 @@
 //! `workflow_steps` tables and `threads.run_id`, unused and harmless.
 
 use anyhow::{Context, Result};
-use dirigent_protocol::{Ask, Entry, ForkedFrom, Notify, Project, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title};
+use dirigent_protocol::{
+    Ask, Entry, ForkedFrom, Notify, Project, ProxySample, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -86,6 +90,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
     hash TEXT NOT NULL UNIQUE,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS proxy_samples (
+    at INTEGER NOT NULL,
+    account TEXT NOT NULL,
+    name TEXT NOT NULL,
+    used REAL NOT NULL,
+    PRIMARY KEY (at, account, name)
+) WITHOUT ROWID;
 ";
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
@@ -797,6 +808,33 @@ impl Storage {
         Ok(self.conn.query_row("SELECT value FROM meta WHERE key = 'service_id'", [], |r| r.get(0))?)
     }
 
+    /// Keep what the proxy's limits stood at (`(account, limit, used)`) for the slot `at`
+    /// starts: a later look in the same slot replaces it. Slots from before `keep_from`
+    /// are dropped.
+    pub fn add_proxy_samples(&self, at: i64, samples: &[(&str, &str, f64)], keep_from: i64) -> Result<()> {
+        let mut add = self.conn.prepare_cached("INSERT OR REPLACE INTO proxy_samples (at, account, name, used) VALUES (?1, ?2, ?3, ?4)")?;
+        for (account, name, used) in samples {
+            add.execute(params![at, account, name, used])?;
+        }
+        self.conn.execute("DELETE FROM proxy_samples WHERE at < ?1", [keep_from])?;
+        Ok(())
+    }
+
+    /// The limits' history in `since..until`: the highest use per `bucket`-wide slot from
+    /// `since`, account and limit, oldest slot first.
+    pub fn proxy_samples(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<ProxySample>> {
+        anyhow::ensure!(bucket > 0, "bucket must be positive");
+        let mut stmt = self.conn.prepare(
+            "SELECT ?1 + ((at - ?1) / ?3) * ?3 AS start, account, name, MAX(used)
+             FROM proxy_samples WHERE at >= ?1 AND at < ?2
+             GROUP BY start, account, name ORDER BY start",
+        )?;
+        let rows = stmt.query_map(params![since, until, bucket], |r| {
+            Ok(ProxySample { start: r.get(0)?, account: r.get(1)?, limit: r.get(2)?, used: r.get(3)? })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Usage in `since..until`, summed per `bucket`-wide slot from `since` and per
     /// provider + model, oldest slot first.
     pub fn usage(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<UsageBucket>> {
@@ -1104,6 +1142,22 @@ mod tests {
         let id = s.service_id().unwrap();
         assert_eq!(id.len(), 32);
         assert_eq!(s.service_id().unwrap(), id);
+    }
+
+    #[test]
+    fn proxy_samples_keep_the_slots_peak() {
+        let s = Storage::in_memory().unwrap();
+        s.add_proxy_samples(100, &[("a", "5h", 0.2), ("a", "7d", 0.1)], 0).unwrap();
+        // A second look in the same slot replaces the first.
+        s.add_proxy_samples(100, &[("a", "5h", 0.3)], 0).unwrap();
+        s.add_proxy_samples(200, &[("a", "5h", 0.9)], 0).unwrap();
+        s.add_proxy_samples(1100, &[("a", "5h", 0.)], 0).unwrap();
+        let got = s.proxy_samples(0, 2000, 1000).unwrap();
+        let row = |start: i64, limit: &str, used: f64| ProxySample { start, account: "a".into(), limit: limit.into(), used };
+        assert_eq!(got, [row(0, "5h", 0.9), row(0, "7d", 0.1), row(1000, "5h", 0.)]);
+        // Old slots go as new ones come.
+        s.add_proxy_samples(1200, &[("a", "5h", 0.5)], 1000).unwrap();
+        assert_eq!(s.proxy_samples(0, 2000, 1000).unwrap(), [row(1000, "5h", 0.5)]);
     }
 
     #[test]
