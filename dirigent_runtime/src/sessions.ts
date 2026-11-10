@@ -22,6 +22,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  createAgentSessionServices,
   DefaultResourceLoader,
   type FileEntry,
   getAgentDir,
@@ -141,7 +142,7 @@ interface Live extends ToolHost {
 export class Sessions {
   private live = new Map<string, Live>();
   // Shared across sessions; also answers `list_models` and signs in (`Logins`).
-  readonly modelRuntime = ModelRuntime.create();
+  readonly modelRuntime = withExtensionProviders(ModelRuntime.create());
 
   constructor(private send: (msg: Outbound) => void) {}
 
@@ -635,4 +636,25 @@ async function captureNixEnv(
     });
     return undefined;
   }
+}
+
+/**
+ * `rt` with the global extensions' providers (cliproxyapi…) registered. Pi registers them
+ * when it loads extensions, which it otherwise does only per session: without this, models
+ * and Settings › Providers would lack them until a thread opened. Each session loads its
+ * own extensions again and re-registers over these. A failing extension only costs its
+ * provider (stderr), never the runtime.
+ */
+async function withExtensionProviders(rt: Promise<ModelRuntime>): Promise<ModelRuntime> {
+  const modelRuntime = await rt;
+  try {
+    const { diagnostics } = await createAgentSessionServices({
+      cwd: getAgentDir(),
+      modelRuntime,
+    });
+    for (const d of diagnostics) if (d.type === "error") console.error(d.message);
+  } catch (e) {
+    console.error("loading extension providers failed:", e);
+  }
+  return modelRuntime;
 }
