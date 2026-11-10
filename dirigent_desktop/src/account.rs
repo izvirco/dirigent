@@ -8,7 +8,8 @@
 //!
 //! The tab lists the one forge there is (Vir's, or `DIRIGENT_FORGE_URL`): who is signed in
 //! (picture and username), Sign in (in the browser, with Cancel while it waits) or Sign
-//! out, and the forge having ended the sign-in (`forge::ENDED`).
+//! out, and the forge having ended the sign-in (`forge::ENDED`). Under it, while the
+//! account is on the leaderboard, the way off it (joining is on the board itself).
 
 use crate::app::Dirigent;
 use crate::settings::{self, saved_to, section};
@@ -129,8 +130,54 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
         .hover(|d| d.underline())
         .on_click(move |_, _, cx| cx.open_url(&page))
         .child("Open the forge account page");
-    let body = div().flex().flex_col().child(row(this, cx)).children(ended).child(div().flex().flex_row().pt_3().child(link));
+    let body = div()
+        .flex()
+        .flex_col()
+        .child(row(this, cx))
+        .children(ended)
+        .children(board_row(this, cx))
+        .child(div().flex().flex_row().pt_3().child(link));
     vec![section("Forge providers", body), saved_to(&forge::path())]
+}
+
+/// `  Leaderboard  on the board as seb        [Leave and delete my usage]`, while the
+/// signed-in account is on the leaderboard: off the board, usage and all, on every desktop.
+/// Under the forge's row, past its dot.
+fn board_row(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
+    let t = theme::t();
+    let player = this.leaderboard.active(&this.forge.status)?;
+    let leave = settings::text_button("board-leave", "Leave and delete my usage")
+        .text_color(rgba(t.error))
+        .on_click(cx.listener(|this, _, _, cx| this.leave_board(cx)));
+    Some(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            .h(u(38.))
+            .px_2()
+            .child(theme::dot(theme::alpha(t.fg_2, 0x00)))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_shrink_0().font_weight(FontWeight::MEDIUM).child("Leaderboard"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(text::sm())
+                            .text_color(rgba(t.fg_2))
+                            .child(SharedString::from(format!("on the board as {}", player.name))),
+                    ),
+            )
+            .child(leave),
+    )
 }
 
 /// `● Vir forge  forge.sebba.dev        (picture) seb  [Sign out]`, or Sign in, or the

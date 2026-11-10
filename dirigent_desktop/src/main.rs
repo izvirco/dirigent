@@ -28,6 +28,7 @@ mod picker;
 mod placement;
 mod projects;
 mod providers;
+mod proxy;
 mod ruler;
 mod select;
 mod settings;

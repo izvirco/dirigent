@@ -11,6 +11,7 @@ use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
 use crate::providers;
+use crate::proxy;
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
@@ -490,8 +491,6 @@ pub enum Menu {
     UsageGroup,
     /// Usage modal: what the chart shows (cost, tokens, ...).
     UsageMetric,
-    /// Usage modal's Leaderboard tab: the joined account's menu (leave).
-    BoardAccount,
     /// Settings modal: theme, background pattern, title model, title reasoning level, the
     /// host whose providers show.
     Theme,
@@ -656,6 +655,8 @@ pub struct Dirigent {
     pub settings: settings::State,
     /// Settings › Providers: a host's providers, and a login in progress.
     pub providers: providers::State,
+    /// Settings › Proxy: the same host's CLIProxyAPI, its address and management key.
+    pub proxy: proxy::State,
     /// Threads whose title is being generated (since their first prompt, or a `Regenerate
     /// title`), with when it started.
     titling: HashMap<(String, String), Instant>,
@@ -791,6 +792,7 @@ impl Dirigent {
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
         let providers = providers::State::new(cx);
+        let proxy = proxy::State::new(cx);
         let (fonts, missing) = config.fonts.resolve(cx);
         settings.missing_fonts = missing.clone();
         theme::set_text_size(config.fonts.size());
@@ -849,6 +851,7 @@ impl Dirigent {
             config_edit: 0,
             settings,
             providers,
+            proxy,
             titling: HashMap::new(),
             retitles: HashMap::new(),
             attachments: vec![],
@@ -1274,7 +1277,7 @@ impl Dirigent {
                 if status == HostStatus::Connected && self.modal == Some(Modal::Usage) {
                     self.request_usage(cx);
                 }
-                self.providers_status(&host, status);
+                self.providers_status(&host, status, cx);
                 // The connection dropped under a sent draft: its request may never have
                 // arrived (a host that got it still runs the thread), so the draft comes back.
                 if status == HostStatus::Disconnected
@@ -1469,6 +1472,13 @@ impl Dirigent {
                     self.usage.buckets.insert(host, buckets);
                 }
             }
+            ServerMessage::Proxy { reply_to, proxy } => {
+                if self.usage.proxy_request == Some(reply_to) {
+                    self.usage.proxies.insert(host, proxy);
+                } else {
+                    self.on_proxy_settings(reply_to, Ok(proxy), cx);
+                }
+            }
             ServerMessage::Title { reply_to, title, model, input, output, cost, duration_ms } => {
                 if self.settings.test_request.take_if(|(id, _)| *id == reply_to).is_some() {
                     self.settings.test_result = Some(Ok(settings::TitleResult { title, model, input, output, cost, duration_ms }));
@@ -1549,8 +1559,16 @@ impl Dirigent {
                 }
                 // Settings › Providers shows its own failures.
                 if let Some(id) = reply_to
-                    && self.on_providers_reply(&host, id, Err(message.clone()), cx)
+                    && (self.on_providers_reply(&host, id, Err(message.clone()), cx)
+                        || self.on_proxy_settings(id, Err(message.clone()), cx))
                 {
+                    return;
+                }
+                // A host that can't say what its proxy is (a service from before `ListProxy`)
+                // has none, as far as the Usage modal goes.
+                if reply_to.is_some() && reply_to == self.usage.proxy_request {
+                    tracing::info!(%host, "no proxy: {message}");
+                    self.usage.proxies.insert(host, dirigent_protocol::Proxy::default());
                     return;
                 }
                 // A failed retitle keeps the name it had (and says why, below).
@@ -1987,6 +2005,8 @@ impl Dirigent {
                         match this.usage.tab {
                             usage::Tab::Mine if this.usage.at_now() => this.request_usage(cx),
                             usage::Tab::Board => this.fetch_board(cx),
+                            // The accounts are as of now, whatever the window.
+                            usage::Tab::Proxy => this.request_proxy(cx),
                             _ => {}
                         }
                     }
@@ -2397,8 +2417,9 @@ impl Dirigent {
     }
 
     /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
-    /// form, if open; the others take focus off the inputs, so keys don't type under the modal
-    /// (Forge providers also loads the account's picture).
+    /// form, if open; Providers and Proxy ask their host and focus a field of theirs; the
+    /// others take focus off the inputs, so keys don't type under the modal (Forge providers
+    /// also loads the account's picture).
     pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
         self.settings.tab = tab;
         if tab == settings::Tab::Hosts {
@@ -2409,6 +2430,8 @@ impl Dirigent {
             }
         } else if tab == settings::Tab::Providers {
             self.enter_providers(cx);
+        } else if tab == settings::Tab::Proxy {
+            self.enter_proxy_settings(cx);
         } else {
             if tab == settings::Tab::Forge {
                 self.fetch_forge_picture(cx);
@@ -3245,7 +3268,7 @@ impl Dirigent {
 
     /// Ask every host for the window shown. Replies to older requests are ignored. The
     /// buckets already shown stay up until each host's reply replaces them, so a refresh
-    /// of unchanged data is invisible.
+    /// of unchanged data is invisible. The Proxy tab's data is for the same window.
     fn request_usage(&mut self, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.usage.request = Some(id);
@@ -3253,6 +3276,32 @@ impl Dirigent {
         for h in &self.hosts {
             self.net.send(&h.name, ClientMessage::ListUsage { id, since, until, bucket_ms });
         }
+        if self.usage.tab == usage::Tab::Proxy {
+            self.request_proxy(cx);
+        }
+        cx.notify();
+    }
+
+    /// Ask every host for its proxy: the accounts now and their limits over the window
+    /// shown. As with `request_usage`, what is shown stays up until the replies replace it.
+    fn request_proxy(&mut self, cx: &mut Context<Self>) {
+        let id = self.next_id();
+        self.usage.proxy_request = Some(id);
+        // No answer comes from a host that is offline or gone, and its last one is no
+        // longer how its accounts are now.
+        let hosts = &self.hosts;
+        self.usage.proxies.retain(|name, _| hosts.iter().any(|h| h.name == *name && h.status == HostStatus::Connected));
+        let (since, until, bucket_ms) = (self.usage.since, self.usage.until, self.usage.bucket());
+        for h in &self.hosts {
+            self.net.send(&h.name, ClientMessage::ListProxy { id, since, until, bucket_ms });
+        }
+        cx.notify();
+    }
+
+    /// The limit the Proxy tab's chart draws.
+    pub fn set_usage_limit(&mut self, limit: String, cx: &mut Context<Self>) {
+        self.usage.limit = limit;
+        self.usage.hover = None;
         cx.notify();
     }
 
@@ -3302,13 +3351,16 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Your usage or the leaderboard; the board is fetched as it shows.
+    /// Your usage, the leaderboard or the proxy; the board and the proxy are fetched as
+    /// they show.
     pub fn set_usage_tab(&mut self, tab: usage::Tab, cx: &mut Context<Self>) {
         self.usage.tab = tab;
         self.usage.hover = None;
         self.menu = None;
-        if tab == usage::Tab::Board {
-            self.fetch_board(cx);
+        match tab {
+            usage::Tab::Board => self.fetch_board(cx),
+            usage::Tab::Proxy => self.request_proxy(cx),
+            usage::Tab::Mine => {}
         }
         cx.notify();
     }

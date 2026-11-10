@@ -6,6 +6,8 @@
 //! from a list. Credentials are saved on the host, in pi's `auth.json` (which the terminal
 //! pi shares), and the host's model list is fetched again once a login or logout is done.
 //! Closing the modal cancels a login; so does the host's connection dropping.
+//!
+//! Settings › Proxy (`proxy.rs`) is about the same host: it shares `State::host` and the chip.
 
 use crate::app::{Dirigent, Menu};
 use crate::input::TextInput;
@@ -116,6 +118,7 @@ impl Dirigent {
             self.providers.host = host;
             self.providers.list = None;
             self.request_providers();
+            self.request_proxy_settings(cx);
         }
         cx.notify();
     }
@@ -283,7 +286,7 @@ impl Dirigent {
     }
 
     /// A host connected or dropped. A login dies with its connection (the host cancels it).
-    pub(crate) fn providers_status(&mut self, host: &str, status: HostStatus) {
+    pub(crate) fn providers_status(&mut self, host: &str, status: HostStatus, cx: &mut Context<Self>) {
         if status == HostStatus::Disconnected {
             if let Some(l) = self.providers.login.as_mut().filter(|l| l.host == host && l.error.is_none()) {
                 l.error = Some("The connection to the host dropped".into());
@@ -295,6 +298,14 @@ impl Dirigent {
         }
         if status == HostStatus::Connected && host == self.providers.host && self.providers_open() {
             self.request_providers();
+        }
+        // Settings › Proxy shows the same host: asked again, or no longer waiting on a
+        // connection that dropped.
+        if host == self.providers.host
+            && self.modal == Some(crate::app::Modal::Settings)
+            && self.settings.tab == crate::settings::Tab::Proxy
+        {
+            self.request_proxy_settings(cx);
         }
     }
 
@@ -373,8 +384,8 @@ pub fn body(this: &Dirigent, intro: bool, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_col().gap_3().children(header).child(body)
 }
 
-/// `Host  local ▾`: whose providers show.
-fn host_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
+/// `Host  local ▾`: whose providers show (and whose proxy, in Settings › Proxy).
+pub(crate) fn host_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.menu == Some(Menu::ProvidersHost);
     let menu = open.then(|| {
         let items = this

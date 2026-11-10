@@ -14,6 +14,7 @@ mod git;
 pub mod hosts;
 mod logging;
 pub mod platform;
+mod proxy;
 mod runtime;
 mod server;
 mod storage;
@@ -65,6 +66,8 @@ pub struct Service {
     starting: Mutex<HashMap<String, Option<Setup>>>,
     /// Logins (`ClientMessage::Login`), by the connection and request id that started them.
     logins: Mutex<Logins>,
+    /// This host's CLIProxyAPI as last seen (`proxy.rs`).
+    proxy: proxy::Poller,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
@@ -184,7 +187,9 @@ impl Service {
             | ClientMessage::ListHosts { id }
             | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
-            | ClientMessage::ListUsage { id, .. } => *id,
+            | ClientMessage::ListUsage { id, .. }
+            | ClientMessage::ListProxy { id, .. }
+            | ClientMessage::SetProxy { id, .. } => *id,
         };
         match self.try_handle(req, conn).await {
             Ok(reply) => reply,
@@ -446,6 +451,15 @@ impl Service {
             }
             ClientMessage::ListUsage { id, since, until, bucket_ms } => {
                 ServerMessage::Usage { reply_to: id, buckets: self.storage.lock().unwrap().usage(since, until, bucket_ms)? }
+            }
+            ClientMessage::ListProxy { id, since, until, bucket_ms } => {
+                self.poll_proxy(proxy::FRESH_MS).await;
+                let samples = if until > since { self.storage.lock().unwrap().proxy_samples(since, until, bucket_ms)? } else { vec![] };
+                ServerMessage::Proxy { reply_to: id, proxy: self.proxy(samples) }
+            }
+            ClientMessage::SetProxy { id, url, key } => {
+                self.set_proxy(&url, &key).await?;
+                ServerMessage::Proxy { reply_to: id, proxy: self.proxy(vec![]) }
             }
             ClientMessage::Abort { id, thread_id } => {
                 info!(thread = %thread_id, "abort");
@@ -1073,6 +1087,7 @@ pub async fn run(port: u16) -> Result<()> {
         missing: Mutex::new(Default::default()),
         starting: Mutex::new(Default::default()),
         logins: Mutex::new(Default::default()),
+        proxy: Default::default(),
         push: broadcast::channel(1024).0,
         host_name,
         service_id,
@@ -1101,6 +1116,16 @@ pub async fn run(port: u16) -> Result<()> {
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    });
+    // The proxy's limits, sampled for their history (a host without a proxy has nothing to ask).
+    tokio::spawn({
+        let svc = svc.clone();
+        async move {
+            loop {
+                svc.poll_proxy(0).await;
+                tokio::time::sleep(Duration::from_millis(proxy::SAMPLE_MS as u64)).await;
             }
         }
     });

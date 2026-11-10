@@ -2,8 +2,9 @@
 //! service's usage, and fetching the board the Usage modal's Leaderboard tab shows
 //! (`usage.rs`). The api is `dirigent_api`'s `leaderboard.rs`.
 //!
-//! Joining: signed in to the forge (`account.rs`; Join takes you to Settings › Forge
-//! providers first if need be), the desktop asks the api to `join` with a forge JWT made
+//! Joining (on the board; leaving is in Settings › Forge providers): signed in to the forge
+//! (`account.rs`; Join takes you to Settings › Forge providers first if need be), the
+//! desktop asks the api to `join` with a forge JWT made
 //! for the api's url, and keeps the `Account` it answers with in `kv`: the data dir, so a
 //! test instance (`--data-dir`) starts out of it. Uploads and leaving send a fresh JWT each
 //! time (`forge::token`, cached for its ten minutes). The account counts while the forge
@@ -186,6 +187,8 @@ impl Dirigent {
                 _ => {
                     this.forget_player();
                     this.fetch_board(cx);
+                    // Said out loud: in Settings, its row just goes.
+                    this.toast("You're off the leaderboard, and your usage there is deleted", cx);
                 }
             },
         );
