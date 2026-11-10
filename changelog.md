@@ -1,3 +1,9 @@
+## 0.0.10 (draft)
+
+- Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
+
+[#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
+
 ## 0.0.9
 
 The CLIProxyAPI provider extension works on installs.
