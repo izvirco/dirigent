@@ -213,6 +213,19 @@ impl OpenThread {
         }
     }
 
+    /// Start the list over on a timeline that was rebuilt (a snapshot, an edit's view going
+    /// up or coming down), every item to be measured again. A list following its end goes
+    /// on doing so; one scrolled up stays at the item it was at, where a bare `reset`, which
+    /// forgets the position, would leave it at the top. A rebuilt timeline has the same
+    /// items up to where its entries differ, so the index holds; past its end is the end.
+    fn relist(&mut self) {
+        let top = (!self.list.is_following_tail()).then(|| self.list.logical_scroll_top());
+        self.list.reset(self.timeline.items.len() + 1);
+        if let Some(top) = top {
+            self.list.scroll_to(top);
+        }
+    }
+
     /// Timeline item `ix` is a pinned message.
     pub fn is_pinned(&self, ix: usize) -> bool {
         self.timeline.entry_id(ix).is_some_and(|id| self.pins.contains(id))
@@ -1450,7 +1463,9 @@ impl Dirigent {
                     for e in fresh {
                         t.fold(e);
                     }
-                    t.list.reset(t.timeline.items.len() + 1);
+                    // The reply can be a while behind the cached entries on show: the user may
+                    // have scrolled up in them already, and stays there.
+                    t.relist();
                     self.end_stale_edit(cx);
                     let Pane::Thread(t) = &mut self.pane else { return };
                     // A fork's source opens at the message it was forked at.
@@ -4240,9 +4255,9 @@ impl Dirigent {
             Timeline::from_entries(branch.into_iter().take_while(|x| x.id != e.entry_id).map(|x| &x.json))
         };
         t.timeline = timeline;
-        t.list.reset(t.timeline.items.len() + 1);
+        t.relist();
         // The edit is the newest message now: show it and the run it starts, even if the
-        // transcript was scrolled up to reach its bubble (a reset alone lands at the top).
+        // transcript was scrolled up to reach its bubble (where `relist` alone keeps it).
         t.list.set_follow_mode(FollowMode::Tail);
         t.rewound = Some(Rewound { request: id, entry_id: e.entry_id.clone(), text: text.clone(), images: images.clone() });
         let (host, thread_id) = (t.host.clone(), t.id.clone());
@@ -4278,7 +4293,7 @@ impl Dirigent {
         let Some(r) = t.rewound.take() else { return };
         t.timeline = timeline_of(&t.entries);
         t.streaming.echo.retain(|(text, mode)| !(*mode == PromptMode::Prompt && *text == r.text));
-        t.list.reset(t.timeline.items.len() + 1);
+        t.relist();
         t.editing = Some(Editing { entry_id: r.entry_id, stash, images: stash_images });
         self.attachments = r.images;
         self.set_composer(input::Content { selection: r.text.len()..r.text.len(), text: r.text, reversed: false }, cx);
@@ -4775,6 +4790,19 @@ mod tests {
         entries.iter().map(|e| e.seq).collect()
     }
 
+    /// A pi `message` entry.
+    fn pi(seq: u64, id: &str, parent: Option<&str>, message: serde_json::Value) -> Entry {
+        Entry::from_pi(seq, serde_json::json!({"type":"message","id":id,"parentId":parent,"message":message}))
+    }
+
+    fn user(seq: u64, id: &str, parent: Option<&str>, text: &str) -> Entry {
+        pi(seq, id, parent, serde_json::json!({"role":"user","content":text}))
+    }
+
+    fn reply(seq: u64, id: &str, parent: Option<&str>, text: &str) -> Entry {
+        pi(seq, id, parent, serde_json::json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":text}]}))
+    }
+
     #[test]
     fn snapshot_merges_with_pushes_either_way() {
         let range = |a: u64, b: u64| (a..b).map(entry).collect::<Vec<_>>();
@@ -4797,13 +4825,6 @@ mod tests {
     /// entries still on the old branch stay out of view.
     #[test]
     fn edits_branch_the_timeline() {
-        let pi = |seq, id: &str, parent: Option<&str>, message: serde_json::Value| {
-            Entry::from_pi(seq, serde_json::json!({"type":"message","id":id,"parentId":parent,"message":message}))
-        };
-        let user = |seq, id, parent, text: &str| pi(seq, id, parent, serde_json::json!({"role":"user","content":text}));
-        let reply = |seq, id, parent, text: &str| {
-            pi(seq, id, parent, serde_json::json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":text}]}))
-        };
         let mut t = OpenThread::new("h", "t", vec![]);
         let texts = |t: &OpenThread| {
             t.timeline
@@ -4836,5 +4857,37 @@ mod tests {
         t.fold(user(5, "u3", None, "yo"));
         assert!(t.rewound.is_none());
         assert_eq!(texts(&t), ["yo"]);
+    }
+
+    /// A rebuilt timeline (the host's snapshot landing on the cached entries) leaves the
+    /// transcript where it was: at its end, or at the item the user scrolled up to.
+    #[test]
+    fn relisting_keeps_the_scroll_position() {
+        let entries = vec![
+            user(0, "u1", None, "hi"),
+            reply(1, "r1", Some("u1"), "hello"),
+            user(2, "u2", Some("r1"), "and?"),
+            reply(3, "r2", Some("u2"), "that's all"),
+        ];
+        let mut t = OpenThread::new("h", "t", entries[..2].to_vec());
+        let top = |t: &OpenThread| {
+            let top = t.list.logical_scroll_top();
+            (top.item_ix, top.offset_in_item)
+        };
+        // Opened at its end, it follows it.
+        t.relist();
+        assert!(t.list.is_following_tail());
+        // Scrolled up into the reply, then the snapshot brings the next turn.
+        t.list.scroll_to(ListOffset { item_ix: 1, offset_in_item: px(12.) });
+        t.timeline = timeline_of(&entries);
+        t.relist();
+        assert_eq!(t.list.item_count(), 5);
+        assert!(!t.list.is_following_tail());
+        assert_eq!(top(&t), (1, px(12.)));
+        // The item it was at is gone (a cache ahead of its host): the end it is.
+        t.list.scroll_to(ListOffset { item_ix: 3, offset_in_item: px(12.) });
+        t.timeline = timeline_of(&entries[..1]);
+        t.relist();
+        assert_eq!(top(&t), (2, px(0.)));
     }
 }
