@@ -10,6 +10,7 @@ dirigent_desktop.exe         the app, with Lilex, the icon and version info buil
 dirigent.exe                 the command line (below), put on the user's PATH (a ticked installer task, applied again on each update; uninstalling takes it off)
 runtime\dirigent_runtime.exe the bun runtime compiled to one exe (dirigent_runtime/build.ts), no bun needed
 runtime\package.json, docs\, …   what a compiled pi reads next to its exe
+runtime\node_modules\        pi-ai's codex module as source: the CLIProxyAPI provider extension patches it (build.ts)
 licenses\Lilex-OFL.txt
 ```
 

@@ -1,3 +1,11 @@
+## 0.0.9 (draft)
+
+The CLIProxyAPI provider extension works on installs.
+
+- Fixed: models behind the CLIProxyAPI provider extension failed with "Codex protocol stream is unavailable" on installs ([#156])
+
+[#156]: https://forge.sebba.dev/izvir/dirigent/changes/156
+
 ## 0.0.8
 
 A newer pi, and your CLIProxyAPI accounts' limits.
