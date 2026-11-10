@@ -1,8 +1,8 @@
 //! The model picker popup, two pages behind the composer's model chip:
 //!
 //! - `Menu::Model`: the current combo (if unsaved) and the saved presets, each a
-//!   `<name> <provider/id> <effort>` row with a hover-revealed ✕. The header saves the
-//!   current combo or links to the second page.
+//!   `<name> <provider/id> <effort>` row with a hover-revealed ✕, grouped by model
+//!   (`ordered`). The header saves the current combo or links to the second page.
 //! - `Menu::AllModels`: back button, search input, and every model the host offers.
 //!
 //! A host that offers no models has no provider set up: both pages then lead to
@@ -54,7 +54,7 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     {
         rows.push(preset_row("p/current", c, true, None, this, cx));
     }
-    for (i, p) in this.presets.iter().enumerate() {
+    for (i, p) in ordered(&this.presets, this.models()) {
         let selected = current.as_ref() == Some(p);
         rows.push(preset_row(format!("p/{i}"), p, selected, Some(i), this, cx));
     }
@@ -62,6 +62,24 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
         rows.push(menu::header("No presets yet. Pick a model, then save the combo."));
     }
     rows
+}
+
+/// The saved presets in the order they are listed, each with its index in `presets` (what
+/// its ✕ removes): by model name, then `provider/id`, then effort in the model's own level
+/// order (by name for a model the host doesn't offer).
+fn ordered<'a>(presets: &'a [Preset], models: &[ModelInfo]) -> Vec<(usize, &'a Preset)> {
+    let mut rows: Vec<_> = presets.iter().enumerate().collect();
+    rows.sort_by_cached_key(|(_, p)| {
+        let levels = models.iter().find(|m| m.key() == p.model).map(|m| m.thinking_levels.as_slice()).unwrap_or(&[]);
+        let level = levels.iter().position(|l| Some(l) == p.effort.as_ref());
+        (model_name(&p.model, models).to_lowercase(), p.model.clone(), level, p.effort.clone())
+    });
+    rows
+}
+
+/// What a preset's model is called: the host's name for it, else the id from its key.
+fn model_name(key: &str, models: &[ModelInfo]) -> String {
+    models.iter().find(|m| m.key() == key).map(|m| m.name.clone()).unwrap_or_else(|| theme::short_model(key).to_owned())
 }
 
 /// When the composer's host is up but offers no models: a row to Settings › Providers, to
@@ -132,12 +150,7 @@ fn preset_row(
     this: &Dirigent,
     cx: &mut Context<Dirigent>,
 ) -> AnyElement {
-    let name = this
-        .models()
-        .iter()
-        .find(|m| m.key() == p.model)
-        .map(|m| m.name.clone())
-        .unwrap_or_else(|| theme::short_model(&p.model).to_owned());
+    let name = model_name(&p.model, this.models());
     let preset = p.clone();
     menu::stop(menu::row(id), selected, move |this, _, cx| this.use_preset(&preset, cx), cx)
         .group("preset")
@@ -183,4 +196,34 @@ fn header_button(id: &'static str, label: &'static str, trailing: Option<&'stati
         .hover(|d| d.text_color(rgba(theme::t().fg)))
         .child(label)
         .children(trailing.map(|name| icon(name, color).size(u(12.))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presets_group_by_model_then_effort_level() {
+        let model = |id: &str, name: &str| ModelInfo {
+            provider: "p".into(),
+            id: id.into(),
+            name: name.into(),
+            context_window: 0,
+            thinking_levels: ["low", "high", "xhigh"].map(String::from).to_vec(),
+        };
+        let preset = |model: &str, effort: &str| Preset { model: model.into(), effort: Some(effort.into()) };
+        // The host's names order the models, not their keys; `gone` isn't offered any more.
+        let models = [model("a", "Opus"), model("b", "Fable")];
+        let presets = [
+            preset("p/a", "xhigh"),
+            preset("p/gone", "low"),
+            preset("p/b", "xhigh"),
+            preset("p/b", "low"),
+            preset("p/gone", "high"),
+            preset("p/a", "high"),
+        ];
+        let order: Vec<usize> = ordered(&presets, &models).into_iter().map(|(i, _)| i).collect();
+        // Fable low, xhigh; gone high, low (by name); Opus high, xhigh.
+        assert_eq!(order, [3, 2, 4, 1, 5, 0]);
+    }
 }
