@@ -476,11 +476,11 @@ pub enum Menu {
     Target,
     /// Draft: which of the group's hosts.
     TargetHost,
-    /// Projects page: actions for a project group (link / remove).
+    /// Projects page: actions for a project group (rename / link / unlink / remove).
     Project {
         group_key: String,
     },
-    /// Pick the group to link `group_key` into.
+    /// Pick the group to link into `group_key`.
     Link {
         group_key: String,
     },
@@ -577,6 +577,8 @@ pub struct Dirigent {
     pub pinned_projects: Vec<String>,
     /// The group keys in the order the user dragged them into (`projects::groups`).
     pub group_order: Vec<String>,
+    /// The groups (keys) expanded on the Projects page. Not kept across restarts.
+    pub expanded_projects: HashSet<String>,
     /// The host the Add project modal adds on; `None`: the first connected one.
     pub new_project_host: Option<String>,
     /// The Add project modal, while open (its path field is `path_input`).
@@ -637,6 +639,8 @@ pub struct Dirigent {
     pub base_search: Entity<TextInput>,
     /// Filter for the draft's `Create thread in` popup.
     pub target_search: Entity<TextInput>,
+    /// Filter for the Projects page's `Link into` popup.
+    pub link_search: Entity<TextInput>,
     /// The Usage modal: window, grouping, hidden series and the hosts' buckets.
     pub usage: usage::State,
     /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
@@ -790,7 +794,8 @@ impl Dirigent {
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
         let base_search = cx.new(|cx| TextInput::new(cx, "Branch, commit or revset", true));
         let target_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
-        for input in [&model_search, &base_search, &target_search] {
+        let link_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
+        for input in [&model_search, &base_search, &target_search, &link_search] {
             cx.subscribe(input, |_, _, _: &input::Changed, cx| menu::Nav::restart(cx)).detach();
         }
         let usage_from = cx.new(|cx| TextInput::new(cx, "2026-01-01", true));
@@ -818,6 +823,7 @@ impl Dirigent {
             rename_input,
             pinned_projects,
             group_order,
+            expanded_projects: HashSet::new(),
             new_project_host: None,
             add_project: None,
             dir_requests: HashSet::new(),
@@ -847,6 +853,7 @@ impl Dirigent {
             model_search,
             base_search,
             target_search,
+            link_search,
             usage: usage::State::new(),
             usage_from,
             usage_to,
@@ -3089,12 +3096,46 @@ impl Dirigent {
 
     /// Link every member of `group_key` into `target_key` (or clear their manual links).
     pub fn link_group(&mut self, group_key: &str, target_key: Option<&str>, cx: &mut Context<Self>) {
+        self.relink(group_key, None, target_key);
+        // Linked into another group: its name goes along, unless that one has its own.
+        if let Some(t) = target_key
+            && let Some(name) = self.names.get(group_key).cloned()
+        {
+            self.set_name(group_key, None);
+            if !self.names.contains_key(t) {
+                self.set_name(t, Some(name));
+            }
+        }
+        self.menu = None;
+        cx.notify();
+    }
+
+    /// The group `other_key` joins `group_key`, which keeps its name and place. A name
+    /// `other_key` was given stays stored: it is back once unlinked.
+    pub fn link_into(&mut self, group_key: &str, other_key: &str, cx: &mut Context<Self>) {
+        self.relink(other_key, None, Some(group_key));
+        self.expanded_projects.remove(other_key);
+        self.expanded_projects.insert(group_key.to_owned());
+        self.menu = None;
+        self.focus_root(cx);
+        cx.notify();
+    }
+
+    pub fn unlink_member(&mut self, host: &str, project_id: &str, cx: &mut Context<Self>) {
+        let Some(key) = self.groups().0.into_iter().find(|g| g.has(host, project_id)).map(|g| g.key) else { return };
+        self.relink(&key, Some((host, project_id)), None);
+        cx.notify();
+    }
+
+    /// Point the manual links of `group_key`'s members (or `only` that one) at `target_key`,
+    /// or clear them. Their group key changes with it: pins and places follow (`rekey`).
+    fn relink(&mut self, group_key: &str, only: Option<(&str, &str)>, target_key: Option<&str>) {
         let (groups, _) = self.groups();
         let Some(group) = groups.iter().find(|g| g.key == group_key) else {
             return;
         };
         let cache = self.cache.lock().unwrap();
-        for m in &group.members {
+        for m in group.members.iter().filter(|m| only.is_none_or(|(h, id)| m.host == h && m.project.id == id)) {
             let _ = cache.set_link(&m.host, &m.project.id, target_key);
             let k = (m.host.clone(), m.project.id.clone());
             match target_key {
@@ -3107,24 +3148,35 @@ impl Dirigent {
             }
         }
         drop(cache); // `save_pins` locks it again
-        // Linked into another group: its name goes along, unless that one has its own.
-        if let Some(t) = target_key
-            && let Some(name) = self.names.get(group_key).cloned()
-        {
-            self.set_name(group_key, None);
-            if !self.names.contains_key(t) {
-                self.set_name(t, Some(name));
-            }
-        }
-        // The members' group key changed: a pinned group stays pinned, and in its place,
-        // under its new key(s).
-        let new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
+        let mut new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
+        // What is left of the group keeps its place, what split off follows.
+        new.sort_by_key(|k| k != group_key);
         self.pinned_projects = projects::rekey(&self.pinned_projects, group_key, &new);
         self.group_order = projects::rekey(&self.group_order, group_key, &new);
         self.save_pins();
         self.save_order();
-        self.menu = None;
+    }
+
+    pub fn toggle_project_expanded(&mut self, group_key: &str, cx: &mut Context<Self>) {
+        if !self.expanded_projects.remove(group_key) {
+            self.expanded_projects.insert(group_key.to_owned());
+        }
         cx.notify();
+    }
+
+    pub fn open_link_picker(&mut self, group_key: &str, cx: &mut Context<Self>) {
+        self.menu = Some(Menu::Link { group_key: group_key.to_owned() });
+        let (window, input) = (self.window, self.link_search.clone());
+        cx.defer(move |cx| {
+            window.update(cx, |_, window, cx| input.update(cx, |i, cx| i.set_text("", window, cx))).ok();
+        });
+        self.focus(self.link_search.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    pub fn link_candidates(&self, group_key: &str, cx: &App) -> Vec<projects::Group> {
+        let others = self.groups().0.into_iter().filter(|g| g.key != group_key).collect();
+        projects::search(others, self.link_search.read(cx).text())
     }
 
     /// Every project group (the Projects page; the sidebar shows the pinned ones) and the
@@ -3927,6 +3979,7 @@ impl Dirigent {
             self.model_search.clone(),
             self.base_search.clone(),
             self.target_search.clone(),
+            self.link_search.clone(),
             self.usage_from.clone(),
             self.usage_to.clone(),
             self.settings.font_ui.clone(),
@@ -4391,8 +4444,10 @@ impl Dirigent {
         }
         // A menu in place of one with a search (All models' back button): the composer gets
         // the keys back, as on `close_menu`; the search's input is gone.
-        if matches!(self.menu, Some(Menu::AllModels | Menu::Base | Menu::Target)) {
-            self.focus_composer(cx);
+        match self.menu {
+            Some(Menu::AllModels | Menu::Base | Menu::Target) => self.focus_composer(cx),
+            Some(Menu::Link { .. }) => self.focus_root(cx),
+            _ => {}
         }
         self.menu = Some(menu);
         cx.notify();
@@ -4403,6 +4458,8 @@ impl Dirigent {
     pub fn close_menu(&mut self, cx: &mut Context<Self>) {
         match self.menu.take() {
             Some(Menu::AllModels | Menu::Base | Menu::Target) => self.focus_composer(cx),
+            // No composer on the Projects page: the root gets the keys, so Esc still works.
+            Some(Menu::Link { .. }) => self.focus_root(cx),
             Some(_) => {}
             None => return,
         }

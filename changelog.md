@@ -1,11 +1,14 @@
 ## 0.0.10 (draft)
 
 - Agents can add a project: "clone this repo and add it to dirigent" ([#160])
+- Projects: expand a project to see where it lives, a line per host and path ([#162])
+- Projects: link with a search that shows paths, unlink one directory at a time ([#162])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
+[#162]: https://forge.sebba.dev/izvir/dirigent/changes/162
 
 ## 0.0.9
 

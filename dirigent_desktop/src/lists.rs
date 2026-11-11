@@ -40,14 +40,15 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 }
 
 /// The Projects page (the sidebar's folder): every project group as a row (pin toggle,
-/// name, its hosts, thread count, `⋯` menu), "Removed projects" last; `Add project` in
-/// the top bar opens the modal (`add_project.rs`). A row opens the project's page; a pinned one is also listed in the
+/// name, its hosts, `⋯` menu; expanded, a line per directory under it), "Removed projects"
+/// last; `Add project` in the top bar opens the modal (`add_project.rs`). A row opens the
+/// project's page; a pinned one is also listed in the
 /// sidebar. Rows reorder by drag, as the sidebar's pinned ones do (one order for both,
 /// `move_project`), and the draft's `Create thread in` popup lists them in that order.
 fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
     let (groups, orphans) = this.groups();
     let dragging = this.dragging.clone().filter(|d| !d.sidebar && cx.has_active_drag()).map(|d| d.key);
-    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, &groups, dragging.as_deref() == Some(&g.key), this, cx)).collect();
+    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, dragging.as_deref() == Some(&g.key), this, cx)).collect();
     // The dragged row is a gap that follows the cursor row by row, the others shuffling
     // around it.
     let rows = div().flex().flex_col().gap(u(ENTRY_GAP)).children(rows).on_drag_move(cx.listener(
@@ -57,14 +58,20 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
                 return;
             }
             let (groups, _) = this.groups();
-            let slot = ((ev.event.position.y - ev.bounds.top()) / u(ENTRY_H + ENTRY_GAP)).floor().max(0.) as usize;
-            if let Some(onto) = groups.get(slot.min(groups.len().saturating_sub(1))) {
-                let key = drag.key.clone();
-                this.move_project(&key, &onto.key, cx);
-            }
+            let Some(dragged) = groups.iter().position(|g| g.key == drag.key) else { return };
+            let heights: Vec<f32> =
+                groups.iter().enumerate().map(|(i, g)| ENTRY_H + if i == dragged { 0. } else { details_height(g, this) }).collect();
+            let y = (ev.event.position.y - ev.bounds.top()) / u(1.);
+            let key = drag.key.clone();
+            this.move_project(&key, &groups[projects::drop_slot(&heights, ENTRY_GAP, dragged, y)].key, cx);
         },
     ));
     let removed = (!orphans.is_empty()).then(|| {
+        let what = if orphans.len() == 1 {
+            "1 thread whose project was removed".to_owned()
+        } else {
+            format!("{} threads whose project was removed", orphans.len())
+        };
         entry_row("proj/orphans", projects::ORPHANS, cx)
             .child(div().size(u(24.)).flex_shrink_0())
             .child(div().w(u(160.)).flex_shrink_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
@@ -72,12 +79,13 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
                 div()
                     .flex_1()
                     .min_w_0()
+                    .pr(u(CHEVRON_W))
                     .truncate()
+                    .text_right()
                     .text_size(text::sm())
                     .text_color(rgba(theme::t().fg_2))
-                    .child("Threads whose project was removed"),
+                    .child(what),
             )
-            .child(thread_count(orphans.len()))
             .child(div().size(u(24.)).flex_shrink_0())
     });
 
@@ -95,6 +103,18 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
 const ENTRY_H: f32 = 36.;
 const ENTRY_GAP: f32 = 4.;
 const ENTRY_MAX_W: f32 = 760.;
+const MEMBER_H: f32 = 28.;
+const MEMBERS_PAD: f32 = 6.;
+/// The expand chevron after a row's hosts, with its gap and padding.
+const CHEVRON_W: f32 = 6. + 12. + 4.;
+/// Where a row's name starts: past its padding, the pin and the gap.
+const NAME_X: f32 = 8. + 24. + 12.;
+const LINK_W: f32 = 440.;
+const LINK_LIST_H: f32 = 216.;
+
+fn details_height(g: &Group, this: &Dirigent) -> f32 {
+    if this.expanded_projects.contains(&g.key) { g.members.len() as f32 * MEMBER_H + MEMBERS_PAD } else { 0. }
+}
 
 /// A Projects page row: opens the project's page (`key`) when clicked.
 fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>) -> Stateful<Div> {
@@ -116,17 +136,18 @@ fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>)
 
 fn thread_count(n: usize) -> Div {
     let text = if n == 1 { "1 thread".to_owned() } else { format!("{n} threads") };
-    div().w(u(80.)).flex_shrink_0().text_right().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text)
+    div().flex_shrink_0().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text)
 }
 
 /// One project group on the Projects page: the pin toggle (amber while pinned, faint
-/// otherwise), its name, its hosts on one line, its thread count, and the `⋯`
-/// menu: rename it (UI only), link it into another group, unlink it, remove it from a host
-/// (its threads are kept, under Removed projects). Grab it to reorder: a `Ghost` follows
-/// the cursor and the row itself is a gap (`dragged`).
-fn project_entry(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+/// otherwise), its name, its hosts on one line with a chevron that expands the row
+/// (`member_lines`), and the `⋯` menu: rename it (UI only), link another group into it,
+/// unlink, remove it from a host (its threads are kept, under Removed projects). Grab it
+/// to reorder: a `Ghost` follows the cursor and the row itself is a gap (`dragged`).
+fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let pinned = this.is_pinned_project(&key);
+    let expanded = this.expanded_projects.contains(&key);
     let menu_open = this.menu == Some(Menu::Project { group_key: key.clone() });
     let link_open = this.menu == Some(Menu::Link { group_key: key.clone() });
 
@@ -135,48 +156,36 @@ fn project_entry(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &
         let k = key.clone();
         actions.push(menu::item("rename", "Rename", "", false, move |this, cx| this.start_rename(&k, cx), cx));
         let k = key.clone();
-        actions.push(menu::item(
-            "link",
-            "Link to another project",
-            "",
-            false,
-            move |this, cx| this.toggle_menu(Menu::Link { group_key: k.clone() }, cx),
-            cx,
-        ));
-        if g.manual {
+        actions.push(menu::item("link", "Link another project", "", false, move |this, cx| this.open_link_picker(&k, cx), cx));
+        let linked: Vec<&str> = g.members.iter().filter(|m| m.linked).map(|m| m.host.as_str()).collect();
+        if !linked.is_empty() {
             let k = key.clone();
-            actions.push(menu::item("unlink", "Unlink", "", false, move |this, cx| this.link_group(&k, None, cx), cx));
+            let (label, which) = if linked.len() > 1 { ("Unlink all", String::new()) } else { ("Unlink", linked[0].to_owned()) };
+            actions.push(menu::item("unlink", label, which, false, move |this, cx| this.link_group(&k, None, cx), cx));
         }
         for m in &g.members {
             let (h, pid) = (m.host.clone(), m.project.id.clone());
             let label = if g.members.len() > 1 { format!("Remove from {h}") } else { "Remove project".to_owned() };
-            actions.push(menu::item(
-                format!("rm/{h}/{pid}"),
-                label,
-                "threads are kept",
-                false,
-                move |this, cx| this.remove_project(&h, &pid, cx),
-                cx,
-            ));
+            // Two of its directories on one host: the path tells them apart.
+            let twice = g.members.iter().filter(|o| o.host == m.host).count() > 1;
+            let detail = if twice { m.project.path.clone() } else { "threads are kept".to_owned() };
+            let row = menu::stop(menu::row(format!("rm/{h}/{pid}")), false, move |this, _, cx| this.remove_project(&h, &pid, cx), cx)
+                .child(div().flex_shrink_0().child(label))
+                .child(
+                    div()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis_start()
+                        .text_color(rgba(theme::t().fg_1))
+                        .text_size(text::sm())
+                        .child(detail),
+                );
+            actions.push(row.into_any());
         }
     }
     if link_open {
-        actions.push(menu::header("Link into"));
-        for other in all.iter().filter(|o| o.key != key) {
-            let (k, target) = (key.clone(), other.key.clone());
-            let hosts = other.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ");
-            actions.push(menu::item(
-                format!("lnk/{}", other.key),
-                other.name.clone(),
-                hosts,
-                false,
-                move |this, cx| this.link_group(&k, Some(&target), cx),
-                cx,
-            ));
-        }
-        if all.len() < 2 {
-            actions.push(menu::header("No other projects"));
-        }
+        actions.push(link_picker(g, this, cx));
     }
 
     let small_button = |id: String| {
@@ -210,10 +219,32 @@ fn project_entry(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &
             this.toggle_menu(Menu::Project { group_key: k.clone() }, cx)
         }))
         .child(icon("ellipsis", theme::t().fg_1))
-        .children(open.then(|| menu::popup(Side::Below(24.), actions, cx)));
+        .children(open.then(|| menu::popup(Side::BelowRight(24.), actions, cx)));
     let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
     hosts.dedup(); // members come sorted by host
     let hosts = hosts.join(", ");
+    let k = key.clone();
+    let places = div()
+        .id(SharedString::from(format!("exp/{key}")))
+        .min_w_0()
+        .h(u(24.))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1p5()
+        .pl_1p5()
+        .pr_1()
+        .rounded_md()
+        .text_size(text::sm())
+        .text_color(rgba(theme::t().fg_2))
+        .hover(|d| d.bg(rgba(theme::t().line)).text_color(rgba(theme::t().fg_1)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_project_expanded(&k, cx)
+        }))
+        .child(div().min_w_0().truncate().child(hosts))
+        .child(icon(if expanded { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(u(12.)));
+    let members = (expanded && !dragged).then(|| member_lines(g, this, cx));
     // While renaming, the name is a field; presses in it don't open the project.
     let name = if this.renaming == Some(Renaming::Project(key.clone())) {
         // Pulled left by its padding + border so the text stays where the name was.
@@ -236,7 +267,7 @@ fn project_entry(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &
     let sidebar_w = if this.sidebar_hidden { 0. } else { this.sidebar_width };
     let (ghost_name, font) = (g.name.clone(), this.fonts.ui.clone());
     let entity = cx.weak_entity();
-    entry_row(format!("proj/{key}"), &key, cx)
+    let row = entry_row(format!("proj/{key}"), &key, cx)
         .when(dragged, |d| d.opacity(0.))
         .on_drag(DragProject { key: key.clone(), sidebar: false }, move |drag, _, window, cx| {
             let drag = drag.clone();
@@ -250,17 +281,139 @@ fn project_entry(g: &Group, all: &[Group], dragged: bool, this: &Dirigent, cx: &
                 name: ghost_name.clone(),
                 width,
                 height: ENTRY_H,
-                indent: 8. + 24. + 12.,
+                indent: NAME_X,
                 weight: FontWeight::MEDIUM,
                 font: font.clone(),
             })
         })
         .child(pin)
         .child(name.w(u(160.)).flex_shrink_0().font_weight(FontWeight::MEDIUM))
-        .child(div().flex_1().min_w_0().truncate().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(hosts))
-        .child(thread_count(g.threads.len()))
-        .child(more)
+        .child(div().flex_1().min_w_0().flex().flex_row().justify_end().child(places))
+        .child(more);
+    div().flex().flex_col().child(row).children(members).into_any_element()
+}
+
+/// What an expanded row shows under it: a line per directory of the group. The hosts are
+/// a column as wide as the longest (not the row's columns), so the paths line up and
+/// have the rest.
+fn member_lines(g: &Group, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let hosts = g.members.iter().map(|m| {
+        let label = div().min_w_0().truncate().child(this.host_label(&m.host));
+        div().h(u(MEMBER_H)).flex().flex_row().items_center().text_color(rgba(theme::t().fg_2)).child(label)
+    });
+    let lines: Vec<AnyElement> = g.members.iter().map(|m| member_line(g, m, this, cx)).collect();
+    div()
+        .flex()
+        .flex_row()
+        .gap_3()
+        .pl(u(NAME_X))
+        .pr_2()
+        .pb(u(MEMBERS_PAD))
+        .text_size(text::sm())
+        .child(div().flex_shrink_0().max_w(u(160.)).flex().flex_col().children(hosts))
+        .child(div().flex_1().min_w_0().flex().flex_col().children(lines))
+}
+
+/// A line of `member_lines`, past its host. The path is cut at its start when it doesn't
+/// fit, so the directory's name stays.
+fn member_line(g: &Group, m: &projects::Member, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+    let (host, pid, path) = (m.host.clone(), m.project.id.clone(), m.project.path.clone());
+    let id = format!("{host}/{pid}");
+    let (h, p) = (host.clone(), pid.clone());
+    let linked = m.linked.then(|| {
+        div()
+            .id(SharedString::from(format!("unlink/{id}")))
+            .flex_shrink_0()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .h(u(18.))
+            .pl_1p5()
+            .pr_1()
+            .rounded_md()
+            .border_1()
+            .border_color(rgba(theme::t().line))
+            .text_size(text::xs())
+            .text_color(rgba(theme::t().fg_1))
+            .cursor_pointer()
+            .hover(|d| d.bg(rgba(theme::t().hover)).text_color(rgba(theme::t().fg)))
+            .tooltip(theme::tooltip("Unlink: its own project again"))
+            .on_click(cx.listener(move |this, _, _, cx| this.unlink_member(&h, &p, cx)))
+            .child("linked")
+            .child(icon("x", theme::t().fg_2).size(u(10.)))
+    });
+    let copy_path = path.clone();
+    let copy = div()
+        .id(SharedString::from(format!("copy/{id}")))
+        .size(u(24.))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .opacity(0.)
+        .group_hover("member", |d| d.opacity(1.))
+        .hover(|d| d.bg(rgba(theme::t().line)))
+        .tooltip(theme::tooltip("Copy path"))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_path.clone()));
+            this.toast("Path copied", cx);
+        }))
+        .child(icon("copy", theme::t().fg_1));
+    div()
+        .group("member")
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .h(u(MEMBER_H))
+        .child(
+            div()
+                .id(SharedString::from(format!("path/{id}")))
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis_start()
+                .font_family(this.fonts.mono.clone())
+                .text_color(rgba(theme::t().fg_1))
+                .tooltip(theme::tooltip(path.clone()))
+                .child(path),
+        )
+        .children(linked)
+        .child(div().flex_1())
+        .child(thread_count(g.threads_of(m)).pr_1())
+        .child(copy)
         .into_any_element()
+}
+
+/// The `Link into <name>` popup, in the `⋯` menu's place: a search over the other groups.
+fn link_picker(g: &Group, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+    let key = g.key.clone();
+    let list = menu::results("link-list", LINK_LIST_H, cx, |cx| {
+        let mut items: Vec<AnyElement> = vec![];
+        for other in this.link_candidates(&key, cx) {
+            let (k, o) = (key.clone(), other.key.clone());
+            let places = other.members.iter().map(|m| format!("{} {}", m.host, m.project.path)).collect::<Vec<_>>().join(", ");
+            let id = format!("lnk/{}", other.key);
+            items.push(menu::item(id, other.name, places, false, move |this, cx| this.link_into(&k, &o, cx), cx));
+        }
+        if items.is_empty() {
+            let none = if this.link_search.read(cx).text().trim().is_empty() { "No other projects" } else { "No projects match" };
+            items.push(menu::header(none));
+        }
+        items
+    });
+    div()
+        .w(u(LINK_W))
+        .flex()
+        .flex_col()
+        .child(menu::header(format!("Link into {}", g.name)))
+        .child(menu::search(this.link_search.clone()))
+        .child(menu::separator())
+        .child(list)
+        .into_any()
 }
 
 /// The main pane's top bar: a title on the left, optional actions on the right. With our

@@ -302,9 +302,10 @@ mod tests {
             .map(|(h, id)| Member {
                 host: (*h).into(),
                 project: Project { id: (*id).into(), path: format!("/p/{name}"), origin: None, created_at: 0 },
+                linked: false,
             })
             .collect();
-        Group { key: key.into(), name: name.into(), dir_name: name.into(), members, threads: vec![], manual: false }
+        Group { key: key.into(), name: name.into(), dir_name: name.into(), members, threads: vec![] }
     }
 
     #[test]

@@ -39,24 +39,29 @@ pub type Names = HashMap<String, String>;
 pub struct Member {
     pub host: String,
     pub project: Project,
+    /// In its group through a manual link.
+    pub linked: bool,
 }
 
 pub struct Group {
     pub key: String,
     /// The name the user gave it, else `dir_name`.
     pub name: String,
-    /// The basename of its first member's path: its name unless renamed.
+    /// The basename of a member's path (one that wasn't linked in, if it has one): its
+    /// name unless renamed.
     pub dir_name: String,
     pub members: Vec<Member>,
     /// (host, thread), most recent first.
     pub threads: Vec<(String, ThreadSummary)>,
-    /// Any member is in this group through a manual link.
-    pub manual: bool,
 }
 
 impl Group {
     pub fn has(&self, host: &str, project_id: &str) -> bool {
         self.members.iter().any(|m| m.host == host && m.project.id == project_id)
+    }
+
+    pub fn threads_of(&self, member: &Member) -> usize {
+        self.threads.iter().filter(|(h, t)| *h == member.host && t.project_id.as_deref() == Some(&member.project.id)).count()
     }
 
     /// The member a new thread goes to: the one on `host` if the group has it, else the
@@ -100,15 +105,17 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
     for host in hosts {
         for project in &host.projects {
             let key = group_key(&host.name, project, links);
-            let manual = links.contains_key(&(host.name.clone(), project.id.clone()));
+            let linked = links.contains_key(&(host.name.clone(), project.id.clone()));
             let group = by_key.entry(key.clone()).or_insert_with(|| {
                 seen.push(key.clone());
-                let dir_name = basename(&project.path).to_owned();
-                let name = names.get(&key).cloned().unwrap_or_else(|| dir_name.clone());
-                Group { key: key.clone(), name, dir_name, members: vec![], threads: vec![], manual: false }
+                Group { key: key.clone(), name: String::new(), dir_name: String::new(), members: vec![], threads: vec![] }
             });
-            group.manual |= manual;
-            group.members.push(Member { host: host.name.clone(), project: project.clone() });
+            // Named by its first member, until one comes that is its own.
+            if group.members.iter().all(|m| m.linked && !linked) {
+                group.dir_name = basename(&project.path).to_owned();
+                group.name = names.get(&key).cloned().unwrap_or_else(|| group.dir_name.clone());
+            }
+            group.members.push(Member { host: host.name.clone(), project: project.clone(), linked });
         }
     }
 
@@ -186,6 +193,25 @@ pub fn moved(order: &[String], groups: &[Group], key: &str, onto: &str) -> Vec<S
         out.insert(to, k);
     }
     out
+}
+
+/// The slot a dragged Projects page row takes with the mouse `y` under the list's top.
+/// It passes a row once the mouse is where its own gap will be after the move, so rows
+/// of different heights don't swap back on the next mouse move.
+pub fn drop_slot(heights: &[f32], gap: f32, dragged: usize, y: f32) -> usize {
+    let Some(&own) = heights.get(dragged) else { return dragged };
+    let (mut top, mut slot) = (0., dragged);
+    for (i, height) in heights.iter().enumerate() {
+        let bottom = top + height;
+        if i < dragged && y < top + own {
+            return i;
+        }
+        if i > dragged && y > bottom - own {
+            slot = i;
+        }
+        top = bottom + gap;
+    }
+    slot
 }
 
 /// A list of group keys (the pins, the order) after a group's key changed (it was linked
@@ -277,10 +303,12 @@ mod tests {
         let app = &groups[0];
         assert_eq!(app.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>(), ["box", "local"]);
         assert_eq!(app.threads.iter().map(|(_, t)| t.id.as_str()).collect::<Vec<_>>(), ["t3", "t1"]);
-        assert!(!app.manual);
+        assert!(app.members.iter().all(|m| !m.linked));
         let notes = &groups[1];
         assert_eq!(notes.members.len(), 2);
-        assert!(notes.manual);
+        assert_eq!(notes.members.iter().map(|m| (m.host.as_str(), m.linked)).collect::<Vec<_>>(), [("box", true), ("local", false)]);
+        assert_eq!(app.members.iter().map(|m| app.threads_of(m)).collect::<Vec<_>>(), [1, 1]);
+        assert_eq!(notes.threads_of(&notes.members[0]), 0);
         assert_eq!(orphans.len(), 1);
         assert_eq!(orphans[0].1.id, "t2");
 
@@ -288,6 +316,12 @@ mod tests {
         assert_eq!(app.member_for(Some("local")).host, "local");
         assert_eq!(app.member_for(None).host, "box"); // t3 is the latest thread
         assert_eq!(notes.member_for(None).host, "box"); // no threads: first member
+
+        // A project linked into a group doesn't name it, though its host comes first.
+        let links: Links = [(("local".to_owned(), "a".to_owned()), "box/m".to_owned())].into();
+        let (groups, _) = super::groups(&hosts, &links, &Names::new(), &[]);
+        let joined = groups.iter().find(|g| g.key == "box/m").unwrap();
+        assert_eq!((joined.name.as_str(), joined.dir_name.as_str(), joined.members.len()), ("notes", "notes", 2));
     }
 
     #[test]
@@ -343,6 +377,26 @@ mod tests {
         // Up onto the first shown: before it.
         assert_eq!(moved(&order, &groups, "local/c", "local/b"), ["gone", "local/c", "local/b", "local/a"]);
         assert_eq!(moved(&order, &groups, "local/a", "local/a"), ["gone", "local/b", "local/a", "local/c"]);
+    }
+
+    #[test]
+    fn drop_slot_follows_the_mouse_past_rows_of_any_height() {
+        let even = [36., 36., 36.];
+        assert_eq!(drop_slot(&even, 4., 0, 38.), 0);
+        assert_eq!(drop_slot(&even, 4., 0, 45.), 1);
+        assert_eq!(drop_slot(&even, 4., 0, 500.), 2);
+        assert_eq!(drop_slot(&even, 4., 2, 50.), 1);
+        assert_eq!(drop_slot(&even, 4., 2, -5.), 0);
+        // A short row passes a tall one (expanded) only in its far end, and stays there.
+        let down = [36., 120., 36.];
+        assert_eq!(drop_slot(&down, 4., 0, 100.), 0);
+        assert_eq!(drop_slot(&down, 4., 0, 130.), 1);
+        let up = [120., 36., 36.]; // after the move
+        assert_eq!(drop_slot(&up, 4., 1, 130.), 1);
+        assert_eq!(drop_slot(&up, 4., 1, 100.), 1);
+        assert_eq!(drop_slot(&up, 4., 1, 30.), 0);
+        assert_eq!(drop_slot(&down, 4., 0, 30.), 0);
+        assert_eq!(drop_slot(&even, 4., 7, 50.), 7);
     }
 
     #[test]
