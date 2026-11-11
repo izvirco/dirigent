@@ -240,7 +240,24 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Register `path` as project `id`. A path that already is a (live) project stays that
+    /// one: adding it again returns it, so a retried or repeated add makes no second row.
     pub fn add_project(&self, id: &str, path: &str, origin: Option<&str>, now: i64) -> Result<Project> {
+        // `C:\Work\x` and `c:\work\x` are one directory on Windows.
+        let same = if cfg!(windows) { "path = ?1 COLLATE NOCASE" } else { "path = ?1" };
+        let existing = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT id, path, origin, created_at FROM projects WHERE deleted_at IS NULL AND {same} ORDER BY created_at LIMIT 1"
+                ),
+                [path],
+                |r| Ok(Project { id: r.get(0)?, path: r.get(1)?, origin: r.get(2)?, created_at: r.get(3)? }),
+            )
+            .optional()?;
+        if let Some(project) = existing {
+            return Ok(project);
+        }
         self.conn.execute("INSERT INTO projects (id, path, origin, created_at) VALUES (?1, ?2, ?3, ?4)", params![id, path, origin, now])?;
         Ok(Project { id: id.into(), path: path.into(), origin: origin.map(str::to_owned), created_at: now })
     }
@@ -941,6 +958,17 @@ mod tests {
         // Opening again is a no-op.
         let s = Storage::init(s.conn).unwrap();
         assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
+    }
+
+    #[test]
+    fn adding_a_path_twice_keeps_one_project() {
+        let s = Storage::in_memory().unwrap();
+        let first = s.add_project("p1", "/x", None, 1).unwrap();
+        assert_eq!(s.add_project("p2", "/x", None, 2).unwrap(), first);
+        assert_eq!(s.list_projects().unwrap(), [first]);
+        // A removed project doesn't hold its path.
+        s.remove_project("p1", 3).unwrap();
+        assert_eq!(s.add_project("p3", "/x", None, 4).unwrap().id, "p3");
     }
 
     #[test]

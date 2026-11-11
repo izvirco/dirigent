@@ -1,8 +1,11 @@
 ## 0.0.10 (draft)
 
+- Agents can add a project: "clone this repo and add it to dirigent" ([#160])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
+- Fixed: adding a folder that already is a project made a second one ([#160])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
+[#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
 
 ## 0.0.9
 

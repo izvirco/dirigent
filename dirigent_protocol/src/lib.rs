@@ -29,7 +29,7 @@ pub enum ClientMessage {
         id: u64,
     },
     /// Register a directory on this host as a project: an absolute path, or one under `~/`
-    /// (this host's home).
+    /// (this host's home). A path that already is a project answers with that one.
     AddProject {
         id: u64,
         path: String,
@@ -345,6 +345,7 @@ pub enum ServerMessage {
         reply_to: Option<u64>,
         projects: Vec<Project>,
     },
+    /// Reply to `AddProject`: the new project, or the one that path already was.
     ProjectAdded {
         reply_to: u64,
         project: Project,

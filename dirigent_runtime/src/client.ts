@@ -319,6 +319,16 @@ export class Dirigent {
     return p;
   }
 
+  /**
+   * Register the directory `path` on `host` (absolute, or `~/…` under its home) as a project
+   * there. One that already is a project stays that one.
+   */
+  async addProject(host: HostInfo, path: string): Promise<Project> {
+    const r = await this.req<{ project: Project }>(host, { type: "add_project", path });
+    this.projectLists.delete(host.name);
+    return r.project;
+  }
+
   /** `t` with its host and project. */
   private async found(host: HostInfo, t: ThreadSummary, snippet?: string): Promise<Found> {
     const projects = await this.projects(host).catch(() => []);
