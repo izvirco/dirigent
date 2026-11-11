@@ -197,13 +197,17 @@ sign in to the forge and Join again; their usage in between is back-filled, up t
 
 ## Making a release
 
-1. Bump `[workspace.package] version` in `Cargo.toml` (semver; a version is published once per channel), make its
-   `changelog.md` section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
+Master is always the next version, in draft: `[workspace.package] version` in `Cargo.toml` (semver; a version is
+published once per channel) is the version of the top `changelog.md` section, `## <version> (draft)`.
+
+1. Make that section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
    refuses a version without a final section; the app shows the changelog after updating
    (`dirigent_desktop/src/changelog.rs`). Each section is a one-line summary, then a glanceable list: a short line
    per change, ending in a link to its forge change (`([#101])`, with `[#101]: <change url>` under the section's
-   list). The next version's starts as a draft.
+   list).
 2. Actions › Release › Run workflow, pick the channel: `nightly` (the default) or `stable`.
+3. Right after, bump the version for the next release (with `Cargo.lock` and the `cargoDeps` hash in `flake.nix`)
+   and open its `## <version> (draft)` section.
 
 Channels are independent: each is a build of its own (the update url is baked in) with its own versions. Publishing
 0.2.0 to `nightly` and later the same commit to `stable` gives both a 0.2.0. A machine only updates within its channel:
