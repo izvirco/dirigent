@@ -657,6 +657,7 @@ pub struct Dirigent {
     pub effort: Option<String>,
     pub presets: Vec<Preset>,
     pub toasts: Vec<(String, Instant)>,
+    pub copied: Option<ElementId>,
     /// `config.toml` as last loaded or saved, the fonts it resolves to, and the watcher
     /// that notices hand edits.
     pub config: config::Config,
@@ -864,6 +865,7 @@ impl Dirigent {
             effort,
             presets,
             toasts: vec![],
+            copied: None,
             config,
             fonts,
             field: ambient::Field::default(),
@@ -4136,19 +4138,17 @@ impl Dirigent {
         }
     }
 
-    /// A copy button in the thread pane (a message's, a code block's, the header's copy id):
+    /// A copy button (a message's, a code block's, the header's copy id, a project path's):
     /// `text` to the clipboard, and a check on button `id` for a moment.
     pub fn copy_item(&mut self, id: ElementId, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
-        let Pane::Thread(t) = &mut self.pane else { return };
-        t.copied = Some(id.clone());
+        *self.copied_mut() = Some(id.clone());
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPIED_TTL).await;
             this.update(cx, |this, cx| {
-                if let Pane::Thread(t) = &mut this.pane
-                    && t.copied == Some(id)
-                {
-                    t.copied = None;
+                let copied = this.copied_mut();
+                if *copied == Some(id) {
+                    *copied = None;
                     cx.notify();
                 }
             })
@@ -4156,6 +4156,13 @@ impl Dirigent {
         })
         .detach();
         cx.notify();
+    }
+
+    fn copied_mut(&mut self) -> &mut Option<ElementId> {
+        match &mut self.pane {
+            Pane::Thread(t) => &mut t.copied,
+            _ => &mut self.copied,
+        }
     }
 
     /// A ruler mark was pressed or dragged to: scroll the transcript so that item is in the
