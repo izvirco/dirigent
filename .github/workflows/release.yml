@@ -1,8 +1,10 @@
 # Builds the Windows installer and the Linux and macOS tarballs and publishes them to a channel. Run by
-# hand (Actions › Release › Run workflow) after bumping `[workspace.package] version` in
-# Cargo.toml and making its changelog.md section final (no "(draft)"), which the app shows: a
-# version is published once per channel and platform (`dirigent_api publish` refuses to
-# overwrite it). Channels (stable, nightly) are independent builds with their own versions.
+# hand (Actions › Release › Run workflow) after making the version's changelog.md section final
+# (no "(draft)"), which the app shows. Master is always the next version, in draft: the commit
+# after a release bumps `[workspace.package] version` in Cargo.toml and opens that version's
+# draft section. A version is published once per channel and platform (`dirigent_api publish`
+# refuses to overwrite it). Channels (stable, nightly) are independent builds with their own
+# versions.
 #
 # Repository settings it needs:
 #   variables  S3_ENDPOINT (https://fsn1.your-objectstorage.com), S3_REGION, S3_BUCKET
