@@ -343,9 +343,11 @@ fn member_line(g: &Group, m: &projects::Member, this: &Dirigent, cx: &mut Contex
             .child("linked")
             .child(icon("x", theme::t().fg_2).size(u(10.)))
     });
-    let copy_path = path.clone();
+    let copy_id = ElementId::from(SharedString::from(format!("copy/{id}")));
+    let done = this.copied.as_ref() == Some(&copy_id);
+    let copy_path = path.to_string();
     let copy = div()
-        .id(SharedString::from(format!("copy/{id}")))
+        .id(copy_id.clone())
         .size(u(24.))
         .flex_shrink_0()
         .flex()
@@ -353,15 +355,11 @@ fn member_line(g: &Group, m: &projects::Member, this: &Dirigent, cx: &mut Contex
         .justify_center()
         .rounded_md()
         .cursor_pointer()
-        .opacity(0.)
+        .opacity(if done { 1. } else { 0. })
         .group_hover("member", |d| d.opacity(1.))
         .hover(|d| d.bg(rgba(theme::t().line)))
-        .tooltip(theme::tooltip("Copy path"))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copy_path.clone()));
-            this.toast("Path copied", cx);
-        }))
-        .child(icon("copy", theme::t().fg_1));
+        .on_click(cx.listener(move |this, _, _, cx| this.copy_item(copy_id.clone(), copy_path.clone(), cx)))
+        .child(icon(if done { "check" } else { "copy" }, theme::t().fg_1));
     div()
         .group("member")
         .flex()
