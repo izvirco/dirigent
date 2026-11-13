@@ -6,11 +6,13 @@
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
+- Fixed: the work log stayed on the previous run when a job or sub-agent ending started the next one ([#167])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
 [#162]: https://forge.sebba.dev/izvir/dirigent/changes/162
 [#166]: https://forge.sebba.dev/izvir/dirigent/changes/166
+[#167]: https://forge.sebba.dev/izvir/dirigent/changes/167
 
 ## 0.0.9
 
