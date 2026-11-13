@@ -534,6 +534,14 @@ impl Timeline {
         }
     }
 
+    /// `event` is the model starting a message with no work open: the first one of a new
+    /// work, which `push_assistant` starts once the message is persisted.
+    pub fn begins_work(&self, event: &Value) -> bool {
+        self.open_work().is_none()
+            && event.get("type").and_then(Value::as_str) == Some("message_start")
+            && event.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+    }
+
     /// Start a `Work` at the prompt that triggered it (the last user message), else at `at`.
     fn start_work(&mut self, at: i64) -> usize {
         let started = self
@@ -1044,6 +1052,23 @@ mod tests {
         assert_eq!(w.latest_text(), Some("after"));
         w.steps.push(Step::Steer { text: "again".into(), images: vec![], queued: false });
         assert_eq!(w.latest_text(), None);
+    }
+
+    /// A run woken by a job starts a new work with the model's first message; the messages
+    /// after it go into that work.
+    #[test]
+    fn model_writing_with_no_work_open_begins_a_work() {
+        let assistant = |stop: &str, content: Value| json!({"type":"message","message":{"role":"assistant","timestamp":2,"stopReason":stop,"content":content}});
+        let start = |role: &str| json!({"type":"message_start","message":{"role":role}});
+        let mut t = Timeline::from_entries([
+            &assistant("stop", json!([{"type":"thinking","thinking":"hm"},{"type":"text","text":"waiting on the job"}])),
+            &json!({"type":"custom_message","customType":"dirigent:job","content":"job done"}),
+        ]);
+        assert!(t.begins_work(&start("assistant")));
+        assert!(!t.begins_work(&start("custom")));
+        assert!(!t.begins_work(&json!({"type":"message_update","message":{"role":"assistant"}})));
+        t.push(&assistant("toolUse", json!([{"type":"toolCall","id":"c","name":"bash","arguments":{}}])));
+        assert!(!t.begins_work(&start("assistant")));
     }
 
     /// Queued steers ride below the message that is streaming, not above it.

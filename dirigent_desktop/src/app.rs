@@ -1712,6 +1712,12 @@ impl Dirigent {
                     t.list.remeasure_items(tail..tail + 1);
                     if t.log.is_some() {
                         t.log_list.remeasure();
+                        // A run nobody sent a message for from here (a job or sub-agent ending
+                        // woke the agent, a follow-up's turn came): the log moves on to it, as
+                        // it does for a sent message (`echo`).
+                        if t.timeline.begins_work(&event) {
+                            self.show_latest_log();
+                        }
                     }
                 }
             }
