@@ -107,12 +107,13 @@ impl Work {
 
     /// The last prose the model wrote: the interim response shown in the transcript while
     /// the work goes on (until the next one, or the final reply, replaces it). Prose from
-    /// before the latest steer is stale — the model hasn't answered the steer yet.
+    /// before the latest steer the model has is stale — it hasn't answered that steer yet.
+    /// A queued steer hides nothing: the model writes on without it.
     pub fn latest_text(&self) -> Option<&str> {
         self.steps
             .iter()
             .rev()
-            .take_while(|s| !matches!(s, Step::Steer { .. }))
+            .take_while(|s| !matches!(s, Step::Steer { queued: false, .. }))
             .find_map(|s| if let Step::Text(t) = s { Some(t.as_str()) } else { None })
     }
 
@@ -845,6 +846,20 @@ impl Streaming {
         self.echo.iter().filter_map(|(t, m)| (*m == PromptMode::Steer).then_some(t.as_str()))
     }
 
+    /// What the run in progress adds to its work's persisted steps: the message streaming
+    /// right now (text only up to its last completed line), then the steers pi still holds
+    /// (typed, or answers on their way) as queued steps. Those go last, where they will
+    /// land: pi hands a steer over after the streaming message and its tool calls.
+    pub fn live_steps(&self) -> impl Iterator<Item = Step> {
+        let streamed = self.steps.iter().filter_map(|s| match s {
+            Step::Text(x) => x.contains('\n').then(|| Step::Text(markdown::committed(x).to_owned())),
+            Step::Thinking(x) => x.contains('\n').then(|| Step::Thinking(markdown::committed(x).to_owned())),
+            tool => Some(tool.clone()),
+        });
+        let queued = self.queued_steers().chain(self.answers.iter().map(|(_, text)| text.as_str()));
+        streamed.chain(queued.map(|text| Step::Steer { text: text.to_owned(), images: vec![], queued: true }))
+    }
+
     /// Apply one pi `AgentSessionEvent`. Returns true if anything visible changed.
     pub fn apply(&mut self, event: &Value, now: i64) -> bool {
         let ty = event.get("type").and_then(Value::as_str).unwrap_or("");
@@ -1022,11 +1037,26 @@ mod tests {
         assert_eq!(w.tool_count(), 2);
         assert_eq!(t.items[2], Item::Assistant("done".into()));
         assert_eq!(t.items[3], Item::User { text: "next prompt".into(), images: vec![], at: 8 });
-        // Prose from before the steer is stale until the model writes again.
+        // Prose from before a steer is stale once the model has it, until it writes again.
         let mut w = w.clone();
         assert_eq!(w.latest_text(), Some("after"));
         w.steps.push(Step::Steer { text: "again".into(), images: vec![], queued: true });
+        assert_eq!(w.latest_text(), Some("after"));
+        w.steps.push(Step::Steer { text: "again".into(), images: vec![], queued: false });
         assert_eq!(w.latest_text(), None);
+    }
+
+    /// Queued steers ride below the message that is streaming, not above it.
+    #[test]
+    fn queued_steers_follow_the_streaming_message() {
+        let s = Streaming {
+            steps: vec![Step::Thinking("hm\nhalf a line".into()), Step::Text("no line yet".into())],
+            echo: vec![("wait".into(), PromptMode::Steer), ("later".into(), PromptMode::FollowUp)],
+            answers: vec![("ask".into(), "pg".into())],
+            ..Default::default()
+        };
+        let steer = |text: &str| Step::Steer { text: text.into(), images: vec![], queued: true };
+        assert_eq!(s.live_steps().collect::<Vec<_>>(), vec![Step::Thinking("hm\n".into()), steer("wait"), steer("pg")]);
     }
 
     #[test]
