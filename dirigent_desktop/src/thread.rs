@@ -1499,7 +1499,7 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
         }
         if let Some((key, work)) = live {
             col = col.child(work_block(&work, key, true, busy, t, bubble, blobs, now, &fonts, keys, cx));
-            // Streamed text is already cut at its last completed line (`live_work`).
+            // Streamed text is already cut at its last completed line (`Streaming::live_steps`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
             }
@@ -1531,7 +1531,8 @@ fn last_prompt_at(t: &OpenThread, now: i64) -> i64 {
 }
 
 /// The run in progress, keyed for `expanded` / `log`: the open work's persisted steps plus
-/// whatever is streaming right now (text only up to its last completed line). A just-sent
+/// what is in flight (`Streaming::live_steps`: the streaming message, then the steers pi
+/// still holds, so a pending steer rides at the log's end until it is taken). A just-sent
 /// message (the echo) counts as running so the work line and the log panel appear at once
 /// rather than when the host confirms the run.
 fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
@@ -1550,14 +1551,7 @@ fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
             (TAIL, Work { model: this.model.clone(), effort: this.effort.clone(), started, ..Default::default() })
         }
     };
-    // Steers pi still holds (typed, or answers on their way) show as queued steps of the run.
-    work.steps.extend(t.streaming.queued_steers().map(|text| Step::Steer { text: text.to_owned(), images: vec![], queued: true }));
-    work.steps.extend(t.streaming.answers.iter().map(|(_, text)| Step::Steer { text: text.clone(), images: vec![], queued: true }));
-    work.steps.extend(t.streaming.steps.iter().filter_map(|s| match s {
-        Step::Text(x) => x.contains('\n').then(|| Step::Text(markdown::committed(x).to_owned())),
-        Step::Thinking(x) => x.contains('\n').then(|| Step::Thinking(markdown::committed(x).to_owned())),
-        tool => Some(tool.clone()),
-    }));
+    work.steps.extend(t.streaming.live_steps());
     Some((key, work))
 }
 
