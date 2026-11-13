@@ -28,7 +28,12 @@ await rm(out, { recursive: true, force: true });
 await mkdir(out, { recursive: true });
 const exe = join(out, windows ? "dirigent_runtime.exe" : "dirigent_runtime");
 const targetArgs = target ? ["--target", target] : [];
-await $`bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv ${targetArgs} ${join(import.meta.dir, "src", "index.ts")} --outfile ${exe}`;
+// The codemode worker is a second entrypoint, which a compiled pi finds as
+// `./src/extensions/codemode/worker.ts` from the root, hence `--root`.
+const entries = ["index.ts", "extensions/codemode/worker.ts"].map((f) =>
+  join(import.meta.dir, "src", f),
+);
+await $`bun build --compile --no-compile-autoload-bunfig --no-compile-autoload-dotenv ${targetArgs} --root ${import.meta.dir} ${entries} --outfile ${exe}`;
 
 // The package's entry is `dist/index.js`: its root is two levels up.
 const pi = dirname(dirname(Bun.resolveSync("@earendil-works/pi-coding-agent", import.meta.dir)));

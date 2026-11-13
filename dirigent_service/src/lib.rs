@@ -633,9 +633,8 @@ impl Service {
 
     /// Delete a thread and what is its alone: its loaded session, workspace and job logs.
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
-        if self.runtime.is_loaded(thread_id) {
-            let _ = self.runtime.unload(thread_id);
-        }
+        // Also when it is still loading, or its session would go live in a deleted thread.
+        let _ = self.runtime.unload(thread_id);
         // Its workspace has no owner without the thread.
         if self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some()
             && let Err(e) = self.remove_workspace(thread_id, false)
@@ -788,9 +787,8 @@ impl Service {
         drop(storage);
         // Its workspace is fresh, or it has none: nothing is missing until a sweep says so.
         self.missing.lock().unwrap().remove(thread_id);
-        if self.runtime.is_loaded(thread_id) {
-            let _ = self.runtime.unload(thread_id);
-        }
+        // Also when it is still loading, or its session would go live at the old cwd.
+        let _ = self.runtime.unload(thread_id);
         Ok(())
     }
 

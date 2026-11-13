@@ -3,6 +3,8 @@
 - Agents can add a project: "clone this repo and add it to dirigent" ([#160])
 - Projects: expand a project to see where it lives, a line per host and path ([#162])
 - Projects: link with a search that shows paths, unlink one directory at a time ([#162])
+- Threads have pi's codemode and MCP servers (`dirigent pi mcp add …`) ([#165])
+- Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title. `/mcp` in a thread says how its servers are ([#165])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
@@ -15,6 +17,7 @@
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
 [#162]: https://forge.sebba.dev/izvir/dirigent/changes/162
 [#164]: https://forge.sebba.dev/izvir/dirigent/changes/164
+[#165]: https://forge.sebba.dev/izvir/dirigent/changes/165
 [#166]: https://forge.sebba.dev/izvir/dirigent/changes/166
 [#167]: https://forge.sebba.dev/izvir/dirigent/changes/167
 [#169]: https://forge.sebba.dev/izvir/dirigent/changes/169
