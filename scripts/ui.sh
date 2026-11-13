@@ -19,23 +19,29 @@
 #
 # Each session (UI_SESSION; default: the last 8 chars of the calling agent's thread id, else
 # "default") gets its own Xvfb display, service port, data and config dirs under
-# /tmp/dirigent-ui/<session>. Nothing touches the real desktop, mouse, keyboard, data, config
+# /tmp/dirigent-ui-<user>/<session>. Nothing touches the real desktop, mouse, keyboard, data, config
 # or the service on :7777, and sessions can run in parallel.
 set -euo pipefail
 CALLER=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Tools (Xvfb, xdotool, imagemagick, sqlite, xclip, lavapipe; Lilex for the build) and the app's runtime libs
-# come from the dev shell. `nix develop` costs seconds per call, so its environment is cached
+# Everything the script writes goes under one directory per user: /tmp is shared, and a
+# directory another user made can't be written to. Nor trusted: `$ENV` below is sourced.
+BASE=/tmp/dirigent-ui-$(id -un)
+mkdir -p "$BASE"
+[ -O "$BASE" ] || { echo "$BASE belongs to another user" >&2; exit 1; }
+
+# Tools (Xvfb, xdotool, imagemagick, sqlite, xclip, lavapipe, setsid, ss, pgrep; Lilex for the build)
+# and the app's runtime libs come from the dev shell, not from the caller's PATH, which differs
+# from user to user. `nix develop` costs seconds per call, so its environment is cached
 # until flake.nix / flake.lock change. Always sourced: a shell the caller entered before the
 # flake last changed may lack newer tools.
 NIX=(nix develop --option warn-dirty false "$ROOT" -c)
 NIX_BUILD=("${NIX[@]}")
 [ -n "${DIRIGENT_UI_VK_ICD:-}" ] && NIX_BUILD=() # already inside a dev shell: build right here
-ENV=/tmp/dirigent-ui/devenv-$(cat flake.nix flake.lock | sha256sum | cut -c1-16).sh
+ENV=$BASE/devenv-$(cat flake.nix flake.lock | sha256sum | cut -c1-16).sh
 if [ ! -s "$ENV" ]; then
-  mkdir -p /tmp/dirigent-ui
   # shellcheck disable=SC2016
   "${NIX[@]}" bash -c 'printf "export PATH=%q LD_LIBRARY_PATH=%q DIRIGENT_UI_VK_ICD=%q DIRIGENT_LILEX_DIR=%q\n" "$PATH" "$LD_LIBRARY_PATH" "$DIRIGENT_UI_VK_ICD" "$DIRIGENT_LILEX_DIR"' >"$ENV.tmp"
   mv "$ENV.tmp" "$ENV"
@@ -54,7 +60,7 @@ elif [ -n "${PI_SESSION_ID:-}" ]; then
 else
   SESSION=default
 fi
-DIR=/tmp/dirigent-ui/$SESSION
+DIR=$BASE/$SESSION
 # The checkout's own target dir, the one `cargo test` uses. Never share one across checkouts:
 # cargo maps every checkout's crates onto the same files and judges freshness by mtime, so
 # one checkout would run another's build. The dev shell's sccache warms a fresh one.

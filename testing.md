@@ -45,7 +45,8 @@ scripts/ui.sh reset                  # stop + wipe the session's data: fresh ser
 
 ## Isolation and sessions
 
-Each session lives in `/tmp/dirigent-ui/<session>/` and has its own Xvfb display, service port (7800 + display number),
+Each session lives in `/tmp/dirigent-ui-<user>/<session>/` (a directory per user, so several users of one machine
+never share or block each other) and has its own Xvfb display, service port (7800 + display number),
 data dir (`data/`: `service.db`, `desktop.db`, `workspaces/`, `jobs/`), config dir (`config/`, so `hosts.toml` starts
 empty and `config.toml` is written with defaults), `app.log`, and pid files. The app gets them as
 `--data-dir` / `--config-dir` (not `XDG_*`, so the agents it runs keep the real git / jj config). It runs its local
@@ -149,7 +150,7 @@ serve`, the leaderboard). A fake `xdg-open` can approve the sign-in as a test us
 
 ## How it works (if you need to go off-script)
 
-- `Xvfb -displayfd` picks a free display; the number is in `/tmp/dirigent-ui/<session>/display`. `ui.sh run` sets
+- `Xvfb -displayfd` picks a free display; the number is in `<session>/display`. `ui.sh run` sets
   `DISPLAY` for you: `scripts/ui.sh run xdotool mousedown 1` (e.g. to shoot a drag halfway), `scripts/ui.sh run import …`.
 - The app is launched with `VK_ICD_FILENAMES=$DIRIGENT_UI_VK_ICD` (lavapipe; Xvfb can't present GPU frames),
   `--data-dir <session>/data --config-dir <session>/config`, `DIRIGENT_PORT=<port>`, `DIRIGENT_BIND=127.0.0.1` (the
@@ -157,7 +158,7 @@ serve`, the leaderboard). A fake `xdg-open` can approve the sign-in as a test us
   (`<session>/prefix`, where an update installs instead of `~/.local`), in its own process group (`setsid`).
   Lilex, the default font, is built into the binary. An app that restarted itself (an update) has a new pid and
   group: `ui.sh` finds it by its command line (binary + session data dir), so `stop` and friends still work.
-- The tool paths from `nix develop` are cached in `/tmp/dirigent-ui/devenv-<hash>.sh`, keyed by `flake.nix` +
+- The tool paths from `nix develop` are cached in `/tmp/dirigent-ui-<user>/devenv-<hash>.sh`, keyed by `flake.nix` +
   `flake.lock`, so calls take well under a second. `start` still builds through `nix develop` (unless you're in a dev
   shell already).
 - `ui.sh rpc` is `scripts/ui-rpc.ts` (bun); `wait-idle` and `setup` are built on it.

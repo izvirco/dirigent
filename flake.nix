@@ -301,6 +301,10 @@
             pkgs.imagemagick
             pkgs.xclip # clipboard of the test display (`scripts/ui.sh run xclip ...`)
             (pkgs.lib.getBin pkgs.sqlite) # peek into a test session's dbs
+            # What `scripts/ui.sh` runs besides (setsid, ss, pgrep / pkill): not on every user's PATH
+            pkgs.util-linux
+            pkgs.iproute2
+            pkgs.procps
           ]
           ++ gpuiLibs;
 
