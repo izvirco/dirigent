@@ -10,7 +10,8 @@
 // service (`deliverNotice`). `async_bash wait` is the one call that blocks: until one of
 // those notices or a user steer comes in, so models stop doing `sleep 60; cat log`. A job
 // started with `notify: "never"` (a dev server, a watcher) is left running: nothing reports
-// its end and nothing waits on it, so its thread can finish (`reportJobs`).
+// its end and nothing waits on it, so its thread can finish (`reportJobs`). The user
+// stopping the run kills the other jobs, so that none wakes the agent again (`killJobs`).
 
 import { spawn } from "node:child_process";
 import {
@@ -67,7 +68,7 @@ interface Job {
   started: number;
   exit?: number;
   ended?: number;
-  /** The model killed it: no notice, it knows. */
+  /** Killed by the model, or by the user stopping the run: no notice comes of it. */
   killed?: boolean;
   /** Outlived its grace window: the model was told it runs on, and the host counts it (`reportJobs`). */
   background?: boolean;
@@ -534,9 +535,14 @@ export async function requeueNotices(host: ToolHost): Promise<void> {
   for (const [key, n] of host.notices) await deliver(host, key, n);
 }
 
-/** Every job's process group, when the session goes. */
-export function killJobs(host: ToolHost): void {
-  for (const job of host.jobs.values()) if (job.exit === undefined) killJob(job);
+/**
+ * Kill the jobs' process groups: every one when the session goes. When the user stops the
+ * run (`waitedOnly`), those the model waits on, whose end would wake it right back up; the
+ * ones it left running stay.
+ */
+export function killJobs(host: ToolHost, waitedOnly = false): void {
+  for (const job of host.jobs.values())
+    if (job.exit === undefined && !(waitedOnly && job.notify === "never")) killJob(job);
   reportJobs(host);
 }
 
@@ -571,7 +577,8 @@ export function createBash(host: ToolHost, options: BashToolOptions) {
                 `Working directory does not exist: ${cwd}\nCannot execute bash commands.`,
               );
             const j = (job = spawnJob(host, command, "asap", cwd, env));
-            // Stopping the run ends the command only while the call still waits on it.
+            // Ends the command while the call still waits on it; once it is in the
+            // background, the user stopping the run does (`killJobs`).
             const abort = () => {
               if (!j.background) killJob(j);
             };
@@ -866,7 +873,7 @@ function getJob(host: ToolHost, id: string | undefined): Job {
   return job;
 }
 
-/** Stop a job for good: the model killed it, or its session went. No notice comes of it. */
+/** Stop a job for good: the model killed it, the user stopped the run, or its session went. No notice comes of it. */
 function killJob(job: Job): void {
   job.killed = true;
   stopJob(job);

@@ -391,8 +391,15 @@ export class Sessions {
     else await session.prompt(text, { images, streamingBehavior: "followUp" });
   }
 
+  /**
+   * The user stopped the run. The jobs the model waits on go with it: left running, the
+   * end of one would start a new turn, and the user would have to stop it again.
+   */
   async abort(threadId: string): Promise<void> {
-    await this.live.get(threadId)?.session.abort();
+    const live = this.live.get(threadId);
+    if (!live) return;
+    killJobs(live, true);
+    await live.session.abort();
   }
 
   /** Drop one queued steer or follow-up by text. Pi only clears whole queues, so

@@ -9,10 +9,12 @@
 - Fixed: the work log stayed on the previous run when a job or sub-agent ending started the next one ([#167])
 - Fixed: on Wayland, ctrl or shift pressed while an arrow or backspace was held did nothing until the key was pressed again ([#169])
 - Fixed: on a remote host, picking a thread up after 30 idle minutes missed the prompt cache and re-billed its whole context ([#170])
+- Fixed: a stopped thread started again when a job it had running ended; stop now ends those jobs too ([#164])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
 [#162]: https://forge.sebba.dev/izvir/dirigent/changes/162
+[#164]: https://forge.sebba.dev/izvir/dirigent/changes/164
 [#166]: https://forge.sebba.dev/izvir/dirigent/changes/166
 [#167]: https://forge.sebba.dev/izvir/dirigent/changes/167
 [#169]: https://forge.sebba.dev/izvir/dirigent/changes/169
