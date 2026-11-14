@@ -2689,6 +2689,7 @@ impl Dirigent {
                 "bash_background" => c.tools.bash_background = !c.tools.bash_background,
                 "ask_user" => c.tools.ask_user = !c.tools.ask_user,
                 "dirigent" => c.tools.dirigent = !c.tools.dirigent,
+                "codemode" => c.tools.codemode = !c.tools.codemode,
                 _ => {}
             },
             cx,

@@ -86,7 +86,8 @@ export interface ToolHost {
   env?: Record<string, string>;
   /**
    * The dirigent tools (`TOOL_NAMES`) the thread has on, as its last prompt named them, and
-   * the option `bash_background` (`createBash`). Sub-agents and new threads get the same.
+   * the option `bash_background` (`createBash`) and the `codemode` switch (`applyTools`).
+   * Sub-agents and new threads get the same.
    */
   tools: string[];
   jobs: Map<string, Job>;

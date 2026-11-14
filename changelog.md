@@ -4,6 +4,7 @@
 - Projects: expand a project to see where it lives, a line per host and path ([#162])
 - Projects: link with a search that shows paths, unlink one directory at a time ([#162])
 - Threads have pi's codemode and MCP servers (`dirigent pi mcp add …`) ([#165])
+- Codemode is on by default: agents can batch tool calls in one script. Settings › Agent tools has its switch ([#172])
 - Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title. `/mcp` in a thread says how its servers are ([#165])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
@@ -22,6 +23,7 @@
 [#167]: https://forge.sebba.dev/izvir/dirigent/changes/167
 [#169]: https://forge.sebba.dev/izvir/dirigent/changes/169
 [#170]: https://forge.sebba.dev/izvir/dirigent/changes/170
+[#172]: https://forge.sebba.dev/izvir/dirigent/changes/172
 
 ## 0.0.9
 
