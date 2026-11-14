@@ -17,7 +17,10 @@ edition = "2024"
 dirigent_protocol = { path = "dirigent_protocol" }
 dirigent_auth = { path = "dirigent_auth" }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: a thread's entries go back to pi with their keys as it wrote them. Pi replays a
+# tool call's arguments as stored, and sorted keys are a prompt the provider hasn't cached.
+# (gpui turns it on for the desktop anyway; the service on a remote host is built without gpui.)
+serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 anyhow = "1"
