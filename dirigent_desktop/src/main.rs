@@ -44,7 +44,7 @@ mod working;
 use app::{Dirigent, Dismiss, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
 use cache::Cache;
 use dirigent_service::hosts;
-use gpui::{App, AppContext, Focusable, KeyBinding, QuitMode, TitlebarOptions, WindowOptions};
+use gpui::{App, AppContext, Focusable, KeyBinding, Keystroke, QuitMode, TitlebarOptions, WindowOptions};
 use gpui_platform::application;
 
 fn main() {
@@ -111,6 +111,7 @@ fn main() {
         ]);
         // After the input's: in one, the open menu's arrows and Enter win.
         cx.bind_keys(menu::key_bindings());
+        rekey_repeats(cx);
 
         // As it was when last used (`placement`).
         let window_bounds = placement::initial(&cache, cx);
@@ -145,4 +146,27 @@ fn main() {
         cx.activate(true);
     });
     tracing::info!("desktop exited");
+}
+
+/// gpui's Wayland client repeats a held key as the keystroke of its press, whatever modifiers
+/// went down or up since: an arrow held before ctrl keeps moving by characters. X11, Windows
+/// and macOS repeat it under the modifiers held now, and so does this: a keystroke whose
+/// modifiers aren't the window's is dropped and sent again with them. Named keys only (arrows,
+/// backspace, enter, ...): gpui leaves shift out of a symbol's keystroke (`!`) by design.
+fn rekey_repeats(cx: &mut App) {
+    if cx.compositor_name() != "Wayland" {
+        return;
+    }
+    cx.intercept_keystrokes(|ev, window, cx| {
+        let held = window.modifiers();
+        if ev.keystroke.modifiers == held || ev.keystroke.key.chars().count() == 1 {
+            return;
+        }
+        cx.stop_propagation();
+        let keystroke = Keystroke { modifiers: held, ..ev.keystroke.clone() };
+        window.defer(cx, move |window, cx| {
+            window.dispatch_keystroke(keystroke, cx);
+        });
+    })
+    .detach();
 }
