@@ -971,6 +971,19 @@ mod tests {
         assert_eq!(s.add_project("p3", "/x", None, 4).unwrap().id, "p3");
     }
 
+    /// An entry comes back as pi wrote it, keys in their order: pi replays a tool call's
+    /// arguments as stored, and the provider's prompt cache misses on reordered ones
+    /// (`preserve_order` in the workspace `Cargo.toml`).
+    #[test]
+    fn entries_keep_their_key_order() {
+        let s = Storage::in_memory().unwrap();
+        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
+        let entry = r#"{"type":"message","id":"a","message":{"role":"assistant","content":[{"type":"toolCall","name":"edit","arguments":{"path":"a.rs","edits":[{"oldText":"x","newText":"y"}]}}]}}"#;
+        s.append_entry("t1", serde_json::from_str(entry).unwrap(), 1).unwrap();
+        let (_, entries) = s.get_thread("t1").unwrap().unwrap();
+        assert_eq!(entries[0].json.to_string(), entry);
+    }
+
     #[test]
     fn roundtrip_thread_and_entries() {
         let s = Storage::in_memory().unwrap();

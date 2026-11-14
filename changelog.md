@@ -7,12 +7,14 @@
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
 - Fixed: the work log stayed on the previous run when a job or sub-agent ending started the next one ([#167])
+- Fixed: on a remote host, picking a thread up after 30 idle minutes missed the prompt cache and re-billed its whole context ([#170])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
 [#162]: https://forge.sebba.dev/izvir/dirigent/changes/162
 [#166]: https://forge.sebba.dev/izvir/dirigent/changes/166
 [#167]: https://forge.sebba.dev/izvir/dirigent/changes/167
+[#170]: https://forge.sebba.dev/izvir/dirigent/changes/170
 
 ## 0.0.9
 
