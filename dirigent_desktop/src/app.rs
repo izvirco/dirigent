@@ -1698,9 +1698,15 @@ impl Dirigent {
                 }
             }
             ServerMessage::Event { thread_id, event } => {
-                // A warning on a thread being named is the runtime giving up on the title.
+                // A warning is the runtime's to say: a title it gave up on, a nix shell that
+                // failed, an extension's (an MCP server that won't connect). Toasted, with
+                // the thread it came from.
                 if event.get("type").and_then(|v| v.as_str()) == Some("warning") {
                     self.titling.remove(&(host.clone(), thread_id.clone()));
+                    let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("warning");
+                    // A thread's first load comes before its name.
+                    let thread = self.summary(&host, &thread_id).and_then(|t| t.name.as_deref()).unwrap_or("new thread");
+                    self.toast(format!("{host}: {thread}: {message}"), cx);
                 }
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host

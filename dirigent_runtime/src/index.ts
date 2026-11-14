@@ -5,16 +5,15 @@
 // Started as `dirigent_runtime pi [args…]` it is pi's own CLI instead (`dirigent pi`): the
 // bundled version, on the agent dir the service gives it (`PI_CODING_AGENT_DIR`).
 
-import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
+// What pi's own Bun binary sets up first: its OAuth flows (Anthropic, Codex, Copilot sign-ins)
+// and Bedrock, which pi loads through variable imports `bun build --compile` can't follow, and
+// the QuickJS wasm codemode scripts run in, embedded. It also names the process `pi` (not
+// visible in `ps`) and silences `process.emitWarning`. Not exported, hence the path.
+import "../node_modules/@earendil-works/pi-coding-agent/dist/bun/runtime-setup.js";
 import { main as piMain } from "@earendil-works/pi-coding-agent";
 import { Logins, type Method } from "./auth";
 import { type Attachment, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
-
-// pi loads its OAuth flows (Anthropic, Codex, Copilot sign-ins) through a variable import
-// that `bun build --compile` can't follow, so the compiled runtime would lack them. Register
-// them statically, as pi's own binary does (`pi-coding-agent/dist/bun/runtime-setup.js`).
-registerBunOAuthFlows();
 
 type Inbound =
   | {
@@ -158,17 +157,20 @@ async function serve(): Promise<void> {
     if (start < chunk.length) partial.push(chunk.subarray(start));
   }
 
-  sessions.disposeAll();
+  await sessions.disposeAll();
   process.exit(0);
 }
 
 if (process.argv[2] === "pi") {
-  // What pi's own entry point sets up before `main` (`dist/cli/setup.js`, not exported).
-  process.title = "pi";
+  // The rest of what pi's own entry point sets up before `main` (`dist/cli/setup.js`, not
+  // exported); `runtime-setup.js` above did the title and warnings.
   process.env.PI_CODING_AGENT = "true";
   process.env.AI_AGENT = "pi";
-  process.emitWarning = () => {};
   await piMain(process.argv.slice(3));
 } else {
+  // Codemode scripts share this many workers across all threads; pi's default of 2 suits
+  // one session. A worker holds a slot while its script runs, mostly waiting on tools, and
+  // its VM may grow to 256 MB.
+  process.env.PI_CODEMODE_MAX_WORKERS ??= "32";
   await serve();
 }

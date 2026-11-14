@@ -305,9 +305,12 @@ impl Runtime {
         let mut inner = self.inner.lock().unwrap();
         match msg {
             RuntimeMessage::Loaded { thread_id, .. } => {
+                // Only a load someone still waits for makes the thread loaded: one given up on
+                // (`unload`, a timeout) was unloaded, and the runtime drops its session.
+                let Some(waiters) = inner.pending_loads.remove(thread_id) else { return };
                 inner.loaded.insert(thread_id.clone());
                 inner.last_activity.insert(thread_id.clone(), Instant::now());
-                for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
+                for w in waiters {
                     let _ = w.send(Ok(()));
                 }
             }
@@ -475,20 +478,27 @@ impl Runtime {
             Ok(Ok(Err(msg))) => Err(anyhow!("load failed: {msg}")),
             Ok(Err(_)) => Err(anyhow!("runtime exited during load")),
             Err(_) => {
-                self.inner.lock().unwrap().pending_loads.remove(thread_id);
+                // Not left loading: a late `loaded` would leave a session nobody unloads.
+                let _ = self.unload(thread_id);
                 Err(anyhow!("load timed out"))
             }
         }
     }
 
+    /// Drop the thread's session, or the load of it in progress: its waiters fail, and the
+    /// runtime tears the session down once it has it.
     pub fn unload(&self, thread_id: &str) -> Result<()> {
-        self.send(&Command_::Unload { thread_id })?;
-        let mut inner = self.inner.lock().unwrap();
-        inner.loaded.remove(thread_id);
-        inner.running.remove(thread_id);
-        inner.compacting.remove(thread_id);
-        inner.last_activity.remove(thread_id);
-        Ok(())
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.loaded.remove(thread_id);
+            inner.running.remove(thread_id);
+            inner.compacting.remove(thread_id);
+            inner.last_activity.remove(thread_id);
+            for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
+                let _ = w.send(Err("unloaded while loading".into()));
+            }
+        }
+        self.send(&Command_::Unload { thread_id })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -630,5 +640,19 @@ mod tests {
         assert_eq!(serde_json::from_value::<TitleResult>(value).unwrap().title, "Fix it");
         let line = r#"{"type":"failed","id":8,"message":"no credentials"}"#;
         assert!(matches!(serde_json::from_str(line), Ok(RuntimeMessage::Failed { id: 8, .. })));
+    }
+
+    /// A load given up on fails its callers, and its late `loaded` doesn't make the thread
+    /// loaded: the runtime drops that session, so nothing would ever unload it.
+    #[test]
+    fn an_unloaded_load_stays_unloaded() {
+        let rt = Runtime { cmd: vec![], url: String::new(), inner: Mutex::default() };
+        let (tx, mut rx) = oneshot::channel();
+        rt.inner.lock().unwrap().pending_loads.insert("t".into(), vec![tx]);
+        let _ = rt.unload("t");
+        assert!(matches!(rx.try_recv(), Ok(Err(_))));
+        let loaded = r#"{"type":"loaded","thread_id":"t","thinking_level":"off","header":null}"#;
+        rt.observe(&serde_json::from_str(loaded).unwrap());
+        assert!(!rt.is_loaded("t"));
     }
 }

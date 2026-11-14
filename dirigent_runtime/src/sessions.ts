@@ -23,6 +23,9 @@ import {
   type AgentSessionEvent,
   createAgentSession,
   createAgentSessionServices,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   type FileEntry,
   getAgentDir,
@@ -121,6 +124,23 @@ Your replies are rendered as markdown in a desktop app. To show the user an imag
 
 Images the user attaches to a message are also saved as files on this machine: the \`[image-N]: /path\` lines at the end of the message give the file of each \`[image-N]\`, for when you need the image itself (to upload, edit or attach it).`;
 
+/**
+ * Pi's built-in codemode, tool search and MCP, which its CLI loads and an SDK session doesn't
+ * (pi's `builtInExtensions`, not exported). As `builtin:<name>` resources, like the CLI's,
+ * `-builtin:mcp` in the `extensions` setting turns one off and an installed extension that
+ * registers the same tool or `/mcp` replaces it. MCP servers are pi's to manage
+ * (`dirigent pi mcp …`, `<agent dir>/mcp.json`); the MCP extension activates `codemode` or
+ * `tool_search` for them, and the `defaultTools` setting can activate either without.
+ */
+const BUILTIN_EXTENSIONS = [
+  { name: "codemode", factory: createCodemodeExtension(), replaceable: true, builtin: true },
+  { name: "tool-search", factory: createToolSearchExtension(), replaceable: true, builtin: true },
+  { name: "mcp", factory: createMcpExtension(), replaceable: true, builtin: true },
+];
+
+/** How long the same extension notice stays quiet once sent (`extensionNotice`). */
+const NOTICE_REPEAT_MS = 10 * 60_000;
+
 export type Outbound =
   | { type: "loaded"; thread_id: string; model?: string; thinking_level: string; header: unknown }
   | { type: "entry"; thread_id: string; entry: unknown }
@@ -137,10 +157,23 @@ interface Live extends ToolHost {
   forwarded: number;
   // Resolved once per load. `undefined` = no flake / nix failed → plain env.
   nixEnv?: Promise<Record<string, string> | undefined>;
+  // While pi takes a prompt in, up to a run starting: an extension command (`/mcp`) runs then.
+  takingIn?: boolean;
+}
+
+/** A `load` in progress; `unloaded` once an `unload` came for it meanwhile. */
+interface Loading {
+  done: Promise<void>;
+  unloaded: boolean;
 }
 
 export class Sessions {
   private live = new Map<string, Live>();
+  // So a thread never has two sessions: a `load` joins the one in progress, and an `unload`
+  // has it tear its session down instead of going live.
+  private loading = new Map<string, Loading>();
+  // Extension notices sent, by text, and when (`extensionNotice`).
+  private noticed = new Map<string, number>();
   // Shared across sessions; also answers `list_models` and signs in (`Logins`).
   readonly modelRuntime = withExtensionProviders(ModelRuntime.create());
 
@@ -155,6 +188,7 @@ export class Sessions {
    * thread (no entries): pi persists them as its first entries, so the thread never shows pi's
    * default model. A thread with history restores its own from the entries. `tools` names
    * the dirigent tools (`TOOL_NAMES`) the model gets; the rest are registered but inactive.
+   * A load of a thread already loading answers with it (its `loaded`, or its error).
    */
   async load(
     threadId: string,
@@ -164,7 +198,36 @@ export class Sessions {
     thinkingLevel?: string,
     tools: string[] = [],
   ): Promise<void> {
+    for (let pending; (pending = this.loading.get(threadId));) {
+      if (!pending.unloaded) return pending.done.catch(() => {});
+      // Unloaded meanwhile (moved to another cwd, say): load anew once it's torn down.
+      await pending.done.catch(() => {});
+    }
     if (this.live.has(threadId)) return;
+    const loading = { unloaded: false } as Loading;
+    // Done only once out of `loading`, so a load waiting on it finds the way clear.
+    loading.done = this.create(
+      threadId,
+      cwd,
+      entries,
+      model,
+      thinkingLevel,
+      tools,
+      loading,
+    ).finally(() => this.loading.delete(threadId));
+    this.loading.set(threadId, loading);
+    return loading.done;
+  }
+
+  private async create(
+    threadId: string,
+    cwd: string,
+    entries: FileEntry[],
+    model: string | undefined,
+    thinkingLevel: string | undefined,
+    tools: string[],
+    loading: Loading,
+  ): Promise<void> {
     const fresh = entries.length === 0;
 
     // The tools hold the session they run in; it exists only after `createAgentSession`.
@@ -188,10 +251,11 @@ export class Sessions {
       spawnHook: (ctx) => (live.env ? { ...ctx, env: { ...ctx.env, ...live.env } } : ctx),
     });
 
-    // Pi's default loader, plus our note on showing images.
+    // Pi's default loader, plus its built-in extensions and our note on showing images.
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: getAgentDir(),
+      extensionFactories: BUILTIN_EXTENSIONS,
       appendSystemPromptOverride: (base) => [...base, IMAGES_PROMPT],
     });
     await resourceLoader.reload();
@@ -206,6 +270,35 @@ export class Sessions {
       customTools: [bash as ToolDefinition, ...createTools(live)],
     });
     live.session = session;
+    // Extensions' warnings and errors (an MCP server that fails to connect or needs a
+    // sign-in) reach the user as thread warnings, which the desktop toasts. Info is chatter
+    // and goes nowhere, as in pi's print mode, unless it answers a command the user typed
+    // (`/mcp` and its status). The rest is pi's no-UI context, and extensions
+    // are still told there is no UI (`hasUI`, before `session_start`): nobody answers their
+    // dialogs, so a permission gate should follow its no-UI policy and an MCP sign-in not
+    // open a browser on this host.
+    const runner = session.extensionRunner;
+    runner.hasUI = () => false;
+    const notify = (message: string, type?: "info" | "warning" | "error") => {
+      if (live.takingIn) this.extensionNotice(threadId, message, true);
+      else if (type === "warning" || type === "error") this.extensionNotice(threadId, message);
+    };
+    // Emits `session_start`, which extensions start on, as in pi: the MCP one connects its
+    // servers, in the background (cliproxyapi's turns on its proactive compaction).
+    await session.bindExtensions({
+      uiContext: { ...runner.getUIContext(), notify },
+      onError: (e) => {
+        console.error(`extension ${e.extensionPath} (${e.event}): ${e.error}`);
+        this.extensionNotice(threadId, `${e.extensionPath} failed on ${e.event}: ${e.error}`);
+      },
+    });
+    // The last await: from here on the session goes live.
+    if (loading.unloaded) {
+      // Nobody waits for it: the service gave up on this load when it unloaded.
+      await shutdownBuiltins(session);
+      session.dispose();
+      return;
+    }
     // Hand every queued steer to the model in the next turn, not one per turn. Set on the
     // agent directly: `session.setSteeringMode` would also write pi's global settings.
     session.agent.steeringMode = "all";
@@ -252,6 +345,18 @@ export class Sessions {
     return resolved;
   }
 
+  /**
+   * An extension's warning or error, as a warning on the thread. Every thread's extensions
+   * say the same things (each load reports the same broken MCP server), so a text already
+   * sent goes again only after a while, unless it answers what the user typed (`always`).
+   */
+  private extensionNotice(threadId: string, message: string, always = false): void {
+    const now = Date.now();
+    if (!always && now - (this.noticed.get(message) ?? 0) < NOTICE_REPEAT_MS) return;
+    this.noticed.set(message, now);
+    this.send({ type: "warning", thread_id: threadId, message });
+  }
+
   private flushEntries(threadId: string, live: Live): void {
     const sm = live.session.sessionManager;
     if (sm.getEntryCount() <= live.forwarded) return;
@@ -261,13 +366,23 @@ export class Sessions {
     live.forwarded = all.length;
   }
 
-  unload(threadId: string): void {
+  /** Resolves once the session's extensions have shut down (MCP servers stopped). */
+  async unload(threadId: string): Promise<void> {
+    const pending = this.loading.get(threadId);
+    if (pending) {
+      pending.unloaded = true;
+      return pending.done.catch(() => {});
+    }
     const live = this.live.get(threadId);
     if (!live) return;
     this.live.delete(threadId);
     live.unsubscribe();
+    // Stop the run first: no tool starts (or job, which killJobs would miss) while the
+    // built-ins shut down.
+    live.session.agent.abort();
     killJobs(live);
     this.flushEntries(threadId, live);
+    await shutdownBuiltins(live.session);
     live.session.dispose();
   }
 
@@ -388,7 +503,26 @@ export class Sessions {
       // parent's `dirigent send`: hence no who.)
       if ((await session.steer(text, images)) === "queued") wake(live, "a message came in");
     } else if (mode === "follow_up" && session.isStreaming) await session.followUp(text, images);
-    else await session.prompt(text, { images, streamingBehavior: "followUp" });
+    else {
+      // An extension command (`/mcp`) runs right here and starts no run, so nothing would
+      // settle the run the service began for the message: it is settled here.
+      let handled = false;
+      live.takingIn = true;
+      try {
+        await session.prompt(text, {
+          images,
+          streamingBehavior: "followUp",
+          preflightResult: (d) => {
+            live.takingIn = false;
+            handled = d === "handled";
+          },
+        });
+      } finally {
+        live.takingIn = false;
+      }
+      if (handled && !session.isStreaming)
+        this.send({ type: "event", thread_id: threadId, event: { type: "agent_settled" } });
+    }
   }
 
   /**
@@ -488,8 +622,11 @@ export class Sessions {
     };
   }
 
-  disposeAll(): void {
-    for (const id of Array.from(this.live.keys())) this.unload(id);
+  /** Unload every thread, waiting at most a few seconds for their extensions to stop. */
+  async disposeAll(): Promise<void> {
+    const ids = new Set([...this.live.keys(), ...this.loading.keys()]);
+    const unloads = Array.from(ids, (id) => this.unload(id));
+    await Promise.race([Promise.allSettled(unloads), Bun.sleep(3000)]);
   }
 }
 
@@ -539,6 +676,23 @@ function rewind(session: AgentSession, edit: string): () => void {
   return () => {
     if (sm.getEntryCount() === count) moveTo(leaf);
   };
+}
+
+/**
+ * `session_shutdown` to pi's built-in extensions only: `dispose` alone leaves the MCP one's
+ * servers running. Not to the others: pi runs one session per process, so an extension may
+ * clean up the whole process on it (cliproxyapi closes every session's sockets, cutting off
+ * other threads' replies). `dispose` closes this session's own (`cleanupSessionResources`).
+ */
+async function shutdownBuiltins(session: AgentSession): Promise<void> {
+  const event = { type: "session_shutdown", reason: "quit" };
+  const ctx = session.extensionRunner.createContext();
+  for (const ext of session.resourceLoader.getExtensions().extensions) {
+    if (!ext.path.startsWith("builtin:")) continue;
+    for (const handler of ext.handlers.get("session_shutdown") ?? []) {
+      await handler(event, ctx).catch((e) => console.error(`${ext.path} shutdown failed:`, e));
+    }
+  }
 }
 
 /**
