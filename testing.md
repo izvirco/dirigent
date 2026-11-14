@@ -127,6 +127,13 @@ handle is the hairline on its left; `]` / the header's panel button toggle the p
 - This runs gpui's **X11** backend with software Vulkan (lavapipe). Layout, input and behaviour match Wayland.
   Wayland-only details (IME, clipboard, window decorations) need a check on the real desktop by Seb. Xvfb has no
   compositor, so a translucent theme renders on black: leave that check to Seb too.
+- Key repeat is Wayland-only code as well (gpui's client repeats a held key itself, `rekey_repeats` in `main.rs`),
+  but one you can check: `nix shell nixpkgs#sway-unwrapped nixpkgs#wtype nixpkgs#grim`, start
+  `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway` on a private `XDG_RUNTIME_DIR` (config:
+  `output HEADLESS-1 resolution 1100x720`, `default_border none`, `xwayland disable`) and launch the binary as `launch`
+  in `ui.sh` does, with that `XDG_RUNTIME_DIR`, its `WAYLAND_DISPLAY` and no `DISPLAY` (`ui.sh stop` first: one desktop
+  per data dir). `wtype -k End -s 300 -P Left -s 1000 -M ctrl -s 400 -p Left -m ctrl` holds Left and adds ctrl after a
+  second (the first key of every `wtype` run is lost, hence the `End`); `grim shot.png` takes the shot.
 - Fractional scaling: `GPUI_X11_SCALE_FACTOR=1.25 scripts/ui.sh start 1375 900` (shot pixels are then device pixels).
 - **The browser.** Anything the app opens (`cx.open_url`: the forge sign-in, links) goes to `xdg-open`, which can
   land in Seb's real browser. Before clicking one, put a fake `xdg-open` in `UI_PATH` that logs its url (or plays
