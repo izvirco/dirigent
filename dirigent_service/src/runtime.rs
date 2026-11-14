@@ -486,12 +486,17 @@ impl Runtime {
     }
 
     /// Drop the thread's session, or the load of it in progress: its waiters fail, and the
-    /// runtime tears the session down once it has it.
+    /// runtime tears the session down once it has it. A run in the session ends with it (a
+    /// dropped session sends no `agent_settled`). One begun for a session still to load
+    /// (`begin_run`, its prompt on the way) isn't ours to end: a new thread goes on running
+    /// while it moves into its workspace, and whoever waited on a load that failed settles
+    /// the run and pushes that.
     pub fn unload(&self, thread_id: &str) -> Result<()> {
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.loaded.remove(thread_id);
-            inner.running.remove(thread_id);
+            if inner.loaded.remove(thread_id) {
+                inner.running.remove(thread_id);
+            }
             inner.compacting.remove(thread_id);
             inner.last_activity.remove(thread_id);
             for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
@@ -654,5 +659,19 @@ mod tests {
         let loaded = r#"{"type":"loaded","thread_id":"t","thinking_level":"off","header":null}"#;
         rt.observe(&serde_json::from_str(loaded).unwrap());
         assert!(!rt.is_loaded("t"));
+    }
+
+    /// Unloading ends a run in the session it drops, not one begun for a session still to
+    /// load: a new thread, running from its creation, is still listed so once it has moved
+    /// into its workspace.
+    #[test]
+    fn unload_ends_only_a_loaded_sessions_run() {
+        let rt = Runtime { cmd: vec![], url: String::new(), inner: Mutex::default() };
+        rt.begin_run("t");
+        let _ = rt.unload("t");
+        assert!(rt.running_since("t").is_some());
+        rt.inner.lock().unwrap().loaded.insert("t".into());
+        let _ = rt.unload("t");
+        assert!(rt.running_since("t").is_none());
     }
 }

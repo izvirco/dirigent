@@ -787,7 +787,8 @@ impl Service {
         drop(storage);
         // Its workspace is fresh, or it has none: nothing is missing until a sweep says so.
         self.missing.lock().unwrap().remove(thread_id);
-        // Also when it is still loading, or its session would go live at the old cwd.
+        // Also when it is still loading, or its session would go live at the old cwd. The run
+        // begun for a new thread's first prompt goes on: it has no session yet (`Runtime::unload`).
         let _ = self.runtime.unload(thread_id);
         Ok(())
     }
