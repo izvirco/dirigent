@@ -101,7 +101,7 @@ CREATE TABLE IF NOT EXISTS proxy_samples (
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
 const COLUMNS: &[(&str, &str, &str)] = &[
-    // The dirigent tools the thread's last prompt enabled, as JSON (`["async_bash", ...]`).
+    // The tool switches the thread's last prompt had on, as JSON (`["async_bash", ...]`).
     ("threads", "tools", "TEXT"),
     // The thread's isolated workspace directory (see `vcs`), while attached.
     ("threads", "workspace", "TEXT"),
@@ -373,7 +373,7 @@ impl Storage {
         Ok(threads)
     }
 
-    /// Remember the dirigent tools the client enabled, for the thread's next load.
+    /// Remember the tool switches the client had on, for the thread's next load.
     pub fn set_tools(&self, id: &str, tools: &[String]) -> Result<()> {
         self.conn.execute("UPDATE threads SET tools = ?2 WHERE id = ?1", params![id, serde_json::to_string(tools)?])?;
         Ok(())

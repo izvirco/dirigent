@@ -172,7 +172,7 @@ export class Client {
   }
 }
 
-/** Who is calling: the thread acting on the host, and the dirigent tools it has on. */
+/** Who is calling: the thread acting on the host, and the tool switches it has on. */
 export interface Self {
   threadId: string;
   tools: string[];

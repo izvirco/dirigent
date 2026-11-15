@@ -113,8 +113,9 @@ pub enum ClientMessage {
     /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
     /// `images` are attached to the message; pi resizes them to the model's limits.
     /// `title` (sent with a thread's first prompt) asks the host to name the thread from `text`.
-    /// `tools` names the dirigent tools (`async_bash`, `ask_user`) the model gets from now on;
-    /// the host remembers them for the thread. `None` leaves them as they are.
+    /// `tools` names the dirigent tools (`async_bash`, `ask_user`) the model gets from now on,
+    /// and `codemode` while its switch is on; the host remembers them for the thread. `None`
+    /// leaves them as they are.
     Prompt {
         id: u64,
         thread_id: String,

@@ -26,6 +26,7 @@
 //! bash_background = true  # a bash command still running after 10 s becomes an async_bash job
 //! ask_user = true
 //! dirigent = true
+//! codemode = true         # pi's own tool: scripts that call the other tools
 //! ```
 
 use crate::ambient::{Pattern, Reach};
@@ -82,8 +83,8 @@ pub struct BackgroundConfig {
     pub reach: Reach,
 }
 
-/// Dirigent's own agent tools (see the runtime's `tools.ts`). Sent with every prompt; a
-/// change reaches a thread with its next message.
+/// Dirigent's own agent tools (see the runtime's `tools.ts`), and pi's `codemode`. Sent with
+/// every prompt; a change reaches a thread with its next message.
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ToolsConfig {
@@ -96,11 +97,15 @@ pub struct ToolsConfig {
     pub ask_user: bool,
     /// The orchestrator: spawn sub-agents, manage threads.
     pub dirigent: bool,
+    /// Pi's `codemode`: the model writes a script that calls the other tools. With it off,
+    /// pi still turns it on, as a thread loads, for MCP servers whose tools only scripts
+    /// reach (the runtime's `applyTools`).
+    pub codemode: bool,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
-        Self { async_bash: true, bash_background: true, ask_user: true, dirigent: true }
+        Self { async_bash: true, bash_background: true, ask_user: true, dirigent: true, codemode: true }
     }
 }
 
@@ -113,6 +118,7 @@ impl ToolsConfig {
             ("bash_background", self.async_bash && self.bash_background),
             ("ask_user", self.ask_user),
             ("dirigent", self.dirigent),
+            ("codemode", self.codemode),
         ]
         .into_iter()
         .filter(|(_, on)| *on)
@@ -336,14 +342,14 @@ mod tests {
         assert_eq!(c.fonts.ui, "Lilex");
         assert_eq!(c.fonts.size(), 13.);
         assert_eq!(c.title.reasoning, "low");
-        assert_eq!(c.tools.enabled(), ["async_bash", "bash_background", "ask_user", "dirigent"]);
+        assert_eq!(c.tools.enabled(), ["async_bash", "bash_background", "ask_user", "dirigent", "codemode"]);
         assert!(c.background.pattern == Pattern::Halftone && c.background.reach == Reach::Full);
         let c: Config = toml::from_str("[background]\npattern = \"spring\"\nreach = \"edge\"\n").unwrap();
         assert!(c.background.pattern == Pattern::Spring && c.background.reach == Reach::Edge);
         let c: Config = toml::from_str("[tools]\nask_user = false\nbash_background = false\n").unwrap();
-        assert_eq!(c.tools.enabled(), ["async_bash", "dirigent"]);
+        assert_eq!(c.tools.enabled(), ["async_bash", "dirigent", "codemode"]);
         // An option of async_bash: off with it.
-        let c: Config = toml::from_str("[tools]\nasync_bash = false\n").unwrap();
+        let c: Config = toml::from_str("[tools]\nasync_bash = false\ncodemode = false\n").unwrap();
         assert_eq!(c.tools.enabled(), ["ask_user", "dirigent"]);
         // A whole number will do, and the size is held to its range.
         let c: Config = toml::from_str("[fonts]\nsize = 15\n").unwrap();

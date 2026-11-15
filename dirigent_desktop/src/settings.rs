@@ -445,9 +445,9 @@ fn switch(
         .child(div().size(u(14.)).rounded_full().bg(rgba(t.fg)))
 }
 
-/// The agent tools dirigent adds to pi's: each a switch; the set goes out with every prompt,
-/// so a change reaches a thread with its next message. `async_bash` has an option under it,
-/// shown while it is on.
+/// The agent tools dirigent adds to pi's, and pi's `codemode`: each a switch; the set goes
+/// out with every prompt, so a change reaches a thread with its next message. `async_bash`
+/// has an option under it, shown while it is on.
 fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let c = &this.config.tools;
     let bash_background = switch("tool-bash-background", c.bash_background, cx, |this, cx| this.toggle_tool("bash_background", cx));
@@ -459,7 +459,8 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(row("async_bash", switch("tool-async-bash", c.async_bash, cx, |this, cx| this.toggle_tool("async_bash", cx))))
             .when(c.async_bash, |d| d.child(sub_row("Move a bash command still running after 10 s to the background", bash_background)))
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
-            .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx)))),
+            .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx))))
+            .child(row("codemode", switch("tool-codemode", c.codemode, cx, |this, cx| this.toggle_tool("codemode", cx)))),
     )
 }
 

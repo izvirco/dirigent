@@ -124,13 +124,17 @@ Your replies are rendered as markdown in a desktop app. To show the user an imag
 
 Images the user attaches to a message are also saved as files on this machine: the \`[image-N]: /path\` lines at the end of the message give the file of each \`[image-N]\`, for when you need the image itself (to upload, edit or attach it).`;
 
+/** Pi's name for the codemode tool, and ours for its switch in a thread's `tools`. */
+const CODEMODE = "codemode";
+
 /**
  * Pi's built-in codemode, tool search and MCP, which its CLI loads and an SDK session doesn't
  * (pi's `builtInExtensions`, not exported). As `builtin:<name>` resources, like the CLI's,
  * `-builtin:mcp` in the `extensions` setting turns one off and an installed extension that
  * registers the same tool or `/mcp` replaces it. MCP servers are pi's to manage
  * (`dirigent pi mcp …`, `<agent dir>/mcp.json`); the MCP extension activates `codemode` or
- * `tool_search` for them, and the `defaultTools` setting can activate either without.
+ * `tool_search` for them, and the `defaultTools` setting can activate `tool_search` without.
+ * `codemode` follows the user's switch instead, on by default (`create`, `applyTools`).
  */
 const BUILTIN_EXTENSIONS = [
   { name: "codemode", factory: createCodemodeExtension(), replaceable: true, builtin: true },
@@ -188,6 +192,7 @@ export class Sessions {
    * thread (no entries): pi persists them as its first entries, so the thread never shows pi's
    * default model. A thread with history restores its own from the entries. `tools` names
    * the dirigent tools (`TOOL_NAMES`) the model gets; the rest are registered but inactive.
+   * It also carries the `codemode` switch (`applyTools`).
    * A load of a thread already loading answers with it (its `loaded`, or its error).
    */
   async load(
@@ -268,6 +273,12 @@ export class Sessions {
       thinkingLevel: fresh ? (thinkingLevel as ThinkingLevel | undefined) : undefined,
       sessionManager: SessionManager.inMemory(cwd, { id: threadId }, entries),
       customTools: [bash as ToolDefinition, ...createTools(live)],
+      // The `codemode` switch, as a change to the tools pi starts with (its `defaultTools`
+      // setting, or the ones the transcript records). Off has to be said here: `applyTools`
+      // only sees the switch go off in a loaded thread, and a thread's next load would bring
+      // codemode back from its transcript. Before `session_start`, so the MCP extension can
+      // still turn it on for its servers.
+      tools: [(tools.includes(CODEMODE) ? "+" : "-") + CODEMODE],
     });
     live.session = session;
     // Extensions' warnings and errors (an MCP server that fails to connect or needs a
@@ -698,11 +709,18 @@ async function shutdownBuiltins(session: AgentSession): Promise<void> {
 /**
  * Activate the dirigent tools in `tools` (and no other dirigent tool), leaving pi's own tools
  * as they are, and keep `tools` for the ones that read it (`ToolHost.tools`).
+ *
+ * `codemode` is pi's tool with a switch of ours: in `tools` it is activated, and it is
+ * deactivated only when it leaves `tools` (the switch going off in a loaded thread; `create`
+ * does it at a load). Not at every prompt without it: pi's MCP extension turns codemode on
+ * at `session_start` for servers whose tools only scripts reach, and that has to last. The
+ * switch going off mid-thread takes it from those servers too, until the thread's next load.
  */
 function applyTools(live: Live, tools: string[]): void {
+  const ours = new Set<string>(TOOL_NAMES);
+  if (tools.includes(CODEMODE) || live.tools.includes(CODEMODE)) ours.add(CODEMODE);
   live.tools = tools;
   const session = live.session;
-  const ours = new Set<string>(TOOL_NAMES);
   const wanted = session
     .getActiveToolNames()
     .filter((n) => !ours.has(n))

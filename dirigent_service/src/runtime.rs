@@ -89,7 +89,7 @@ enum Command_<'a> {
         /// Initial model / thinking level; the runtime only applies them to a fresh thread.
         model: Option<&'a str>,
         thinking_level: Option<&'a str>,
-        /// The dirigent tools to activate (`async_bash`, `ask_user`).
+        /// The tool switches that are on (`async_bash`, `ask_user`, `codemode`).
         tools: &'a [String],
     },
     Unload {
