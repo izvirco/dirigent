@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "dirigent_agent",
   "dirigent_api",
   "dirigent_auth",
   "dirigent_cli",
@@ -14,6 +15,7 @@ version = "0.0.10"
 edition = "2024"
 
 [workspace.dependencies]
+dirigent_agent = { path = "dirigent_agent" }
 dirigent_protocol = { path = "dirigent_protocol" }
 dirigent_auth = { path = "dirigent_auth" }
 serde = { version = "1", features = ["derive"] }
