@@ -341,6 +341,7 @@
             cuaDriver
             pkgs.xvfb
             pkgs.xdotool # `scripts/ui.sh` makes the test app's window fill its screen
+            pkgs.imagemagick # crop a picture of the test app to the part to look at (testing.md)
             (pkgs.lib.getBin pkgs.sqlite) # peek into a test session's dbs
             # What `scripts/ui.sh` runs besides (setsid, ss, pgrep / pkill): not on every user's PATH
             pkgs.util-linux

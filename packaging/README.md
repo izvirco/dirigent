@@ -80,9 +80,10 @@ sha256 and puts its license next to it; the version and hashes are pinned there 
 (`cuaDriver`) pins the same version for the nix packages and the dev shell: bump both together. The driver moves
 fast and drops things on dated notices, so an update is a release to try, not a number to raise: `testing.md` has
 how. A private screen offers a named few of its tools and a guide of ours in the place of its own (`PRIVATE_TOOLS`,
-`PRIVATE_GUIDE` in `computer.ts`), both written against the pinned version: read them against a new one. Where none
-is shipped (macOS, a dev checkout outside the dev shell) the runtime takes `cua-driver` from PATH; a machine without one that starts (`cua-driver --version`, tried once per runtime) has no computer use, and the
-agent that asks is told why. On macOS that is the user's own install
+`privateGuide` in `computer.ts`), both written against the pinned version: read them against a new one. Where none
+is shipped (macOS, a dev checkout outside the dev shell) the runtime takes `cua-driver` from PATH; a machine
+without one that starts (`cua-driver --version`, tried once per runtime) has no computer use, and the agent that
+asks is told why. On macOS that is the user's own install
 (`/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"`): its `CuaDriver.app` holds the permissions.
 Untested by us, like the rest of the macOS build. Windows is untested too: the driver is what its release ships.
 Its telemetry, update check and on-screen cursor are off, and it keeps its state under `<data dir>/screens/`,

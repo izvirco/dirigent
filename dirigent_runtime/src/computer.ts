@@ -18,7 +18,7 @@
 // The driver is made for a desktop: its guide and most of its tools go by windows and their
 // accessibility trees, which a private screen (no window manager, apps drawn in software)
 // mostly hasn't got. So a private screen has a guide of ours in the driver's place
-// (`PRIVATE_GUIDE`: operate it by its pixels) and only the tools that takes
+// (`privateGuide`: operate it by its pixels) and only the tools that takes
 // (`PRIVATE_TOOLS`). The desktop has the driver as it comes.
 //
 // The thread shows what the agent does there. The driver's own recorder writes a folder per
@@ -31,7 +31,8 @@
 // app that draws slowly (in software, on a private screen) shows what it did.
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { userInfo } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import {
   type AgentSessionEvent,
   createMcpExtension,
@@ -64,7 +65,7 @@ const SERVER: Record<Where, string> = { private: "private_screen", desktop: "use
 const RECORDING_ID = "dirigent-recording";
 /** The driver's tools that answer with a picture of what the recorder shows: the screen, a window. */
 const LOOKS = new Set(["get_desktop_state", "get_window_state"]);
-/** Every tool of the driver's that takes a picture: those, and a region of a window. */
+/** The tools whose picture is to show what the last action did (`recorded`): those, and a region of a window. */
 const PICTURES = new Set([...LOOKS, "zoom"]);
 /**
  * How long an app gets to draw what an action did before a picture of it is taken
@@ -112,20 +113,27 @@ const PRIVATE_TOOLS = [
 ];
 
 /**
- * How a private screen is operated: what its opening says and what
+ * How the private screen on `display` (`:N`) is operated: what its opening says and what
  * `describeNamespace("mcp__private_screen")` returns, in the place of the driver's own guide
  * (`guided`), which says the opposite (act on a window's elements, check with `verify_state`).
- * Each line is something an agent got wrong without it.
+ * Each line is something an agent got wrong without it. The files it names are this
+ * user's, for this display: every thread's screen shares `/tmp`, a model uses the names it
+ * is shown, and a file another user left there can't be written over.
  */
-const PRIVATE_GUIDE = [
-  "A private screen has no window manager: windows have no title bars and stay where they open, and input aimed at a window (`pid`, `window_id`) doesn't reach every app. So operate it by its pixels:",
-  "- See it: `get_desktop_state({})` answers with the screen's picture.",
-  '- Act on it with `target: {kind: "desktop", display_id: "primary"}` and the `x`, `y` you read off your latest picture: `click` (`button: "right"`, `count: 2` for a double click), `move_cursor` (to hover), `scroll` (`direction`, `amount`), `drag` (`from_x`, `from_y`, `to_x`, `to_y`), `type_text` (`text`), `press_key` (`key`, `modifiers`) and `hotkey` (`keys`). Keys go to the window under the pointer, so click into it first. `target` goes alone: with `scope`, `pid` or `window_id` next to it the call is refused.',
-  "- See what it did: take the picture after the action in the same script (it is held a moment for the app to draw; after something slower, an animation, look again), or in a later message. Not in another tool call of the same message: those run at the same time, and the picture shows the screen as it was before.",
-  '- An action here always answers `effect: "unverifiable"`, which says nothing: the picture is the check. A refused call doesn\'t throw: its result has `isError: true` and the reason in `content[0].text`.',
-  '- A cheaper look: `get_desktop_state({screenshot_out_file: "/tmp/screen.png"})` writes the picture to a file and answers without it; crop the part you need (ImageMagick: `magick /tmp/screen.png -crop 400x200+0+600 /tmp/part.png`) and read that. `max_image_dimension` answers with a smaller picture, and until your next picture `x` and `y` are taken as pixels of that one: read them off the picture you took last, never off an earlier, larger one.',
-  "- A window: `list_windows({})` has each one's `pid` and `window_id`, `get_window_state` its picture and, where the app has one (many here don't), its accessibility tree. Once that was called for a window (with `screenshot_out_file`, to keep its picture out of the answer), `zoom` answers with a region of it as a small picture.",
-].join("\n");
+function privateGuide(display: string): string {
+  const screen = `/tmp/screen-${userInfo().username}-${display.replace(/\D/g, "")}.png`;
+  const part = screen.replace(".png", "-part.png");
+  return [
+    "A private screen has no window manager: windows have no title bars and stay where they open, and input aimed at a window (`pid`, `window_id`) doesn't reach every app. So operate it by its pixels:",
+    "- See it: `get_desktop_state({})` answers with the screen's picture: pass the image block in its `content` to `image()`.",
+    '- Act on it with `target: {kind: "desktop", display_id: "primary"}` and the `x`, `y` you read off your latest picture of the screen (`get_desktop_state`): `click` (`button: "right"` for a right click, `count: 2` for a double click), `move_cursor` (to hover), `scroll` (`direction`, `amount`), `drag` (`from_x`, `from_y`, `to_x`, `to_y`), `type_text` (`text`), `press_key` (`key`, `modifiers`) and `hotkey` (`keys`). Keys go to the window under the pointer, so click into it first. `target` goes alone: with `scope`, `pid` or `window_id` next to it the call is refused.',
+    "- See what it did: take the picture after the action in the same script (it is held a moment for the app to draw; after something slower, an animation, look again), or in a later message. Not in another tool call of the same message: those run at the same time, and the picture shows the screen as it was before.",
+    '- An action here always answers `effect: "unverifiable"`, which says nothing: the picture is the check. A refused call doesn\'t throw: its result has `isError: true` and the reason in `content[0].text`.',
+    `- A cheaper look: \`get_desktop_state({screenshot_out_file: "${screen}"})\` writes the picture to that file and answers without it; crop the part you need (with ImageMagick, if it is installed: \`magick ${screen} -crop 400x200+0+600 ${part}\`) and read that. \`max_image_dimension\` answers with a smaller picture, and until your next \`get_desktop_state\` \`x\` and \`y\` are taken as pixels of that one: read them off the picture of the screen you took last, never off an earlier, larger one.`,
+    "- A window: `list_windows({})` has each one's `pid` and `window_id`, `get_window_state` its picture and, where the app has one (many here don't), its accessibility tree. Once that was called for a window (with `screenshot_out_file`, to keep its picture out of the answer), `zoom` answers with a region of it as it is now, as a small picture: `x1`, `y1`, `x2`, `y2` are pixels of that window's own picture, not of the screen's. A zoom is for reading: don't click by its pixels (`from_zoom` does nothing with this `target`).",
+    "- What `describeTool` says of a tool is the driver's text, written for a desktop: where it prefers an `element_token` to pixels, or names a tool this screen doesn't have (`run_steps`, `get_guide`, `list_apps`), go by this guide.",
+  ].join("\n");
+}
 
 /** A step of a thread's computer use, as the service takes it (`RuntimeMessage::Screen`). */
 export interface ScreenUpdate {
@@ -240,12 +248,10 @@ function serverConfig(
   if (process.platform !== "darwin") env.CUA_DRIVER_RS_HOME = home;
   if (display)
     Object.assign(env, { DISPLAY: display, WAYLAND_DISPLAY: "", XDG_SESSION_TYPE: "x11" });
-  const does =
-    "list and launch apps, read a window's accessibility tree and screenshot, click, type, scroll and press keys";
   const description =
     where === "private"
-      ? `Operate the apps on this thread's private screen: ${does}.`
-      : `Operate the apps on the user's desktop: ${does}, in the background where the app allows.`;
+      ? "Operate the apps on this thread's private screen by its pixels: launch them, see the screen, click, type, scroll, drag and press keys."
+      : "Operate the apps on the user's desktop: list and launch apps, read a window's accessibility tree and screenshot, click, type, scroll and press keys, in the background where the app allows.";
   const config: McpServerConfig = { command, args: ["mcp", "--no-overlay"], env, description };
   if (where === "private") {
     config.exposure = "hidden";
@@ -328,7 +334,7 @@ export class Computer {
       const where = (Object.keys(SERVER) as Where[]).find((w) => SERVER[w] === entry.name);
       const open = where && this.open.get(where);
       if (!open) return transport;
-      return recorded(transport, open.recording, where === "private" ? PRIVATE_GUIDE : undefined);
+      return recorded(transport, open.recording, open.display && privateGuide(open.display.name));
     };
     const mcp = {
       name: "mcp",
@@ -415,7 +421,7 @@ export class Computer {
     return (
       `Your private screen is open: an X display of this thread's own (\`DISPLAY=${display.name}\`, ${width}x${height}), which nobody sees but in this thread. ${how(server, where)}\n` +
       `Start apps on it with \`mcp__${server}__launch_app\`, or from bash, in the background, with \`env -u WAYLAND_DISPLAY DISPLAY=${display.name} <command>\`: anything started without that opens on the user's desktop.\n` +
-      `${PRIVATE_GUIDE}\n` +
+      `${privateGuide(display.name)}\n` +
       "The screen closes when the thread has been idle for a while; open it again then."
     );
   }
@@ -473,11 +479,11 @@ export function forgetScreens(): void {
  * their way to pi. Changed in place, not wrapped: pi tells a stdio transport by its class
  * (a failed connection's error then has the server's stderr).
  *
- * A picture (`PICTURES`) is taken `SETTLE_MS` after the last other call went out or was
- * answered, not before: a script that acts and then looks sees what the action did, not
- * the screen the app hadn't drawn yet. Two calls the model sent in one message run side by
- * side, and their order is anyone's: the wait covers a quick action whose call went out
- * first, the guide says not to (`PRIVATE_GUIDE`).
+ * A picture (`PICTURES`) waits until `SETTLE_MS` have passed since another call last went
+ * out or was answered: a script that acts and then looks sees what the action did, not the
+ * screen the app hadn't drawn yet. Not so two calls the model sent in one message, which
+ * run side by side: the picture may go out first, or while an action that takes long (a
+ * drag) is still under way. The guide says not to (`privateGuide`).
  *
  * With a `guide`, that is the server's guide in the place of its own (`guided`).
  */
@@ -487,9 +493,12 @@ function recorded(transport: Transport, recording: Recording, guide?: string): T
   let started: Promise<void> | undefined;
   /** The ids of the calls in flight that answer with a picture. */
   const looks = new Set<unknown>();
-  /** The ids of the other calls in flight, and when one of them last went out or was answered. */
+  /**
+   * The ids of the other calls in flight, and when one of them last went out or was
+   * answered (`performance.now()`: the wall clock can be set back).
+   */
   const acts = new Set<unknown>();
-  let acted = 0;
+  let acted = -Infinity;
   const start = () =>
     new Promise<void>((resolve) => {
       let dir: string;
@@ -528,12 +537,14 @@ function recorded(transport: Transport, recording: Recording, guide?: string): T
       if (options?.signal?.aborted) return;
       const name = (message.params as { name?: string } | undefined)?.name;
       if (name && PICTURES.has(name)) {
-        const wait = acted + SETTLE_MS - Date.now();
-        if (wait > 0) await Bun.sleep(wait);
-        if (options?.signal?.aborted) return;
+        // Again after the wait: an action may have been answered meanwhile.
+        for (let wait; (wait = acted + SETTLE_MS - performance.now()) > 0;) {
+          await Bun.sleep(Math.ceil(wait));
+          if (options?.signal?.aborted) return;
+        }
       } else if ("id" in message) {
         acts.add(message.id);
-        acted = Date.now();
+        acted = performance.now();
       }
       if ("id" in message && name && LOOKS.has(name)) looks.add(message.id);
     }
@@ -542,9 +553,11 @@ function recorded(transport: Transport, recording: Recording, guide?: string): T
   transport.onMessage = (listener) =>
     onMessage((message) => {
       if ("id" in message && message.id === RECORDING_ID) return;
-      if ("id" in message && acts.delete(message.id)) acted = Date.now();
+      // An answer to a call of pi's, not a request of the server's own, whose ids are its own.
+      const answered = "id" in message && !("method" in message) ? message.id : undefined;
+      if (answered !== undefined && acts.delete(answered)) acted = performance.now();
       listener(guide ? guided(message, guide) : message);
-      if ("id" in message && looks.delete(message.id) && "result" in message)
+      if (answered !== undefined && looks.delete(answered) && "result" in message)
         recording.looked(message.result);
     });
   return transport;
@@ -621,12 +634,27 @@ class Recording {
     this.read();
   }
 
-  /** The agent took a picture (the `result` of one of `LOOKS`): it is shown. */
+  /**
+   * The agent took a picture (the `result` of one of `LOOKS`): it is shown, whether it came
+   * in the answer or went to a file the agent named (`screenshot_out_file`). Not one named
+   * by a relative path: that is the driver's, under the thread's directory, not ours.
+   */
   looked(result: unknown): void {
-    const content = (result as { content?: unknown } | null)?.content;
-    if (!Array.isArray(content)) return;
-    const data = content.find((b) => b?.type === "image" && b.mimeType === "image/png")?.data;
-    const image = typeof data === "string" && this.changed(Buffer.from(data, "base64"));
+    const { content, structuredContent } = (result ?? {}) as {
+      content?: unknown;
+      structuredContent?: { screenshot_file_path?: unknown } | null;
+    };
+    const block = Array.isArray(content)
+      ? content.find((b) => b?.type === "image" && b.mimeType === "image/png")
+      : undefined;
+    const path = structuredContent?.screenshot_file_path;
+    const png =
+      typeof block?.data === "string"
+        ? Buffer.from(block.data, "base64")
+        : typeof path === "string" && isAbsolute(path)
+          ? picture(path)
+          : undefined;
+    const image = png && this.changed(png);
     if (image) this.update({ image });
   }
 
