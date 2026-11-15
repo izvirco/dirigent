@@ -152,6 +152,10 @@ export async function check(name: string, models: Promise<ModelRuntime>): Promis
   }
 }
 
+/** pi-mcp's `OAuthRegistrationError` (not ours to import) for a server that forbade registering. */
+const isRegistrationRefusal = (e: unknown): e is Error =>
+  e instanceof Error && e.name === "OAuthRegistrationError" && "status" in e && e.status === 403;
+
 /** Sign in to OAuth server `name`, as `pi mcp login` does, through a login's `interaction`. */
 export async function signIn(
   name: string,
@@ -181,10 +185,11 @@ export async function signIn(
       if (connection.state !== "needs-auth")
         throw new Error(connection.error ?? "It didn't connect");
     }
-    await rt.signInMcpServer({
+    const settings = connection.oauthSettings();
+    const signingIn = rt.signInMcpServer({
       serverUrl: url,
       store: credentials.forServer(name, url),
-      settings: connection.oauthSettings(),
+      settings,
       challenge: connection.challenge,
       prompt: {
         showAuthorizationUrl: (u) => interaction.notify({ type: "auth_url", url: u.href }),
@@ -201,6 +206,15 @@ export async function signIn(
             .catch(() => undefined),
       },
       signal: interaction.signal,
+    });
+    await signingIn.catch((e: unknown) => {
+      // Some servers only register the clients they know, by name (Figma's refuses pi's). What
+      // to do comes first: pi's message ends with the server's answer, however long.
+      if (isRegistrationRefusal(e) && !settings.clientName)
+        throw new Error(
+          `The server may only let clients it knows sign in: edit ${name} and give it a client name the server accepts, such as Claude Code (${e.message})`,
+        );
+      throw e;
     });
     // The sign-in answered the challenge: connecting proves it works.
     connection.challenge = undefined;
