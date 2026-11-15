@@ -120,7 +120,7 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
 
     let _ = out.send(ServerMessage::Hello {
         host_name: svc.host_name.clone(),
-        version: env!("CARGO_PKG_VERSION").into(),
+        version: dirigent_protocol::release::VERSION.into(),
         service_id: svc.service_id.clone(),
     });
 

@@ -4,11 +4,35 @@
 
 use serde::{Deserialize, Serialize};
 
+/// This build's version, semver. The release workflow bakes it in (`DIRIGENT_BUILD_VERSION`
+/// at compile time): the workspace version on `stable`, and on `nightly` a prerelease of it
+/// named by its build time, `0.0.10-nightly.202611151432`, so the draft version can have
+/// any number of nightlies, each newer than the last and all older than its release. Dev
+/// and nix builds are the workspace version. (`dirigent_auth` doesn't depend on this crate:
+/// its user agent names the workspace version.)
+pub const VERSION: &str = match option_env!("DIRIGENT_BUILD_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// Whether this build is a nightly: an app of its own, which installs and runs next to a
+/// stable one and shares nothing with it (`app`; `packaging/README.md` has all of it). The
+/// version alone says so, to the packaging too.
+pub fn nightly() -> bool {
+    VERSION.contains("-nightly.")
+}
+
+/// What this build is called wherever a stable and a nightly one would meet: its data and
+/// config dirs, its window class. `dirigent`, or `dirigent-nightly`.
+pub fn app() -> &'static str {
+    if nightly() { "dirigent-nightly" } else { "dirigent" }
+}
+
 /// A channel's current release for one platform. `dirigent_api publish` writes it to the
 /// bucket's `channels/{channel}/{platform}.json` and the api serves it as is.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Release {
-    /// Semver, compared against the running build's `CARGO_PKG_VERSION`.
+    /// Semver, compared against the running build's `VERSION`.
     pub version: String,
     /// The installer to download: the setup exe (Windows) or the tarball (Linux). Its
     /// minisign signature is at `{url}.minisig`.

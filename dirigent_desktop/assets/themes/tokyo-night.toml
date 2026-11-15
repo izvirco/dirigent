@@ -1,4 +1,4 @@
-# Dirigent theme "tokyo-night". Copy to ~/.config/dirigent/theme/<name>.toml to make your own;
+# Dirigent theme "tokyo-night". Copy to <config dir>/theme/<name>.toml to make your own;
 # config.toml's `theme = "<name>"` picks it. Colours are #rrggbb, or #rrggbbaa for a translucent one.
 
 # Surfaces, from the window canvas (behind the sidebar) to the main panel, raised

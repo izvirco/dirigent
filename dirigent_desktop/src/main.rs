@@ -45,6 +45,7 @@ mod working;
 
 use app::{Dirigent, Dismiss, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
 use cache::Cache;
+use dirigent_protocol::release;
 use dirigent_service::hosts;
 use gpui::{App, AppContext, Focusable, KeyBinding, Keystroke, QuitMode, TitlebarOptions, WindowOptions};
 use gpui_platform::application;
@@ -69,7 +70,7 @@ fn main() {
     }
     let launches = instance::listen();
     tracing::info!(
-        version = env!("CARGO_PKG_VERSION"),
+        version = release::VERSION,
         data = %dirigent_service::data_dir().display(),
         config = %dirigent_service::config_dir().display(),
         "desktop starting"
@@ -122,10 +123,12 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(window_bounds),
                     window_background,
-                    // app_id/title are what testing.md keys on to find this window.
-                    app_id: Some("dirigent".into()),
+                    // app_id/title are what testing.md keys on to find this window, and the
+                    // app_id what the app menu entry names (`StartupWMClass`, install.sh):
+                    // a nightly's windows go under its own entry and icon.
+                    app_id: Some(release::app().into()),
                     titlebar: Some(TitlebarOptions {
-                        title: Some("Dirigent".into()),
+                        title: Some(if release::nightly() { "Dirigent Nightly" } else { "Dirigent" }.into()),
                         appears_transparent: titlebar::CUSTOM,
                         ..Default::default()
                     }),

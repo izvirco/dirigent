@@ -69,7 +69,7 @@ mkdir -p "$DIR"
 # app that restarted itself (`update.rs`) has a new pid and process group. An update installs
 # into the session's own prefix (DIRIGENT_PREFIX, never ~/.local) and starts from there.
 PREFIX=$DIR/prefix
-APP_CMD="^($BIN|$PREFIX/lib/dirigent/dirigent) --data-dir $DIR/data( |$)"
+APP_CMD="^($BIN|$PREFIX/lib/dirigent(-nightly)?/dirigent) --data-dir $DIR/data( |$)"
 alive() {
   [ -f "$DIR/app.pid" ] && kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null && return
   pgrep -f "$APP_CMD" >/dev/null

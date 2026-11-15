@@ -281,8 +281,15 @@ pub fn curtain(this: &Dirigent, layer: impl IntoElement + 'static) -> AnyElement
         .into_any_element()
 }
 
-/// The mark, the conductor (two colours: an image, not an `icons` mask).
-const LOGO_SVG: &str = include_str!("../assets/dirigent.svg");
+/// The mark, the conductor (two colours: an image, not an `icons` mask), in a nightly build
+/// its nightly colours: the app's icon either way.
+fn logo_svg() -> &'static str {
+    if dirigent_protocol::release::nightly() {
+        include_str!("../assets/dirigent_nightly.svg")
+    } else {
+        include_str!("../assets/dirigent.svg")
+    }
+}
 /// Its size on the welcome, in design px: the height of the words beside it (the name's
 /// line, the tagline, the buttons).
 const LOGO: f32 = 176.;
@@ -297,7 +304,7 @@ fn logo(size: u32) -> Arc<Image> {
     match &*last {
         Some((s, image)) if *s == size => image.clone(),
         _ => {
-            let image = Arc::new(Image::from_bytes(ImageFormat::Svg, sized(LOGO_SVG, size).into_bytes()));
+            let image = Arc::new(Image::from_bytes(ImageFormat::Svg, sized(logo_svg(), size).into_bytes()));
             *last = Some((size, image.clone()));
             image
         }
@@ -379,8 +386,12 @@ fn welcome(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
         (line - ascent - descent) / 2. + ascent
     };
     let drop = baseline(FontWeight::SEMIBOLD, title_size, title_line) - baseline(FontWeight::NORMAL, version_size, version_line);
-    let version =
-        div().mt(drop).text_size(version_size).line_height(version_line).text_color(rgba(t.fg_2)).child(env!("CARGO_PKG_VERSION"));
+    let version = div()
+        .mt(drop)
+        .text_size(version_size)
+        .line_height(version_line)
+        .text_color(rgba(t.fg_2))
+        .child(dirigent_protocol::release::VERSION);
     let tagline = div().mt_4().text_size(u(16.)).text_color(rgba(t.fg_1)).child("Best way to combobulate your codebase");
     let buttons = div().mt_8().flex().flex_row().items_center().gap_3().child(set_up).child(skip);
     let mark = div().size(u(LOGO)).flex_shrink_0().child(img(logo((LOGO * theme::zoom()).round() as u32)).size_full());
@@ -704,6 +715,6 @@ mod tests {
     /// The mark is declared at the size it shows at, its drawing left alone.
     #[test]
     fn the_mark_is_sized() {
-        assert!(sized(LOGO_SVG, 96).starts_with(r#"<svg width="96" height="96" viewBox="0 0 1000 1000""#));
+        assert!(sized(logo_svg(), 96).starts_with(r#"<svg width="96" height="96" viewBox="0 0 1000 1000""#));
     }
 }

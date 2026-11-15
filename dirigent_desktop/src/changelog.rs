@@ -21,7 +21,7 @@ const WIDTH: f32 = 620.;
 
 /// At startup: whether this build is newer than the last one this data dir ran (`updated`).
 pub fn after_update(cache: &Cache) -> bool {
-    updated(cache, &Version::parse(env!("CARGO_PKG_VERSION")).expect("the crate version is semver"))
+    updated(cache, &Version::parse(dirigent_protocol::release::VERSION).expect("the version is semver"))
 }
 
 /// Whether `current` is newer than the version kept in `cache`; it's kept from now on, unless
