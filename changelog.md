@@ -14,6 +14,7 @@
 - Computer use: an agent can open a screen to run and operate GUI apps on, when a task needs one: a private one of the thread's own, which nobody sees but in the thread (Linux, with Xvfb installed), or your desktop, where it works in the background where the app allows. Tell it which ("test this on your private screen", "do it on my desktop"); without a private screen it uses the desktop and says so. The thread's right panel shows the window it works in as it goes, with a cursor where it clicks, marked when that is your desktop; click the picture to enlarge it. Windows and Linux installs ship Cua Driver for it; on macOS install it yourself. Settings › Agent tools › `computer` turns it off ([#178])
 - A slow connection stays responsive while an agent takes screenshots: they no longer travel in every event, and the images in a tool call's output are fetched when you open it in the log ([#178])
 - The sidebar and the right panel can be dragged as wide as you like ([#177])
+- Dirigent Nightly: the nightly channel is an app of its own, with its own icon, data and settings, that installs and runs next to a stable Dirigent. A nightly can come out any time, as a build of the next version named by its time (`0.0.10-nightly.202611151432`) ([#183])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
@@ -39,6 +40,7 @@
 [#177]: https://forge.sebba.dev/izvir/dirigent/changes/177
 [#178]: https://forge.sebba.dev/izvir/dirigent/changes/178
 [#180]: https://forge.sebba.dev/izvir/dirigent/changes/180
+[#183]: https://forge.sebba.dev/izvir/dirigent/changes/183
 
 ## 0.0.9
 

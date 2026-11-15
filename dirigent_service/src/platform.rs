@@ -1,7 +1,8 @@
 //! What differs between OSes: where config and data live by default, this machine's name,
 //! and how helper programs start. Everything else is the same code on every OS (Windows takes
 //! `/` in paths too, and `std::env::home_dir` is `%USERPROFILE%` there). macOS uses the same
-//! dirs as Linux, as developer tools there mostly do.
+//! dirs as Linux, as developer tools there mostly do. A nightly build's dirs are
+//! `dirigent-nightly` wherever a stable one's are `dirigent` (`release::app`).
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -17,13 +18,13 @@ pub fn data_dir() -> PathBuf {
     if cfg!(windows) { app_dir("LOCALAPPDATA", r"AppData\Local") } else { app_dir("XDG_DATA_HOME", ".local/share") }
 }
 
-/// `$var/dirigent`, else `<home>/<fallback>/dirigent`.
+/// `$var/<app>`, else `<home>/<fallback>/<app>`: `dirigent`, or a nightly's `dirigent-nightly`.
 fn app_dir(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .map(PathBuf::from)
         .or_else(|| std::env::home_dir().map(|h| h.join(fallback)))
         .expect("no home directory")
-        .join("dirigent")
+        .join(dirigent_protocol::release::app())
 }
 
 /// This machine's name, which the service introduces itself with (`Hello`): `/etc/hostname`,

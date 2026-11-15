@@ -64,11 +64,19 @@ fn lilex(out: &Path) -> Result<(), String> {
     std::fs::write(out.join("lilex.rs"), format!("pub const LILEX: &[&[u8]] = &[\n{faces}];\n")).map_err(|e| e.to_string())
 }
 
-/// The icon and version info, as an .rc compiled into the exe.
+/// The icon and version info, as an .rc compiled into the exe. The version is the one the
+/// release workflow bakes in (`dirigent_protocol::release::VERSION`), and a nightly's makes
+/// it Dirigent Nightly, with its own icon.
 fn windows_resources(out: &Path) {
-    let icon = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/dirigent.ico");
+    println!("cargo:rerun-if-env-changed=DIRIGENT_BUILD_VERSION");
+    let version = std::env::var("DIRIGENT_BUILD_VERSION").unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap());
+    let (name, icon) = if version.contains("-nightly.") {
+        ("Dirigent Nightly", "assets/dirigent_nightly.ico")
+    } else {
+        ("Dirigent", "assets/dirigent.ico")
+    };
+    let icon = Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap()).join(icon);
     println!("cargo:rerun-if-changed={}", icon.display());
-    let version = std::env::var("CARGO_PKG_VERSION").unwrap();
     let mut parts = version.split(['.', '-', '+']).map(|p| p.parse::<u16>().unwrap_or(0));
     let numeric: Vec<String> = (0..4).map(|_| parts.next().unwrap_or(0).to_string()).collect();
     let numeric = numeric.join(",");
@@ -86,9 +94,9 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "FileDescription", "Dirigent\0"
+            VALUE "FileDescription", "{name}\0"
             VALUE "FileVersion", "{version}\0"
-            VALUE "ProductName", "Dirigent\0"
+            VALUE "ProductName", "{name}\0"
             VALUE "ProductVersion", "{version}\0"
             VALUE "OriginalFilename", "Dirigent.exe\0"
         END

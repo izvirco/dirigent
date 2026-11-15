@@ -101,13 +101,14 @@ pub fn start(cx: &mut Context<Dirigent>) {
     .detach();
 }
 
-/// One check: the channel's release, downloaded and verified if it is newer than this build.
+/// One check: the channel's release, downloaded and verified if it is newer than this build
+/// (`release::VERSION`: on nightly both are prereleases, ordered by their build time).
 /// `offered`: the version already handed to the UI, not looked at again.
 fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
     let platform = release::platform();
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .user_agent(format!("Dirigent/{} ({platform})", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("Dirigent/{} ({platform})", release::VERSION))
             .timeout_connect(Some(Duration::from_secs(20)))
             .build(),
     );
@@ -119,7 +120,7 @@ fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
         Err(e) => return Err(e).with_context(|| format!("GET {url}")),
     };
     let dir = dirigent_service::data_dir().join("updates");
-    if Version::parse(&release.version)? <= Version::parse(env!("CARGO_PKG_VERSION"))? {
+    if Version::parse(&release.version)? <= Version::parse(release::VERSION)? {
         clean(&dir, None);
         return Ok(None);
     }

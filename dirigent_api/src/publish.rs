@@ -1,6 +1,7 @@
 //! `dirigent_api publish`: sign an installer, upload it with its signature, then point the
 //! channel at it. The channel file goes last, so no client ever sees a release whose files
-//! aren't there yet. A version is published once per channel: its files are never overwritten.
+//! aren't there yet. A version is published once per channel: its files are never overwritten
+//! (a nightly is a version of its own each time: `release::VERSION`).
 
 use crate::bucket::{self, Bucket};
 use anyhow::{Context, Result, bail};

@@ -1,6 +1,6 @@
 # Dirigent theme "vir-soft-dark", after vir's house look: super-dark grey surfaces, navy where
 # things light up (hover, menus, send, running work), a coral accent. Copy to
-# ~/.config/dirigent/theme/<name>.toml to make your own; config.toml's `theme = "<name>"` picks it.
+# <config dir>/theme/<name>.toml to make your own; config.toml's `theme = "<name>"` picks it.
 # Colours are #rrggbb, or #rrggbbaa for a translucent one.
 
 # Surfaces, from the window canvas (behind the sidebar) to the main panel, raised

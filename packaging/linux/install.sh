@@ -8,6 +8,11 @@
 #                                                 desktop, `dirigent pi …` the bundled pi)
 #   ~/.local/share/applications/dirigent.desktop  the app menu entry, also offered for folders (not on macOS)
 #
+# A nightly's tarball (it has a `nightly` file next to this script) installs as an app of its
+# own, Dirigent Nightly, next to a stable one: `dirigent-nightly` wherever the above says
+# `dirigent`. The binaries keep their names inside it; they are nightly builds, with their own
+# data and config dirs (dirigent_protocol/src/release.rs).
+#
 # On macOS that's all there is: no .app, it starts from a terminal. Nothing it installs is
 # quarantined (curl and the app's own download don't mark files), so Gatekeeper never asks,
 # and the binaries' ad-hoc signatures (release.yml) are all Apple silicon wants.
@@ -22,12 +27,19 @@
 # starts Dirigent again with the app args (its --data-dir / --config-dir). So every update
 # runs the new version's script, which can change in any release.
 #
-# Never change: the tarball's layout (this script at dirigent/install.sh), --update's arguments.
+# Never change: the tarball's layout (this script at dirigent/install.sh, a nightly's
+# dirigent/nightly), --update's arguments.
 set -eu
 
 src=$(cd "$(dirname "$0")" && pwd)
 prefix=${DIRIGENT_PREFIX:-$HOME/.local}
-dest=$prefix/lib/dirigent
+name=dirigent
+title=Dirigent
+if [ -e "$src/nightly" ]; then
+  name=dirigent-nightly
+  title="Dirigent Nightly"
+fi
+dest=$prefix/lib/$name
 apps=$prefix/share/applications
 
 update=
@@ -52,21 +64,21 @@ cp -R "$src" "$dest.new"
 if [ -e "$dest" ]; then mv "$dest" "$dest.old"; fi
 mv "$dest.new" "$dest"
 rm -rf "$dest.old"
-ln -sfn "$dest/dirigent" "$prefix/bin/dirigent"
+ln -sfn "$dest/dirigent" "$prefix/bin/$name"
 
 if [ -z "$mac" ]; then
   mkdir -p "$apps"
   # %f: a folder from the file manager's "Open with", which the app opens as a project.
-  cat >"$apps/dirigent.desktop" <<EOF
+  cat >"$apps/$name.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Dirigent
+Name=$title
 Exec="$dest/dirigent_desktop" %f
 Icon=$dest/dirigent.png
 Terminal=false
 Categories=Development;
 MimeType=inode/directory;
-StartupWMClass=dirigent
+StartupWMClass=$name
 EOF
   # The cache file managers look folder handlers up in.
   update-desktop-database -q "$apps" 2>/dev/null || true
@@ -74,12 +86,12 @@ fi
 
 if [ -z "$update" ]; then
   if [ -n "$mac" ]; then
-    echo "Installed Dirigent in $dest: start it from a terminal as $prefix/bin/dirigent."
+    echo "Installed $title in $dest: start it from a terminal as $prefix/bin/$name."
   else
-    echo "Installed Dirigent in $dest: start it from the app menu, or as $prefix/bin/dirigent."
+    echo "Installed $title in $dest: start it from the app menu, or as $prefix/bin/$name."
   fi
   case ":$PATH:" in
     *":$prefix/bin:"*) ;;
-    *) echo "($prefix/bin isn't on your PATH: add it to start Dirigent as \`dirigent\`, and pi as \`dirigent pi\`.)" ;;
+    *) echo "($prefix/bin isn't on your PATH: add it to start $title as \`$name\`, and pi as \`$name pi\`.)" ;;
   esac
 fi

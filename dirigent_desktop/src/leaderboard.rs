@@ -58,7 +58,7 @@ fn api() -> String {
 fn agent() -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .user_agent(format!("Dirigent/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("Dirigent/{}", dirigent_protocol::release::VERSION))
             .timeout_global(Some(Duration::from_secs(30)))
             .build(),
     )

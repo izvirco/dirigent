@@ -18,7 +18,7 @@ use crate::projects::{self, Group};
 use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
 use crate::titlebar;
-use dirigent_protocol::ThreadSummary;
+use dirigent_protocol::{ThreadSummary, release};
 use gpui::{
     AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Render, SharedString,
     Stateful, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
@@ -153,6 +153,10 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let inbox = this.inbox_threads();
     let working = this.busy_threads();
 
+    // Beside the title: the version, which a nightly's is too long for. It says `nightly`
+    // there, and its tooltip the version.
+    let version = release::VERSION;
+    let short = if release::nightly() { "nightly" } else { version };
     let title_row = div()
         .flex()
         .flex_row()
@@ -183,7 +187,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
                 .text_color(rgba(theme::t().fg_2))
                 .hover(|d| d.text_color(rgba(theme::t().fg)))
                 .on_click(cx.listener(|this, _, _, cx| this.open_changelog(cx)))
-                .child(env!("CARGO_PKG_VERSION")),
+                .when(release::nightly(), |d| d.tooltip(theme::tooltip(version)))
+                .child(short),
         )
         .child(div().flex_1().h_full().when(titlebar::CUSTOM, |d| titlebar::grab(d, cx)))
         // The folder opens the Projects page (lit while it's open); `+` a new thread.

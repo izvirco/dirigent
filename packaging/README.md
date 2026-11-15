@@ -68,6 +68,41 @@ installing, or use the curl line.
 
 None of it is tested by us (no Mac): CI only proves it builds.
 
+## Dirigent Nightly: an app of its own
+
+A nightly build (a version with `-nightly.` in it, below; `dirigent_protocol::release::nightly`) is Dirigent
+Nightly: it installs and runs next to a stable Dirigent, at the same time, and the two share nothing. Everything
+above holds for it with these names in the place of the stable ones:
+
+|                          | stable                                          | nightly                                        |
+| ------------------------ | ----------------------------------------------- | ---------------------------------------------- |
+| data dir                 | `~/.local/share/dirigent`                       | `~/.local/share/dirigent-nightly`              |
+| config dir (pi's too)    | `~/.config/dirigent`                            | `~/.config/dirigent-nightly`                   |
+| Windows data, config     | `%LOCALAPPDATA%\dirigent`, `%APPDATA%\dirigent` | `…\dirigent-nightly` in both                   |
+| local service port       | 7777                                            | 7776                                           |
+| install (Linux, macOS)   | `~/.local/lib/dirigent`                         | `~/.local/lib/dirigent-nightly`                |
+| command                  | `dirigent`                                      | `dirigent-nightly`                             |
+| app menu entry           | `dirigent.desktop`, Dirigent                    | `dirigent-nightly.desktop`, Dirigent Nightly   |
+| window class and title   | `dirigent`, Dirigent                            | `dirigent-nightly`, Dirigent Nightly           |
+| install (Windows)        | `…\Programs\Dirigent`, its own `AppId`          | `…\Programs\Dirigent Nightly`, its own `AppId` |
+| folder right-click entry | Open in Dirigent                                | Open in Dirigent Nightly                       |
+| icon                     | `dirigent.png` / `.ico`                         | `dirigent_nightly.png` / `.ico`                |
+
+The app picks its dirs, port, window class and logo (`release::app`, `dirigent_service::port`); the installers
+pick the rest: `install.sh` from the `nightly` file a nightly's tarball has next to it, `dirigent.iss` from the
+version. Inside an install the files are named the same in both, but for the command on Windows
+(`dirigent-nightly.exe`: both install dirs are on PATH there, which leaves `dirigent_desktop.exe` the one name
+they share on it; nothing starts the app that way). So a nightly starts empty, as a first install
+does: its own setup, sign-ins, hosts and threads (pi's agent dir is seeded from `~/.pi/agent` if there is one, as
+on any first start; never from the stable install's). Its service being on 7776, another desktop reaches it as
+`ws://<host>:7776/ws`.
+
+Installing one is the stable line with `nightly` for `stable`:
+
+```sh
+d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/nightly/linux-x86_64 | tar xz -C "$d" && "$d/dirigent/install.sh"
+```
+
 ## Computer use (Cua Driver, Xvfb)
 
 The `computer` tool (Settings › Agent tools, on by default; `dirigent_runtime/src/computer.ts`) opens a screen for
@@ -214,8 +249,10 @@ The new version's installer always does the installing, and the update code ship
 can change in any release. What installs in the field rely on, and must stay compatible:
 
 - the update url and the `Release` JSON (`dirigent_protocol/src/release.rs`; add fields, don't change them),
-- the installer's `AppId` and the flags `update.rs` passes it,
-- the tarball's layout (`dirigent/install.sh` at its root) and `install.sh --update`'s arguments,
+- the installer's `AppId`s (stable's and nightly's) and the flags `update.rs` passes it,
+- the tarball's layout (`dirigent/install.sh` at its root; a nightly's `dirigent/nightly`) and `install.sh --update`'s
+  arguments,
+- the names in the table above (`release::app`, the nightly port): an install's data is found by them,
 - the signing keys (`release::KEYS`; rotate by shipping the new key next to the old one first),
 - the leaderboard api (`join`, `usage`, `me`, `leaderboard` under `/api/v0/` and their statuses;
   `dirigent_protocol/src/leaderboard.rs`'s types: add fields),
@@ -229,27 +266,37 @@ sign in to the forge and Join again; their usage in between is back-filled, up t
 
 ## Making a release
 
-Master is always the next version, in draft: `[workspace.package] version` in `Cargo.toml` (semver; a version is
-published once per channel) is the version of the top `changelog.md` section, `## <version> (draft)`.
+Master is always the next version, in draft: `[workspace.package] version` in `Cargo.toml` (semver) is the version
+of the top `changelog.md` section, `## <version> (draft)`. Each section is a one-line summary, then a glanceable
+list: a short line per change, ending in a link to its forge change (`([#101])`, with `[#101]: <change url>` under
+the section's list). The app shows the changelog after updating (`dirigent_desktop/src/changelog.rs`).
 
-1. Make that section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
-   refuses a version without a final section; the app shows the changelog after updating
-   (`dirigent_desktop/src/changelog.rs`). Each section is a one-line summary, then a glanceable list: a short line
-   per change, ending in a link to its forge change (`([#101])`, with `[#101]: <change url>` under the section's
-   list).
-2. Actions › Release › Run workflow, pick the channel: `nightly` (the default) or `stable`.
+**A nightly**, any time and as often as you like: Actions › Release › Run workflow, channel `nightly` (the
+default). Nothing to edit first. It is a prerelease of the draft version named by the time of the run (UTC),
+`0.0.10-nightly.202611151432`: semver puts each above the last one and all of them below `0.0.10` itself, and the
+next version's nightlies (`0.0.11-nightly.…`) above those. Its changelog is the draft section as it stands. That
+version is also what makes the build Dirigent Nightly (above).
+
+**A stable release**, once per version:
+
+1. Make the section final (`## <version> (draft)` becomes `## <version>`) and push to GitHub. The workflow
+   refuses `stable` without a final section.
+2. Actions › Release › Run workflow, channel `stable`.
 3. Right after, bump the version for the next release (with `Cargo.lock` and the `cargoDeps` hash in `flake.nix`)
    and open its `## <version> (draft)` section.
 
-Channels are independent: each is a build of its own (the update url is baked in) with its own versions. Publishing
-0.2.0 to `nightly` and later the same commit to `stable` gives both a 0.2.0. A machine only updates within its channel:
-moving one to another channel is installing that channel's installer by hand. (The first installs were on `beta`,
-which gets no more releases: they move to `nightly` or `stable` that way.)
+Channels are independent: each is a build of its own (the update url is baked in) with its own versions, and an
+install only updates within its channel. A machine can have both; neither becomes the other. (The first installs
+were on `beta`, which gets no more releases: they move to `stable` by installing its installer by hand.)
 
-The workflow (`.github/workflows/release.yml`) has a job per platform. Each builds the desktop with the channel's
-update url baked in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime,
+The workflow (`.github/workflows/release.yml`) works the version out once (its `version` job), then has a job per
+platform. Each builds the desktop with that version (`DIRIGENT_BUILD_VERSION`, which becomes
+`dirigent_protocol::release::VERSION`; other builds are the workspace version) and the channel's update url baked
+in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime,
 builds the installer (Windows) or the tarball (Linux, macOS) and runs `dirigent_api publish`, which signs it and
-uploads it to the bucket, the channel file last. If one job fails, re-run it alone. Testers download the latest from
+uploads it to the bucket, the channel file last. If one job fails, re-run it alone ("Re-run failed jobs": it keeps
+the run's version; re-running all jobs makes a new nightly). Not once a newer nightly is out: the re-run would point
+its platform's channel back at the older one, so run a new nightly then. Testers download the latest from
 `https://dirigent.sebba.dev/api/v0/download/<channel>/<windows-x86_64|linux-x86_64|macos-aarch64>`. Unsigned by Authenticode for
 now: SmartScreen asks once ("More info", "Run anyway"); updates aren't downloaded by a browser, so they don't ask.
 
@@ -312,9 +359,12 @@ package could repackage the Linux tarball (pacman would then update it, so its i
 ## The icon
 
 `dirigent_desktop/assets/dirigent.png` (1000 px) is the source; `dirigent.ico` is made from it with PNG entries
-from 64 px up and bitmaps below:
+from 64 px up and bitmaps below. The nightly's source is `dirigent_nightly.svg` (the welcome screen draws it, as it
+does `dirigent.svg`): `magick -background none dirigent_nightly.svg -resize 1000x1000 -depth 8 -strip
+dirigent_nightly.png`, then its `.ico` the same way (`PNG32:` keeps the entries RGBA, which an image of few
+colours wouldn't be):
 
 ```sh
-for s in 256 128 96 64 48 40 32 24 20 16; do magick dirigent.png -filter Lanczos -resize ${s}x$s -strip i$s.png; done
+for s in 256 128 96 64 48 40 32 24 20 16; do magick dirigent.png -filter Lanczos -resize ${s}x$s -strip PNG32:i$s.png; done
 icotool -c -o dirigent.ico --raw=i256.png --raw=i128.png --raw=i96.png --raw=i64.png i48.png i40.png i32.png i24.png i20.png i16.png
 ```

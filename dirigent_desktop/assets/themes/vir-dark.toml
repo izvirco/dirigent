@@ -1,5 +1,5 @@
 # Dirigent theme "vir-dark", the default: vir-soft-dark on near-black, the same navy highlights and
-# coral accent over a darker canvas and main panel. Copy to ~/.config/dirigent/theme/<name>.toml
+# coral accent over a darker canvas and main panel. Copy to <config dir>/theme/<name>.toml
 # to make your own; config.toml's `theme = "<name>"` picks it. Colours are #rrggbb, or
 # #rrggbbaa for a translucent one.
 

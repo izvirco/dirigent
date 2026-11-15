@@ -1,10 +1,18 @@
 # Builds the Windows installer and the Linux and macOS tarballs and publishes them to a channel. Run by
-# hand (Actions › Release › Run workflow) after making the version's changelog.md section final
-# (no "(draft)"), which the app shows. Master is always the next version, in draft: the commit
-# after a release bumps `[workspace.package] version` in Cargo.toml and opens that version's
-# draft section. A version is published once per channel and platform (`dirigent_api publish`
-# refuses to overwrite it). Channels (stable, nightly) are independent builds with their own
-# versions.
+# hand (Actions › Release › Run workflow). Master is always the next version, in draft:
+# `[workspace.package] version` in Cargo.toml, with a `## <version> (draft)` section in
+# changelog.md.
+#
+#   nightly  any time, as often as you like: a prerelease of that draft version named by the
+#            time of the run, `0.0.10-nightly.202611151432`. Nothing to edit first. Such a
+#            version makes the build Dirigent Nightly, an app of its own that installs and
+#            runs next to a stable one (packaging/README.md).
+#   stable   the version itself, once: make its changelog.md section final first (no
+#            "(draft)"); the commit after the release bumps the version and opens the next
+#            draft section.
+#
+# A version is published once per channel and platform (`dirigent_api publish` refuses to
+# overwrite it). Channels are independent builds: a machine only updates within its own.
 #
 # Repository settings it needs:
 #   variables  S3_ENDPOINT (https://fsn1.your-objectstorage.com), S3_REGION, S3_BUCKET
@@ -32,22 +40,43 @@ on:
 concurrency: release
 
 jobs:
-  windows:
-    runs-on: windows-latest
-    env:
-      CARGO_TERM_COLOR: always
+  # The version every platform builds and publishes, worked out once so they agree (a job
+  # re-run alone gets the same one).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Version
         id: version
-        shell: bash
+        env:
+          CHANNEL: ${{ inputs.channel }}
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its changelog.md section, which the app shows after updating, and
-          # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
-          grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          # No release without its changelog.md section, which the app shows after updating.
+          # A nightly takes it as a draft too (`## <version> (draft)`), stable only final.
+          # [[:space:]]* takes a CRLF line's CR.
+          if [ "$CHANNEL" = nightly ]; then
+            grep -Eq "^## $version( \(draft\))?[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section" >&2; exit 1; }
+            # The time (UTC) as one numeric identifier: semver orders it as a number, and
+            # takes no leading zeros (a `0905` of its own for the time would be refused).
+            version="$version-nightly.$(date -u +%Y%m%d%H%M)"
+          else
+            grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      # Baked into the binaries as their version (`dirigent_protocol::release::VERSION`).
+      DIRIGENT_BUILD_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -82,13 +111,13 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=${{ steps.version.outputs.version }}" "/DDist=$PWD\dist" packaging\windows\dirigent.iss
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=${{ needs.version.outputs.version }}" "/DDist=$PWD\dist" packaging\windows\dirigent.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Dirigent-Setup-${{ steps.version.outputs.version }}
-          path: dist/Dirigent-Setup-${{ steps.version.outputs.version }}.exe
+          name: Dirigent-Setup-${{ needs.version.outputs.version }}
+          path: dist/Dirigent-Setup-${{ needs.version.outputs.version }}.exe
 
       - name: Publish
         shell: bash
@@ -100,28 +129,22 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
           CHANNEL: ${{ inputs.channel }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform windows-x86_64 \
             --version "$VERSION" "dist/Dirigent-Setup-$VERSION.exe"
           echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/windows-x86_64" >> "$GITHUB_STEP_SUMMARY"
 
   linux:
+    needs: version
     # The oldest runner: the binary needs a glibc at least as new as the one it's built against.
     runs-on: ubuntu-22.04
     env:
       CARGO_TERM_COLOR: always
+      # Baked into the binaries as their version (`dirigent_protocol::release::VERSION`).
+      DIRIGENT_BUILD_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Version
-        id: version
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its changelog.md section, which the app shows after updating, and
-          # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
-          grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -151,20 +174,26 @@ jobs:
       # The layout packaging/linux/install.sh expects, and installs as is.
       - name: Pack the tarball
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
           cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
           mv dist/runtime dist/dirigent/runtime
-          cp packaging/linux/install.sh dirigent_desktop/assets/dirigent.png dist/dirigent/
+          cp packaging/linux/install.sh dist/dirigent/
+          # A nightly installs as an app of its own (the `nightly` file tells install.sh), with
+          # its own icon.
+          case "$VERSION" in
+            *-nightly.*) touch dist/dirigent/nightly; cp dirigent_desktop/assets/dirigent_nightly.png dist/dirigent/dirigent.png ;;
+            *) cp dirigent_desktop/assets/dirigent.png dist/dirigent/ ;;
+          esac
           curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
           echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/dirigent/licenses/Lilex-OFL.txt" | sha256sum -c
           tar -czf "dist/dirigent-$VERSION-linux-x86_64.tar.gz" -C dist dirigent
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dirigent-${{ steps.version.outputs.version }}-linux-x86_64
-          path: dist/dirigent-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+          name: dirigent-${{ needs.version.outputs.version }}-linux-x86_64
+          path: dist/dirigent-${{ needs.version.outputs.version }}-linux-x86_64.tar.gz
 
       - name: Publish
         env:
@@ -175,28 +204,22 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
           CHANNEL: ${{ inputs.channel }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform linux-x86_64 \
             --version "$VERSION" "dist/dirigent-$VERSION-linux-x86_64.tar.gz"
           echo "Published Dirigent $VERSION to \`$CHANNEL\`: https://dirigent.sebba.dev/api/v0/download/$CHANNEL/linux-x86_64" >> "$GITHUB_STEP_SUMMARY"
 
   macos:
+    needs: version
     # Apple silicon.
     runs-on: macos-15
     env:
       CARGO_TERM_COLOR: always
+      # Baked into the binaries as their version (`dirigent_protocol::release::VERSION`).
+      DIRIGENT_BUILD_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Version
-        id: version
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its changelog.md section, which the app shows after updating, and
-          # not while it's a draft (`## <version> (draft)`). [[:space:]]* takes a CRLF line's CR.
-          grep -Eq "^## $version[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section (or it's still a draft)" >&2; exit 1; }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -226,7 +249,7 @@ jobs:
       # and the app's own updates never are.
       - name: Pack the tarball
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
           cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
@@ -234,6 +257,8 @@ jobs:
           codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/runtime/dirigent_runtime
           codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/runtime/dirigent_runtime
           cp packaging/linux/install.sh dist/dirigent/
+          # A nightly installs as an app of its own (the `nightly` file tells install.sh).
+          case "$VERSION" in *-nightly.*) touch dist/dirigent/nightly ;; esac
           curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
           echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/dirigent/licenses/Lilex-OFL.txt" | shasum -a 256 -c
           # No AppleDouble (._*) files or extended attributes in the archive.
@@ -241,8 +266,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dirigent-${{ steps.version.outputs.version }}-macos-aarch64
-          path: dist/dirigent-${{ steps.version.outputs.version }}-macos-aarch64.tar.gz
+          name: dirigent-${{ needs.version.outputs.version }}-macos-aarch64
+          path: dist/dirigent-${{ needs.version.outputs.version }}-macos-aarch64.tar.gz
 
       - name: Publish
         env:
@@ -253,7 +278,7 @@ jobs:
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           DIRIGENT_SIGNING_KEY: ${{ secrets.DIRIGENT_SIGNING_KEY }}
           CHANNEL: ${{ inputs.channel }}
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           cargo run --release --locked -p dirigent_api -- publish --channel "$CHANNEL" --platform macos-aarch64 \
             --version "$VERSION" "dist/dirigent-$VERSION-macos-aarch64.tar.gz"

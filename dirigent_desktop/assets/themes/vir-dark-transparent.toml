@@ -1,5 +1,5 @@
 # Dirigent theme "vir-dark-transparent": vir-dark on a black, 95% opaque window. Copy to
-# ~/.config/dirigent/theme/<name>.toml to make your own; config.toml's `theme = "<name>"` picks it.
+# <config dir>/theme/<name>.toml to make your own; config.toml's `theme = "<name>"` picks it.
 # Colours are #rrggbb, or #rrggbbaa for a translucent one.
 
 # The canvas is pure black at 95%, so the window is faintly see-through, blurred where the compositor supports it.

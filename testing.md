@@ -66,12 +66,18 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   `pi.on("session_before_compact", …)` that sleeps, and returns `{ compaction: { get summary() { throw … } } }`.
 - **Computer use in the app under test** (`"computer"` in a prompt's `tools`): its `desktop` is your private screen.
   - An app there: `scripts/ui.sh run sh -c 'setsid xcalc -geometry 300x400+500+200 &'` (`nixpkgs#xcalc`).
-  - The app back on top: `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent$" | xargs xdotool windowraise'`.
+  - The app back on top: `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | xargs xdotool windowraise'`.
   - A covered window is only captured under a compositor: `picom --backend xrender` (`nixpkgs#picom`).
   - The fallback to the desktop: a `UI_PATH` directory with an `Xvfb` that exits 1.
   - Over `rpc`: `screen` events, `get_screen`, and `screen: true` in `list_threads`.
 - **The setup** (`onboarding.rs`): `UI_ONBOARDING=1 scripts/ui.sh start :3`. It animates: ~2 s title card, ~0.6 s
   per step, ~1 s fade out.
+- **A nightly build** (its title `Dirigent Nightly`, window class, logo, version): `start` with
+  `DIRIGENT_BUILD_VERSION` set, and again without it when done (both rebuild):
+  `DIRIGENT_BUILD_VERSION=0.0.10-nightly.202611151432 scripts/ui.sh start :3`.
+  The session's dirs and port are the script's either way. A nightly's own dirs (`packaging/README.md`) only show
+  without `--data-dir`: start the binary by hand with `HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME` in a temp
+  dir, and with `DIRIGENT_PORT=<a free port> DIRIGENT_BIND=127.0.0.1`: its default port, 7776, is Seb's nightly.
 - **The changelog modal**: lower `kv.last_version` in `data/desktop.db` and `start`. Esc closes it.
 - **Window placement** (`kv.window`, `placement.rs`): `start` resizes the window after launch, so relaunch the
   binary as `launch` in `ui.sh` does without the `xdotool` line, and check `xdotool getwindowgeometry`.

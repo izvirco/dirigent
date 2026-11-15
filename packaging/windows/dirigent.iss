@@ -6,7 +6,12 @@
 ; Dirigent again. Every update thus runs the new version's installer: the files, registry
 ; entries and this script itself can all change in any release.
 ;
-; Never change: AppId (it is how an update finds the install), the flags above.
+; Never change: the AppIds (each is how an update finds its install), the flags above.
+;
+; A nightly (a Version with "-nightly." in it, as the app itself tells: dirigent_protocol's
+; release.rs) installs as an app of its own, Dirigent Nightly, next to a stable one: its own
+; AppId, directory, shortcuts, right-click entry and command (dirigent-nightly), so neither
+; touches the other. Its exes are nightly builds, with their own data dirs and icon.
 ;
 ; Built by the release workflow (.github/workflows/release.yml):
 ;   iscc /DVersion=0.1.0 /DDist=<dir> packaging\windows\dirigent.iss
@@ -20,25 +25,42 @@
 #ifndef Dist
   #define Dist "..\..\dist"
 #endif
+; Name: what the user sees. Key: the right-click entry's registry key. Cli: the command on
+; PATH. Data: the data dir's name in %LOCALAPPDATA%, which the app picks (release::app).
+#if Pos("-nightly.", Version) > 0
+  #define Id "{{92A54733-5874-4F63-BB88-EDBA04F3B7EE}"
+  #define Name "Dirigent Nightly"
+  #define Key "DirigentNightly"
+  #define Cli "dirigent-nightly"
+  #define Data "dirigent-nightly"
+  #define Icon "dirigent_nightly.ico"
+#else
+  #define Id "{{62E36A4A-63C4-495C-8340-00B3023A0729}"
+  #define Name "Dirigent"
+  #define Key "Dirigent"
+  #define Cli "dirigent"
+  #define Data "dirigent"
+  #define Icon "dirigent.ico"
+#endif
 
 [Setup]
-AppId={{62E36A4A-63C4-495C-8340-00B3023A0729}
-AppName=Dirigent
+AppId={#Id}
+AppName={#Name}
 AppVersion={#Version}
-AppVerName=Dirigent {#Version}
+AppVerName={#Name} {#Version}
 AppPublisher=Dirigent
 AppPublisherURL=https://dirigent.sebba.dev
 ; Per user, no admin: %LOCALAPPDATA%\Programs\Dirigent (data stays in %LOCALAPPDATA%\dirigent).
 PrivilegesRequired=lowest
-DefaultDirName={autopf}\Dirigent
+DefaultDirName={autopf}\{#Name}
 DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
 OutputDir={#Dist}
 OutputBaseFilename=Dirigent-Setup-{#Version}
-SetupIconFile=..\..\dirigent_desktop\assets\dirigent.ico
+SetupIconFile=..\..\dirigent_desktop\assets\{#Icon}
 UninstallDisplayIcon={app}\dirigent_desktop.exe
-UninstallDisplayName=Dirigent
+UninstallDisplayName={#Name}
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
@@ -51,50 +73,51 @@ RestartApplications=no
 ChangesEnvironment=yes
 
 [Tasks]
-Name: contextmenu; Description: "Add ""Open in Dirigent"" to the folder right-click menu"
+Name: contextmenu; Description: "Add ""Open in {#Name}"" to the folder right-click menu"
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 ; Older installs get this ticked on their next update: Inno restores each task's previous state, and a
 ; task it hasn't seen before keeps its default.
-Name: addtopath; Description: "Add the dirigent command to PATH (dirigent pi install ...)"
+Name: addtopath; Description: "Add the {#Cli} command to PATH ({#Cli} pi install ...)"
 
 [InstallDelete]
 ; The runtime's files are replaced wholesale: nothing of an older pi lingers.
 Type: filesandordirs; Name: "{app}\runtime"
 ; The app's name in the first releases; dirigent.exe is the command line now (the same name on NTFS).
+; A nightly never had one.
 Type: files; Name: "{app}\Dirigent.exe"
 
 [Files]
 Source: "{#Dist}\dirigent_desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; DestName: "{#Cli}.exe"; Flags: ignoreversion
 Source: "{#Dist}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\Dirigent"; Filename: "{app}\dirigent_desktop.exe"
-Name: "{autodesktop}\Dirigent"; Filename: "{app}\dirigent_desktop.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#Name}"; Filename: "{app}\dirigent_desktop.exe"
+Name: "{autodesktop}\{#Name}"; Filename: "{app}\dirigent_desktop.exe"; Tasks: desktopicon
 
 [Registry]
 ; "Open in Dirigent" on a folder, on a folder's background (inside it) and on a drive. The
 ; app takes the folder as its argument and hands it to the running instance if there is one.
 ; Windows 11 lists these under "Show more options".
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent"; ValueType: string; ValueName: ""; ValueData: "Open in Dirigent"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent"; ValueType: string; ValueName: ""; ValueData: "Open in Dirigent"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent"; ValueType: string; ValueName: ""; ValueData: "Open in Dirigent"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\Dirigent\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 
 [Run]
 ; A first install offers to start it; an update starts it again.
-Filename: "{app}\dirigent_desktop.exe"; Description: "Start Dirigent"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\dirigent_desktop.exe"; Description: "Start {#Name}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\dirigent_desktop.exe"; Flags: nowait; Check: IsUpdate
 
 [UninstallDelete]
 ; Downloaded updates. Threads, settings and logs (%LOCALAPPDATA%\dirigent, %APPDATA%\dirigent) stay.
-Type: filesandordirs; Name: "{localappdata}\dirigent\updates"
+Type: filesandordirs; Name: "{localappdata}\{#Data}\updates"
 
 [Code]
 const

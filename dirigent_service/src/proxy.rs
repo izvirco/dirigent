@@ -173,7 +173,7 @@ fn fetch(url: &str, key: &str) -> Result<Vec<ProxyAccount>, Failure> {
     let fail = |message: String| Failure { message, refused: false };
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .user_agent(format!("Dirigent/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("Dirigent/{}", dirigent_protocol::release::VERSION))
             .timeout_global(Some(TIMEOUT))
             // The proxy says why in the body.
             .http_status_as_error(false)

@@ -48,10 +48,13 @@ const MAX_DEPTH: usize = 3;
 /// How much of a sub-agent's reply a parent's notice carries.
 const NOTICE_CHARS: usize = 6000;
 
-/// The local service's port: `DIRIGENT_PORT` or 7777. The desktop uses it both to reach and
-/// to embed the local service, so a test instance with its own port never touches the real one.
+/// The local service's port: `DIRIGENT_PORT`, else 7777, or 7776 in a nightly build. The
+/// desktop uses it both to reach and to embed the local service, so a test instance with its
+/// own port never touches the real one, and a nightly desktop never finds a stable one's
+/// service (it would use it as its own).
 pub fn port() -> u16 {
-    std::env::var("DIRIGENT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(DEFAULT_PORT)
+    let default = if dirigent_protocol::release::nightly() { DEFAULT_PORT - 1 } else { DEFAULT_PORT };
+    std::env::var("DIRIGENT_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(default)
 }
 
 pub struct Service {
@@ -1050,7 +1053,8 @@ static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
 
 pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent, \
                          %LOCALAPPDATA%\\dirigent on Windows) --config-dir DIR (config.toml, hosts.toml, themes; \
-                         default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows)";
+                         default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows); a nightly build's \
+                         are dirigent-nightly";
 
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, every binary's only
 /// options, and return the operands (the desktop takes a folder to open, `dirigent` its
@@ -1182,7 +1186,7 @@ pub async fn run(port: u16) -> Result<()> {
     }
     let listeners = server::bind(addrs).await?;
     let host_name = platform::host_name();
-    info!(host = %host_name, data = %data_dir().display(), version = env!("CARGO_PKG_VERSION"), "service started");
+    info!(host = %host_name, data = %data_dir().display(), version = dirigent_protocol::release::VERSION, "service started");
     let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));
     let svc = Arc::new(Service {
         storage: Mutex::new(storage),
