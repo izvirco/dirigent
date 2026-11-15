@@ -15,6 +15,12 @@
 // isn't shipped is taken from PATH (`program`): both in a dev checkout (the nix dev shell
 // has them), the driver on macOS, Xvfb in a Linux install (`packaging/README.md`).
 //
+// The driver is made for a desktop: its guide and most of its tools go by windows and their
+// accessibility trees, which a private screen (no window manager, apps drawn in software)
+// mostly hasn't got. So a private screen has a guide of ours in the driver's place
+// (`PRIVATE_GUIDE`: operate it by its pixels) and only the tools that takes
+// (`PRIVATE_TOOLS`). The desktop has the driver as it comes.
+//
 // The thread shows what the agent does there. The driver's own recorder writes a folder per
 // action (`turn-NNNNN/`: the target window before and after, and what was done where),
 // which `Recording` reads while a tool of that screen runs and hands on as `screen`
@@ -58,6 +64,14 @@ const SERVER: Record<Where, string> = { private: "private_screen", desktop: "use
 const RECORDING_ID = "dirigent-recording";
 /** The driver's tools that answer with a picture of what the recorder shows: the screen, a window. */
 const LOOKS = new Set(["get_desktop_state", "get_window_state"]);
+/** Every tool of the driver's that takes a picture: those, and a region of a window. */
+const PICTURES = new Set([...LOOKS, "zoom"]);
+/**
+ * How long an app gets to draw what an action did before a picture of it is taken
+ * (`recorded`). Dirigent's own window, drawn in software on a private screen, shows a hover
+ * some 70 ms after the pointer moved; this leaves room for a busy machine.
+ */
+const SETTLE_MS = 250;
 /** How long the first tool call waits for the recording to start before going ahead without. */
 const RECORDING_START_MS = 3000;
 /** How often the recording is read while a computer tool runs. */
@@ -69,6 +83,49 @@ const WIDTH = 1280;
 const HEIGHT = 800;
 /** How long Xvfb gets to come up, and the driver to say its version. */
 const START_MS = 5000;
+
+/**
+ * The driver's tools a private screen offers, a quarter of them: what operating a screen by
+ * its pixels takes. The others are for what a private screen hasn't got or dirigent does
+ * itself (browser pages over their own protocol, acting through the accessibility tree
+ * alone, the driver's sessions, cursor, recorder, settings and updates), and every one of
+ * them is a long description for the agent to read past. `click` does the double and the right click
+ * too: `double_click` and `right_click` take no `target`. Names are the driver's: check them
+ * with every update of it (`packaging/README.md`), a tool it renamed is one gone missing.
+ */
+const PRIVATE_TOOLS = [
+  "get_desktop_state",
+  "get_window_state",
+  "zoom",
+  "click",
+  "move_cursor",
+  "scroll",
+  "drag",
+  "type_text",
+  "press_key",
+  "hotkey",
+  "launch_app",
+  "kill_app",
+  "list_windows",
+  "clipboard_read",
+  "clipboard_write",
+];
+
+/**
+ * How a private screen is operated: what its opening says and what
+ * `describeNamespace("mcp__private_screen")` returns, in the place of the driver's own guide
+ * (`guided`), which says the opposite (act on a window's elements, check with `verify_state`).
+ * Each line is something an agent got wrong without it.
+ */
+const PRIVATE_GUIDE = [
+  "A private screen has no window manager: windows have no title bars and stay where they open, and input aimed at a window (`pid`, `window_id`) doesn't reach every app. So operate it by its pixels:",
+  "- See it: `get_desktop_state({})` answers with the screen's picture.",
+  '- Act on it with `target: {kind: "desktop", display_id: "primary"}` and the `x`, `y` you read off your latest picture: `click` (`button: "right"`, `count: 2` for a double click), `move_cursor` (to hover), `scroll` (`direction`, `amount`), `drag` (`from_x`, `from_y`, `to_x`, `to_y`), `type_text` (`text`), `press_key` (`key`, `modifiers`) and `hotkey` (`keys`). Keys go to the window under the pointer, so click into it first. `target` goes alone: with `scope`, `pid` or `window_id` next to it the call is refused.',
+  "- See what it did: take the picture after the action in the same script (it is held a moment for the app to draw; after something slower, an animation, look again), or in a later message. Not in another tool call of the same message: those run at the same time, and the picture shows the screen as it was before.",
+  '- An action here always answers `effect: "unverifiable"`, which says nothing: the picture is the check. A refused call doesn\'t throw: its result has `isError: true` and the reason in `content[0].text`.',
+  '- A cheaper look: `get_desktop_state({screenshot_out_file: "/tmp/screen.png"})` writes the picture to a file and answers without it; crop the part you need (ImageMagick: `magick /tmp/screen.png -crop 400x200+0+600 /tmp/part.png`) and read that. `max_image_dimension` answers with a smaller picture, and until your next picture `x` and `y` are taken as pixels of that one: read them off the picture you took last, never off an earlier, larger one.',
+  "- A window: `list_windows({})` has each one's `pid` and `window_id`, `get_window_state` its picture and, where the app has one (many here don't), its accessibility tree. Once that was called for a window (with `screenshot_out_file`, to keep its picture out of the answer), `zoom` answers with a region of it as a small picture.",
+].join("\n");
 
 /** A step of a thread's computer use, as the service takes it (`RuntimeMessage::Screen`). */
 export interface ScreenUpdate {
@@ -166,7 +223,9 @@ async function startDisplay(width: number, height: number): Promise<Display> {
  * driver draws on the screen itself for its agent (`--no-overlay`): the thread shows where
  * the agent clicks, and the user's desktop stays theirs. Its state lives in `home`, except
  * on macOS, where the driver in use is the user's own install and `mcp` talks to its daemon.
- * A private screen's driver, and the apps it launches, get that display and no Wayland one.
+ * A private screen's driver, and the apps it launches, get that display and no Wayland one;
+ * of its tools the agent gets `PRIVATE_TOOLS` and no other (nor its resources, a guide among
+ * them: a hidden server has none).
  */
 function serverConfig(
   command: string,
@@ -187,13 +246,19 @@ function serverConfig(
     where === "private"
       ? `Operate the apps on this thread's private screen: ${does}.`
       : `Operate the apps on the user's desktop: ${does}, in the background where the app allows.`;
-  return { command, args: ["mcp", "--no-overlay"], env, description };
+  const config: McpServerConfig = { command, args: ["mcp", "--no-overlay"], env, description };
+  if (where === "private") {
+    config.exposure = "hidden";
+    config.toolExposure = Object.fromEntries(PRIVATE_TOOLS.map((tool) => [tool, "codemode"]));
+  }
+  return config;
 }
 
 /** How a screen's tools are used, for the model that just opened it. */
-function how(server: string): string {
+function how(server: string, where: Where): string {
+  const guide = where === "private" ? "this screen's guide" : "the driver's guide";
   return (
-    `Operate it from codemode with the \`mcp__${server}__…\` tools: \`describeNamespace("mcp__${server}")\` has the driver's guide and the tool names. ` +
+    `Operate it from codemode with the \`mcp__${server}__…\` tools: \`describeNamespace("mcp__${server}")\` has ${guide} and the tool names. ` +
     "A screenshot is an image block of a tool's result: pass it to `image()` to see it. The user watches what you do there in this thread."
   );
 }
@@ -262,7 +327,8 @@ export class Computer {
       // A screen of ours that is open; a server of the user's by that name otherwise.
       const where = (Object.keys(SERVER) as Where[]).find((w) => SERVER[w] === entry.name);
       const open = where && this.open.get(where);
-      return open ? recorded(transport, open.recording) : transport;
+      if (!open) return transport;
+      return recorded(transport, open.recording, where === "private" ? PRIVATE_GUIDE : undefined);
     };
     const mcp = {
       name: "mcp",
@@ -323,7 +389,7 @@ export class Computer {
     const opened = this.open.get(where);
     if (opened) {
       const at = opened.display ? ` (\`DISPLAY=${opened.display.name}\`)` : "";
-      return `${stoodIn}The ${where} screen is open already${at}. ${how(server)}`;
+      return `${stoodIn}The ${where} screen is open already${at}. ${how(server, where)}`;
     }
     const sessionless =
       where === "desktop" &&
@@ -345,11 +411,11 @@ export class Computer {
       throw e;
     }
     if (!display)
-      return `${stoodIn}The user's desktop is open to you. ${how(server)} It is the screen they are working on: act only on what they asked for, and leave their other windows as they are.`;
+      return `${stoodIn}The user's desktop is open to you. ${how(server, where)} It is the screen they are working on: act only on what they asked for, and leave their other windows as they are.`;
     return (
-      `Your private screen is open: an X display of this thread's own (\`DISPLAY=${display.name}\`, ${width}x${height}), which nobody sees but in this thread. ${how(server)}\n` +
-      `Start apps on it with \`mcp__${server}__launch_app\`, or from bash, in the background, with \`env -u WAYLAND_DISPLAY DISPLAY=${display.name} <command>\`: anything started without that opens on the user's desktop. ` +
-      'It has no window manager: windows have no title bars and stay where they open, and input aimed at a window (`pid`, `window_id`) doesn\'t reach every app. Aim at the screen instead: `get_desktop_state({})` for its picture, then `click` with `target: {kind: "desktop", display_id: "primary"}` and the `x`, `y` you read off that picture. `type_text`, `press_key`, `hotkey`, `scroll` and `drag` take the same `target`; keys go to the window under the pointer, so click into it first. Apps draw in software here and can take a moment to show what an action did: a picture taken in the same script as the action may show the screen as it was, so take it in your next call. ' +
+      `Your private screen is open: an X display of this thread's own (\`DISPLAY=${display.name}\`, ${width}x${height}), which nobody sees but in this thread. ${how(server, where)}\n` +
+      `Start apps on it with \`mcp__${server}__launch_app\`, or from bash, in the background, with \`env -u WAYLAND_DISPLAY DISPLAY=${display.name} <command>\`: anything started without that opens on the user's desktop.\n` +
+      `${PRIVATE_GUIDE}\n` +
       "The screen closes when the thread has been idle for a while; open it again then."
     );
   }
@@ -406,13 +472,24 @@ export function forgetScreens(): void {
  * only the picture. The pictures the agent asks for (`LOOKS`) are handed to `recording` on
  * their way to pi. Changed in place, not wrapped: pi tells a stdio transport by its class
  * (a failed connection's error then has the server's stderr).
+ *
+ * A picture (`PICTURES`) is taken `SETTLE_MS` after the last other call went out or was
+ * answered, not before: a script that acts and then looks sees what the action did, not
+ * the screen the app hadn't drawn yet. Two calls the model sent in one message run side by
+ * side, and their order is anyone's: the wait covers a quick action whose call went out
+ * first, the guide says not to (`PRIVATE_GUIDE`).
+ *
+ * With a `guide`, that is the server's guide in the place of its own (`guided`).
  */
-function recorded(transport: Transport, recording: Recording): Transport {
+function recorded(transport: Transport, recording: Recording, guide?: string): Transport {
   const send = transport.send.bind(transport);
   const onMessage = transport.onMessage.bind(transport);
   let started: Promise<void> | undefined;
   /** The ids of the calls in flight that answer with a picture. */
   const looks = new Set<unknown>();
+  /** The ids of the other calls in flight, and when one of them last went out or was answered. */
+  const acts = new Set<unknown>();
+  let acted = 0;
   const start = () =>
     new Promise<void>((resolve) => {
       let dir: string;
@@ -450,6 +527,14 @@ function recorded(transport: Transport, recording: Recording): Transport {
       // Cancelled while it waited (the user stopped the run): the call never goes out.
       if (options?.signal?.aborted) return;
       const name = (message.params as { name?: string } | undefined)?.name;
+      if (name && PICTURES.has(name)) {
+        const wait = acted + SETTLE_MS - Date.now();
+        if (wait > 0) await Bun.sleep(wait);
+        if (options?.signal?.aborted) return;
+      } else if ("id" in message) {
+        acts.add(message.id);
+        acted = Date.now();
+      }
       if ("id" in message && name && LOOKS.has(name)) looks.add(message.id);
     }
     return send(message, options);
@@ -457,11 +542,23 @@ function recorded(transport: Transport, recording: Recording): Transport {
   transport.onMessage = (listener) =>
     onMessage((message) => {
       if ("id" in message && message.id === RECORDING_ID) return;
-      listener(message);
+      if ("id" in message && acts.delete(message.id)) acted = Date.now();
+      listener(guide ? guided(message, guide) : message);
       if ("id" in message && looks.delete(message.id) && "result" in message)
         recording.looked(message.result);
     });
   return transport;
+}
+
+/**
+ * `message` with `guide` for the server's own guide, if it is the server's answer to
+ * `initialize` (the one result with a `protocolVersion`), whose `instructions` are what
+ * `describeNamespace` returns.
+ */
+function guided(message: JsonRpc, guide: string): JsonRpc {
+  const result = "result" in message ? (message.result as Record<string, unknown> | null) : null;
+  if (typeof result?.protocolVersion !== "string") return message;
+  return { ...message, result: { ...result, instructions: guide } } as JsonRpc;
 }
 
 /** The recorder's `action.json`, as far as we read it. */
