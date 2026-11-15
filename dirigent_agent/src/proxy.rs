@@ -31,7 +31,7 @@ pub use failure::Error;
 
 use crate::config::{Config, Dirs};
 use crate::tool::ToolSpec;
-use dirigent_protocol::transcript::{Api, Assistant, Block, Stop, Usage, text_of};
+use dirigent_protocol::transcript::{Api, Assistant, Block, Stop, Usage};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -181,13 +181,6 @@ pub enum Failure {
     Other,
 }
 
-/// One completion without tools (`Proxy::complete`): a title, a summary.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Completion {
-    pub text: String,
-    pub message: Assistant,
-}
-
 /// The client: one for the host, shared by its sessions (a clone is the same client). It
 /// keeps the connections to the proxy and what the proxy said of its models.
 #[derive(Clone)]
@@ -248,29 +241,6 @@ impl Proxy {
             outcome = self.run(path, headers, body, wire.as_mut(), on) => Some(outcome),
         };
         reply(request.model, wire.take(), outcome)
-    }
-
-    /// One completion without tools: a title, a compaction's summary. An error's cause is an
-    /// `Error`, which says whether another try is worth it.
-    pub async fn complete(
-        &self,
-        model: &Model,
-        system: &str,
-        text: &str,
-        effort: Option<&str>,
-        cancel: &CancellationToken,
-    ) -> anyhow::Result<Completion> {
-        let messages = [Message::User(vec![Part::Text(text.to_owned())])];
-        let request = Request { model, system, messages: &messages, tools: &[], effort, max_output: None, cache_key: "" };
-        let Reply { message, failure } = self.stream(&request, &mut |_| {}, cancel).await;
-        match message.stop {
-            Stop::Aborted => anyhow::bail!("cancelled"),
-            Stop::Error => {
-                let message = message.error.unwrap_or_else(|| "The request failed.".into());
-                Err(Error { failure: failure.unwrap_or(Failure::Other), message }.into())
-            }
-            Stop::End | Stop::ToolUse | Stop::MaxTokens => Ok(Completion { text: text_of(&message.content), message }),
-        }
     }
 
     /// Send the request and feed what streams back to `wire`, until the reply is complete.

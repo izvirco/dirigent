@@ -11,6 +11,7 @@
 
 use super::tests::{dirs, point_at};
 use super::*;
+use dirigent_protocol::transcript::text_of;
 use serde_json::json;
 
 const HAIKU: &str = "claude-haiku-5-5";
@@ -204,9 +205,9 @@ async fn a_completion_and_an_abort() {
     let (_tmp, proxy) = proxy();
     let model = proxy.model(HAIKU).await.unwrap();
     let never = CancellationToken::new();
-    let completion = proxy.complete(&model, "Answer with one word.", "The capital of France?", Some("low"), &never).await.unwrap();
-    assert!(completion.text.contains("Paris"), "{}", completion.text);
-    assert!(completion.message.usage.cost.total() > 0.0);
+    let reply = crate::complete(&proxy, &model, "Answer with one word.", "The capital of France?", Some("low"), &never).await.unwrap();
+    assert!(text_of(&reply.content).contains("Paris"), "{reply:?}");
+    assert!(reply.usage.cost.total() > 0.0);
 
     // Stopped once text streams: what came is the reply.
     let stop = CancellationToken::new();
