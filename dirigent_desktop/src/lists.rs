@@ -552,8 +552,9 @@ fn section_label(text: String) -> Div {
         .child(text)
 }
 
+/// `content`, scrolling, in what is left of the column it is put in.
 pub fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
-    div().id(id).flex_1().overflow_y_scroll().flex().flex_col().child(content)
+    theme::stack().id(id).flex_1().overflow_y_scroll().child(content)
 }
 
 /// Every item of a thread list is this tall (rows and section labels alike).

@@ -374,6 +374,18 @@ pub fn mix(a: u32, b: u32, k: f32) -> Hsla {
     Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }.into()
 }
 
+/// A vertical stack as wide as its parent: a flex column, for a column inside a column.
+/// The width is not for looks (a column stretches its children anyway; only in a row, under
+/// `items_*` or with a side margin would it show) but for what the layout costs. taffy 0.13 sizes a column's child of unset width twice, as wide as the
+/// column and again to ask how wide it would like to be, and each of the two sizes the
+/// child's own children both ways again, throwing away what the other found (its cache
+/// holds one of them). So every level of `div().flex().flex_col()` in another doubles the
+/// cost of all that is under it: Settings, seven levels over a server's 40 tools, took
+/// over a second a frame. A width of its own skips the second sizing.
+pub fn stack() -> Div {
+    div().w_full().flex().flex_col()
+}
+
 /// A 7px status dot.
 pub fn dot(color: u32) -> Div {
     div().size(u(7.)).rounded_full().bg(rgba(color)).flex_shrink_0()

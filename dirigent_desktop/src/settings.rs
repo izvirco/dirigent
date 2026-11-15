@@ -166,7 +166,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         Tab::Hosts => hosts_tab::render(this, cx),
         Tab::Forge => crate::account::render(this, cx),
     };
-    let column = div().flex().flex_col().gap_8().px_8().py_6().children(sections);
+    let column = theme::stack().gap_8().px_8().py_6().children(sections);
     let body = div().flex().flex_row().child(nav).child(div().flex_1().min_w_0().flex().flex_col().child(scroll("settings", column)));
     modal::frame(modal::large(body), cx)
 }
@@ -191,7 +191,7 @@ fn nav_item(tab: Tab, on: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 
 /// A section: title over its content.
 pub fn section(title: &'static str, body: impl IntoElement) -> Div {
-    div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
+    theme::stack().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
 }
 
 /// The file a tab's settings live in (also editable by hand), in small print at its bottom.
@@ -260,9 +260,7 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let bg = this.config.background;
     section(
         "Appearance",
-        div()
-            .flex()
-            .flex_col()
+        theme::stack()
             .child(row("Theme", theme_chip))
             .child(row("Background", background_chip(this, cx)))
             .when(bg.pattern != Pattern::Off, |d| {
@@ -379,9 +377,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .hover(move |d| d.bg(rgba(t.accent_active)))
             .on_click(cx.listener(|this, _, _, cx| this.run_title_test(cx)))
             .child(if running { "Naming…" } else { "Name it" });
-        div()
-            .flex()
-            .flex_col()
+        theme::stack()
             .gap_2()
             .pt_2()
             .child(field(s.sample.clone()))
@@ -390,14 +386,10 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 
     section(
         "Thread titles",
-        div()
-            .flex()
-            .flex_col()
+        theme::stack()
             .child(row("Model", model_chip))
             .child(row("Reasoning", effort_chip))
-            .child(
-                div().flex().flex_col().gap_1().py_2().child(div().text_color(rgba(t.fg_1)).child("Prompt")).child(field(s.prompt.clone())),
-            )
+            .child(theme::stack().gap_1().py_2().child(div().text_color(rgba(t.fg_1)).child("Prompt")).child(field(s.prompt.clone())))
             .child(div().flex().flex_row().pt_2().child(test_button))
             .children(test),
     )
@@ -458,9 +450,7 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let bash_background = switch("tool-bash-background", c.bash_background, cx, |this, cx| this.toggle_tool("bash_background", cx));
     section(
         "Agent tools",
-        div()
-            .flex()
-            .flex_col()
+        theme::stack()
             .child(row("async_bash", switch("tool-async-bash", c.async_bash, cx, |this, cx| this.toggle_tool("async_bash", cx))))
             .when(c.async_bash, |d| d.child(sub_row("Move a bash command still running after 10 s to the background", bash_background)))
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))

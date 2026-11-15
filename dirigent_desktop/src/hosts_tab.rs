@@ -292,7 +292,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
         Some(_) => None,
         None => Some(div().flex().flex_row().pt_3().child(add_button(this, cx))),
     };
-    vec![section("Hosts", div().flex().flex_col().children(rows).children(below)), saved_to(&hosts::path())]
+    vec![section("Hosts", theme::stack().children(rows).children(below)), saved_to(&hosts::path())]
 }
 
 /// `● name   address   auth   state   ✎ ×`: one line, whatever its state.
@@ -458,9 +458,7 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
         .child(div().flex_1().min_w_0().text_size(text::sm()).children(note))
         .child(settings::text_button("host-form-cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| this.close_host_form(cx))))
         .child(settings::primary_button("host-form-save", save).on_click(cx.listener(|this, _, _, cx| this.save_host_form(cx))));
-    div()
-        .flex()
-        .flex_col()
+    theme::stack()
         .gap_2p5()
         .p_4()
         .rounded_lg()

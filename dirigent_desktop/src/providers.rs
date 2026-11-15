@@ -433,7 +433,7 @@ pub fn body(this: &Dirigent, intro: bool, cx: &mut Context<Dirigent>) -> Div {
             })
             .children(chip.then(|| host_chip(this, cx)))
     });
-    div().flex().flex_col().gap_3().children(header).child(body)
+    theme::stack().gap_3().children(header).child(body)
 }
 
 /// `Host  local ▾`: whose providers show (and whose proxy and MCP servers, in their tabs).
@@ -474,17 +474,13 @@ fn list(providers: &[ProviderInfo], this: &Dirigent, cx: &mut Context<Dirigent>)
     let busy: HashSet<&str> = this.providers.logouts.values().filter(|(h, _)| h == shown).map(|(_, p)| p.id.as_str()).collect();
     let group = |title: &'static str, rows: Vec<&ProviderInfo>, cx: &mut Context<Dirigent>| {
         (!rows.is_empty()).then(|| {
-            div()
-                .flex()
-                .flex_col()
+            theme::stack()
                 .child(div().h(u(26.)).flex().items_end().pb_1().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(title))
                 .children(rows.into_iter().map(|p| provider_row(p, busy.contains(p.id.as_str()), cx)))
         })
     };
     let empty = (set_up.is_empty() && rest.is_empty()).then(|| hint("No provider matches"));
-    div()
-        .flex()
-        .flex_col()
+    theme::stack()
         .gap_2()
         .child(field(this.providers.search.clone()))
         .children(group("Set up", set_up, cx))
@@ -601,7 +597,7 @@ pub(crate) fn login_panel(login: &Login, this: &Dirigent, cx: &mut Context<Dirig
             login.steps.iter().map(|s| step(s, matches!(s, LoginStep::Prompt { n, .. } if Some(*n) == open), this, cx)).collect()
         }
     };
-    div().flex().flex_col().gap_3().p_4().rounded_lg().border_1().border_color(rgba(t.line)).bg(rgba(t.raised)).child(header).children(body)
+    theme::stack().gap_3().p_4().rounded_lg().border_1().border_color(rgba(t.line)).bg(rgba(t.raised)).child(header).children(body)
 }
 
 /// One of pi's steps. `open`: the question being asked (it gets the answer field).
@@ -611,9 +607,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
     match s {
         LoginStep::AuthUrl { url, instructions } => {
             let (open_url, copy_url) = (url.clone(), url.clone());
-            div()
-                .flex()
-                .flex_col()
+            theme::stack()
                 .gap_1p5()
                 .child(instructions.clone().unwrap_or_else(|| "Finish signing in with your browser.".into()))
                 .child(
@@ -631,9 +625,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
         }
         LoginStep::DeviceCode { user_code, verification_uri } => {
             let (code, page) = (user_code.clone(), verification_uri.clone());
-            div()
-                .flex()
-                .flex_col()
+            theme::stack()
                 .gap_1p5()
                 .child(format!("Enter this code at {verification_uri}:"))
                 .child(div().font_family(mono).text_size(text::lg()).font_weight(FontWeight::BOLD).child(user_code.clone()))
@@ -651,9 +643,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
                 .child(hint("Waiting for you to finish there…"))
                 .into_any()
         }
-        LoginStep::Info { message, links } => div()
-            .flex()
-            .flex_col()
+        LoginStep::Info { message, links } => theme::stack()
             .gap_1()
             .child(message.clone())
             .children(links.iter().enumerate().map(|(i, l)| {
@@ -675,9 +665,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
                 return question.into_any();
             }
             let answer = if *kind == PromptKind::Select {
-                div()
-                    .flex()
-                    .flex_col()
+                theme::stack()
                     .children(options.iter().map(|o| {
                         let id = o.id.clone();
                         menu::row(format!("auth-option/{}", o.id))
@@ -704,7 +692,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
                     )
                     .into_any()
             };
-            div().flex().flex_col().gap_1p5().child(question).child(answer).into_any()
+            theme::stack().gap_1p5().child(question).child(answer).into_any()
         }
         // Never kept (it removes its prompt), or from a newer host.
         LoginStep::PromptClosed { .. } | LoginStep::Unknown => div().into_any(),

@@ -160,9 +160,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
         .child(primary_button("proxy-save", "Save").on_click(cx.listener(|this, _, _, cx| this.save_proxy(cx))))
         .when(set, |d| d.child(text_button("proxy-remove", "Remove").on_click(cx.listener(|this, _, _, cx| this.remove_proxy(cx)))))
         .children(status.map(|s| s.ml_1()));
-    let fields = div()
-        .flex()
-        .flex_col()
+    let fields = theme::stack()
         .children((this.hosts.len() > 1).then(|| row("Host", host_chip(this, cx))))
         .child(row("Address", field(p.url.clone())))
         .child(row("Management key", field(p.key.clone())))

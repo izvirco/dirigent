@@ -130,13 +130,8 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
         .hover(|d| d.underline())
         .on_click(move |_, _, cx| cx.open_url(&page))
         .child("Open the forge account page");
-    let body = div()
-        .flex()
-        .flex_col()
-        .child(row(this, cx))
-        .children(ended)
-        .children(board_row(this, cx))
-        .child(div().flex().flex_row().pt_3().child(link));
+    let body =
+        theme::stack().child(row(this, cx)).children(ended).children(board_row(this, cx)).child(div().flex().flex_row().pt_3().child(link));
     vec![section("Forge providers", body), saved_to(&forge::path())]
 }
 
