@@ -323,6 +323,19 @@
             DIRIGENT_UI_VK_ICD = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
             DIRIGENT_LILEX_DIR = lilexDir;
           };
+
+          # sccache's server listens on one TCP port for the whole machine by default, so a second
+          # user's builds reach the first user's server, which compiles as that user and can't read
+          # their files. A socket in the home dir gives every user their own server, shared by all
+          # their checkouts and agents. Not in /tmp: another user could own the path first. Not in
+          # $XDG_RUNTIME_DIR: a service user has none. Builds that start together while no server
+          # runs each start one (a new server replaces the socket file); the extras exit when idle.
+          # A hook because `env` is static; the mkdir because sccache won't create the directory.
+          # `~`, not $HOME: bash resolves it even when HOME is unset.
+          shellHook = ''
+            mkdir -p ~/.cache
+            export SCCACHE_SERVER_UDS=~/.cache/sccache.sock
+          '';
         };
 
         # `nix develop .#windows`: checks that the Windows build compiles (AGENTS.md). MinGW's
