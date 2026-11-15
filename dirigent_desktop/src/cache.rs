@@ -218,6 +218,8 @@ impl Cache {
                 setup: None,
                 compacting_since: None,
                 screen: false,
+                // The host says so again when it is reached.
+                locked: false,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -473,6 +475,7 @@ mod tests {
             setup: None,
             compacting_since: None,
             screen: false,
+            locked: false,
         }
     }
 

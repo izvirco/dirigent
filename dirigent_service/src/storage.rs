@@ -364,6 +364,7 @@ impl Storage {
                 setup: None,
                 compacting_since: None,
                 screen: false,
+                locked: false,
             })
         })?;
         let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -653,6 +654,7 @@ impl Storage {
             setup: None,
             compacting_since: None,
             screen: false,
+            locked: false,
         })
     }
 

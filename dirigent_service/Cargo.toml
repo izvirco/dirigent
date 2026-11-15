@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dirigent_protocol.workspace = true
+dirigent_agent.workspace = true
 dirigent_auth.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
