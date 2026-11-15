@@ -59,6 +59,7 @@ echo "starting in $PWD" >&2
 while IFS= read -r line; do
   id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
+    *'"hang":true'*) continue ;;
     *'"method":"initialize"'*) result='{"protocolVersion":"2025-06-18","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"1"},"instructions":"Echo things."}' ;;
     *'"method":"tools/list"'*) result='{"tools":[{"name":"echo","description":"Say it back.\nTwice.","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}},{"name":"where-am-i","inputSchema":{}}]}' ;;
     *'"name":"where-am-i"'*) result="{\"content\":[{\"type\":\"text\",\"text\":\"$GREETING from $PWD, pid $$\"}]}" ;;
@@ -199,7 +200,7 @@ impl Watch for Seen {
         self.0.lock().unwrap().push(format!("{tool} starts with {input}"));
     }
 
-    async fn call_ended(&self, tool: &str, result: Option<&Value>) {
+    fn call_ended(&self, tool: &str, result: Option<&Value>) {
         self.0.lock().unwrap().push(format!("{tool} ended: {}", result.is_some()));
     }
 }
@@ -222,6 +223,9 @@ async fn a_server_is_added_to_a_running_session_and_watched() {
     let where_am_i = tool(&servers, "mcp__screen__where_am_i");
     let pid = where_am_i.call(json!({"a": 1}), &call()).await.unwrap().as_text().rsplit(' ').next().unwrap().to_owned();
     assert_eq!(*seen.0.lock().unwrap(), ["connected, own call: \"echo\"", "where-am-i starts with {\"a\":1}", "where-am-i ended: true"]);
+    // A call that is let go of before it has an answer (a stopped run drops it) has ended too.
+    assert!(tokio::time::timeout(Duration::from_millis(200), where_am_i.call(json!({"hang": true}), &call())).await.is_err());
+    assert_eq!(seen.0.lock().unwrap()[3..], ["where-am-i starts with {\"hang\":true}", "where-am-i ended: false"]);
 
     // A name that is taken, a command that doesn't speak: said, and nothing is left of them.
     let taken = servers.add("mine", sh(STDIO_SERVER), Added::default()).await.unwrap_err();
@@ -229,6 +233,9 @@ async fn a_server_is_added_to_a_running_session_and_watched() {
     let broken = servers.add("other", sh("echo 'cannot open display' >&2"), Added::default()).await.unwrap_err();
     assert_eq!(broken, "MCP server \"other\" failed to connect: The connection to the server closed\ncannot open display");
     assert!(servers.namespace("other").is_none());
+    // So with one whose adding is let go of half-way: its name is free again.
+    assert!(tokio::time::timeout(Duration::from_millis(200), servers.add("other", sh("sleep 5"), Added::default())).await.is_err());
+    servers.add("other", sh(STDIO_SERVER), Added::default()).await.unwrap();
 
     assert!(servers.remove("screen").await && !servers.remove("screen").await);
     assert!(!runs(&pid) && !names(&servers).iter().any(|name| name.starts_with("mcp__screen__")));

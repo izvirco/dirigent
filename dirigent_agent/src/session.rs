@@ -14,6 +14,7 @@ use crate::mcp::Servers;
 use crate::prompt::Prompt as SystemPrompt;
 use crate::tool::{Call, Tool, ToolOutput, ToolSpec};
 use crate::tools::bash::{AskUser, AsyncBash, Bash};
+use crate::tools::computer::{COMPUTER, Computer};
 use crate::tools::files::{Edit, Read, Write};
 use crate::tools::shell::Jobs;
 use crate::tools::{Env, images};
@@ -34,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 
 /// The tools a thread has only while their switch is on (`Prompt::tools`); `bash_background`
 /// is an option of `async_bash`, not a tool.
-const SWITCHED: [&str; 5] = ["async_bash", "ask_user", "dirigent", "computer", CODEMODE];
+const SWITCHED: [&str; 5] = ["async_bash", "ask_user", "dirigent", COMPUTER, CODEMODE];
 pub(crate) const CODEMODE: &str = "codemode";
 /// How long a request, or a script, waits for MCP servers that are still connecting.
 const SERVERS_WAIT: Duration = Duration::from_secs(10);
@@ -132,6 +133,9 @@ pub struct Session {
     tools: Vec<(String, Arc<dyn Tool>)>,
     /// The MCP servers, whose tools come and go with their connections.
     pub mcp: Servers,
+    /// The `computer` tool, which is one of `tools`: the screens it opened close with the
+    /// session, and when its switch goes off.
+    computer: Arc<Computer>,
     /// The names of the host's tools among them.
     host_tools: Vec<String>,
     pub jobs: Jobs,
@@ -203,8 +207,11 @@ impl Session {
             let named = |tools: &[Arc<dyn Tool>]| -> Vec<String> { tools.iter().map(|t| t.spec().name).collect() };
             let host_names = named(&host_tools);
             tools.extend(host_tools);
+            let computer = Arc::new(Computer::new(this.clone()));
+            tools.push(computer.clone());
             let tools = named(&tools).into_iter().zip(tools).collect();
             Session {
+                computer,
                 host_tools: host_names,
                 active: Mutex::new(std::time::Instant::now()),
                 prompt: SystemPrompt::load(dirs, &cwd),
@@ -338,6 +345,11 @@ impl Session {
         state.model = Some(model);
         state.effort = prompt.effort.or(state.effort.take());
         if let Some(tools) = prompt.tools {
+            // `computer` going off also closes the screens the thread has open.
+            if !tools.iter().any(|tool| tool == COMPUTER) {
+                let (computer, mcp) = (self.computer.clone(), self.mcp.clone());
+                tokio::spawn(async move { computer.close_all(&mcp).await });
+            }
             state.switches = tools;
         }
         if state.run.is_some() {
@@ -460,7 +472,7 @@ impl Session {
     }
 
     /// Drop the session: its run stops where it is, its jobs are killed, the ones left
-    /// running too, and its servers close. Nothing more comes of it.
+    /// running too, and its servers and screens close. Nothing more comes of it.
     pub(crate) fn unload(self: &Arc<Self>) {
         self.end(false);
         let this = self.clone();
@@ -488,9 +500,11 @@ impl Session {
         self.ready.send_replace(true);
     }
 
-    /// Close what a session that ended holds: its MCP servers.
+    /// Close what a session that ended holds: its MCP servers and its screens.
     pub(crate) async fn close(&self) {
+        // The servers first: none is added after that, so no screen opens once they are closed.
         self.mcp.close().await;
+        self.computer.close_all(&self.mcp).await;
     }
 
     /// Whether the session does anything that unloading would end: a run, jobs, or a

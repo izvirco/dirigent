@@ -123,8 +123,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Must be called within a tokio runtime.
+    /// Must be called within a tokio runtime. One per data directory: what an agent before
+    /// it left of its threads' screens there is forgotten.
     pub fn new(dirs: Dirs, host: Arc<dyn Host>, llm: Arc<dyn Llm>) -> Arc<Self> {
+        tools::computer::forget_screens(&dirs);
         let (out, mut outs) = mpsc::unbounded_channel::<(String, Out)>();
         tokio::spawn({
             let host = host.clone();

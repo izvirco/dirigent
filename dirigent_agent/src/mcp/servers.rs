@@ -44,9 +44,47 @@ pub trait Watch: Send + Sync {
     async fn call_starts(&self, _client: &Client, _tool: &str, _input: &Value, _call: &Call) {}
 
     /// The call is over: `result` is the tool's (its `CallToolResult`), `None` if it
-    /// failed or was cancelled. Every `call_starts` is followed by one, unless the run
-    /// drops the call instead of cancelling it.
-    async fn call_ended(&self, _tool: &str, _result: Option<&Value>) {}
+    /// failed, was cancelled, or was let go of by a run that stopped (which drops a call
+    /// that takes too long to end). Every `call_starts` that returned is followed by one.
+    fn call_ended(&self, _tool: &str, _result: Option<&Value>) {}
+}
+
+/// A watched call under way: `Watch::call_ended` is told when it is over, however it ends.
+struct Watched<'a> {
+    watch: Option<&'a dyn Watch>,
+    tool: &'a str,
+}
+
+impl Watched<'_> {
+    fn ended(mut self, result: Option<&Value>) {
+        if let Some(watch) = self.watch.take() {
+            watch.call_ended(self.tool, result);
+        }
+    }
+}
+
+impl Drop for Watched<'_> {
+    /// The call was dropped before it had an answer.
+    fn drop(&mut self) {
+        if let Some(watch) = self.watch.take() {
+            watch.call_ended(self.tool, None);
+        }
+    }
+}
+
+/// A server being added: forgotten again unless `Servers::add` gets to its end, so one
+/// whose caller is dropped half-way (a stopped run) doesn't keep its name taken.
+struct Adding<'a> {
+    servers: &'a Mutex<BTreeMap<String, Entry>>,
+    name: Option<&'a str>,
+}
+
+impl Drop for Adding<'_> {
+    fn drop(&mut self) {
+        if let Some(entry) = self.name.and_then(|name| self.servers.lock().unwrap().remove(name)) {
+            entry.connection.shutdown.cancel();
+        }
+    }
 }
 
 /// What whoever adds a server while the session runs makes of it.
@@ -216,11 +254,12 @@ impl Servers {
     /// another server's, it didn't connect.
     pub async fn add(&self, name: &str, server: Server, with: Added) -> Result<(), String> {
         let reach = server.reach(name)?;
-        if self.inner.closed.load(Ordering::Relaxed) {
-            return Err("The session's MCP servers are closed".into());
-        }
         let connection = {
             let mut servers = self.inner.servers.lock().unwrap();
+            // Looked at with the servers held, as `close` takes them: none slips in behind it.
+            if self.inner.closed.load(Ordering::Relaxed) {
+                return Err("The session's MCP servers are closed".into());
+            }
             if let Some(other) = servers.keys().find(|other| namespace(other) == namespace(name)) {
                 return Err(format!("There is an MCP server named \"{other}\" already"));
             }
@@ -230,7 +269,10 @@ impl Servers {
             servers.insert(name.to_owned(), entry);
             connection
         };
-        if let Err(e) = connection.client().await {
+        let mut adding = Adding { servers: &self.inner.servers, name: Some(name) };
+        let connected = connection.client().await;
+        adding.name = None;
+        if let Err(e) = connected {
             self.remove(name).await;
             return Err(e.to_string());
         }
@@ -509,10 +551,9 @@ impl Connection {
             if let Some(watch) = watch {
                 watch.call_starts(&client, tool, &input, call).await;
             }
+            let watched = Watched { watch, tool };
             let result = client.call_tool(tool, input.clone(), self.server.timeout(), &call.cancel).await;
-            if let Some(watch) = watch {
-                watch.call_ended(tool, result.as_ref().ok()).await;
-            }
+            watched.ended(result.as_ref().ok());
             match result {
                 // The server restarted and doesn't know the session: the call didn't run,
                 // and goes out again on a new one. The old connection is let go, not
