@@ -15,9 +15,27 @@ async-trait = "0.1"
 # `CancellationToken`: the user stopping a run reaches the request and every tool call.
 tokio-util = "0.7"
 toml = "0.8"
-# The proxy's HTTP: streamed replies over rustls with ring and bundled roots, as the rest of
-# the tree has them (no system TLS). `gzip`: models.dev's price list is 12 times smaller with it.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
+# HTTP, to the proxy (streamed replies) and to MCP servers (streamable HTTP, OAuth): rustls
+# with ring and bundled roots, as the rest of the tree has them (no system TLS, no second
+# crypto library: 0.13's rustls is aws-lc). `gzip`: models.dev's price list is 12 times
+# smaller with it.
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls-webpki-roots",
+  "gzip",
+] }
+# `mcp`: the addresses of servers and of their OAuth, and form bodies.
+url = "2"
+# `mcp`: PKCE's SHA-256 and randomness, a long tool name's hash.
+sha2 = "0.10"
+getrandom = "0.4"
+# Images cross between tools, scripts, servers and requests as base64.
+base64 = "0.22"
+
+# `mcp/stdio.rs`, `tools/shell.rs`: signals to a process group.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# `mcp/tests.rs`: an HTTP MCP server with OAuth to connect to.
+axum = "0.8"

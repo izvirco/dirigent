@@ -1362,15 +1362,21 @@ version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
+ "axum",
+ "base64 0.22.1",
  "dirigent_protocol",
+ "getrandom 0.4.3",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
  "toml 0.8.23",
  "tracing",
+ "url",
 ]
 
 [[package]]
