@@ -15,6 +15,9 @@ async-trait = "0.1"
 # `CancellationToken`: the user stopping a run reaches the request and every tool call.
 tokio-util = "0.7"
 toml = "0.8"
+# The proxy's HTTP: streamed replies over rustls with ring and bundled roots, as the rest of
+# the tree has them (no system TLS). `gzip`: models.dev's price list is 12 times smaller with it.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 
 [dev-dependencies]
 tempfile = "3"
