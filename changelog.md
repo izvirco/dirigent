@@ -8,6 +8,7 @@
 - Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title. `/mcp` in a thread says how its servers are ([#165])
 - A message the model can't take (no credentials for its provider) comes back: a new thread's draft returns with its text and images, one sent to a thread goes back into its composer, and the toast says how to fix it ([#173])
 - Several new threads can start at once: a draft no longer waits for the last one to start ([#173])
+- Pi 1.5.2: Claude OAuth requests report a current Claude Code version ([#175])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
@@ -28,6 +29,7 @@
 [#170]: https://forge.sebba.dev/izvir/dirigent/changes/170
 [#172]: https://forge.sebba.dev/izvir/dirigent/changes/172
 [#173]: https://forge.sebba.dev/izvir/dirigent/changes/173
+[#175]: https://forge.sebba.dev/izvir/dirigent/changes/175
 
 ## 0.0.9
 
