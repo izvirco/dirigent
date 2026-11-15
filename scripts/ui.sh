@@ -53,8 +53,8 @@ source "$ENV"
 # One session per agent thread unless told otherwise, so parallel agents never share one.
 if [ -n "${UI_SESSION:-}" ]; then
   SESSION=$UI_SESSION
-elif [ -n "${PI_SESSION_ID:-}" ]; then
-  SESSION=${PI_SESSION_ID: -8}
+elif [ -n "${DIRIGENT_THREAD_ID:-}" ]; then
+  SESSION=${DIRIGENT_THREAD_ID: -8}
 else
   SESSION=default
 fi
@@ -74,9 +74,9 @@ alive() {
   [ -f "$DIR/app.pid" ] && kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null && return
   pgrep -f "$APP_CMD" >/dev/null
 }
-# The app is started with setsid, so pid == process group: this also takes down its embedded
-# service and pi runtime, and nothing outside the session. A restarted app is signalled by
-# its command line; its runtime follows it out (stdin closes).
+# The app is started with setsid, so pid == process group: this also takes down what its
+# embedded service started, and nothing outside the session. A restarted app is signalled
+# by its command line.
 kill_app() {
   if alive; then
     [ -f "$DIR/app.pid" ] && { kill -TERM -- "-$(cat "$DIR/app.pid")" 2>/dev/null || true; }
@@ -102,11 +102,10 @@ need_app() {
 }
 # The service port: every live private screen has its own display number, so no two collide.
 port() { echo $((7800 + $(cat "$DIR/display"))); }
-rpc() { bun "$ROOT/scripts/ui-rpc.ts" "$(port)" "$@"; }
+rpc() { node "$ROOT/scripts/ui-rpc.mjs" "$(port)" "$@"; }
 
 # Only errors are printed; the last line says what happened.
 build() {
-  [ -d node_modules ] || bun install --frozen-lockfile # a fresh workspace
   if ! "${NIX_BUILD[@]}" cargo build -q -p dirigent_desktop --message-format short 2>"$DIR/build.log"; then
     grep -E 'error' "$DIR/build.log" | grep -v '^error: could not compile' | head -30 || true
     echo "build failed, full output: $DIR/build.log" >&2
@@ -130,8 +129,8 @@ onboarding() {
 
 # Launch the app on the session's display (it must be up), filling it: the screen's pixels are
 # the window's. Dirs as flags, not XDG_*, so the agents it runs keep the real git / jj config.
-# Not the caller's PI_SESSION_ID or UI_SESSION: the app's own agents would take them for
-# theirs (a nix dev shell they capture carries them into their commands), and their
+# Not the caller's DIRIGENT_THREAD_ID or UI_SESSION: the app's own agents would take them
+# for theirs (a nix dev shell they capture carries them into their commands), and their
 # `ui.sh` would act on this session, the app they run in.
 launch() {
   DISPLAY=:$(cat "$DIR/display"); export DISPLAY
@@ -140,9 +139,9 @@ launch() {
   ! ss -ltnH "sport = :$PORT" | grep -q . || { echo "port $PORT is taken: by another session's app on this screen? One app per screen" >&2; exit 1; }
   mkdir -p "$DIR/data" "$DIR/config"
   onboarding
-  env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR -u PI_SESSION_ID -u UI_SESSION \
+  env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR -u DIRIGENT_THREAD_ID -u UI_SESSION \
     VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" \
-    DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 DIRIGENT_RUNTIME="$ROOT/dirigent_runtime/src/index.ts" \
+    DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 \
     DIRIGENT_PREFIX="$PREFIX" setsid "$BIN" --data-dir "$DIR/data" --config-dir "$DIR/config" >"$DIR/app.log" 2>&1 </dev/null &
   echo $! >"$DIR/app.pid"
   WIN=$(timeout 20 xdotool search --sync --onlyvisible --class dirigent | head -1) ||
@@ -170,7 +169,7 @@ case "${1:-}" in
     need_display; need_app
     PROJECT=${2:-$DIR/scratch}
     case $PROJECT in /*) ;; *) PROJECT=$CALLER/$PROJECT ;; esac
-    MODEL=${3:-anthropic/claude-opus-5-5}
+    MODEL=${3:-claude-opus-5-5}
     mkdir -p "$PROJECT"
     PROJECT=$(cd "$PROJECT" && pwd)
     ID=$(P=$PROJECT rpc '{"type":"list_projects"}' 'r.projects.find(p => p.path === process.env.P)?.id ?? ""')

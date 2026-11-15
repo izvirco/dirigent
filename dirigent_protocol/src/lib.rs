@@ -1,8 +1,12 @@
 //! Wire types between `dirigent_desktop` and `dirigent_service` (JSON over WebSocket).
 //!
 //! Requests carry an `id`, replies carry `reply_to`, pushes have neither.
-//! Pi entries and events stay opaque `serde_json::Value`s so this crate is pi-version-agnostic.
+//! A thread's entries and events are `transcript`'s: the format the agent writes, the host
+//! stores and clients draw.
 //! `release` and `leaderboard` are the other wire: the update api's (`dirigent_api`).
+//!
+//! A host and a client talk only when they speak the same `PROTOCOL`: the host says its
+//! own in `Hello`, and a client that reads another one tells its user which side to update.
 
 pub mod images;
 pub mod leaderboard;
@@ -11,15 +15,21 @@ pub mod transcript;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use transcript::{Entry, Event};
+
+/// The wire's version. Raised when a change would make an older host or client misread a
+/// newer one (not for a field added with a default). 1 was pi's entries as opaque JSON,
+/// from hosts that sent no number.
+pub const PROTOCOL: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptMode {
     /// Start a run (queued as follow-up if one is already running).
     Prompt,
-    /// Inject after the current assistant turn.
+    /// Hand it to the model after its current tool calls.
     Steer,
-    /// Deliver after the current run finishes.
+    /// Hand it to the model once it would stop: the run goes on with it.
     FollowUp,
 }
 
@@ -111,24 +121,23 @@ pub enum ClientMessage {
         id: u64,
         path: String,
     },
-    /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
-    /// `images` are attached to the message; pi resizes them to the model's limits.
+    /// `model` (its id) and `effort` switch the thread before sending, if they differ.
+    /// `images` are attached to the message; the host scales them to what a model takes.
     /// `title` (sent with a thread's first prompt) asks the host to name the thread from `text`.
-    /// `tools` names the dirigent tools (`async_bash`, `ask_user`, `computer`) the model gets
-    /// from now on, and `codemode` while its switch is on; the host remembers them for the
-    /// thread. `None` leaves them as they are.
+    /// `tools` names the tool switches that are on from now on (`async_bash`, `ask_user`,
+    /// `dirigent`, `computer`, `codemode`) and the option `bash_background`; the host
+    /// remembers them for the thread. `None` leaves them as they are.
     /// The reply (`Ok`) says the model has the message: its run started, or it is queued
     /// behind the one in progress. An `Error` says it has not, and why (the session didn't
-    /// load, no credentials for the model): the conversation has nothing of the message, so
-    /// the client gives it back to its user. A host from before 0.0.10 replied as soon as
-    /// the message was on its way, and told of such a failure in an `Error` push.
+    /// load, the proxy doesn't serve the model): the conversation has nothing of the message,
+    /// so the client gives it back to its user.
     Prompt {
         id: u64,
         thread_id: String,
         text: String,
         mode: PromptMode,
         model: Option<String>,
-        thinking_level: Option<String>,
+        effort: Option<String>,
         #[serde(default)]
         images: Vec<ImageAttachment>,
         #[serde(default)]
@@ -136,19 +145,18 @@ pub enum ClientMessage {
         #[serde(default)]
         tools: Option<Vec<String>>,
     },
-    /// Rewrite one of the thread's user messages (`entry_id`, a pi `message` entry with role
-    /// `user`) and run from there: the conversation goes back to just before it and `text`
-    /// is sent in its place, as a `Prompt` in mode `prompt` with these fields would be. The
-    /// old message and everything after it stay in the thread's history, on a branch of
-    /// pi's session tree no client shows (see `Entry`). Refused while the thread runs. Not a
-    /// field of `Prompt`: a host from before this refuses it instead of appending the text.
+    /// Rewrite one of the thread's user messages (`entry_id`, a `Body::User` entry) and run
+    /// from there: the conversation goes back to just before it and `text` is sent in its
+    /// place, as a `Prompt` in mode `prompt` with these fields would be. The old message and
+    /// everything after it stay in the thread's history, on a branch no client shows (see
+    /// `transcript::Entry`). Refused while the thread runs.
     EditMessage {
         id: u64,
         thread_id: String,
         entry_id: String,
         text: String,
         model: Option<String>,
-        thinking_level: Option<String>,
+        effort: Option<String>,
         #[serde(default)]
         images: Vec<ImageAttachment>,
         #[serde(default)]
@@ -189,7 +197,7 @@ pub enum ClientMessage {
         id: u64,
         thread_id: String,
     },
-    /// Drop one steer / follow-up (by text) that pi has queued but not yet handed to the model.
+    /// Drop one steer / follow-up (by text) that is queued but not yet handed to the model.
     CancelQueued {
         id: u64,
         thread_id: String,
@@ -208,7 +216,7 @@ pub enum ClientMessage {
         name: String,
     },
     /// Title the thread again from what it has become: its user messages and latest reply,
-    /// not just its first prompt. `model` (`provider/id`) and `reasoning` are the `[title]`
+    /// not just its first prompt. `model` (its id) and `reasoning` are the `[title]`
     /// settings; the host has the prompt. Replies `Title`; every client sees the new name.
     RetitleThread {
         id: u64,
@@ -228,7 +236,7 @@ pub enum ClientMessage {
         thread_id: String,
         pinned: bool,
     },
-    /// Pin one of the thread's messages (by the pi entry id it came from; see
+    /// Pin one of the thread's messages (by the id of the entry it came from; see
     /// `ThreadSummary::pinned_entries`).
     PinMessage {
         id: u64,
@@ -261,25 +269,11 @@ pub enum ClientMessage {
         id: u64,
         thread_id: String,
     },
-    /// Models this host has credentials for.
+    /// The models this host's proxy serves.
     ListModels {
         id: u64,
     },
-    /// The model providers this host's pi knows, and how each is set up (Settings › Providers).
-    ListProviders {
-        id: u64,
-    },
-    /// Sign in to a model provider on this host, as pi's `/login` does: with an account
-    /// (`Oauth`) or a key (`ApiKey`: or whatever setup the provider asks for). Its steps
-    /// come to this connection only, as `LoginStep`s under this request's id; the prompts
-    /// among them are answered with `LoginAnswer`. The reply (`Ok`, or `Error`) ends it.
-    /// The connection dropping cancels it.
-    Login {
-        id: u64,
-        provider: String,
-        method: AuthMethod,
-    },
-    /// The answer to prompt `prompt` of the login started by request `login` (see
+    /// The answer to prompt `prompt` of the login (`McpLogin`) started by request `login` (see
     /// `LoginStep::Prompt`).
     LoginAnswer {
         id: u64,
@@ -292,13 +286,7 @@ pub enum ClientMessage {
         id: u64,
         login: u64,
     },
-    /// Remove the credential a `Login` stored for the provider. Environment variables and
-    /// pi's `models.json` stay as they are.
-    Logout {
-        id: u64,
-        provider: String,
-    },
-    /// The MCP servers in this host's pi `mcp.json` (Settings › MCP servers), as configured:
+    /// The MCP servers in this host's `agent.toml` (Settings › MCP servers), as configured:
     /// nothing is connected to (`CheckMcpServer` does that).
     ListMcpServers {
         id: u64,
@@ -309,23 +297,25 @@ pub enum ClientMessage {
         id: u64,
         name: String,
     },
-    /// Add server `name` to `mcp.json`, or replace its entry, with `config` (an entry of
-    /// pi's `mcpServers` shape). Sessions read the file when they start: the host unloads
-    /// its idle ones, so their next prompt sees the change.
+    /// Add server `name` to `agent.toml`, or replace its entry, with `config` (an entry of
+    /// the common `mcpServers` shape). Sessions read the file when they start: the host
+    /// unloads its idle ones, so their next prompt sees the change.
     SaveMcpServer {
         id: u64,
         name: String,
         config: Value,
     },
-    /// Remove server `name` from `mcp.json` (its OAuth credentials stay, as with
-    /// `pi mcp remove`). Idle sessions are unloaded, as for `SaveMcpServer`.
+    /// Remove server `name` from `agent.toml`, and the OAuth credentials stored for it. Idle
+    /// sessions are unloaded, as for `SaveMcpServer`.
     RemoveMcpServer {
         id: u64,
         name: String,
     },
-    /// Sign in to OAuth server `name`, as `Login` does to a provider: its steps, answers
-    /// (`LoginAnswer`), cancel (`LoginCancel`) and end are the same. Sessions waiting for
-    /// the sign-in pick it up on their next turn.
+    /// Sign in to OAuth server `name` on this host. Its steps come to this connection only,
+    /// as `LoginStep`s under this request's id; the prompts among them are answered with
+    /// `LoginAnswer`, and `LoginCancel` stops it. The reply (`Ok`, or `Error`) ends it; so
+    /// does the connection dropping. Sessions waiting for the sign-in pick it up on their
+    /// next turn.
     McpLogin {
         id: u64,
         name: String,
@@ -362,7 +352,8 @@ pub enum ClientMessage {
         offset: u64,
     },
     /// Token / cost usage of every assistant message with `since <= timestamp < until`,
-    /// summed per `bucket_ms`-wide slot (counted from `since`) and per provider + model.
+    /// summed per `bucket_ms`-wide slot (counted from `since`) and per provider (who makes
+    /// the model) + model.
     ListUsage {
         id: u64,
         since: i64,
@@ -379,14 +370,18 @@ pub enum ClientMessage {
         until: i64,
         bucket_ms: i64,
     },
-    /// Point this host at its CLIProxyAPI's management API (Settings › Proxy): `url` is
-    /// the proxy's address, `key` its management key (empty: the one the host holds for that
-    /// address). An empty `url` forgets both. The host asks the proxy at once: the reply is
-    /// a `Proxy` with what it found (no history).
+    /// Point this host at its CLIProxyAPI (Settings › Proxy): `url` is the proxy's address,
+    /// `key` one of its API keys (what every model request is made with) and
+    /// `management_key` its management key (what Usage reads the accounts with; optional).
+    /// An empty key is the one the host holds for that address. An empty `url` forgets
+    /// everything. The host asks the proxy at once: the reply is a `Proxy` with what it
+    /// found (no history).
     SetProxy {
         id: u64,
         url: String,
         key: String,
+        #[serde(default)]
+        management_key: String,
     },
 }
 
@@ -396,10 +391,13 @@ pub enum ServerMessage {
     Hello {
         host_name: String,
         version: String,
-        /// Random, made once per service (its `service.db`): what the leaderboard counts a
-        /// service's usage under, whichever desktops upload it. Empty from older services.
+        /// Random, made once per service (kept in its db): what the leaderboard counts a
+        /// service's usage under, whichever desktops upload it.
         #[serde(default)]
         service_id: String,
+        /// The `PROTOCOL` it speaks. 1 from a host that doesn't say.
+        #[serde(default = "first_protocol")]
+        protocol: u32,
     },
     /// Reply to `ListProjects`, or pushed (`reply_to: None`) whenever a project changes.
     Projects {
@@ -421,10 +419,10 @@ pub enum ServerMessage {
         reply_to: Option<u64>,
         threads: Vec<ThreadSummary>,
     },
+    /// Reply to `GetThread`: every entry of the thread, in `seq` order.
     Thread {
         reply_to: u64,
         thread_id: String,
-        header: Value,
         entries: Vec<Entry>,
     },
     ThreadCreated {
@@ -438,35 +436,24 @@ pub enum ServerMessage {
         reply_to: Option<u64>,
         message: String,
     },
-    /// Pushed to all clients whenever an entry is persisted for a thread. Image blocks in
-    /// entries carry `blob` (a content hash) instead of `data`; fetch them with `GetBlob`.
-    /// A reply's text blocks carry the blobs of the images they link to (`images`).
+    /// Pushed to all clients whenever an entry is kept for a thread. Images are blobs
+    /// (`transcript::Block::Image`, and the `blobs` of a reply's text): fetch them with
+    /// `GetBlob`.
     Entry {
         thread_id: String,
         entry: Entry,
     },
-    /// Pi `AgentSessionEvent`, forwarded as JSON, its inline images without their `data`
-    /// (the entry that follows has them, as `blob`s). Two are the host's own: `warning` (with a
-    /// `message`) and `screen`, a step of the thread's computer use: `frame` is the id of
-    /// the picture its screen shows now (0: none yet; `GetScreen` has it), `action` what the
-    /// agent just did there, in a few words, and `cursor` where it clicked, as fractions
-    /// `[x, y]` of the picture; both absent when only the picture changed. `desktop: true`
-    /// when it happened on the desktop of the host's user, not on a screen of the thread's own.
+    /// What happens in a thread between entries: a reply streaming, a tool running, a
+    /// message queued.
     Event {
         thread_id: String,
-        event: Value,
+        event: Event,
     },
     Models {
         reply_to: u64,
         models: Vec<ModelInfo>,
     },
-    /// Reply to `ListProviders`: by name; `auth_path` is the file logins are saved to.
-    Providers {
-        reply_to: u64,
-        providers: Vec<ProviderInfo>,
-        auth_path: String,
-    },
-    /// Reply to `ListMcpServers`: in `mcp.json`'s order; `path` is the file.
+    /// Reply to `ListMcpServers`: by name; `path` is the file they are in (`agent.toml`).
     McpServers {
         reply_to: u64,
         servers: Vec<McpServer>,
@@ -477,8 +464,8 @@ pub enum ServerMessage {
         reply_to: u64,
         status: McpServerStatus,
     },
-    /// A step of the login started by request `login` (`ClientMessage::Login` or
-    /// `McpLogin`), to the connection that started it.
+    /// A step of the login started by request `login` (`ClientMessage::McpLogin`), to the
+    /// connection that started it.
     LoginStep {
         login: u64,
         step: LoginStep,
@@ -551,43 +538,14 @@ pub enum ServerMessage {
     },
 }
 
-/// How to sign in to a model provider: with an account, or a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthMethod {
-    Oauth,
-    ApiKey,
-}
-
-/// A model provider and how it is set up on a host (see `ClientMessage::ListProviders`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderInfo {
-    pub id: String,
-    pub name: String,
-    /// Signing in with an account is offered: what that is ("Anthropic (Claude Pro/Max)").
-    #[serde(default)]
-    pub oauth: Option<String>,
-    /// A key (or the provider's other setup: a profile, an account id) can be entered: what
-    /// it is ("Anthropic API key").
-    #[serde(default)]
-    pub api_key: Option<String>,
-    /// Where its credentials come from now ("Signed in", "From ANTHROPIC_API_KEY"); `None`:
-    /// it has none, so it offers no models.
-    #[serde(default)]
-    pub status: Option<String>,
-    /// What a `Login` stored for it: what `Logout` removes.
-    #[serde(default)]
-    pub stored: Option<AuthMethod>,
-}
-
-/// An MCP server in a host's `mcp.json` (see `ClientMessage::ListMcpServers`).
+/// An MCP server in a host's `agent.toml` (see `ClientMessage::ListMcpServers`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct McpServer {
     pub name: String,
-    /// Its entry as the file has it (pi's `mcpServers` shape): what an edit starts from,
-    /// so the fields a client doesn't show stay as they are.
+    /// Its entry as the file has it, as JSON (the common `mcpServers` shape): what an edit
+    /// starts from, so the fields a client doesn't show stay as they are.
     pub config: Value,
-    /// Why pi skips the entry (a field it rejects, a name clashing with another's).
+    /// Why sessions skip the entry (a field that is wrong, a name clashing with another's).
     #[serde(default)]
     pub error: Option<String>,
     /// OAuth credentials are stored for it: what `McpLogout` removes.
@@ -601,7 +559,7 @@ pub struct McpServerStatus {
     pub state: McpState,
     #[serde(default)]
     pub tools: Vec<McpTool>,
-    /// Why it isn't connected: pi's message (with a failed command's last stderr lines).
+    /// Why it isn't connected (with a failed command's last stderr lines).
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -626,77 +584,28 @@ pub struct McpTool {
     pub description: Option<String>,
 }
 
-/// A step of a login (`ServerMessage::LoginStep`): pi's prompts and notices, in order.
+/// A step of an MCP server's sign-in (`ServerMessage::LoginStep`), in order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LoginStep {
     /// Sign in at `url` in a browser.
-    AuthUrl {
-        url: String,
-        #[serde(default)]
-        instructions: Option<String>,
-    },
-    /// Enter `user_code` at `verification_uri`; the login goes on once that is done.
-    DeviceCode {
-        user_code: String,
-        verification_uri: String,
-    },
-    Info {
-        message: String,
-        #[serde(default)]
-        links: Vec<AuthLink>,
-    },
-    Progress {
-        message: String,
-    },
-    /// A question, answered with `ClientMessage::LoginAnswer { prompt: n }`: the text typed
-    /// for `Text` / `Secret` / `ManualCode`, the picked option's `id` for `Select`.
+    AuthUrl { url: String },
+    /// What the sign-in is doing.
+    Progress { message: String },
+    /// A question, answered with `ClientMessage::LoginAnswer { prompt: n }` and the text
+    /// typed: the address the browser ended up on, pasted. The way in when the browser
+    /// can't reach the host (a remote one).
     Prompt {
         n: u32,
-        kind: PromptKind,
         message: String,
         #[serde(default)]
         placeholder: Option<String>,
-        #[serde(default)]
-        options: Vec<AuthOption>,
     },
-    /// Prompt `n` needs no answer any more (the browser sign-in got there first).
-    PromptClosed {
-        n: u32,
-    },
+    /// Prompt `n` needs no answer any more (the browser got to the host).
+    PromptClosed { n: u32 },
     /// A step a newer host knows: nothing to show, rather than the whole message dropped.
     #[serde(other)]
     Unknown,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptKind {
-    Text,
-    /// Text not to show (a key).
-    Secret,
-    Select,
-    /// The code or redirect url the provider shows after a browser sign-in, pasted: the way
-    /// in when the browser can't reach the host (a remote one).
-    ManualCode,
-    /// A kind a newer host knows: answered as text.
-    #[serde(other)]
-    Other,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AuthLink {
-    pub url: String,
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AuthOption {
-    pub id: String,
-    pub label: String,
-    #[serde(default)]
-    pub description: Option<String>,
 }
 
 /// A host in a `hosts.toml`, as an agent connects to it: its name there, its `ws(s)://`
@@ -733,18 +642,12 @@ pub enum Notify {
     WhenIdle,
 }
 
-impl Notify {
-    /// The runtime's name for it.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Notify::Asap => "asap",
-            Notify::WhenIdle => "when_idle",
-        }
-    }
-}
-
 fn default_limit() -> u64 {
     20
+}
+
+fn first_protocol() -> u32 {
+    1
 }
 
 /// One thread matching a `SearchThreads` query, with the best matching passage.
@@ -783,8 +686,8 @@ pub struct Question {
     pub multi: bool,
 }
 
-/// How to name a thread from its first prompt: the model (`provider/id`), pi thinking level
-/// and system prompt. Comes from the desktop's `config.toml`.
+/// How to name a thread from its first prompt: the model (its id), its reasoning effort and
+/// the system prompt. Comes from the desktop's `config.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TitleGen {
     pub model: String,
@@ -804,21 +707,33 @@ pub struct UsageBucket {
     pub output: u64,
     pub cache_read: u64,
     pub cache_write: u64,
-    /// Dollars, as pi prices them.
+    /// Dollars, at the models' list prices.
     pub cost: f64,
     /// Assistant messages summed into this bucket.
     pub messages: u64,
 }
 
-/// A host's CLIProxyAPI as its service last saw it (`ServerMessage::Proxy`): the accounts
-/// behind the proxy and how much of each one's limits is used. The management key never
+/// A host's CLIProxyAPI as its service last saw it (`ServerMessage::Proxy`): whether it is
+/// set up, the accounts behind it and how much of each one's limits is used. No key ever
 /// comes back.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Proxy {
     /// The proxy's address; empty: the host has none set.
     pub url: String,
-    /// Why the host's last look at the proxy failed. The accounts are then as of the last
-    /// one that worked.
+    /// The host holds an API key for it: its threads can run.
+    #[serde(default)]
+    pub key: bool,
+    /// The host holds its management key: the accounts and their limits can be read.
+    #[serde(default)]
+    pub management_key: bool,
+    /// How many models it serves the host.
+    #[serde(default)]
+    pub models: u32,
+    /// Why it serves none: it isn't reached, or turned the API key down.
+    #[serde(default)]
+    pub models_error: Option<String>,
+    /// Why the host's last look at the proxy's accounts failed. They are then as of the
+    /// last one that worked.
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
@@ -895,7 +810,7 @@ pub struct ProxySample {
 pub struct FirstPrompt {
     pub text: String,
     pub model: Option<String>,
-    pub thinking_level: Option<String>,
+    pub effort: Option<String>,
     #[serde(default)]
     pub images: Vec<ImageAttachment>,
     #[serde(default)]
@@ -931,20 +846,17 @@ pub struct Project {
     pub created_at: i64,
 }
 
+/// A model a host's proxy serves.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelInfo {
-    pub provider: String,
+    /// What a thread names it by: `claude-opus-5-5`.
     pub id: String,
     pub name: String,
+    /// Who makes it: `anthropic`, `openai`.
+    pub owner: String,
     pub context_window: u64,
-    pub thinking_levels: Vec<String>,
-}
-
-impl ModelInfo {
-    /// `provider/id`, the form used everywhere a model is referenced by string.
-    pub fn key(&self) -> String {
-        format!("{}/{}", self.provider, self.id)
-    }
+    /// The reasoning efforts it takes, lowest first; empty: it doesn't reason.
+    pub efforts: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -954,9 +866,9 @@ pub struct ThreadSummary {
     pub project_id: Option<String>,
     pub cwd: String,
     pub name: Option<String>,
-    /// Current `provider/id` and thinking level, from the latest change entries.
+    /// The model (its id) and reasoning effort it was last prompted with.
     pub model: Option<String>,
-    pub thinking_level: Option<String>,
+    pub effort: Option<String>,
     /// Unix millis.
     pub created_at: i64,
     pub updated_at: i64,
@@ -988,7 +900,7 @@ pub struct ThreadSummary {
     /// thread updated since, or never looked at, is unread.
     #[serde(default)]
     pub seen_at: Option<i64>,
-    /// Pi entry ids of the pinned messages (`ClientMessage::PinMessage`).
+    /// The entry ids of the pinned messages (`ClientMessage::PinMessage`).
     #[serde(default)]
     pub pinned_entries: Vec<String>,
     /// Unix millis of the last `Prompt` that started a turn (mode `prompt`): when the
@@ -1020,8 +932,8 @@ pub struct ThreadSummary {
     /// state, never stored.
     #[serde(default)]
     pub setup: Option<Setup>,
-    /// Unix millis its host started compacting the thread's context, while it does (pi's
-    /// `compaction_start` to `compaction_end`). Runtime state, never stored.
+    /// Unix millis its host started compacting the thread's context, while it does. Runtime
+    /// state, never stored.
     #[serde(default)]
     pub compacting_since: Option<i64>,
     /// Its agent is using a screen in this run (one of its own, or its host's desktop), and
@@ -1060,7 +972,7 @@ pub fn workspace_name(thread_id: &str) -> String {
     format!("dirigent-{short}")
 }
 
-/// Tokens and dollars summed over a thread's assistant messages, as pi reports them.
+/// Tokens and dollars summed over a thread's assistant messages.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Spend {
@@ -1069,7 +981,7 @@ pub struct Spend {
     pub output: u64,
     /// The part of `input` read from cache.
     pub cached: u64,
-    /// Dollars, as pi prices them.
+    /// Dollars, at the models' list prices.
     pub cost: f64,
 }
 
@@ -1108,52 +1020,6 @@ pub fn prompt_title(text: &str) -> Option<String> {
     Some(line.chars().take(80).collect())
 }
 
-/// One pi session entry. A session is a tree: each entry is a child of the one before it
-/// (`parent_id`), except where an `EditMessage` branched off an earlier entry. The branch
-/// that counts, what the model sees and clients show, is the last entry's and its
-/// ancestors (pi's leaf); older branches stay in the history.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Entry {
-    /// Append order within the thread, starting at 0.
-    pub seq: u64,
-    pub id: String,
-    pub parent_id: Option<String>,
-    /// Pi entry `type` (`message`, `model_change`, ...).
-    pub kind: String,
-    /// The full pi entry.
-    pub json: Value,
-}
-
-impl Entry {
-    /// Build from a raw pi session entry; `seq` is assigned by storage.
-    pub fn from_pi(seq: u64, json: Value) -> Self {
-        let s = |k: &str| json.get(k).and_then(Value::as_str).map(str::to_owned);
-        Self { seq, id: s("id").unwrap_or_default(), parent_id: s("parentId"), kind: s("type").unwrap_or_default(), json }
-    }
-}
-
-/// The branch of `entries` (a thread's, in `seq` order) that ends at the entry `leaf`: it
-/// and its ancestors, oldest first; empty without such an entry. With the last entry as
-/// `leaf`, the thread's current branch: all of it, unless an edit branched it.
-pub fn branch<'a>(entries: &'a [Entry], leaf: &str) -> Vec<&'a Entry> {
-    let Some(end) = entries.iter().rposition(|e| e.id == leaf) else { return vec![] };
-    // A parent is appended before its children, so nothing past `leaf` is on its branch.
-    let entries = &entries[..=end];
-    // No edit up to there: each entry is the child of the one before.
-    if entries.windows(2).all(|w| w[1].parent_id.as_deref() == Some(w[0].id.as_str())) {
-        return entries.iter().collect();
-    }
-    let by_id: std::collections::HashMap<&str, &Entry> = entries.iter().map(|e| (e.id.as_str(), e)).collect();
-    let mut branch = vec![&entries[end]];
-    while let Some(parent) = branch[branch.len() - 1].parent_id.as_deref().and_then(|p| by_id.get(p))
-        && branch.len() <= entries.len()
-    {
-        branch.push(parent);
-    }
-    branch.reverse();
-    branch
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,7 +1051,7 @@ mod tests {
             prompt: Some(FirstPrompt {
                 text: "hi".into(),
                 model: Some("a/b".into()),
-                thinking_level: Some("low".into()),
+                effort: Some("low".into()),
                 images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into(), n: Some(1) }],
                 title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
                 tools: None,
@@ -1209,7 +1075,7 @@ mod tests {
             text: "hi".into(),
             mode: PromptMode::FollowUp,
             model: Some("a/b".into()),
-            thinking_level: None,
+            effort: None,
             images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into(), n: None }],
             title: Some(TitleGen { model: "a/c".into(), reasoning: "low".into(), prompt: "name it".into() }),
             tools: Some(vec!["async_bash".into()]),
@@ -1233,7 +1099,7 @@ mod tests {
             entry_id: "e".into(),
             text: "hi again".into(),
             model: Some("a/b".into()),
-            thinking_level: Some("low".into()),
+            effort: Some("low".into()),
             images: vec![ImageAttachment { mime_type: "image/png".into(), data: "AAAA".into(), n: Some(1) }],
             tools: Some(vec![]),
         });
@@ -1243,8 +1109,6 @@ mod tests {
         roundtrip(ClientMessage::ArchiveThread { id: 7, thread_id: "t".into(), archived: true });
         roundtrip(ClientMessage::DeleteThread { id: 8, thread_id: "t".into() });
         roundtrip(ClientMessage::ListModels { id: 6 });
-        roundtrip(ClientMessage::ListProviders { id: 26 });
-        roundtrip(ClientMessage::Login { id: 27, provider: "anthropic".into(), method: AuthMethod::ApiKey });
         roundtrip(ClientMessage::LoginAnswer { id: 28, login: 27, prompt: 1, value: "sk-x".into() });
         roundtrip(ClientMessage::ListMcpServers { id: 31 });
         roundtrip(ClientMessage::CheckMcpServer { id: 32, name: "docs".into() });
@@ -1253,12 +1117,11 @@ mod tests {
         roundtrip(ClientMessage::McpLogin { id: 35, name: "docs".into() });
         roundtrip(ClientMessage::McpLogout { id: 36, name: "docs".into() });
         roundtrip(ClientMessage::LoginCancel { id: 29, login: 27 });
-        roundtrip(ClientMessage::Logout { id: 30, provider: "anthropic".into() });
         roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
         roundtrip(ClientMessage::GetScreen { id: 33, thread_id: "t".into(), frame: 3, offset: 16384 });
         roundtrip(ClientMessage::ListUsage { id: 11, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         roundtrip(ClientMessage::ListProxy { id: 31, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
-        roundtrip(ClientMessage::SetProxy { id: 32, url: "http://127.0.0.1:8317".into(), key: "k".into() });
+        roundtrip(ClientMessage::SetProxy { id: 32, url: "http://127.0.0.1:8317".into(), key: "k".into(), management_key: "m".into() });
         assert_eq!(
             serde_json::to_value(ClientMessage::Prompt {
                 id: 4,
@@ -1266,13 +1129,13 @@ mod tests {
                 text: "hi".into(),
                 mode: PromptMode::Steer,
                 model: None,
-                thinking_level: None,
+                effort: None,
                 images: vec![],
                 title: None,
                 tools: None,
             })
             .unwrap(),
-            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"thinking_level":null,"images":[],"title":null,"tools":null})
+            json!({"type":"prompt","id":4,"thread_id":"t","text":"hi","mode":"steer","model":null,"effort":null,"images":[],"title":null,"tools":null})
         );
     }
 
@@ -1281,7 +1144,7 @@ mod tests {
     #[test]
     fn added_fields_are_optional() {
         let t: ThreadSummary = serde_json::from_value(json!({
-            "id":"t","project_id":null,"cwd":"/x","name":null,"model":null,"thinking_level":null,
+            "id":"t","project_id":null,"cwd":"/x","name":null,"model":null,"effort":null,
             "created_at":1,"updated_at":2,"entry_count":0,"running_since":null,"last_run_ms":null,"archived":false
         }))
         .unwrap();
@@ -1326,7 +1189,7 @@ mod tests {
             cwd: "/x".into(),
             name: None,
             model: None,
-            thinking_level: None,
+            effort: None,
             created_at: 1,
             updated_at: 2,
             entry_count: 3,
@@ -1360,34 +1223,19 @@ mod tests {
             reply_to: 1,
             hosts: vec![HostInfo { name: "h".into(), url: "ws://h:7777/ws".into(), bearer: Some("dk_x".into()), error: None }],
         });
-        assert_eq!(serde_json::to_value(Notify::WhenIdle).unwrap(), json!(Notify::WhenIdle.as_str()));
         roundtrip(ServerMessage::Search { reply_to: 1, hits: vec![SearchHit { thread_id: "t".into(), snippet: "…sqlite…".into() }] });
         let p = Project { id: "p".into(), path: "/x".into(), origin: Some("github.com/a/b".into()), created_at: 1 };
-        let m =
-            ModelInfo { provider: "a".into(), id: "b".into(), name: "B".into(), context_window: 1, thinking_levels: vec!["low".into()] };
-        assert_eq!(m.key(), "a/b");
+        let m = ModelInfo { id: "b".into(), name: "B".into(), owner: "a".into(), context_window: 1, efforts: vec!["low".into()] };
         roundtrip(ServerMessage::Projects { reply_to: None, projects: vec![p.clone()] });
         roundtrip(ServerMessage::ProjectAdded { reply_to: 1, project: p });
         roundtrip(ServerMessage::Dirs { reply_to: 1, dirs: vec![Dir { name: "work".into(), repo: true }] });
         roundtrip(ServerMessage::Models { reply_to: 1, models: vec![m] });
-        roundtrip(ServerMessage::Providers {
-            reply_to: 2,
-            providers: vec![ProviderInfo {
-                id: "anthropic".into(),
-                name: "Anthropic".into(),
-                oauth: Some("Anthropic (Claude Pro/Max)".into()),
-                api_key: Some("Anthropic API key".into()),
-                status: Some("Signed in".into()),
-                stored: Some(AuthMethod::Oauth),
-            }],
-            auth_path: "/home/x/.pi/agent/auth.json".into(),
-        });
         roundtrip(ServerMessage::McpServers {
             reply_to: 3,
             servers: vec![McpServer { name: "fs".into(), config: json!({"command": "npx"}), error: None, signed_in: false }],
-            path: "/home/x/.pi/agent/mcp.json".into(),
+            path: "/home/x/.config/dirigent/agent.toml".into(),
         });
-        // As the runtime writes it; a state from a newer host is no error.
+        // A state from a newer host is no error.
         let status: McpServerStatus =
             serde_json::from_value(json!({"state":"needs_auth","tools":[{"name":"search"}],"error":"401"})).unwrap();
         assert_eq!(status.state, McpState::NeedsAuth);
@@ -1395,38 +1243,32 @@ mod tests {
         roundtrip(ServerMessage::McpStatus { reply_to: 4, status });
         let newer: McpServerStatus = serde_json::from_value(json!({"state":"sleeping"})).unwrap();
         assert_eq!(newer.state, McpState::Other);
-        // As the runtime writes them.
-        let step: LoginStep = serde_json::from_value(json!({"type":"prompt","n":2,"kind":"manual_code","message":"Paste it"})).unwrap();
-        assert_eq!(
-            step,
-            LoginStep::Prompt { n: 2, kind: PromptKind::ManualCode, message: "Paste it".into(), placeholder: None, options: vec![] }
-        );
+        let step: LoginStep = serde_json::from_value(json!({"type":"prompt","n":2,"message":"Paste it"})).unwrap();
+        assert_eq!(step, LoginStep::Prompt { n: 2, message: "Paste it".into(), placeholder: None });
         // What a newer host may send.
         let newer: LoginStep = serde_json::from_value(json!({"type":"qr_code","data":"x"})).unwrap();
         assert_eq!(newer, LoginStep::Unknown);
-        let newer: LoginStep = serde_json::from_value(json!({"type":"prompt","n":3,"kind":"date","message":"m"})).unwrap();
-        assert!(matches!(newer, LoginStep::Prompt { kind: PromptKind::Other, .. }));
         for step in [
             step,
-            LoginStep::AuthUrl { url: "https://x".into(), instructions: None },
-            LoginStep::DeviceCode { user_code: "AB-12".into(), verification_uri: "https://x/device".into() },
-            LoginStep::Info { message: "m".into(), links: vec![AuthLink { url: "https://x".into(), label: None }] },
+            LoginStep::AuthUrl { url: "https://x".into() },
             LoginStep::Progress { message: "p".into() },
             LoginStep::PromptClosed { n: 2 },
         ] {
             roundtrip(ServerMessage::LoginStep { login: 27, step });
         }
-        let e = Entry::from_pi(0, json!({"type":"message","id":"a","parentId":null,"message":{"role":"user","content":"hi"}}));
-        assert_eq!(e.kind, "message");
-        assert_eq!(e.parent_id, None);
-        roundtrip(ServerMessage::Hello { host_name: "h".into(), version: "0".into(), service_id: "s".into() });
+        let e = Entry {
+            seq: 0,
+            id: "a".into(),
+            parent_id: None,
+            at: 1,
+            body: transcript::Body::User { content: vec![transcript::Block::text("hi")] },
+        };
+        roundtrip(ServerMessage::Hello { host_name: "h".into(), version: "0".into(), service_id: "s".into(), protocol: PROTOCOL });
+        // A host from before the number speaks the first protocol.
+        let old: ServerMessage = serde_json::from_value(json!({"type":"hello","host_name":"h","version":"0.0.10"})).unwrap();
+        assert!(matches!(old, ServerMessage::Hello { protocol: 1, .. }));
         roundtrip(ServerMessage::Threads { reply_to: None, threads: vec![t.clone()] });
-        roundtrip(ServerMessage::Thread {
-            reply_to: 1,
-            thread_id: "t".into(),
-            header: json!({"type":"session"}),
-            entries: vec![e.clone()],
-        });
+        roundtrip(ServerMessage::Thread { reply_to: 1, thread_id: "t".into(), entries: vec![e.clone()] });
         roundtrip(ServerMessage::ThreadCreated { reply_to: 2, thread: Box::new(t) });
         roundtrip(ServerMessage::Title {
             reply_to: 3,
@@ -1440,7 +1282,7 @@ mod tests {
         roundtrip(ServerMessage::Ok { reply_to: 3 });
         roundtrip(ServerMessage::Error { reply_to: Some(4), message: "boom".into() });
         roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });
-        roundtrip(ServerMessage::Event { thread_id: "t".into(), event: json!({"type":"agent_start"}) });
+        roundtrip(ServerMessage::Event { thread_id: "t".into(), event: Event::RunStart });
         roundtrip(ServerMessage::Blob { reply_to: 5, blob_id: "abc".into(), mime_type: "image/png".into(), data: "AAAA".into() });
         roundtrip(ServerMessage::Screen {
             reply_to: 8,
@@ -1481,6 +1323,10 @@ mod tests {
             reply_to: 7,
             proxy: Proxy {
                 url: "http://127.0.0.1:8317".into(),
+                key: true,
+                management_key: true,
+                models: 20,
+                models_error: None,
                 error: None,
                 accounts: vec![ProxyAccount {
                     id: "a.json".into(),
@@ -1495,17 +1341,5 @@ mod tests {
         });
         // A host that has none answers with the url alone.
         assert_eq!(serde_json::from_value::<Proxy>(json!({"url": ""})).unwrap(), Proxy::default());
-    }
-
-    #[test]
-    fn branches_follow_parent_links() {
-        let e = |seq, id: &str, parent: Option<&str>| Entry::from_pi(seq, json!({"type":"message","id":id,"parentId":parent}));
-        let ids = |b: Vec<&Entry>| b.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
-        // a ← b ← c, then an edit of c: d is b's child too, e follows d.
-        let entries = [e(0, "a", None), e(1, "b", Some("a")), e(2, "c", Some("b")), e(3, "d", Some("b")), e(4, "e", Some("d"))];
-        assert_eq!(ids(branch(&entries, "e")), ["a", "b", "d", "e"]);
-        assert_eq!(ids(branch(&entries, "c")), ["a", "b", "c"]);
-        assert_eq!(ids(branch(&entries[..3], "c")), ["a", "b", "c"]);
-        assert!(branch(&entries, "x").is_empty());
     }
 }

@@ -1,5 +1,5 @@
 //! The setup, over the whole window: a welcome, then a look (theme, background, text size),
-//! a model provider (Settings › Providers' list and sign-in, `providers.rs`), a first project
+//! the proxy the models come through (Settings › Proxy's fields, `proxy.rs`), a first project
 //! (the Add project browser, `add_project.rs`), and out into a first thread. It opens at
 //! launch until this data dir has finished or skipped it once (`needed`), so installs from
 //! before it see it too. Each step is one centered column: its title, what it asks, and
@@ -21,7 +21,7 @@ use crate::icons::icon;
 use crate::lists::scroll;
 use crate::projects::Group;
 use crate::theme::{self, Theme, text, u};
-use crate::{add_project, providers, settings, titlebar};
+use crate::{add_project, proxy, settings, titlebar};
 use gpui::{
     Animation, AnimationExt, AnyElement, Context, Div, Font, FontWeight, Image, ImageFormat, Pixels, SharedString, Stateful, Window,
     actions, div, font, img, prelude::*, rgba,
@@ -60,12 +60,12 @@ pub fn needed(cache: &Cache) -> bool {
 pub enum Step {
     Welcome,
     Look,
-    Providers,
+    Proxy,
     Project,
 }
 
 impl Step {
-    const ALL: [Step; 4] = [Step::Welcome, Step::Look, Step::Providers, Step::Project];
+    const ALL: [Step; 4] = [Step::Welcome, Step::Look, Step::Proxy, Step::Project];
 
     fn next(self) -> Option<Step> {
         Self::ALL.get(self as usize + 1).copied()
@@ -136,18 +136,17 @@ impl Dirigent {
         s.step = step;
         self.leave_onboarding_step(cx);
         match step {
-            Step::Providers => self.enter_providers(cx),
+            Step::Proxy => self.enter_proxy_settings(cx),
             Step::Project if self.groups().0.is_empty() => self.open_add_project(cx),
             _ => self.focus_root(cx),
         }
         cx.notify();
     }
 
-    /// Leaving a step (for another, or the way out) puts its business away: its menu, a login
-    /// in progress (cancelled) and the project browser.
+    /// Leaving a step (for another, or the way out) puts its business away: its menu and
+    /// the project browser.
     fn leave_onboarding_step(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
-        self.cancel_login(cx);
         if self.add_project.is_some() {
             self.close_add_project(cx);
         }
@@ -163,12 +162,9 @@ impl Dirigent {
         }
     }
 
-    /// Enter. Not during a login: while it waits (a device code, a choice) the keys are on the
-    /// setup itself, and a stray Enter mustn't throw it away. The button still does.
+    /// Enter, where no input takes it (the proxy's fields save on it).
     pub fn onboarding_continue(&mut self, _: &Continue, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.logging_in() {
-            self.onboarding_next(cx);
-        }
+        self.onboarding_next(cx);
     }
 
     /// Done for good, finished or skipped: `start` opens a new-thread draft, in the project
@@ -211,8 +207,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A provider is set up somewhere: a host offers models.
-    fn has_provider(&self) -> bool {
+    /// A proxy is set up somewhere: a host offers models.
+    fn has_models(&self) -> bool {
         self.hosts.iter().any(|h| !h.models.is_empty())
     }
 }
@@ -241,9 +237,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let step = match s.step {
         Step::Welcome => welcome(this, s, cx),
         Step::Look => column("Choose a look", scroll("onboarding-look", look(this, s, cx)), this, s, cx),
-        Step::Providers => {
-            column("Sign in to a model provider", scroll("onboarding-providers", providers::body(this, false, cx)), this, s, cx)
-        }
+        Step::Proxy => column("Connect your proxy", scroll("onboarding-proxy", proxy_step(this, cx)), this, s, cx),
         Step::Project => column("Add a project", project(this, cx), this, s, cx),
     };
     let body = div().flex_1().min_h_0().flex().flex_row().justify_center().px_8().child(step);
@@ -482,7 +476,7 @@ fn footer(this: &Dirigent, step: Step, cx: &mut Context<Dirigent>) -> Div {
         quiet("onboarding-back", "Back").ml(-u(10.)).on_click(cx.listener(move |this, _, _, cx| this.set_onboarding_step(prev, cx)))
     });
     let note = match step {
-        Step::Providers if !this.has_provider() => Some("Agents can't run until a provider is set up."),
+        Step::Proxy if !this.has_models() => Some("Agents can't run until a host has a proxy with models."),
         Step::Project if this.groups().0.is_empty() => Some("Or add one later, from the sidebar."),
         _ => None,
     };
@@ -525,6 +519,15 @@ fn look(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
             .child(labeled("Background", div().flex().flex_row().gap_1().children(patterns)))
             .child(labeled("Text size", size)),
     )
+}
+
+/// What a proxy is to Dirigent, then Settings › Proxy's fields.
+fn proxy_step(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let about = div().text_color(rgba(theme::t().fg_1)).child(
+        "Dirigent reaches its models through a CLIProxyAPI you run, with the accounts you signed in to there. Enter its \
+         address and one of its API keys.",
+    );
+    div().flex().flex_col().gap_4().pb_2().child(about).child(proxy::body(this, cx))
 }
 
 /// A theme as a little window: its sidebar on the canvas, the pane with a title and a
@@ -653,7 +656,7 @@ fn labeled(label: &'static str, body: impl IntoElement) -> Div {
 }
 
 /// The way on: the accent's fill, like send.
-fn primary(id: &'static str, label: &'static str) -> Stateful<Div> {
+pub fn primary(id: &'static str, label: &'static str) -> Stateful<Div> {
     let t = theme::t();
     div()
         .id(id)

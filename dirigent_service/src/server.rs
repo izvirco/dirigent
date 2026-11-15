@@ -122,6 +122,7 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         host_name: svc.host_name.clone(),
         version: dirigent_protocol::release::VERSION.into(),
         service_id: svc.service_id.clone(),
+        protocol: dirigent_protocol::PROTOCOL,
     });
 
     // Writer: this connection's replies, then global pushes, then screens, then images. One

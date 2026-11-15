@@ -20,7 +20,7 @@ use gpui::{
     prelude::*, px, rgba,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, TextMergeStream};
-use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::iter::Peekable;
 use std::ops::Range;
 
@@ -53,7 +53,7 @@ pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, 
 /// `text` with the target of each image whose target `blobs` knows (a reply's text block's
 /// map, see `dirigent_protocol::images`) made `blob:<id>`, for `render` to draw. Images
 /// only: a link quoted in code stays as written.
-pub fn link_blobs(text: &str, blobs: &Map<String, Value>) -> String {
+pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut done = 0;
     for (event, source) in Parser::new_ext(text, OPTS).into_offset_iter() {
@@ -62,7 +62,7 @@ pub fn link_blobs(text: &str, blobs: &Map<String, Value>) -> String {
         let Some(target) = image_targets(&text[source.clone()]).into_iter().next() else { continue };
         let target = source.start + target.start..source.start + target.end;
         // Skips an image nested in another's alt text that was already replaced.
-        if let Some(id) = blobs.get(&text[target.clone()]).and_then(Value::as_str)
+        if let Some(id) = blobs.get(&text[target.clone()])
             && target.start >= done
         {
             // Without the space before the target: `view::blob_links` looks for `](blob:`.
@@ -491,9 +491,9 @@ mod tests {
     #[test]
     fn images_link_their_blobs() {
         let text = "![a](shot.png) ![b]( /abs/b.png \"t\") ![c](other.png)\n\n```\n![a](shot.png)\n```\n\n`![a](shot.png)`";
-        let blobs = serde_json::json!({"shot.png": "aa", "/abs/b.png": "bb"});
+        let blobs = [("shot.png", "aa"), ("/abs/b.png", "bb")].map(|(target, id)| (target.to_owned(), id.to_owned())).into();
         assert_eq!(
-            link_blobs(text, blobs.as_object().unwrap()),
+            link_blobs(text, &blobs),
             "![a](blob:aa) ![b](blob:bb \"t\") ![c](other.png)\n\n```\n![a](shot.png)\n```\n\n`![a](shot.png)`"
         );
     }

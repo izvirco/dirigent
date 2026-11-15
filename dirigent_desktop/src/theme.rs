@@ -577,6 +577,17 @@ pub fn kilo(n: u64) -> String {
     format!("{}{suffix}", s.strip_suffix(".0").unwrap_or(&s))
 }
 
+/// Dollars with cents: `$24.66`, `$0.05`; tenths of a cent when there's less than one.
+pub fn dollars(v: f64) -> String {
+    if v > 0. && v < 0.01 { format!("${v:.3}") } else { format!("${v:.2}") }
+}
+
+/// A model's id without the vendor a proxy may put before it: `vendor/model-id` →
+/// `model-id`.
+pub fn short_model(key: &str) -> &str {
+    key.rsplit('/').next().unwrap_or(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,14 +620,4 @@ mod tests {
         assert_eq!(dollars(0.004), "$0.004");
         assert_eq!(dollars(0.), "$0.00");
     }
-}
-
-/// Dollars with cents: `$24.66`, `$0.05`; tenths of a cent when there's less than one.
-pub fn dollars(v: f64) -> String {
-    if v > 0. && v < 0.01 { format!("${v:.3}") } else { format!("${v:.2}") }
-}
-
-/// `provider/model-id` → `model-id`.
-pub fn short_model(key: &str) -> &str {
-    key.rsplit('/').next().unwrap_or(key)
 }

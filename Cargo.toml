@@ -19,8 +19,8 @@ dirigent_agent = { path = "dirigent_agent" }
 dirigent_protocol = { path = "dirigent_protocol" }
 dirigent_auth = { path = "dirigent_auth" }
 serde = { version = "1", features = ["derive"] }
-# `preserve_order`: a thread's entries go back to pi with their keys as it wrote them. Pi replays a
-# tool call's arguments as stored, and sorted keys are a prompt the provider hasn't cached.
+# `preserve_order`: a tool call's input goes back to the model with its keys as the model wrote
+# them. Sorted keys are a prompt the provider hasn't cached.
 # (gpui turns it on for the desktop anyway; the service on a remote host is built without gpui.)
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }

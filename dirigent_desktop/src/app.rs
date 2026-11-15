@@ -11,7 +11,6 @@ use crate::mcp;
 use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
-use crate::providers;
 use crate::proxy;
 use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
@@ -19,9 +18,10 @@ use crate::view::{self, Item, Streaming, Timeline};
 use crate::{account, leaderboard, lists, menu, onboarding, ruler, sidebar, thread, titlebar, usage};
 use crate::{changelog, config, hosts, images, instance, settings, update};
 use base64::Engine;
+use dirigent_protocol::transcript::{Body, Entry, Event, Notice, text_of};
 use dirigent_protocol::{
-    Ask, ClientMessage, Entry, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary,
-    TitleGen, Vcs, prompt_title,
+    Ask, ClientMessage, FirstPrompt, ForkedFrom, ImageAttachment, ModelInfo, PromptMode, ServerMessage, Setup, ThreadSummary, TitleGen,
+    Vcs, prompt_title,
 };
 use futures::StreamExt;
 use gpui::EntityInputHandler;
@@ -41,6 +41,8 @@ const TOAST_TTL: Duration = Duration::from_secs(8);
 /// How often the draft page / an open workspace menu re-asks the host about the repo.
 const VCS_REFRESH_SECS: u64 = 2;
 const LAST_MODEL_KEY: &str = "last_model";
+/// Set once what this desktop keeps names models by id (see `name_models_by_id`).
+const MODEL_IDS_KEY: &str = "model_ids";
 const LAST_EFFORT_KEY: &str = "last_effort";
 const LAST_TARGET_KEY: &str = "last_target";
 /// Whether the last draft asked for an isolated workspace; the next one starts the same way.
@@ -150,7 +152,7 @@ pub struct OpenThread {
     pub screen: Option<crate::screen::Screen>,
 }
 
-/// An edit in progress (`Dirigent::start_edit`): the user message (pi entry id) whose
+/// An edit in progress (`Dirigent::start_edit`): the user message (its entry's id) whose
 /// bubble holds the composer, and what the composer held before, the thread's draft,
 /// which it gets back when the edit is sent or cancelled.
 pub struct Editing {
@@ -172,8 +174,8 @@ pub struct Rewound {
 
 /// The timeline of `entries`' current branch (`dirigent_protocol::branch`).
 fn timeline_of(entries: &[Entry]) -> Timeline {
-    let branch = entries.last().map(|last| dirigent_protocol::branch(entries, &last.id)).unwrap_or_default();
-    Timeline::from_entries(branch.into_iter().map(|e| &e.json))
+    let branch = entries.last().map(|last| dirigent_protocol::transcript::branch(entries, &last.id)).unwrap_or_default();
+    Timeline::from_entries(branch)
 }
 
 /// How the user left a thread's log, kept in memory (`Dirigent::logs`) so coming back to the
@@ -246,17 +248,13 @@ impl OpenThread {
     /// a new branch (an edit), whose timeline replaces the old one; none for an entry kept
     /// out of a sent edit's view (`Rewound`).
     fn fold(&mut self, entry: Entry) -> (usize, Option<usize>) {
-        match entry.json.pointer("/message/role").and_then(|r| r.as_str()) {
-            Some("assistant") => self.streaming.steps.clear(),
-            // A user message into an open work is a steer; `queue_update` already
-            // dropped its echo (see `Timeline::push_message`, `Streaming::apply`).
-            Some("user") if self.timeline.open_work().is_none() => {
-                self.streaming.confirm_prompt(&view::text_of(entry.json.pointer("/message/content")))
-            }
+        match &entry.body {
+            Body::Assistant(_) => self.streaming.steps.clear(),
+            // A user message into an open work is a steer; the agent's queue already
+            // dropped its echo (see `Timeline::push`, `Streaming::apply`).
+            Body::User { content } if self.timeline.open_work().is_none() => self.streaming.confirm_prompt(&text_of(content)),
+            Body::Notice(Notice::Answer { ask_id, .. }) => self.streaming.confirm_answer(ask_id),
             _ => {}
-        }
-        if entry.json.get("customType").and_then(serde_json::Value::as_str) == Some("dirigent:answer") {
-            self.streaming.confirm_answer(&entry.json);
         }
         let n = self.timeline.items.len();
         // An edit branched off an earlier entry: the timeline is the new branch's from here.
@@ -272,11 +270,11 @@ impl OpenThread {
         if self.rewound.is_some() {
             return (n, None);
         }
-        let changed = self.timeline.push(&self.entries[self.entries.len() - 1].json);
+        let changed = self.timeline.push(&self.entries[self.entries.len() - 1]);
         (n, changed)
     }
 
-    /// The message behind timeline item `ix` if the user typed it: a pi `message` entry
+    /// The message behind timeline item `ix` if the user typed it: a `Body::User` entry
     /// (not the answers to an ask, which also show as a user bubble). What an edit
     /// rewrites, and what a fork from its bubble starts before.
     pub fn typed_message(&self, ix: usize) -> Option<&Entry> {
@@ -284,13 +282,13 @@ impl OpenThread {
             return None;
         }
         let id = self.timeline.entry_id(ix)?;
-        self.entries.iter().rev().find(|e| e.id == id).filter(|e| e.kind == "message")
+        self.entries.iter().rev().find(|e| e.id == id).filter(|e| matches!(e.body, Body::User { .. }))
     }
 
     /// The timeline item to show for entry `id`: the last one made by it or an entry
     /// before it on its branch. `None` before the entries are in.
     fn item_at(&self, id: &str) -> Option<usize> {
-        let branch: HashSet<&str> = dirigent_protocol::branch(&self.entries, id).into_iter().map(|e| e.id.as_str()).collect();
+        let branch: HashSet<&str> = dirigent_protocol::transcript::branch(&self.entries, id).into_iter().map(|e| e.id.as_str()).collect();
         (0..self.timeline.items.len()).rev().find(|&ix| self.timeline.entry_id(ix).is_some_and(|e| branch.contains(e)))
     }
 }
@@ -523,12 +521,12 @@ pub enum Menu {
     /// Usage modal: what the chart shows (cost, tokens, ...).
     UsageMetric,
     /// Settings modal: theme, background pattern, title model, title reasoning level, the
-    /// host whose providers show.
+    /// host whose proxy and MCP servers show.
     Theme,
     Background,
     TitleModel,
     TitleEffort,
-    ProvidersHost,
+    SettingsHost,
     /// Settings › Hosts: `Add host`'s choice of auth, and the form's auth chip.
     AddHost,
     HostAuth,
@@ -567,7 +565,8 @@ pub enum Renaming {
 /// `modal.rs`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Modal {
-    /// `settings.rs`: config, thread titles, agent tools, hosts.
+    /// `settings.rs`: config, the proxy, thread titles, agent tools, MCP servers, hosts,
+    /// the forge sign-in.
     Settings,
     /// `usage.rs`: tokens and cost over time, across hosts.
     Usage,
@@ -672,7 +671,7 @@ pub struct Dirigent {
     pub forge: account::State,
     /// Seconds since launch, from `tick`.
     ticks: u64,
-    /// Model (`provider/id`) and thinking level the next prompt is sent with.
+    /// Model (its id) and reasoning effort the next prompt is sent with.
     pub model: Option<String>,
     pub effort: Option<String>,
     pub presets: Vec<Preset>,
@@ -691,8 +690,8 @@ pub struct Dirigent {
     config_edit: u64,
     /// The Settings modal's tab, inputs and title test.
     pub settings: settings::State,
-    /// Settings › Providers: a host's providers, and a login in progress.
-    pub providers: providers::State,
+    /// The host Settings › Proxy and MCP servers show, and an MCP server's sign-in in progress.
+    pub login: crate::login::State,
     /// Settings › Proxy: the same host's CLIProxyAPI, its address and management key.
     pub proxy: proxy::State,
     /// Settings › MCP servers: the same host's MCP servers, and the form adding or editing one.
@@ -753,7 +752,7 @@ pub struct Dirigent {
 }
 
 impl Dirigent {
-    pub fn new(cache: Cache, config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(cache: Cache, mut config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // `local` is the embedded service; the rest come from hosts.toml.
         let mut hosts = vec![(hosts::LOCAL.to_owned(), hosts::Host::new(format!("ws://127.0.0.1:{}/ws", dirigent_service::port())))];
         let hosts_error = match hosts::load() {
@@ -766,6 +765,13 @@ impl Dirigent {
         // First, before anything is kept in `kv`: it tells a new data dir from an old one.
         let updated = changelog::after_update(&cache);
         let onboard = onboarding::needed(&cache);
+        // Before the cache is read, and before the config's watcher takes its first stamp
+        // (the write isn't a hand edit).
+        if name_models_by_id(&cache, &mut config)
+            && let Err(e) = config::save(&config)
+        {
+            tracing::warn!("{e:#}");
+        }
         let host_states = hosts.iter().map(|(name, host)| host_state(&cache, name, host)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
@@ -780,7 +786,7 @@ impl Dirigent {
         };
         let model = cache.get(LAST_MODEL_KEY);
         let effort = cache.get(LAST_EFFORT_KEY);
-        let presets = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let presets: Vec<Preset> = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let isolate = cache.get(LAST_ISOLATE_KEY).as_deref() == Some("1");
         let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
@@ -836,7 +842,7 @@ impl Dirigent {
             cx.subscribe(input, |this, _, _: &input::Changed, cx| this.schedule_apply(cx)).detach();
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
-        let providers = providers::State::new(cx);
+        let login = crate::login::State::new(cx);
         let proxy = proxy::State::new(cx);
         let mcp = mcp::State::new(cx);
         let (fonts, missing) = config.fonts.resolve(cx);
@@ -899,7 +905,7 @@ impl Dirigent {
             watch: config::Watch::new(),
             config_edit: 0,
             settings,
-            providers,
+            login,
             proxy,
             mcp,
             titling: HashMap::new(),
@@ -1014,9 +1020,13 @@ impl Dirigent {
         Some(self.pending.remove(i))
     }
 
-    /// Why the thread can't take a message yet, if it can't: its host is still creating it
-    /// or setting it up (`ThreadSummary::setup`). The composer keeps the text meanwhile.
+    /// Why the thread can't take a message, if it can't: its host is still creating it or
+    /// setting it up (`ThreadSummary::setup`), or it never will (`ThreadSummary::locked`).
+    /// The composer keeps the text meanwhile.
     pub fn not_ready(&self, host: &str, id: &str) -> Option<&'static str> {
+        if self.summary(host, id).is_some_and(|s| s.locked) {
+            return Some("This thread could not be converted from pi whole: fork it from an earlier message to go on");
+        }
         match self.summary(host, id).and_then(|s| s.setup) {
             Some(Setup::Workspace) => Some("Still creating the thread's workspace"),
             Some(Setup::NixShell) => Some("Still activating the nix dev shell"),
@@ -1259,7 +1269,7 @@ impl Dirigent {
 
     pub fn current_model(&self) -> Option<&ModelInfo> {
         let key = self.model.as_deref()?;
-        self.models().iter().find(|m| m.key() == key)
+        self.models().iter().find(|m| m.id == key)
     }
 
     /// Show `message` for a while. Logged too: toasts are how most failures reach the user.
@@ -1298,8 +1308,9 @@ impl Dirigent {
                     self.blob_requests.remove(&host);
                     self.forks.retain(|_, (h, _)| *h != host);
                     self.leaderboard.drop_uploads(&host);
-                    // Runs don't outlive the host (`runtime.rs` keeps them in memory): a
-                    // message sent meanwhile is a prompt, not a steer into a run that is gone.
+                    // Runs don't outlive the host's service (its agent's sessions are in
+                    // memory): a message sent meanwhile is a prompt, not a steer into a run
+                    // that is gone.
                     // The thread list keeps the old entries until the reconnect's refresh.
                     if let Some(h) = self.host_mut(&host) {
                         for t in &mut h.threads {
@@ -1337,7 +1348,7 @@ impl Dirigent {
                 if status == HostStatus::Connected && self.modal == Some(Modal::Usage) {
                     self.request_usage(cx);
                 }
-                self.providers_status(&host, status, cx);
+                self.shown_host_status(&host, status, cx);
                 // The connection dropped under a sent draft: its request may never have
                 // arrived (a host that got it still runs the thread), so the draft comes back.
                 // A message sent to a thread isn't given back: it may well have arrived.
@@ -1396,9 +1407,8 @@ impl Dirigent {
             ServerMessage::Ok { reply_to } => {
                 // The model has the message.
                 self.prompts.remove(&reply_to);
-                let _ = self.on_providers_reply(&host, reply_to, Ok(()), cx) || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
+                let _ = self.on_login_reply(&host, reply_to, Ok(()), cx) || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
             }
-            ServerMessage::Providers { reply_to, providers, auth_path } => self.on_providers(&host, reply_to, providers, auth_path),
             ServerMessage::McpServers { reply_to, servers, path } => self.on_mcp_servers(&host, reply_to, servers, path, cx),
             ServerMessage::McpStatus { reply_to, status } => self.on_mcp_status(&host, reply_to, status),
             ServerMessage::LoginStep { login, step } => self.on_login_step(&host, login, step, cx),
@@ -1443,6 +1453,7 @@ impl Dirigent {
                 if let Some(h) = self.host_mut(&host) {
                     h.models = models;
                 }
+                self.hold_effort();
             }
             ServerMessage::Threads { threads, .. } => {
                 let was_running = self.is_running();
@@ -1470,16 +1481,17 @@ impl Dirigent {
                 {
                     let id = t.id.clone();
                     if let Some(pins) = self.summary(&host, &id).map(|s| s.pinned_entries.iter().cloned().collect()) {
-                        // The run ended without pi settling it (the runtime died under it):
-                        // the host reports the thread idle, so nothing streams or runs any more.
-                        let died = was_running && !self.is_running();
+                        // The run is over, with or without a `RunEnd`: none comes for a run
+                        // the host counted from a message that its session then refused. The
+                        // host lists the thread idle, so nothing streams or runs any more.
+                        let over = was_running && !self.is_running();
                         if let Pane::Thread(t) = &mut self.pane {
                             t.pins = pins;
                         }
-                        if died {
+                        if over {
                             self.settle_open();
-                            // An edit's run ended before its branch started: it failed in the
-                            // runtime (which says why in its own error).
+                            // An edit's run ended before its branch started: the host
+                            // refused it (its reply says why).
                             self.unrewind(cx);
                         }
                         self.mark_seen(&host, &id);
@@ -1632,9 +1644,9 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
-                // Settings › Providers, Proxy and MCP servers show their own failures.
+                // Settings › Proxy and MCP servers show their own failures.
                 if let Some(id) = reply_to
-                    && (self.on_providers_reply(&host, id, Err(message.clone()), cx)
+                    && (self.on_login_reply(&host, id, Err(message.clone()), cx)
                         || self.on_proxy_settings(id, Err(message.clone()), cx)
                         || self.on_mcp_reply(&host, id, Err(message.clone()), cx))
                 {
@@ -1702,11 +1714,6 @@ impl Dirigent {
                 self.toast(format!("{host}: {message}"), cx)
             }
             ServerMessage::Entry { thread_id, entry } => {
-                // The generated name arrives as pi's `session_info` entry (a retitle's with
-                // its reply).
-                if entry.kind == "session_info" && !self.retitling(&host, &thread_id) {
-                    self.titling.remove(&(host.clone(), thread_id.clone()));
-                }
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host
                     && t.id == thread_id
@@ -1717,9 +1724,7 @@ impl Dirigent {
                     // read left alone: pushes come in order, so that is its own or older. (Not the
                     // prompt echo: confirming twice would drop a later one.)
                     if t.entries.last().is_some_and(|e| entry.seq <= e.seq) {
-                        if entry.json.pointer("/message/role").and_then(|r| r.as_str()) == Some("assistant")
-                            && !t.streaming.steps.is_empty()
-                        {
+                        if matches!(entry.body, Body::Assistant(_)) && !t.streaming.steps.is_empty() {
                             t.streaming.steps.clear();
                             let tail = t.timeline.items.len();
                             t.list.remeasure_items(tail..tail + 1);
@@ -1754,20 +1759,23 @@ impl Dirigent {
                 }
             }
             ServerMessage::Event { thread_id, event } => {
-                // A warning is the runtime's to say: a title it gave up on, a nix shell that
-                // failed, an extension's (an MCP server that won't connect). Toasted, with
-                // the thread it came from.
-                if event.get("type").and_then(|v| v.as_str()) == Some("warning") {
-                    self.titling.remove(&(host.clone(), thread_id.clone()));
-                    let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("warning");
-                    // A thread's first load comes before its name.
-                    let thread = self.summary(&host, &thread_id).and_then(|t| t.name.as_deref()).unwrap_or("new thread");
-                    self.toast(format!("{host}: {thread}: {message}"), cx);
-                }
-                // A step of the thread's computer use, the host's own event too.
-                if event.get("type").and_then(|v| v.as_str()) == Some("screen") {
-                    self.on_screen_event(&host, &thread_id, &event);
-                    return;
+                match &event {
+                    // A warning is the host's to say: a title it gave up on, a nix shell that
+                    // failed, an MCP server that won't connect. Toasted, with the thread it
+                    // came from.
+                    Event::Warning { message } => {
+                        self.titling.remove(&(host.clone(), thread_id.clone()));
+                        // A thread's first load comes before its name.
+                        let thread = self.summary(&host, &thread_id).and_then(|t| t.name.as_deref()).unwrap_or("new thread");
+                        self.toast(format!("{host}: {thread}: {message}"), cx);
+                    }
+                    // The name generated from its first prompt is there (a retitle ends with its reply).
+                    Event::Titled if !self.retitling(&host, &thread_id) => {
+                        self.titling.remove(&(host.clone(), thread_id.clone()));
+                    }
+                    // A step of the thread's computer use.
+                    Event::Screen { .. } => return self.on_screen_event(&host, &thread_id, &event),
+                    _ => {}
                 }
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host
@@ -1823,6 +1831,8 @@ impl Dirigent {
         self.stash_log();
         self.drop_screen(cx);
         self.pane = pane;
+        // The composer's host may be another now, and the model take other efforts there.
+        self.hold_effort();
         if entering {
             self.load_composer(cx);
         }
@@ -1904,7 +1914,7 @@ impl Dirigent {
         self.stash_log();
         let entries = self.cache.lock().unwrap().entries(host, id).unwrap_or_default();
         // The thread's own model if it has one, else whatever we used last.
-        if let Some((m, e)) = self.summary(host, id).filter(|s| s.model.is_some()).map(|s| (s.model.clone(), s.thinking_level.clone())) {
+        if let Some((m, e)) = self.summary(host, id).filter(|s| s.model.is_some()).map(|s| (s.model.clone(), s.effort.clone())) {
             self.model = m;
             self.effort = e;
         }
@@ -2239,6 +2249,7 @@ impl Dirigent {
         if let Pane::Draft { target: t } = &mut self.pane {
             *t = Some(target);
         }
+        self.hold_effort();
         self.menu = None;
         self.refresh_draft_vcs();
         self.focus_composer(cx);
@@ -2515,7 +2526,7 @@ impl Dirigent {
     }
 
     /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
-    /// form, if open; Providers, Proxy and MCP servers ask their host and focus a field of theirs; the
+    /// form, if open; Proxy and MCP servers ask their host and focus a field of theirs; the
     /// others take focus off the inputs, so keys don't type under the modal (Forge providers
     /// also loads the account's picture).
     pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
@@ -2526,8 +2537,6 @@ impl Dirigent {
                 Some(_) => self.focus(self.hosts_tab.name.focus_handle(cx), cx),
                 None => self.focus_root(cx),
             }
-        } else if tab == settings::Tab::Providers {
-            self.enter_providers(cx);
         } else if tab == settings::Tab::Proxy {
             self.enter_proxy_settings(cx);
         } else if tab == settings::Tab::Mcp {
@@ -2562,8 +2571,7 @@ impl Dirigent {
     }
 
     /// Esc or a press on the dim: back to the pane, with the composer focused if it has one.
-    /// A login (Settings › Providers, or an MCP server's) is cancelled: nobody would see its
-    /// questions.
+    /// An MCP server's sign-in is cancelled: nobody would see its questions.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         self.menu = None;
@@ -3541,11 +3549,9 @@ impl Dirigent {
     // ---- composer ----
 
     pub fn set_model(&mut self, key: String, cx: &mut Context<Self>) {
-        // Keep the effort if the new model supports it, else "high" (or its highest level).
-        let levels = self.models().iter().find(|m| m.key() == key).map(|m| m.thinking_levels.clone()).unwrap_or_default();
-        if !self.effort.as_ref().is_some_and(|e| levels.contains(e)) {
-            self.effort = levels.iter().find(|l| *l == "high").or(levels.last()).cloned();
-        }
+        // Keep the effort if the new model takes it (`held_effort`); with none picked, "high".
+        let levels = self.models().iter().find(|m| m.id == key).map(|m| m.efforts.clone()).unwrap_or_default();
+        self.effort = held_effort(self.effort.as_deref().unwrap_or("high"), &levels);
         self.model = Some(key);
         self.remember_model();
         self.menu = None;
@@ -3559,6 +3565,18 @@ impl Dirigent {
         self.menu = None;
         self.focus_composer(cx);
         cx.notify();
+    }
+
+    /// Hold the effort shown to what the model takes, where the composer's host lists the
+    /// model: a host runs any other effort as the model's default, whatever the chip says.
+    /// What comes in from elsewhere may be one: a thread's own, a preset's, the one
+    /// remembered (pi's `off` and `minimal`, from when hosts ran pi), another host's.
+    fn hold_effort(&mut self) {
+        if let Some(model) = self.current_model()
+            && let Some(effort) = &self.effort
+        {
+            self.effort = held_effort(effort, &model.efforts);
+        }
     }
 
     fn remember_model(&self) {
@@ -3581,6 +3599,7 @@ impl Dirigent {
     pub fn use_preset(&mut self, p: &Preset, cx: &mut Context<Self>) {
         self.model = Some(p.model.clone());
         self.effort = p.effort.clone();
+        self.hold_effort();
         self.remember_model();
         self.menu = None;
         self.focus_composer(cx);
@@ -3627,7 +3646,7 @@ impl Dirigent {
         self.models()
             .iter()
             .filter(|m| {
-                let hay = format!("{} {}", m.name, m.key()).to_lowercase();
+                let hay = format!("{} {}", m.name, m.id).to_lowercase();
                 words.iter().all(|w| hay.contains(w))
             })
             .collect()
@@ -3874,7 +3893,7 @@ impl Dirigent {
             let prompt = FirstPrompt {
                 text: text.clone(),
                 model: self.model.clone(),
-                thinking_level: self.effort.clone(),
+                effort: self.effort.clone(),
                 images: wire_images(&images),
                 title: Some(self.config.title.clone()),
                 tools: Some(self.config.tools.enabled()),
@@ -3890,7 +3909,7 @@ impl Dirigent {
                 cwd,
                 name: prompt_title(&text),
                 model: self.model.clone(),
-                thinking_level: self.effort.clone(),
+                effort: self.effort.clone(),
                 created_at: now,
                 updated_at: now,
                 running_since: Some(now),
@@ -3956,8 +3975,8 @@ impl Dirigent {
         }
     }
 
-    /// The open thread's run ended without pi settling it (the runtime died under it, or
-    /// its host went away): nothing streams, runs or is queued any more.
+    /// The open thread's run is over without a `RunEnd` to say so (its host lists it idle,
+    /// or went away): nothing streams, runs or is queued any more.
     fn settle_open(&mut self) {
         let Pane::Thread(t) = &mut self.pane else { return };
         t.streaming.settle();
@@ -3995,7 +4014,7 @@ impl Dirigent {
                 text: text.clone(),
                 mode,
                 model: self.model.clone(),
-                thinking_level: self.effort.clone(),
+                effort: self.effort.clone(),
                 images: wire_images(images),
                 title,
                 tools: Some(self.config.tools.enabled()),
@@ -4045,10 +4064,10 @@ impl Dirigent {
         if self.add_project.is_some() {
             return self.close_add_project(cx);
         }
-        // The setup stays until it's finished or skipped; in it Esc only stops a login (its
-        // project browser is closed above).
+        // The setup stays until it's finished or skipped (its project browser is closed
+        // above).
         if self.onboarding_open() {
-            return self.cancel_login(cx);
+            return;
         }
         if self.host_form_escape(cx) || self.mcp_form_escape(cx) {
             return;
@@ -4441,8 +4460,8 @@ impl Dirigent {
         let Pane::Thread(t) = &mut self.pane else { return };
         let Some(e) = t.editing.take() else { return };
         let timeline = {
-            let branch = t.entries.last().map(|last| dirigent_protocol::branch(&t.entries, &last.id)).unwrap_or_default();
-            Timeline::from_entries(branch.into_iter().take_while(|x| x.id != e.entry_id).map(|x| &x.json))
+            let branch = t.entries.last().map(|last| dirigent_protocol::transcript::branch(&t.entries, &last.id)).unwrap_or_default();
+            Timeline::from_entries(branch.into_iter().take_while(|x| x.id != e.entry_id))
         };
         t.timeline = timeline;
         t.relist();
@@ -4459,7 +4478,7 @@ impl Dirigent {
                 entry_id: e.entry_id,
                 text: text.clone(),
                 model: self.model.clone(),
-                thinking_level: self.effort.clone(),
+                effort: self.effort.clone(),
                 images: wire_images(&images),
                 tools: Some(self.config.tools.enabled()),
             },
@@ -4530,8 +4549,8 @@ impl Dirigent {
         }
     }
 
-    /// Drop a queued steer / follow-up the model hasn't seen yet. Pi confirms with a
-    /// `queue_update`; the echo goes now so the row doesn't linger for the round trip.
+    /// Drop a queued steer / follow-up the model hasn't seen yet. The host confirms with an
+    /// `Event::Queue`; the echo goes now so the row doesn't linger for the round trip.
     pub fn cancel_queued(&mut self, text: String, cx: &mut Context<Self>) {
         let id = self.next_id();
         if let Pane::Thread(t) = &mut self.pane {
@@ -4769,6 +4788,53 @@ pub fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     Some(Arc::new(gpui::Image { format, bytes, id }))
 }
 
+/// A model's id, from how a build named one while hosts ran pi: `provider/id`
+/// (`cliproxyapi/claude-opus-5-5`). Everything after the first `/`, as in the hosts' own
+/// conversion (`dirigent_agent::import::model_id`): a proxy's id may hold more of them.
+fn model_id(model: &str) -> &str {
+    model.split_once('/').map_or(model, |(_, id)| id)
+}
+
+/// What this desktop kept of models while hosts ran pi names them `provider/id`: the cached
+/// thread summaries, the remembered model, the presets (two providers' presets for one
+/// model become one) and the title model. All are made the id, once (`MODEL_IDS_KEY`): an
+/// id may hold a `/` of its own. True if `config` changed, which the caller saves.
+fn name_models_by_id(cache: &Cache, config: &mut config::Config) -> bool {
+    if cache.get(MODEL_IDS_KEY).is_some() {
+        return false;
+    }
+    if let Err(e) = cache.thread_models_as_ids() {
+        tracing::warn!("{e:#}");
+    }
+    if let Some(model) = cache.get(LAST_MODEL_KEY) {
+        let _ = cache.set(LAST_MODEL_KEY, model_id(&model));
+    }
+    if let Some(old) = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str::<Vec<Preset>>(&s).ok()) {
+        let mut presets: Vec<Preset> = vec![];
+        for p in old {
+            let p = Preset { model: model_id(&p.model).to_owned(), effort: p.effort };
+            if !presets.contains(&p) {
+                presets.push(p);
+            }
+        }
+        let _ = cache.set(PRESETS_KEY, &serde_json::to_string(&presets).unwrap_or_default());
+    }
+    let _ = cache.set(MODEL_IDS_KEY, "1");
+    let title = model_id(&config.title.model).to_owned();
+    let changed = title != config.title.model;
+    config.title.model = title;
+    changed
+}
+
+/// `effort` as a model that takes `efforts` (lowest first) runs it: itself if it is one of
+/// them, else its lowest for what pi had below them all (`off`, `minimal`) and `high`, or
+/// its highest, for any other. None for a model that doesn't reason.
+fn held_effort(effort: &str, efforts: &[String]) -> Option<String> {
+    let named = |name: &str| efforts.iter().find(|e| *e == name);
+    let nearest = if matches!(effort, "off" | "minimal") { efforts.first() } else { named("high").or(efforts.last()) };
+    named(effort).or(nearest).cloned()
+}
+
 /// A host as the cache last saw it; the connection fills in the rest.
 fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
     HostState {
@@ -5004,9 +5070,10 @@ impl Render for Dirigent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dirigent_protocol::transcript::{Api, Assistant, Block, Stop};
 
     fn entry(seq: u64) -> Entry {
-        Entry { seq, id: format!("e{seq}"), parent_id: None, kind: "message".into(), json: serde_json::json!({}) }
+        user(seq, &format!("e{seq}"), None, "")
     }
 
     fn seqs(entries: &[Entry]) -> Vec<u64> {
@@ -5029,17 +5096,27 @@ mod tests {
         assert_eq!(images(&d), [(1, 1), (2, 2), (3, 11), (5, 13)]);
     }
 
-    /// A pi `message` entry.
-    fn pi(seq: u64, id: &str, parent: Option<&str>, message: serde_json::Value) -> Entry {
-        Entry::from_pi(seq, serde_json::json!({"type":"message","id":id,"parentId":parent,"message":message}))
+    fn at(seq: u64, id: &str, parent: Option<&str>, body: Body) -> Entry {
+        Entry { seq, id: id.into(), parent_id: parent.map(str::to_owned), at: 0, body }
     }
 
     fn user(seq: u64, id: &str, parent: Option<&str>, text: &str) -> Entry {
-        pi(seq, id, parent, serde_json::json!({"role":"user","content":text}))
+        at(seq, id, parent, Body::User { content: vec![Block::text(text)] })
     }
 
     fn reply(seq: u64, id: &str, parent: Option<&str>, text: &str) -> Entry {
-        pi(seq, id, parent, serde_json::json!({"role":"assistant","stopReason":"stop","content":[{"type":"text","text":text}]}))
+        let reply = Assistant {
+            content: vec![Block::text(text)],
+            model: "m".into(),
+            provider: String::new(),
+            api: Api::Anthropic,
+            effort: None,
+            usage: Default::default(),
+            stop: Stop::End,
+            error: None,
+            duration_ms: 0,
+        };
+        at(seq, id, parent, Body::Assistant(reply))
     }
 
     #[test]
@@ -5096,6 +5173,55 @@ mod tests {
         t.fold(user(5, "u3", None, "yo"));
         assert!(t.rewound.is_none());
         assert_eq!(texts(&t), ["yo"]);
+    }
+
+    /// What a build from when hosts ran pi kept, as the first start after it finds it.
+    #[test]
+    fn models_kept_as_provider_and_id_become_ids_once() {
+        let mut cache = Cache::in_memory().unwrap();
+        let thread = |id: &str, model: &str| ThreadSummary { id: id.into(), model: Some(model.into()), ..Default::default() };
+        let models = |cache: &Cache| {
+            let mut threads = cache.threads("h").unwrap();
+            threads.sort_by(|a, b| a.id.cmp(&b.id));
+            threads.into_iter().map(|t| t.model.unwrap()).collect::<Vec<_>>()
+        };
+        let preset = |model: &str, effort: &str| Preset { model: model.into(), effort: Some(effort.into()) };
+        let presets = |cache: &Cache| serde_json::from_str::<Vec<Preset>>(&cache.get(PRESETS_KEY).unwrap()).unwrap();
+        let old =
+            [preset("cliproxyapi/claude-opus-5-5", "high"), preset("openai/gpt-5", "low"), preset("anthropic/claude-opus-5-5", "high")];
+        cache.set_threads("h", &[thread("a", "cliproxyapi/claude-opus-5-5"), thread("b", "openrouter/vendor/model")]).unwrap();
+        cache.set(LAST_MODEL_KEY, "cliproxyapi/claude-opus-5-5").unwrap();
+        cache.set(PRESETS_KEY, &serde_json::to_string(&old).unwrap()).unwrap();
+        let mut config = config::Config::default();
+        config.title.model = "anthropic/claude-haiku-5-5".into();
+
+        assert!(name_models_by_id(&cache, &mut config));
+        // Everything after the first slash, as the hosts convert theirs.
+        assert_eq!(models(&cache), ["claude-opus-5-5", "vendor/model"]);
+        assert_eq!(cache.get(LAST_MODEL_KEY).as_deref(), Some("claude-opus-5-5"));
+        assert!(presets(&cache) == [preset("claude-opus-5-5", "high"), preset("gpt-5", "low")]);
+        assert_eq!(config.title.model, "claude-haiku-5-5");
+
+        // From then on an id with a slash is an id: nothing is cut again.
+        config.title.model = "vendor/model".into();
+        cache.set(LAST_MODEL_KEY, "vendor/model").unwrap();
+        assert!(!name_models_by_id(&cache, &mut config));
+        assert_eq!(models(&cache), ["claude-opus-5-5", "vendor/model"]);
+        assert_eq!((cache.get(LAST_MODEL_KEY).as_deref(), config.title.model.as_str()), (Some("vendor/model"), "vendor/model"));
+    }
+
+    #[test]
+    fn an_effort_is_held_to_what_the_model_takes() {
+        let claude = ["low", "medium", "high", "xhigh", "max"].map(String::from);
+        assert_eq!(held_effort("medium", &claude).as_deref(), Some("medium"));
+        // pi's levels below the model's lowest.
+        assert_eq!(held_effort("off", &claude).as_deref(), Some("low"));
+        assert_eq!(held_effort("minimal", &claude).as_deref(), Some("low"));
+        // One only another model takes.
+        assert_eq!(held_effort("xhigh", &claude[..3]).as_deref(), Some("high"));
+        assert_eq!(held_effort("high", &claude[..2]).as_deref(), Some("medium"));
+        // A model that doesn't reason.
+        assert_eq!(held_effort("high", &[]), None);
     }
 
     /// A rebuilt timeline (the host's snapshot landing on the cached entries) leaves the

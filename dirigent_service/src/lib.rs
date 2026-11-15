@@ -1,36 +1,40 @@
-//! dirigent_service: owns this host's threads (sqlite), drives the pi runtime,
+//! dirigent_service: owns this host's threads (sqlite), runs their agents (`dirigent_agent`)
 //! and serves them to desktops over WebSocket.
 //!
 //! A library so the desktop can run the local service in-process (`run`) and the `dirigent`
-//! command line (`dirigent_cli`) shares its dirs and runtime; the `dirigent_service` binary
-//! is a thin wrapper for remote hosts.
+//! command line (`dirigent_cli`) shares its dirs; the `dirigent_service` binary is a thin
+//! wrapper for remote hosts.
 
 mod agent;
 mod auth;
-mod blobs;
+mod dirigent;
 mod dirs;
 pub mod forge;
 mod git;
 pub mod hosts;
+mod live;
 mod logging;
+mod mcp;
+pub mod migration;
 pub mod platform;
 mod proxy;
-mod runtime;
 mod screen;
 mod server;
 mod storage;
-// The storage to come: it takes `storage`'s place and name when the service runs
-// `dirigent_agent` instead of pi. Unused until then.
-#[allow(dead_code)]
-mod storage2;
 mod title;
 pub mod tunnel;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs};
-use runtime::{Login, Runtime, RuntimeMessage, now};
-use serde_json::{Value, json};
+use dirigent_agent::config::Dirs as AgentDirs;
+use dirigent_agent::proxy::Proxy;
+use dirigent_agent::session::{Prompt, Session, Thread};
+use dirigent_agent::{Agent, Out};
+use dirigent_protocol::transcript::{Body, Entry, Event, Notice};
+use dirigent_protocol::{
+    ClientMessage, FirstPrompt, HostInfo, ModelInfo, Notify, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs,
+};
+use live::Live;
 use server::Conn;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -41,11 +45,12 @@ use storage::Storage;
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-pub use agent::dir as agent_dir;
 pub use auth::{KEY_USAGE, key_command};
 pub use logging::init_logging;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
+/// How long `shutdown` waits for the agent's MCP servers and screens to close.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 pub const DEFAULT_PORT: u16 = 7777;
 /// Sub-agents can't nest deeper than this (a root thread is depth 0).
 const MAX_DEPTH: usize = 3;
@@ -63,16 +68,20 @@ pub fn port() -> u16 {
 
 pub struct Service {
     storage: Mutex<Storage>,
-    runtime: Arc<Runtime>,
+    /// This host's agent: the live sessions of its threads.
+    agent: Arc<Agent>,
+    /// The way to the models: the agent's, and what lists them and names threads.
+    models: Arc<Proxy>,
+    /// What the threads' sessions are up to (`live.rs`).
+    live: Live,
     /// Threads whose workspace was gone (or no longer known to the vcs) at the last
     /// `sweep_workspaces`: what `workspace_missing` reports between sweeps.
     missing: Mutex<std::collections::HashSet<String>>,
     /// Threads being created with their first prompt, until it is delivered: they take no
     /// other prompt meanwhile. `Some(Workspace)` while their workspace is being made.
     starting: Mutex<HashMap<String, Option<Setup>>>,
-    /// Logins (`ClientMessage::Login`, `McpLogin`), by the connection and request id that
-    /// started them.
-    logins: Mutex<Logins>,
+    /// The MCP sign-ins in progress (`mcp.rs`).
+    logins: mcp::Logins,
     /// This host's CLIProxyAPI as last seen (`proxy.rs`).
     proxy: proxy::Poller,
     /// The pictures of the threads using the computer (`screen.rs`).
@@ -82,15 +91,6 @@ pub struct Service {
     pub host_name: String,
     /// `Storage::service_id`, sent in every `Hello`.
     pub service_id: String,
-}
-
-#[derive(Default)]
-struct Logins {
-    /// In progress: their runtime request id, which answers and cancels go to.
-    running: HashMap<(u64, u64), u64>,
-    /// Cancelled before they started: requests are handled side by side, so a `LoginCancel`
-    /// sent right after its `Login` may get here first.
-    cancelled: std::collections::HashSet<(u64, u64)>,
 }
 
 impl Service {
@@ -105,24 +105,32 @@ impl Service {
         for t in &mut threads {
             // A thread still starting works, whatever its session is up to: `abandon` drops
             // the session, and the run in it, before the thread is gone.
-            t.running_since = self.runtime.running_since(&t.id).or(t.prompted_at.filter(|_| starting.contains_key(&t.id)));
-            t.jobs = self.runtime.jobs(&t.id);
-            t.free_jobs = self.runtime.free_jobs(&t.id);
+            t.running_since = self.live.running_since(&t.id).or(t.prompted_at.filter(|_| starting.contains_key(&t.id)));
+            (t.jobs, t.free_jobs) = self.live.jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
             t.workspace_missing = missing.contains(&t.id);
-            t.setup = starting.get(&t.id).copied().flatten().or(self.runtime.nix_shell(&t.id).then_some(Setup::NixShell));
-            t.compacting_since = self.runtime.compacting_since(&t.id);
+            t.setup = starting.get(&t.id).copied().flatten().or(self.live.nix_shell(&t.id).then_some(Setup::NixShell));
+            t.compacting_since = self.live.compacting_since(&t.id);
             // A screen is its run's: one left by a run that never settled doesn't count.
             t.screen = t.running_since.is_some() && self.screens.has(&t.id);
         }
         Ok(threads)
     }
 
-    /// Drop the thread's session (`Runtime::unload`), and with it the screen of the run it
-    /// may have been in: no `agent_settled` comes for that one.
+    /// Drop the thread's session, and with it the run it may have been in (no `RunEnd` comes
+    /// for that one), its jobs and its screen. A run begun for a session still to load (its
+    /// prompt on the way) isn't the session's to end: a new thread goes on running while it
+    /// moves into its workspace, and whoever waited on a load that failed settles the run.
     fn unload(&self, thread_id: &str) {
         self.screens.clear(thread_id);
-        let _ = self.runtime.unload(thread_id);
+        let loaded = self.agent.session(thread_id).is_some();
+        self.agent.unload(thread_id);
+        self.live.unloaded(thread_id, loaded);
+    }
+
+    /// The tool switches the thread's last prompt had on.
+    pub(crate) fn thread_tools(&self, thread_id: &str) -> Result<Vec<String>> {
+        self.storage.lock().unwrap().thread_tools(thread_id)
     }
 
     fn push_threads(&self) {
@@ -199,11 +207,8 @@ impl Service {
             | ClientMessage::SearchThreads { id, .. }
             | ClientMessage::DeleteThread { id, .. }
             | ClientMessage::ListModels { id }
-            | ClientMessage::ListProviders { id }
-            | ClientMessage::Login { id, .. }
             | ClientMessage::LoginAnswer { id, .. }
             | ClientMessage::LoginCancel { id, .. }
-            | ClientMessage::Logout { id, .. }
             | ClientMessage::ListMcpServers { id }
             | ClientMessage::CheckMcpServer { id, .. }
             | ClientMessage::SaveMcpServer { id, .. }
@@ -260,8 +265,8 @@ impl Service {
             ClientMessage::ListThreads { id } => ServerMessage::Threads { reply_to: Some(id), threads: self.threads()? },
             ClientMessage::GetThread { id, thread_id } => {
                 self.sweep_workspaces();
-                let (header, entries) = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
-                ServerMessage::Thread { reply_to: id, thread_id, header, entries }
+                let entries = self.storage.lock().unwrap().get_thread(&thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+                ServerMessage::Thread { reply_to: id, thread_id, entries }
             }
             ClientMessage::CreateThread { id, thread_id, project_id, workspace, base, parent, name, report, notify, prompt } => {
                 let thread_id = new_thread_id(thread_id)?;
@@ -288,8 +293,8 @@ impl Service {
                     // threads' activity) lists it running, never idle in the inbox while its
                     // workspace is made or its prompt is on the way.
                     if let Some(p) = &prompt {
-                        storage.set_prompted(&thread_id, &p.text, p.model.as_deref(), p.thinking_level.as_deref(), now())?;
-                        self.runtime.begin_run(&thread_id);
+                        storage.set_prompted(&thread_id, &p.text, p.model.as_deref(), p.effort.as_deref(), now())?;
+                        self.live.begin_run(&thread_id);
                         self.starting.lock().unwrap().insert(thread_id.clone(), workspace.then_some(Setup::Workspace));
                     }
                     thread
@@ -337,7 +342,7 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::RemoveWorkspace { id, thread_id, detach } => {
-                anyhow::ensure!(self.runtime.running_since(&thread_id).is_none(), "the thread is running");
+                anyhow::ensure!(self.live.running_since(&thread_id).is_none(), "the thread is running");
                 self.remove_workspace(&thread_id, detach)?;
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
@@ -354,22 +359,22 @@ impl Service {
                 let refs = vcs.map(|v| vcs::refs(v, dir)).unwrap_or_default();
                 ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
             }
-            ClientMessage::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools } => {
+            ClientMessage::Prompt { id, thread_id, text, mode, model, effort, images, title, tools } => {
                 // Its first prompt goes first: a second one now would load its session ahead
                 // of it (in the project, while its workspace is being made).
                 anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
-                self.prompt(&thread_id, mode, &FirstPrompt { text, model, thinking_level, images, title, tools }, None).await?;
+                self.prompt(&thread_id, mode, &FirstPrompt { text, model, effort, images, title, tools }, None).await?;
                 ServerMessage::Ok { reply_to: id }
             }
-            ClientMessage::EditMessage { id, thread_id, entry_id, text, model, thinking_level, images, tools } => {
+            ClientMessage::EditMessage { id, thread_id, entry_id, text, model, effort, images, tools } => {
                 anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
-                // Pi can't move its session back under a run; the runtime refuses it too.
-                anyhow::ensure!(self.runtime.running_since(&thread_id).is_none(), "the thread is running; stop it first");
+                // A thread can't go back under a run; its session refuses it too.
+                anyhow::ensure!(self.live.running_since(&thread_id).is_none(), "the thread is running; stop it first");
                 anyhow::ensure!(
                     self.storage.lock().unwrap().is_user_message(&thread_id, &entry_id)?,
                     "only a message the user sent can be edited"
                 );
-                let p = FirstPrompt { text, model, thinking_level, images, title: None, tools };
+                let p = FirstPrompt { text, model, effort, images, title: None, tools };
                 self.prompt(&thread_id, PromptMode::Prompt, &p, Some(&entry_id)).await?;
                 ServerMessage::Ok { reply_to: id }
             }
@@ -381,6 +386,7 @@ impl Service {
                 ServerMessage::ThreadCreated { reply_to: id, thread: Box::new(fork) }
             }
             ClientMessage::Answer { id, thread_id, ask_id, answers, silent } => {
+                self.takes_messages(&thread_id)?;
                 // Taken before anything else so a second client answering the same ask is refused.
                 let ask = self.storage.lock().unwrap().take_ask(&thread_id, &ask_id)?.ok_or_else(|| anyhow!("already answered"))?;
                 info!(thread = %thread_id, dismissed = answers.is_none(), silent, "ask answered");
@@ -391,71 +397,62 @@ impl Service {
                 // An answer is a message: an archived thread comes back for it.
                 self.storage.lock().unwrap().unarchive(&thread_id)?;
                 // The answer starts a turn if the model is idle (and is queued if it isn't).
-                self.runtime.begin_run(&thread_id);
+                self.live.begin_run(&thread_id);
                 self.push_threads();
-                let sent = match self.ensure_loaded(&thread_id, None, None).await {
-                    Ok(()) => self.runtime.answer(&thread_id, &ask, answers.as_deref()),
+                let sent = match self.ensure_loaded(&thread_id) {
+                    Ok(session) => session.answer(ask, answers).await,
                     Err(e) => Err(e),
                 };
-                if sent.is_err() && self.runtime.settle(&thread_id).is_some() {
+                if sent.is_err() && self.live.settle(&thread_id).is_some() {
                     self.push_threads();
                 }
                 sent?;
                 ServerMessage::Ok { reply_to: id }
             }
-            ClientMessage::ListModels { id } => ServerMessage::Models { reply_to: id, models: self.runtime.list_models().await? },
-            ClientMessage::ListProviders { id } => {
-                let p = self.runtime.list_providers().await?;
-                ServerMessage::Providers { reply_to: id, providers: p.providers, auth_path: p.auth_path }
+            ClientMessage::ListModels { id } => {
+                // A host without a proxy has no models: that is no error, it is how clients
+                // see that it has to be set up.
+                let set_up = !dirigent_agent::config::Config::load(&self.agent.dirs)?.proxy.url.is_empty();
+                let models = if set_up { self.models.models().await? } else { vec![] };
+                let info = |m: dirigent_agent::proxy::Model| ModelInfo {
+                    id: m.id,
+                    name: m.name,
+                    owner: m.owner,
+                    context_window: m.context_window,
+                    efforts: m.efforts,
+                };
+                ServerMessage::Models { reply_to: id, models: models.into_iter().map(info).collect() }
             }
-            ClientMessage::Login { id, provider, method } => self.login(conn, id, Login::Provider(&provider, method)).await,
-            ClientMessage::McpLogin { id, name } => self.login(conn, id, Login::McpServer(&name)).await,
+            ClientMessage::McpLogin { id, name } => self.mcp_login(conn, id, &name).await,
             ClientMessage::LoginAnswer { id, login, prompt, value } => {
-                let login = self.logins.lock().unwrap().running.get(&(conn.id, login)).copied().ok_or_else(|| anyhow!("no such login"))?;
-                self.runtime.login_answer(login, prompt, &value)?;
+                self.logins.answer(conn.id, login, prompt, value)?;
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::LoginCancel { id, login } => {
-                let key = (conn.id, login);
-                let running = {
-                    let mut logins = self.logins.lock().unwrap();
-                    let running = logins.running.get(&key).copied();
-                    if running.is_none() {
-                        logins.cancelled.insert(key);
-                    }
-                    running
-                };
-                if let Some(login) = running {
-                    self.runtime.login_cancel(login)?;
-                }
-                ServerMessage::Ok { reply_to: id }
-            }
-            ClientMessage::Logout { id, provider } => {
-                self.runtime.logout(&provider).await?;
-                info!(%provider, "logged out");
+                self.logins.cancel(conn.id, login);
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListMcpServers { id } => {
-                let list = self.runtime.list_mcp_servers().await?;
-                ServerMessage::McpServers { reply_to: id, servers: list.servers, path: list.path }
+                let (servers, path) = dirigent_agent::mcp::list(&self.agent.dirs)?;
+                ServerMessage::McpServers { reply_to: id, servers, path }
             }
             ClientMessage::CheckMcpServer { id, name } => {
-                ServerMessage::McpStatus { reply_to: id, status: self.runtime.check_mcp_server(&name).await? }
+                ServerMessage::McpStatus { reply_to: id, status: dirigent_agent::mcp::check(&self.agent.dirs, &name).await? }
             }
             ClientMessage::SaveMcpServer { id, name, config } => {
-                self.runtime.save_mcp_server(&name, &config).await?;
+                dirigent_agent::mcp::save(&self.agent.dirs, &name, config)?;
                 info!(server = %name, "MCP server saved");
                 self.unload_idle_sessions();
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::RemoveMcpServer { id, name } => {
-                self.runtime.remove_mcp_server(&name).await?;
+                dirigent_agent::mcp::remove(&self.agent.dirs, &name)?;
                 info!(server = %name, "MCP server removed");
                 self.unload_idle_sessions();
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::McpLogout { id, name } => {
-                self.runtime.mcp_logout(&name).await?;
+                dirigent_agent::mcp::sign_out(&self.agent.dirs, &name)?;
                 info!(server = %name, "signed out of MCP server");
                 ServerMessage::Ok { reply_to: id }
             }
@@ -474,12 +471,12 @@ impl Service {
                 .await;
                 ServerMessage::Hosts { reply_to: id, hosts }
             }
-            ClientMessage::GenerateTitle { id, title, text } => self.runtime.generate_title(&title, &text).await?.reply(id),
+            ClientMessage::GenerateTitle { id, title, text } => title::generate(&*self.models, &title, &text, None).await?.reply(id),
             ClientMessage::RetitleThread { id, thread_id, model, reasoning } => {
                 let (prompts, reply) = self.storage.lock().unwrap().conversation(&thread_id)?;
                 anyhow::ensure!(!prompts.is_empty(), "the thread has no messages to name it from");
                 let settings = TitleGen { model, reasoning, prompt: title::PROMPT.into() };
-                let r = self.runtime.generate_title(&settings, &title::digest(&prompts, reply.as_deref())).await?;
+                let r = title::generate(&*self.models, &settings, &title::digest(&prompts, reply.as_deref()), None).await?;
                 self.storage.lock().unwrap().set_name(&thread_id, &r.title)?;
                 info!(thread = %thread_id, "thread retitled");
                 self.push_threads();
@@ -512,19 +509,26 @@ impl Service {
             ClientMessage::ListProxy { id, since, until, bucket_ms } => {
                 self.poll_proxy(proxy::FRESH_MS).await;
                 let samples = if until > since { self.storage.lock().unwrap().proxy_samples(since, until, bucket_ms)? } else { vec![] };
-                ServerMessage::Proxy { reply_to: id, proxy: self.proxy(samples) }
+                ServerMessage::Proxy { reply_to: id, proxy: self.proxy(samples, false).await }
             }
-            ClientMessage::SetProxy { id, url, key } => {
-                self.set_proxy(&url, &key).await?;
-                ServerMessage::Proxy { reply_to: id, proxy: self.proxy(vec![]) }
+            ClientMessage::SetProxy { id, url, key, management_key } => {
+                self.set_proxy(&url, &key, &management_key).await?;
+                ServerMessage::Proxy { reply_to: id, proxy: self.proxy(vec![], true).await }
             }
             ClientMessage::Abort { id, thread_id } => {
                 info!(thread = %thread_id, "abort");
-                self.runtime.abort(&thread_id)?;
+                match self.agent.session(&thread_id) {
+                    Some(session) => session.abort(),
+                    // Nothing runs it: if it still counts as running, it doesn't any more.
+                    None if self.live.settle(&thread_id).is_some() => self.push_threads(),
+                    None => {}
+                }
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::CancelQueued { id, thread_id, text } => {
-                self.runtime.cancel_queued(&thread_id, &text)?;
+                if let Some(session) = self.agent.session(&thread_id) {
+                    session.cancel_queued(&text);
+                }
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ArchiveThread { id, thread_id, archived } => {
@@ -535,10 +539,10 @@ impl Service {
                     // (servers, watchers) go with it: unloading a session kills its jobs. A
                     // message or run brings it back (`unarchive`); it doesn't go back by itself.
                     let family = if archived { storage.family(&thread_id)? } else { vec![] };
-                    let busy = family.iter().any(|t| self.runtime.running_since(t).is_some() || self.runtime.jobs(t) > 0);
+                    let busy = family.iter().any(|t| self.live.running_since(t).is_some() || self.live.jobs(t).0 > 0);
                     anyhow::ensure!(!busy, "the thread or one of its sub-agents is still working; archive it once they are done");
                     storage.set_archived(&thread_id, archived, now())?;
-                    for t in family.iter().filter(|t| self.runtime.free_jobs(t) > 0) {
+                    for t in family.iter().filter(|t| self.live.jobs(t).1 > 0) {
                         info!(thread = %t, "archived: stopping the jobs it left running");
                         self.unload(t);
                     }
@@ -594,79 +598,61 @@ impl Service {
         })
     }
 
-    /// Run login `id` of connection `conn` to its end, its steps going to that connection;
-    /// the reply ends it. Logged here, not as a failed request: a cancel or a mistyped key
-    /// is no failure of the service.
-    async fn login(&self, conn: &Conn, id: u64, what: Login<'_>) -> ServerMessage {
-        let (key, login) = ((conn.id, id), self.runtime.next_id());
-        {
-            let mut logins = self.logins.lock().unwrap();
-            if logins.cancelled.remove(&key) {
-                return ServerMessage::Error { reply_to: Some(id), message: "Login cancelled".into() };
-            }
-            logins.running.insert(key, login);
-        }
-        info!(?what, "login started");
-        // Straight into the connection, in order: the steps all come before the reply.
-        let out = conn.out.clone();
-        let steps = Box::new(move |step| {
-            let _ = out.send(ServerMessage::LoginStep { login: id, step });
-        });
-        let result = self.runtime.login(login, what, steps).await;
-        self.logins.lock().unwrap().running.remove(&key);
-        match result {
-            Ok(()) => {
-                info!(?what, "logged in");
-                ServerMessage::Ok { reply_to: id }
-            }
-            Err(e) => {
-                info!(?what, "login ended: {e:#}");
-                ServerMessage::Error { reply_to: Some(id), message: format!("{e:#}") }
-            }
-        }
-    }
-
-    /// `mcp.json` changed. Sessions read it when they start, so the idle ones go: their
-    /// next prompt loads them with the change. Running ones (and those with jobs, which
-    /// unloading would kill) keep the servers they have until they are unloaded idle.
+    /// The MCP servers changed. Sessions read them when they start, so the idle ones go:
+    /// their next prompt loads them with the change. Running ones (and those with jobs,
+    /// which unloading would kill) keep the servers they have until they are unloaded idle.
     fn unload_idle_sessions(&self) {
-        for id in self.runtime.unload_idle(Duration::ZERO) {
+        for id in self.unload_idle(Duration::ZERO) {
             info!(thread = %id, "unloaded idle session: the MCP servers changed");
         }
     }
 
-    /// A connection is gone: the logins it started are cancelled, as nobody is left to
+    /// Unload the sessions that have done nothing for `max_idle` (`Agent::unload_idle`).
+    fn unload_idle(&self, max_idle: Duration) -> Vec<String> {
+        let idle = self.agent.unload_idle(max_idle);
+        for id in &idle {
+            self.screens.clear(id);
+            self.live.unloaded(id, true);
+        }
+        idle
+    }
+
+    /// A connection is gone: the sign-ins it started are cancelled, as nobody is left to
     /// finish them (and a browser sign-in's callback server would hold its port).
     fn disconnected(&self, conn: u64) {
-        let logins: Vec<u64> = {
-            let mut logins = self.logins.lock().unwrap();
-            logins.cancelled.retain(|(c, _)| *c != conn);
-            logins.running.iter().filter(|((c, _), _)| *c == conn).map(|(_, l)| *l).collect()
-        };
-        for login in logins {
-            info!("login cancelled: its client left");
-            let _ = self.runtime.login_cancel(login);
-        }
+        self.logins.disconnected(conn);
+    }
+
+    /// An error for a thread that takes no message (`ThreadSummary::locked`), before
+    /// anything is done for one.
+    fn takes_messages(&self, thread_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            !self.storage.lock().unwrap().thread_locked(thread_id)?,
+            "This thread could not be converted from pi whole: it can be read and forked, but takes no message"
+        );
+        Ok(())
     }
 
     /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
     /// `Prompt`'s fields; `edit`, the user message it replaces (`EditMessage`).
-    async fn prompt(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
+    async fn prompt(self: &Arc<Self>, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
+        self.takes_messages(thread_id)?;
         // A steer or follow-up into a run that is over (the sender's view was stale: it
-        // ended, or this service restarted under it) is a new turn. The runtime does the
-        // same when the run ends while the message is on its way (`deliver`).
-        let idle = self.runtime.running_since(thread_id).is_none();
+        // ended, or this service restarted under it) is a new turn. The session does the
+        // same when the run ends while the message is on its way.
+        let idle = self.live.running_since(thread_id).is_none();
         let mode = if idle { PromptMode::Prompt } else { mode };
         // A message brings an archived thread back.
         let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
-        // The run starts now, not at pi's `agent_start`: loading the session (and a nix
-        // dev shell) can take seconds, and clients should see the thread working with
+        // The run starts now, not at the session's `RunStart`: a nix dev shell can take
+        // seconds to capture, and clients should see the thread working with
         // the model it will use for all of it. A new turn is a new task, too
         // (`prompted_at`: steers, follow-ups and answers don't count). `CreateThread` does
         // the same for its first prompt, earlier.
+        let before = self.storage.lock().unwrap().thread_model(thread_id)?;
         if mode == PromptMode::Prompt {
-            self.storage.lock().unwrap().set_prompted(thread_id, &p.text, p.model.as_deref(), p.thinking_level.as_deref(), now())?;
-            self.runtime.begin_run(thread_id);
+            self.storage.lock().unwrap().set_prompted(thread_id, &p.text, p.model.as_deref(), p.effort.as_deref(), now())?;
+            self.live.begin_run(thread_id);
         }
         if mode == PromptMode::Prompt || unarchived {
             self.push_threads();
@@ -674,24 +660,61 @@ impl Service {
         let sent = self.deliver(thread_id, mode, p, edit).await;
         // The run begun above never started. A message refused under a run in progress (a
         // steer, a prompt from a client that didn't know of the run) leaves that run alone.
-        if sent.is_err() && idle && self.runtime.settle(thread_id).is_some() {
+        if sent.is_err() && idle && self.live.settle(thread_id).is_some() {
+            // Nor does the thread keep the model of a message it refused (one the proxy
+            // doesn't serve): the next message would be refused for it again.
+            let (model, effort) = before;
+            self.storage.lock().unwrap().set_model(thread_id, model.as_deref(), effort.as_deref())?;
             self.push_threads();
         }
         sent
     }
 
     /// `prompt` after the run's start: load the session and hand it the prompt. Returns once
-    /// pi has the message, or with why it has not (the session didn't load, pi refused the
-    /// message: `Runtime::prompt`); the caller settles the run then, and the sender still
-    /// has the message to give back to its user.
-    async fn deliver(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
-        let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
-        info!(thread = %thread_id, ?mode, model = model.map(tracing::field::display), "prompt");
+    /// the model has the message, or with why it has not (the session didn't load, it
+    /// refused the message: `Session::prompt`); the caller settles the run then, and the
+    /// sender still has the message to give back to its user. `p.title` (a thread's first
+    /// prompt) names the thread from the text alongside the run.
+    async fn deliver(self: &Arc<Self>, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
+        info!(thread = %thread_id, ?mode, model = p.model.as_deref().map(tracing::field::display), "prompt");
         if let Some(tools) = &p.tools {
             self.storage.lock().unwrap().set_tools(thread_id, tools)?;
         }
-        self.ensure_loaded(thread_id, model, thinking_level).await?;
-        self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref(), edit).await
+        let session = self.ensure_loaded(thread_id)?;
+        let prompt = Prompt {
+            text: p.text.clone(),
+            images: p.images.clone(),
+            mode: Some(mode),
+            model: p.model.clone(),
+            effort: p.effort.clone(),
+            tools: p.tools.clone(),
+            edit: edit.map(str::to_owned),
+        };
+        session.prompt(prompt).await?;
+        if let Some(settings) = p.title.clone() {
+            let (this, thread_id, text) = (self.clone(), thread_id.to_owned(), p.text.clone());
+            tokio::spawn(async move { this.name_thread(&thread_id, &settings, &text).await });
+        }
+        Ok(())
+    }
+
+    /// Name a thread from its first prompt. A name given by hand meanwhile stays.
+    async fn name_thread(&self, thread_id: &str, settings: &TitleGen, text: &str) {
+        let own = self.storage.lock().unwrap().thread_model(thread_id).ok().and_then(|(model, _)| model);
+        let title = title::generate(&*self.models, settings, text, own.as_deref()).await;
+        // On its own line: the storage's lock is let go before the push takes it.
+        let named = title.and_then(|title| self.storage.lock().unwrap().set_title(thread_id, &title.title));
+        match named {
+            Ok(()) => {
+                self.push(ServerMessage::Event { thread_id: thread_id.to_owned(), event: Event::Titled });
+                self.push_threads();
+            }
+            Err(e) => {
+                warn!(thread = %thread_id, "title generation failed: {e:#}");
+                let event = Event::Warning { message: format!("title generation failed: {e:#}") };
+                self.push(ServerMessage::Event { thread_id: thread_id.to_owned(), event });
+            }
+        }
     }
 
     /// A `CreateThread` with a prompt is still setting the thread up (`starting`).
@@ -707,7 +730,7 @@ impl Service {
         if let Err(e) = self.delete_thread(thread_id) {
             error!(thread = %thread_id, "delete unstarted thread: {e:#}");
         }
-        self.runtime.settle(thread_id);
+        self.live.settle(thread_id);
         self.starting.lock().unwrap().remove(thread_id);
         e
     }
@@ -736,12 +759,12 @@ impl Service {
     /// answers to an ask are: it starts a turn when the model is idle. The caller has
     /// already counted the thread as running (`begin_run`) and pushed that; a notice that
     /// can't be delivered settles it again.
-    async fn notify_thread(&self, thread_id: &str, custom_type: &str, content: &str, details: Value, notify: &str) -> Result<()> {
-        let sent = match self.ensure_loaded(thread_id, None, None).await {
-            Ok(()) => self.runtime.notify(thread_id, custom_type, content, &details, notify),
+    async fn notify_thread(&self, thread_id: &str, notice: Notice, when: Notify) -> Result<()> {
+        let sent = match self.ensure_loaded(thread_id) {
+            Ok(session) => session.notify(notice, when).await,
             Err(e) => Err(e),
         };
-        if sent.is_err() && self.runtime.settle(thread_id).is_some() {
+        if sent.is_err() && self.live.settle(thread_id).is_some() {
             self.push_threads();
         }
         sent
@@ -750,7 +773,7 @@ impl Service {
     /// A sub-agent's run ended: tell its parent, with the child's final reply (or, if it was
     /// spawned with `Report::Done`, only that it finished), as it was spawned to (`Notify`).
     /// A child that stopped to ask the user is reported as waiting, not finished. The
-    /// parent already counts as running (see `on_runtime`); `notify_thread` settles it
+    /// parent already counts as running (see `on_out`); `notify_thread` settles it
     /// again if the notice can't be delivered.
     async fn on_child_settled(&self, thread_id: &str, parent: &str) {
         let (name, asks, reply, (report, notify)) = {
@@ -773,12 +796,15 @@ impl Service {
                 None => format!("{who} stopped without a reply (aborted or failed)."),
             }
         };
-        let details = json!({
-            "thread_id": thread_id, "name": name, "reply": reply,
-            "error": asks.is_empty() && reply.is_none(), "asking": !asks.is_empty(),
-        });
+        let notice = Notice::Child {
+            text: content,
+            thread_id: thread_id.to_owned(),
+            name,
+            asking: !asks.is_empty(),
+            failed: asks.is_empty() && reply.is_none(),
+        };
         info!(thread = %parent, child = %thread_id, "notifying parent of sub-agent");
-        if let Err(e) = self.notify_thread(parent, "dirigent:child", &content, details, notify.as_str()).await {
+        if let Err(e) = self.notify_thread(parent, notice, notify).await {
             error!(thread = %parent, child = %thread_id, "notify parent: {e:#}");
         }
     }
@@ -803,7 +829,7 @@ impl Service {
     /// uncommitted edits behind in the main checkout. A `new` one (being created) starts
     /// from HEAD on purpose and may already count as running: its first prompt waits on this.
     fn move_to_workspace(&self, thread_id: &str, new: bool, base: Option<&str>) -> Result<()> {
-        anyhow::ensure!(new || self.runtime.running_since(thread_id).is_none(), "the thread is running");
+        anyhow::ensure!(new || self.live.running_since(thread_id).is_none(), "the thread is running");
         let (repo, vcs) = self.thread_repo(thread_id)?;
         let recreating = self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some();
         anyhow::ensure!(recreating || new || !vcs::dirty(vcs, &repo)?, "the working copy has uncommitted changes; commit them first");
@@ -853,34 +879,31 @@ impl Service {
         let storage = self.storage.lock().unwrap();
         storage.set_cwd(thread_id, cwd, workspace)?;
         if let Some(parent) = storage.last_entry_id(thread_id)? {
-            let entry = json!({
-                "type": "custom_message",
-                "customType": "dirigent:workspace",
-                "content": notice,
-                "display": true,
-                "id": uuid::Uuid::new_v4().simple().to_string()[..8],
-                "parentId": parent,
-                "timestamp": runtime::iso_now(),
-            });
+            let entry = Entry {
+                seq: 0,
+                id: uuid::Uuid::new_v4().simple().to_string()[..16].to_owned(),
+                parent_id: Some(parent),
+                at: now(),
+                body: Body::Notice(Notice::Info { text: notice.to_owned() }),
+            };
             let entry = storage.append_entry(thread_id, entry, now())?;
             self.push(ServerMessage::Entry { thread_id: thread_id.to_owned(), entry });
         }
         drop(storage);
         // Its workspace is fresh, or it has none: nothing is missing until a sweep says so.
         self.missing.lock().unwrap().remove(thread_id);
-        // Also when it is still loading, or its session would go live at the old cwd. The run
-        // begun for a new thread's first prompt goes on: it has no session yet (`Runtime::unload`).
+        // Its session works at the old cwd. The run begun for a new thread's first prompt goes
+        // on: it has no session yet (`unload`).
         self.unload(thread_id);
         Ok(())
     }
 
-    /// Replay the thread from sqlite into the runtime if it isn't live yet. `model` and
-    /// `thinking_level` seed a fresh thread's session (see `Sessions.load` in the runtime).
-    async fn ensure_loaded(&self, thread_id: &str, model: Option<&str>, thinking_level: Option<&str>) -> Result<()> {
-        if self.runtime.is_loaded(thread_id) {
-            return Ok(());
+    /// The thread's live session, loaded from its stored entries if it has none.
+    fn ensure_loaded(&self, thread_id: &str) -> Result<Arc<Session>> {
+        if let Some(session) = self.agent.session(thread_id) {
+            return Ok(session);
         }
-        let (cwd, file_entries, tools) = {
+        let thread = {
             let storage = self.storage.lock().unwrap();
             let cwd = storage.thread_cwd(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
             // A jj workspace the user rebased from elsewhere is made current before the
@@ -888,77 +911,73 @@ impl Service {
             if storage.thread_workspace(thread_id)?.is_some() {
                 vcs::update_stale(Path::new(&cwd));
             }
-            let tools = storage.thread_tools(thread_id)?;
-            let (header, entries) = storage.get_thread(thread_id)?.unwrap();
-            let mut file_entries: Vec<Value> = Vec::with_capacity(entries.len() + 1);
-            if !header.is_null() {
-                file_entries.push(header);
+            let (model, effort) = storage.thread_model(thread_id)?;
+            Thread {
+                id: thread_id.to_owned(),
+                cwd,
+                entries: storage.get_thread(thread_id)?.unwrap_or_default(),
+                model,
+                effort,
+                tools: storage.thread_tools(thread_id)?,
             }
-            file_entries.extend(entries.into_iter().map(|e| e.json));
-            // Pi wants its images inline again.
-            storage.inflate(&mut file_entries);
-            (cwd, file_entries, tools)
         };
-        self.runtime.load(thread_id, &cwd, &file_entries, model, thinking_level, &tools).await
+        // A new session has done nothing on the computer yet.
+        self.screens.clear(thread_id);
+        info!(thread = %thread_id, "session loaded");
+        Ok(self.agent.load(thread))
     }
 
-    /// Persist and fan out what the runtime reports.
-    fn on_runtime(self: &Arc<Self>, msg: RuntimeMessage) {
-        match msg {
-            RuntimeMessage::Loaded { thread_id, model, header, .. } => {
-                info!(thread = %thread_id, model = model.as_deref().map(tracing::field::display), "session loaded");
-                // A new session has done nothing on the computer yet.
-                self.screens.clear(&thread_id);
-                if let Err(e) = self.storage.lock().unwrap().set_header(&thread_id, &header) {
-                    error!(thread = %thread_id, "set header: {e:#}");
-                }
-            }
-            RuntimeMessage::Entry { thread_id, entry } => {
+    /// Keep and fan out what comes of a thread's session.
+    fn on_out(self: &Arc<Self>, thread_id: &str, out: Out) {
+        let thread_id = thread_id.to_owned();
+        match out {
+            Out::Entry(entry) => {
                 match self.storage.lock().unwrap().append_entry(&thread_id, entry, now()) {
                     Ok(entry) => self.push(ServerMessage::Entry { thread_id, entry }),
                     Err(e) => error!(thread = %thread_id, "append entry: {e:#}"),
                 }
                 self.push_threads();
             }
-            RuntimeMessage::Event { thread_id, mut event } => {
-                // No client draws an event's images, and on a slow connection they would
-                // hold up everything else: they come with the entry.
-                blobs::shed(&mut event);
-                let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
+            Out::Event(event) => {
                 // Changes the thread list shows (`running_since`, `compacting_since`).
-                let lifecycle = matches!(kind, "agent_start" | "agent_settled" | "compaction_start" | "compaction_end");
-                if kind == "agent_start" {
-                    info!(thread = %thread_id, "agent started");
-                    // Whatever woke it (a message does that earlier, a job's notice only
-                    // here), a working thread isn't archived. The lifecycle push below shows it.
-                    if let Err(e) = self.storage.lock().unwrap().unarchive(&thread_id) {
-                        error!(thread = %thread_id, "unarchive: {e:#}");
+                let lifecycle = matches!(event, Event::RunStart | Event::RunEnd | Event::CompactionStart | Event::CompactionEnd);
+                let mut parent = None;
+                match &event {
+                    Event::RunStart => {
+                        info!(thread = %thread_id, "run started");
+                        self.live.begin_run(&thread_id);
+                        // Whatever woke it (a message does that earlier, a job's notice only
+                        // here), a working thread isn't archived. The lifecycle push below shows it.
+                        if let Err(e) = self.storage.lock().unwrap().unarchive(&thread_id) {
+                            error!(thread = %thread_id, "unarchive: {e:#}");
+                        }
                     }
-                }
-                if kind == "agent_settled" {
-                    self.screens.clear(&thread_id);
-                    let ms = self.runtime.settle(&thread_id);
-                    info!(thread = %thread_id, secs = ms.map(|ms| ms / 1000), "agent settled");
-                    if let Some(ms) = ms
-                        && let Err(e) = self.storage.lock().unwrap().set_last_run(&thread_id, ms)
-                    {
-                        error!(thread = %thread_id, "set last run: {e:#}");
+                    Event::RunEnd => {
+                        self.screens.clear(&thread_id);
+                        let ms = self.live.settle(&thread_id);
+                        info!(thread = %thread_id, secs = ms.map(|ms| ms / 1000), "run ended");
+                        if let Some(ms) = ms
+                            && let Err(e) = self.storage.lock().unwrap().set_last_run(&thread_id, ms)
+                        {
+                            error!(thread = %thread_id, "set last run: {e:#}");
+                        }
+                        // A sub-agent's run ended: its parent is about to be woken
+                        // (`on_child_settled`), so it counts as running from now, in the same
+                        // `Threads` push that settles the child; otherwise clients would see it
+                        // finished for a moment and move it to the inbox and back.
+                        parent = self.storage.lock().unwrap().thread_parent(&thread_id).ok().flatten();
                     }
+                    Event::CompactionStart => self.live.set_compacting(&thread_id, true),
+                    Event::CompactionEnd => self.live.set_compacting(&thread_id, false),
+                    Event::Warning { message } => warn!(thread = %thread_id, "{message}"),
+                    _ => {}
                 }
-                // A sub-agent settled: its parent is about to be woken (`on_child_settled`), so
-                // it counts as running from now, in the same `Threads` push that settles the
-                // child; otherwise clients would see it finished for a moment and move it to
-                // the inbox and back.
-                let parent = match kind {
-                    "agent_settled" => self.storage.lock().unwrap().thread_parent(&thread_id).ok().flatten(),
-                    _ => None,
-                };
                 if let Some(parent) = parent {
                     // The notice is a message: an archived parent comes back for it.
                     if let Err(e) = self.storage.lock().unwrap().unarchive(&parent) {
                         error!(thread = %parent, "unarchive: {e:#}");
                     }
-                    self.runtime.begin_run(&parent);
+                    self.live.begin_run(&parent);
                     let (this, id) = (self.clone(), thread_id.clone());
                     tokio::spawn(async move { this.on_child_settled(&id, &parent).await });
                 }
@@ -967,63 +986,72 @@ impl Service {
                     self.push_threads();
                 }
             }
-            RuntimeMessage::Warning { thread_id, message } => {
-                warn!(thread = %thread_id, "{message}");
-                self.push(ServerMessage::Event { thread_id, event: json!({ "type": "warning", "message": message }) });
-            }
-            RuntimeMessage::Ask { thread_id, ask } => {
+            Out::Ask(ask) => {
                 info!(thread = %thread_id, "asking the user");
                 if let Err(e) = self.storage.lock().unwrap().add_ask(&thread_id, &ask, now()) {
                     error!(thread = %thread_id, "add ask: {e:#}");
                 }
                 self.push_threads();
             }
-            RuntimeMessage::Jobs { .. } | RuntimeMessage::NixShell { .. } => self.push_threads(),
-            RuntimeMessage::Screen { thread_id, image, action, cursor, desktop } => {
-                let png = image.and_then(|i| base64::Engine::decode(&base64::prelude::BASE64_STANDARD, i.data).ok());
-                let (frame, new) = self.screens.update(&thread_id, png);
-                let mut event = json!({ "type": "screen", "frame": frame });
-                if let Some(action) = action {
-                    event["action"] = action.into();
-                }
-                if let Some(cursor) = cursor {
-                    event["cursor"] = json!(cursor);
-                }
-                if desktop {
-                    event["desktop"] = true.into();
-                }
+            Out::Jobs { running, free } => {
+                self.live.set_jobs(&thread_id, running, free);
+                self.push_threads();
+            }
+            Out::NixShell(active) => {
+                self.live.set_nix_shell(&thread_id, active);
+                self.push_threads();
+            }
+            Out::Screen(screen) => {
+                let (frame, new) = self.screens.update(&thread_id, screen.image);
+                let event = Event::Screen { frame, action: screen.action, cursor: screen.cursor, desktop: screen.desktop };
                 self.push(ServerMessage::Event { thread_id, event });
                 // The thread list says which threads have a screen to show.
                 if new {
                     self.push_threads();
                 }
             }
-            RuntimeMessage::Error { thread_id, message } => {
-                warn!(thread = thread_id.as_deref().map(tracing::field::display), "runtime error: {message}");
-                // A run that failed outside pi (a prompt throwing after pi took it, a notice or
-                // answers that couldn't be handed over) never settles.
-                // A thread still starting is deleted next (`abandon`): its push is the one.
-                if let Some(t) = &thread_id
-                    && self.runtime.settle(t).is_some()
-                    && !self.starting(t)
-                {
-                    self.push_threads();
-                }
-                let message = match thread_id {
-                    Some(t) => format!("{t}: {message}"),
-                    None => message,
-                };
-                self.push(ServerMessage::Error { reply_to: None, message });
-            }
-            // `Runtime` hands these to whoever waits on them.
-            RuntimeMessage::Reply { .. } | RuntimeMessage::Failed { .. } | RuntimeMessage::LoginStep { .. } => {}
-            RuntimeMessage::Crashed => {
-                self.screens.clear_all();
-                self.push(ServerMessage::Error { reply_to: None, message: "runtime restarted".into() });
-                self.push_threads();
-            }
         }
     }
+}
+
+/// The service as its agent sees it (`dirigent_agent::Host`).
+struct AgentHost(std::sync::Weak<Service>);
+
+impl dirigent_agent::Host for AgentHost {
+    fn emit(&self, thread_id: &str, out: Out) {
+        if let Some(svc) = self.0.upgrade() {
+            svc.on_out(thread_id, out);
+        }
+    }
+
+    fn put_blob(&self, mime: &str, bytes: &[u8]) -> String {
+        let Some(svc) = self.0.upgrade() else { return String::new() };
+        let kept = svc.storage.lock().unwrap().put_blob(mime, bytes);
+        kept.unwrap_or_else(|e| {
+            error!("keep a blob: {e:#}");
+            String::new()
+        })
+    }
+
+    fn blob(&self, id: &str) -> Option<(String, Vec<u8>)> {
+        self.0.upgrade()?.storage.lock().unwrap().blob(id).ok().flatten()
+    }
+
+    fn children_busy(&self, thread_id: &str) -> bool {
+        let Some(svc) = self.0.upgrade() else { return false };
+        // Not known: wait then.
+        svc.threads()
+            .map_or(true, |threads| threads.iter().any(|t| t.parent_id.as_deref() == Some(thread_id) && (t.running() || t.jobs > 0)))
+    }
+
+    fn tools(&self, thread_id: &str) -> Vec<Arc<dyn dirigent_agent::tool::Tool>> {
+        vec![Arc::new(dirigent::Dirigent::new(self.0.clone(), thread_id))]
+    }
+}
+
+/// Unix millis.
+pub(crate) fn now() -> i64 {
+    std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 /// A new thread's id: the client's pick (a lowercase, hyphenated uuid), so it can open the
@@ -1056,13 +1084,45 @@ struct Dirs {
 static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
 
 pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent, \
-                         %LOCALAPPDATA%\\dirigent on Windows) --config-dir DIR (config.toml, hosts.toml, themes; \
+                         %LOCALAPPDATA%\\dirigent on Windows) --config-dir DIR (agent.toml, AGENTS.md, skills, hosts.toml, config.toml, themes; \
                          default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows); a nightly build's \
                          are dirigent-nightly";
 
+/// The running service's agent and the runtime it lives on, for `shutdown`.
+static RUNNING: Mutex<Option<(Arc<Agent>, tokio::runtime::Handle)>> = Mutex::new(None);
+
+/// The process is about to exit (the desktop quits, the service was told to stop): what the
+/// agent's sessions started goes with it, where it would live on by itself: their commands
+/// (killed at once), MCP servers and screens (`Agent::shutdown`). Blocks, for
+/// `SHUTDOWN_WAIT` at the most: not for a thread of the service's runtime to call.
+pub fn shutdown() {
+    let Some((agent, runtime)) = RUNNING.lock().unwrap().take() else { return };
+    let (done, wait) = std::sync::mpsc::channel();
+    runtime.spawn(async move {
+        agent.shutdown().await;
+        let _ = done.send(());
+    });
+    match wait.recv_timeout(SHUTDOWN_WAIT) {
+        Ok(()) => info!("the agent shut down"),
+        Err(e) => warn!("the agent did not shut down in time: {e}"),
+    }
+}
+
+/// This instance's storage, `<data dir>/service.db`. Not one that is pi's still: the
+/// migration (`migration.rs`) comes first, and is the service's or the desktop's to make.
+pub(crate) fn open_storage(data: &Path) -> Result<Storage> {
+    let db = data.join("service.db");
+    anyhow::ensure!(
+        !storage::from_pi(&db)?,
+        "{} is from before Dirigent had its own agent: start Dirigent once to migrate it",
+        db.display()
+    );
+    Storage::open(&db)
+}
+
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, every binary's only
-/// options, and return the operands (the desktop takes a folder to open, `dirigent` its
-/// command, the service none).
+/// options, and return the operands (the desktop takes a folder to open, `dirigent` and the
+/// service a command).
 /// Call it first thing in `main`, before anything asks for a directory. A test instance
 /// points both elsewhere so it never touches the real dbs or config (and, unlike overriding
 /// `XDG_*`, nothing it spawns sees a changed environment).
@@ -1084,7 +1144,7 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)>
     let mut operands = vec![];
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
-        // Options end at the first operand: what follows a command (`pi --help`) is its own.
+        // Options end at the first operand: what follows a command (`key add …`) is its own.
         if !arg.starts_with("--") {
             operands.push(arg);
             operands.extend(args);
@@ -1100,52 +1160,28 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)>
             _ => return Err(anyhow!("unknown argument {flag}\n{USAGE}")),
         };
         let value = value.or_else(|| args.next()).ok_or_else(|| anyhow!("{flag} needs a directory\n{USAGE}"))?;
-        // Absolute, so it means the same to the runtime (`DIRIGENT_DATA_DIR`) whatever its cwd.
+        // Absolute, so it means the same whatever the cwd of who is told it.
         *slot = Some(std::path::absolute(&value)?);
     }
     Ok((dirs, operands))
 }
 
+/// Only one of `--data-dir` and `--config-dir` was given: the other dir is the real
+/// install's.
+pub(crate) fn half_elsewhere() -> bool {
+    DIRS.get().is_some_and(|dirs| dirs.data.is_some() != dirs.config.is_some())
+}
+
 /// `--config-dir`, else the platform's (`platform::config_dir`): the desktop's
-/// `config.toml` and the machine's `hosts.toml`.
+/// `config.toml`, the machine's `hosts.toml` and the agent's files (`agent.rs`).
 pub fn config_dir() -> PathBuf {
     DIRS.get().and_then(|d| d.config.clone()).unwrap_or_else(platform::config_dir)
 }
 
 /// `--data-dir`, else the platform's (`platform::data_dir`): the service's and the
-/// desktop's dbs, workspaces, job logs, attached images (`attachments/`) and logs. The
-/// runtime gets it as `DIRIGENT_DATA_DIR`.
+/// desktop's dbs, workspaces, job logs, attached images (`attachments/`) and logs.
 pub fn data_dir() -> PathBuf {
     DIRS.get().and_then(|d| d.data.clone()).unwrap_or_else(platform::data_dir)
-}
-
-/// How to start the runtime: `bun run $DIRIGENT_RUNTIME` if set; the compiled runtime an
-/// install ships next to the binary (`runtime/dirigent_runtime`, built by
-/// `dirigent_runtime/build.ts`); else, in a dev checkout, `bun run` its source
-/// (`../../dirigent_runtime/src/index.ts` from the binary). With `runtime_env` in its
-/// environment; the service adds `DIRIGENT_URL`, `dirigent pi` the `pi` argument.
-pub fn runtime_cmd() -> Result<Vec<String>> {
-    // Links resolved: on macOS `current_exe` is the path it was started by, for an install
-    // the `~/.local/bin/dirigent` link (Linux resolves it already). Not on Windows, where a
-    // canonical path is a `\\?\` one.
-    let exe = std::env::current_exe()?;
-    let exe = if cfg!(windows) { exe } else { exe.canonicalize()? };
-    let compiled = exe.with_file_name("runtime").join(format!("dirigent_runtime{}", std::env::consts::EXE_SUFFIX));
-    let path = match std::env::var("DIRIGENT_RUNTIME") {
-        Ok(p) => PathBuf::from(p),
-        Err(_) if compiled.exists() => return Ok(vec![compiled.to_string_lossy().into_owned()]),
-        Err(_) => {
-            let candidate = exe.ancestors().nth(3).map(|root| root.join("dirigent_runtime/src/index.ts"));
-            candidate.filter(|p| p.exists()).ok_or_else(|| anyhow!("set DIRIGENT_RUNTIME to the runtime entry point"))?
-        }
-    };
-    Ok(vec!["bun".into(), "run".into(), path.to_string_lossy().into_owned()])
-}
-
-/// What the runtime (and the pi CLI it embeds) read from its environment: this instance's
-/// data dir and pi's agent dir (`agent::dir`, seeded on first use).
-pub fn runtime_env() -> [(&'static str, PathBuf); 2] {
-    [("DIRIGENT_DATA_DIR", data_dir()), ("PI_CODING_AGENT_DIR", agent_dir())]
 }
 
 /// Where the service listens openly: `DIRIGENT_BIND` (comma-separated IPs) if set, else
@@ -1174,11 +1210,9 @@ fn tailscale_ips() -> Vec<IpAddr> {
 /// Run the service until a listener fails. An `AddrInUse` error means another service
 /// already owns this host.
 pub async fn run(port: u16) -> Result<()> {
-    let storage = Storage::open(&data_dir().join("service.db"))?;
-    let service_id = storage.service_id()?;
-    let cmd = runtime_cmd()?;
-    // Bound before the runtime starts: a service that can't listen leaves no runtime behind
-    // (the desktop retries its embedded one) and logs nothing more.
+    let dirs = AgentDirs { config: config_dir(), data: data_dir() };
+    // Bound before anything is set up: a service that can't listen (another one owns this
+    // host; the desktop retries its embedded one) touches no file and logs nothing more.
     let mut addrs: Vec<(SocketAddr, Option<Arc<auth::Gate>>)> = bind_addrs(port).into_iter().map(|a| (a, None)).collect();
     if let Some(public) = auth::load()?.public {
         info!(url = public.url.as_deref().unwrap_or("?"), "public listener on {}", public.listen);
@@ -1189,30 +1223,31 @@ pub async fn run(port: u16) -> Result<()> {
         addrs.push((public.listen, Some(Arc::new(gate))));
     }
     let listeners = server::bind(addrs).await?;
+    // The first start after pi, where no desktop has made it in its window. Off the async
+    // workers: it copies and converts a whole db.
+    tokio::task::spawn_blocking(migration::headless).await??;
+    agent::prepare(&dirs);
+    let storage = open_storage(&dirs.data)?;
+    let service_id = storage.service_id()?;
     let host_name = platform::host_name();
     info!(host = %host_name, data = %data_dir().display(), version = dirigent_protocol::release::VERSION, "service started");
-    let (runtime, mut runtime_rx) = Runtime::start(cmd, format!("ws://127.0.0.1:{port}/ws"));
-    let svc = Arc::new(Service {
+    let models = Arc::new(Proxy::new(dirs.clone()));
+    let svc = Arc::new_cyclic(|this| Service {
         storage: Mutex::new(storage),
-        runtime,
+        agent: Agent::new(dirs, Arc::new(AgentHost(this.clone())), models.clone()),
+        models,
+        live: Live::default(),
         missing: Mutex::new(Default::default()),
         starting: Mutex::new(Default::default()),
-        logins: Mutex::new(Default::default()),
+        logins: Default::default(),
         proxy: Default::default(),
         screens: Default::default(),
         push: broadcast::channel(1024).0,
         host_name,
         service_id,
     });
+    *RUNNING.lock().unwrap() = Some((svc.agent.clone(), tokio::runtime::Handle::current()));
 
-    tokio::spawn({
-        let svc = svc.clone();
-        async move {
-            while let Some(msg) = runtime_rx.recv().await {
-                svc.on_runtime(msg);
-            }
-        }
-    });
     tokio::spawn({
         let svc = svc.clone();
         async move {
@@ -1222,7 +1257,7 @@ pub async fn run(port: u16) -> Result<()> {
                 svc.sweep_workspaces();
                 n += 1;
                 if n.is_multiple_of(6) {
-                    for id in svc.runtime.unload_idle(IDLE_UNLOAD) {
+                    for id in svc.unload_idle(IDLE_UNLOAD) {
                         info!(thread = %id, "unloaded idle session");
                     }
                 }
@@ -1267,7 +1302,7 @@ mod tests {
         // The desktop's folder to open; a command's own options are left to it.
         let (_, operands) = parse_dirs(["--data-dir=d", "/some/dir"].map(String::from).into_iter()).unwrap();
         assert_eq!(operands, ["/some/dir"]);
-        let (_, operands) = parse_dirs(["pi", "--version", "--data-dir"].map(String::from).into_iter()).unwrap();
-        assert_eq!(operands, ["pi", "--version", "--data-dir"]);
+        let (_, operands) = parse_dirs(["key", "add", "--data-dir"].map(String::from).into_iter()).unwrap();
+        assert_eq!(operands, ["key", "add", "--data-dir"]);
     }
 }

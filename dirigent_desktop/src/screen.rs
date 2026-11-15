@@ -19,11 +19,11 @@ use crate::net::HostStatus;
 use crate::theme::{self, text, u};
 use base64::Engine;
 use dirigent_protocol::ClientMessage;
+use dirigent_protocol::transcript::Event;
 use gpui::{
     Animation, AnimationExt, Context, Div, IntoElement, Pixels, RenderImage, SharedString, Size, Stateful, div, ease_out_quint, img,
     prelude::*, px, relative, rgba, svg,
 };
-use serde_json::Value;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,20 +115,20 @@ impl Screen {
         self.picture.as_ref().map_or(0, |(frame, _)| *frame)
     }
 
-    /// A `screen` event (`ServerMessage::Event`): the picture to show now, and what the
-    /// agent did.
-    fn step(&mut self, event: &Value) {
-        self.latest = self.latest.max(event.get("frame").and_then(Value::as_u64).unwrap_or(0));
+    /// A step of the thread's computer use (`Event::Screen`): the picture to show now
+    /// (`frame`), what the agent did and where it clicked, and whether that was on the
+    /// user's desktop.
+    fn step(&mut self, frame: u64, action: Option<&str>, cursor: Option<[f32; 2]>, desktop: bool) {
+        self.latest = self.latest.max(frame);
         if self.latest > self.shown() {
             self.behind.get_or_insert_with(Instant::now);
         }
-        if let Some(action) = event.get("action").and_then(Value::as_str) {
+        if let Some(action) = action {
             self.action = Some(action.to_owned().into());
         }
-        self.desktop = event.get("desktop").and_then(Value::as_bool).unwrap_or(false);
-        let point = |i: usize| event.get("cursor")?.get(i)?.as_f64().map(|v| v.clamp(0., 1.) as f32);
-        if let Some(to) = point(0).zip(point(1)) {
-            self.from = self.cursor.replace(to);
+        self.desktop = desktop;
+        if let Some([x, y]) = cursor {
+            self.from = self.cursor.replace((x.clamp(0., 1.), y.clamp(0., 1.)));
             self.clicks += 1;
         }
     }
@@ -270,12 +270,12 @@ impl Dirigent {
     }
 
     /// A `screen` event of a thread on `host`: a step of its agent's computer use.
-    pub fn on_screen_event(&mut self, host: &str, thread_id: &str, event: &Value) {
-        if let Pane::Thread(t) = &mut self.pane
+    pub fn on_screen_event(&mut self, host: &str, thread_id: &str, event: &Event) {
+        if let (Pane::Thread(t), Event::Screen { frame, action, cursor, desktop }) = (&mut self.pane, event)
             && t.host == host
             && t.id == thread_id
         {
-            t.screen.get_or_insert_with(Screen::new).step(event);
+            t.screen.get_or_insert_with(Screen::new).step(*frame, action.as_deref(), *cursor, *desktop);
         }
     }
 
@@ -434,7 +434,6 @@ pub fn preview(this: &Dirigent, viewport: Size<Pixels>, cx: &mut Context<Dirigen
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     fn picture() -> Picture {
         (Arc::new(RenderImage::new([image::Frame::new(image::RgbaImage::new(1, 1))])), (1., 1.))
@@ -449,8 +448,8 @@ mod tests {
         // Just heard of: the host's latest is asked for, whatever it is.
         assert_eq!(s.next(), Some((0, 0)));
         s.asked(1, now);
-        s.step(&json!({"type": "screen", "frame": 3}));
-        s.step(&json!({"type": "screen", "frame": 4, "action": "click", "cursor": [0.25, 0.5]}));
+        s.step(3, None, None, false);
+        s.step(4, Some("click"), Some([0.25, 0.5]), false);
         assert_eq!(s.next(), None);
         assert_eq!((s.action.as_deref(), s.cursor, s.clicks), (Some("click"), Some((0.25, 0.5)), 1));
         assert!(!s.desktop);
@@ -468,11 +467,11 @@ mod tests {
         s.show(4, picture());
         assert!(s.next().is_none() && s.behind.is_none());
         // The same picture again (an action that changed nothing) is not asked for.
-        s.step(&json!({"type": "screen", "frame": 4, "action": "key Return", "desktop": true}));
+        s.step(4, Some("key Return"), None, true);
         assert_eq!(s.next(), None);
         assert!(s.desktop);
         // A request the host has no picture for (the run ended) isn't repeated.
-        s.step(&json!({"type": "screen", "frame": 5}));
+        s.step(5, None, None, false);
         s.asked(4, now);
         assert_eq!(s.piece(&Piece { frame: 0, total: 0, offset: 0, data: "" }, now), None);
         assert_eq!(s.next(), None);

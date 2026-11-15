@@ -18,9 +18,11 @@ mod input;
 mod instance;
 mod leaderboard;
 mod lists;
+mod login;
 mod markdown;
 mod mcp;
 mod menu;
+mod migration;
 mod modal;
 mod net;
 mod onboarding;
@@ -28,7 +30,6 @@ mod orchestra;
 mod picker;
 mod placement;
 mod projects;
-mod providers;
 mod proxy;
 mod ruler;
 mod screen;
@@ -75,25 +76,20 @@ fn main() {
         config = %dirigent_service::config_dir().display(),
         "desktop starting"
     );
-    let cache = Cache::open(&dirigent_service::data_dir().join("desktop.db")).expect("open cache");
-    // A broken config.toml still starts the app (on defaults); the watcher picks up the fix.
-    let config = config::load().unwrap_or_else(|e| {
-        tracing::warn!("{e:#}");
-        config::Config::default()
-    });
-    // Before the config watcher takes its first stamp, so the write isn't seen as an edit.
-    if let Err(e) = theme::write_example() {
-        tracing::warn!("{e:#}");
-    }
-    // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
-    let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
-
     // Closing the window quits, on macOS too: gpui's default there keeps a windowless app
     // running, which every later launch would hand its folder to (`instance.rs`) and vanish.
     application().with_assets(icons::Assets).with_quit_mode(QuitMode::LastWindowClosed).run(move |cx: &mut App| {
         config::add_bundled_fonts(cx);
-        // ssh tunnels to `ssh://` hosts are our children: they go with us.
-        cx.on_app_quit(|_| async { dirigent_service::tunnel::close_all() }).detach();
+        // What we started goes with us: what the agent runs (commands, MCP servers and
+        // screens, when its service runs in here), and the ssh tunnels to `ssh://` hosts.
+        // Right in the callback, not in its future: that is polled once the windows are
+        // gone, and with them the net thread the service runs on.
+        cx.on_app_quit(|_| {
+            dirigent_service::shutdown();
+            dirigent_service::tunnel::close_all();
+            async {}
+        })
+        .detach();
         cx.bind_keys(input::key_bindings());
         // `secondary-`: cmd on macOS, ctrl elsewhere.
         cx.bind_keys([
@@ -115,42 +111,66 @@ fn main() {
         // After the input's: in one, the open menu's arrows and Enter win.
         cx.bind_keys(menu::key_bindings());
         rekey_repeats(cx);
-
-        // As it was when last used (`placement`).
-        let window_bounds = placement::initial(&cache, cx);
-        let window = cx
-            .open_window(
-                WindowOptions {
-                    window_bounds: Some(window_bounds),
-                    window_background,
-                    // app_id/title are what testing.md keys on to find this window, and the
-                    // app_id what the app menu entry names (`StartupWMClass`, install.sh):
-                    // a nightly's windows go under its own entry and icon.
-                    app_id: Some(release::app().into()),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some(if release::nightly() { "Dirigent Nightly" } else { "Dirigent" }.into()),
-                        appears_transparent: titlebar::CUSTOM,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                |window, cx| cx.new(|cx| Dirigent::new(cache, config, window, cx)),
-            )
-            .unwrap();
         // Every keystroke with its key-context stack, at debug (`DIRIGENT_LOG=dirigent_desktop=debug`):
         // the fastest way to debug a binding.
         cx.observe_keystrokes(|ev, _, _| tracing::debug!("key {} ctx={:?}", ev.keystroke.unparse(), ev.context_stack)).detach();
-        // Focus the root so the global key context (new thread, esc, ...) is active immediately.
-        window
-            .update(cx, |view, window, cx| {
-                window.focus(&view.focus_handle(cx), cx);
-                placement::remember(window, cx);
-                view.serve_launches(open, launches, cx);
-            })
-            .unwrap();
-        cx.activate(true);
+
+        // An install as pi left it is brought over first, in a window of its own
+        // (`migration.rs`), before anything here opens a db or writes a setting.
+        let start = move |cx: &mut App| start(open, launches, cx);
+        if migration::needed() {
+            migration::open(&config::peek(), start, cx);
+        } else {
+            start(cx);
+        }
     });
     tracing::info!("desktop exited");
+}
+
+/// Start the app proper: its db, its settings, its window.
+fn start(open: Option<String>, launches: Option<futures::channel::mpsc::UnboundedReceiver<instance::Launch>>, cx: &mut App) {
+    let cache = Cache::open(&dirigent_service::data_dir().join("desktop.db")).expect("open cache");
+    // A broken config.toml still starts the app (on defaults); the watcher picks up the fix.
+    let config = config::load().unwrap_or_else(|e| {
+        tracing::warn!("{e:#}");
+        config::Config::default()
+    });
+    // Before the config watcher takes its first stamp, so the write isn't seen as an edit.
+    if let Err(e) = theme::write_example() {
+        tracing::warn!("{e:#}");
+    }
+    // A translucent theme needs the window created see-through; `Dirigent` toasts a bad theme.
+    let window_background = theme::load(&config.theme).map(|t| theme::background(&t)).unwrap_or_default();
+    // As it was when last used (`placement`).
+    let window_bounds = placement::initial(&cache, cx);
+    let window = cx
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(window_bounds),
+                window_background,
+                // app_id/title are what testing.md keys on to find this window, and the
+                // app_id what the app menu entry names (`StartupWMClass`, install.sh):
+                // a nightly's windows go under its own entry and icon.
+                app_id: Some(release::app().into()),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(if release::nightly() { "Dirigent Nightly" } else { "Dirigent" }.into()),
+                    appears_transparent: titlebar::CUSTOM,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |window, cx| cx.new(|cx| Dirigent::new(cache, config, window, cx)),
+        )
+        .unwrap();
+    // Focus the root so the global key context (new thread, esc, ...) is active immediately.
+    window
+        .update(cx, |view, window, cx| {
+            window.focus(&view.focus_handle(cx), cx);
+            placement::remember(window, cx);
+            view.serve_launches(open, launches, cx);
+        })
+        .unwrap();
+    cx.activate(true);
 }
 
 /// gpui's Wayland client repeats a held key as the keystroke of its press, whatever modifiers

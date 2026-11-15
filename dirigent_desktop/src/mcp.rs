@@ -1,7 +1,7 @@
-//! Settings › MCP servers: the MCP servers a host's pi gives its sessions (its `mcp.json`,
-//! which the terminal pi shares), managed as `dirigent pi mcp …` and pi's `/mcp` do in a
-//! terminal: add, edit and remove one, turn it off and on, pick how its tools reach the
-//! model, and sign in to one that uses OAuth.
+//! Settings › MCP servers: the MCP servers a host's agent gives its sessions, the
+//! `[mcp.<name>]` entries of its `agent.toml` (`dirigent_agent::mcp`): add, edit and remove
+//! one, turn it off and on, pick how its tools reach the model, and sign in to one that
+//! uses OAuth.
 //!
 //! The host lists the servers without connecting to them; each enabled one is then checked
 //! (the host connects to it as a session would, and lets go) and its row says how that went:
@@ -15,18 +15,17 @@
 //! would, without running one) or an `http(s)://` URL, the command's environment or the
 //! URL's headers (a line each), and a description. A URL also takes a client name: who its
 //! OAuth sign-in says the app is (`oauth.clientName`), for a server that only lets clients it
-//! knows register (Figma's refuses pi, and takes "Claude Code"). An edit keeps the entry's
-//! other fields (`cwd`, `timeout`, the rest of `oauth`, `toolExposure`…), which only a hand
-//! edit of the file sets.
+//! knows register (Figma's takes "Claude Code"). An edit keeps the entry's other fields
+//! (`cwd`, `timeout`, the rest of `oauth`), which only a hand edit of the file sets.
 //!
-//! The host is Settings › Providers' (`providers.host`, its chip). A sign-in is a login of
-//! that tab's (`LoginKind::McpServer`), shown here in place of the list.
+//! The host is the one the tabs about one host share (`login.host`, its chip). A server's
+//! sign-in (`login.rs`) shows here in place of the list.
 
 use crate::app::{Dirigent, Menu, Modal};
 use crate::input::{self, Submitted, TextInput};
+use crate::login::{Login, action, hint, host_chip, login_panel, too_old};
 use crate::menu::{self, Side};
 use crate::net::HostStatus;
-use crate::providers::{Login, LoginKind, action, hint, host_chip, login_panel, too_old};
 use crate::settings::{self, field, saved_to, section, switch};
 use crate::theme::{self, text, u};
 use dirigent_protocol::{ClientMessage, McpServer, McpServerStatus, McpState};
@@ -42,14 +41,11 @@ const ROW_H: f32 = 38.;
 /// The most of a tool's description its row is given (`summary`).
 const SUMMARY_CHARS: usize = 300;
 
-/// How a server's tools can reach the model (pi's `exposure`), with what that means; the
-/// first is pi's default.
-const EXPOSURES: [(&str, &str); 4] = [
-    ("codemode", "called from codemode scripts"),
-    ("deferred", "loaded when tool_search finds them"),
-    ("direct", "declared to the model, as built-in tools are"),
-    ("hidden", "not reachable"),
-];
+/// How a server's tools can reach the model: an entry's `exposure`, one of
+/// `dirigent_agent::mcp::Exposure` as the file spells it, with what that means. The first is
+/// the default.
+const EXPOSURES: [(&str, &str); 2] =
+    [("codemode", "only scripts call them; declared when codemode is off"), ("direct", "declared to the model, as built-in tools are")];
 
 const RUN_PLACEHOLDER: &str = "npx -y @modelcontextprotocol/server-filesystem ~, or https://…/mcp";
 const ENV_PLACEHOLDER: &str = "KEY=value, a line each";
@@ -58,7 +54,7 @@ const CLIENT_PLACEHOLDER: &str = "Claude Code, if the server refuses unknown cli
 
 /// The tab's state, on `Dirigent`.
 pub struct State {
-    /// The shown host's (`providers.host`) servers and the file they're in, as last listed,
+    /// The shown host's (`login.host`) servers and the file they're in, as last listed,
     /// or why listing failed.
     list: Option<Result<(Vec<McpServer>, String), String>>,
     list_request: Option<u64>,
@@ -76,7 +72,7 @@ pub struct State {
     run: Entity<TextInput>,
     /// The command's environment, or the URL's headers.
     pairs: Entity<TextInput>,
-    /// The name a URL's OAuth sign-in registers the app under, when not pi's own.
+    /// The name a URL's OAuth sign-in registers the app under, when not "Dirigent".
     client: Entity<TextInput>,
     description: Entity<TextInput>,
 }
@@ -179,7 +175,7 @@ impl Dirigent {
     /// servers are listed and checked anew (what one says may have changed since; checks
     /// still running stay), and the keys go where the tab wants them.
     pub(crate) fn enter_mcp(&mut self, cx: &mut Context<Self>) {
-        if self.host(&self.providers.host).is_none() {
+        if self.host(&self.login.host).is_none() {
             self.show_host(hosts::LOCAL.to_owned());
         }
         self.mcp.checks.retain(|_, c| matches!(c, Check::Running(_)));
@@ -194,7 +190,7 @@ impl Dirigent {
 
     /// Ask the shown host for its servers.
     fn request_mcp(&mut self) {
-        let host = self.providers.host.clone();
+        let host = self.login.host.clone();
         if self.connected(&host) {
             self.mcp.list_request = Some(self.request(&host, |id| ClientMessage::ListMcpServers { id }));
         }
@@ -220,7 +216,7 @@ impl Dirigent {
     }
 
     pub(crate) fn on_mcp_servers(&mut self, host: &str, reply_to: u64, servers: Vec<McpServer>, path: String, cx: &mut Context<Self>) {
-        if host != self.providers.host || self.mcp.list_request.take_if(|r| *r == reply_to).is_none() {
+        if host != self.login.host || self.mcp.list_request.take_if(|r| *r == reply_to).is_none() {
             return;
         }
         // A server gone (removed, renamed by hand) takes its check along.
@@ -230,7 +226,7 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Check every enabled server pi takes that has no check yet.
+    /// Check every enabled server with a usable entry that has no check yet.
     fn check_servers(&mut self) {
         let Some(Ok((servers, _))) = &self.mcp.list else { return };
         let due: Vec<String> = servers
@@ -238,7 +234,7 @@ impl Dirigent {
             .filter(|s| s.error.is_none() && enabled(&s.config) && !self.mcp.checks.contains_key(&s.name))
             .map(|s| s.name.clone())
             .collect();
-        let host = self.providers.host.clone();
+        let host = self.login.host.clone();
         for name in due {
             let id = self.request(&host, |id| ClientMessage::CheckMcpServer { id, name: name.clone() });
             self.mcp.checks.insert(name, Check::Running(id));
@@ -253,7 +249,7 @@ impl Dirigent {
     }
 
     pub(crate) fn on_mcp_status(&mut self, host: &str, reply_to: u64, status: McpServerStatus) {
-        if host != self.providers.host {
+        if host != self.login.host {
             return;
         }
         // An answer to a check since dropped (asked again) is stale.
@@ -265,7 +261,7 @@ impl Dirigent {
     /// The reply to one of the tab's requests (`Err`: an `Error` reply). False when the
     /// request is none of them.
     pub(crate) fn on_mcp_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
-        let shown = host == self.providers.host;
+        let shown = host == self.login.host;
         let m = &mut self.mcp;
         if shown && m.list_request.take_if(|r| *r == reply_to).is_some() {
             if let Err(e) = outcome {
@@ -305,7 +301,7 @@ impl Dirigent {
     /// Server `name` changed on `host` (saved, removed, signed in or out): the list anew,
     /// and the server checked again. `None`: one this side doesn't know, so all of them.
     pub(crate) fn mcp_changed(&mut self, host: &str, name: Option<&str>, cx: &mut Context<Self>) {
-        if host != self.providers.host {
+        if host != self.login.host {
             return;
         }
         match name {
@@ -321,7 +317,7 @@ impl Dirigent {
     /// Send the shown host a change to server `name` (`make` builds it around an id and the
     /// name); `failure` is what a toast calls it if it doesn't go through.
     fn change_mcp(&mut self, name: &str, failure: String, make: impl FnOnce(u64, String) -> ClientMessage, cx: &mut Context<Self>) {
-        let host = self.providers.host.clone();
+        let host = self.login.host.clone();
         if !self.connected(&host) {
             return self.toast(format!("{host} is offline"), cx);
         }
@@ -332,8 +328,8 @@ impl Dirigent {
 
     /// A row's change of the server's entry: shown at once, the host's list confirms it.
     fn save_mcp_entry(&mut self, name: &str, config: Value, failure: String, cx: &mut Context<Self>) {
-        if !self.connected(&self.providers.host) {
-            return self.toast(format!("{} is offline", self.providers.host), cx);
+        if !self.connected(&self.login.host) {
+            return self.toast(format!("{} is offline", self.login.host), cx);
         }
         if let Some(Ok((servers, _))) = &mut self.mcp.list
             && let Some(s) = servers.iter_mut().find(|s| s.name == name)
@@ -343,7 +339,7 @@ impl Dirigent {
         self.change_mcp(name, failure, |id, name| ClientMessage::SaveMcpServer { id, name, config }, cx);
     }
 
-    /// The row's switch: pi connects to the server, or leaves it be.
+    /// The row's switch: sessions connect to the server, or leave it be.
     pub fn toggle_mcp(&mut self, server: &McpServer, cx: &mut Context<Self>) {
         let on = !enabled(&server.config);
         let config = with(&server.config, "enabled", (!on).then_some(Value::Bool(false)));
@@ -356,7 +352,7 @@ impl Dirigent {
         if exposure == self::exposure(&server.config) {
             return cx.notify();
         }
-        // pi's default goes unsaid, as pi writes it.
+        // The default goes unsaid, as the host writes it.
         let config = with(&server.config, "exposure", (exposure != EXPOSURES[0].0).then(|| json!(exposure)));
         self.save_mcp_entry(&server.name, config, format!("Couldn't change how {}'s tools are reached", server.name), cx);
     }
@@ -371,7 +367,7 @@ impl Dirigent {
 
     /// `Sign in`: the host runs the server's OAuth sign-in, a login shown in the list's place.
     pub fn start_mcp_login(&mut self, name: &str, cx: &mut Context<Self>) {
-        let host = self.providers.host.clone();
+        let host = self.login.host.clone();
         if !self.connected(&host) {
             return self.toast(format!("{host} is offline"), cx);
         }
@@ -380,7 +376,7 @@ impl Dirigent {
         self.cancel_login(cx);
         self.drop_mcp_form();
         let request = self.request(&host, |id| ClientMessage::McpLogin { id, name: name.to_owned() });
-        self.providers.login = Some(Login::new(host, request, name.to_owned(), LoginKind::McpServer));
+        self.login.login = Some(Login::new(host, request, name.to_owned()));
         self.focus_mcp(cx);
         cx.notify();
     }
@@ -434,7 +430,7 @@ impl Dirigent {
             let base = form.editing.as_ref().map(|s| &s.config);
             config_from(base, &text(&m.run), &text(&m.pairs), &text(&m.client), &text(&m.description))
         };
-        let host = self.providers.host.clone();
+        let host = self.login.host.clone();
         let made = made.and_then(|config| if self.connected(&host) { Ok(config) } else { Err(format!("{host} is offline")) });
         match made {
             Ok(config) => {
@@ -485,10 +481,10 @@ impl Dirigent {
         if !self.mcp_open() {
             return;
         }
-        let login = self.providers.login.as_ref().filter(|l| l.kind == LoginKind::McpServer);
+        let login = self.login.login.as_ref();
         let m = &self.mcp;
         match (login, &m.form) {
-            (Some(l), _) if l.typing() => self.focus(self.providers.answer.focus_handle(cx), cx),
+            (Some(l), _) if l.typing() => self.focus(self.login.answer.focus_handle(cx), cx),
             (None, Some(f)) if f.editing.is_some() => self.focus(m.run.focus_handle(cx), cx),
             (None, Some(_)) => self.focus(m.name.focus_handle(cx), cx),
             _ => self.focus_root(cx),
@@ -496,12 +492,12 @@ impl Dirigent {
     }
 }
 
-/// Pi connects to it: `enabled` isn't false.
+/// Sessions connect to it: `enabled` isn't false.
 fn enabled(config: &Value) -> bool {
     config.get("enabled") != Some(&Value::Bool(false))
 }
 
-/// How its tools reach the model: `exposure`, pi's default when unsaid.
+/// How its tools reach the model: `exposure`, the default when unsaid.
 fn exposure(config: &Value) -> &str {
     config.get("exposure").and_then(Value::as_str).unwrap_or(EXPOSURES[0].0)
 }
@@ -557,8 +553,8 @@ fn fields_of(config: &Value) -> (String, String, String) {
 }
 
 /// The entry the form's fields make, from `base` (an edit's: its other fields stay), or
-/// what's wrong with them. `client` is a URL's alone: a command doesn't sign in. pi checks
-/// the rest when the host saves it.
+/// what's wrong with them. `client` is a URL's alone: a command doesn't sign in. The host
+/// checks the rest when it saves the entry (`dirigent_agent::mcp::save`).
 fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, description: &str) -> Result<Value, String> {
     let mut config = base.and_then(Value::as_object).cloned().unwrap_or_default();
     // Implied by `command` or `url`; one left from the other kind would contradict it.
@@ -586,7 +582,7 @@ fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, descr
         set("headers", nonempty(parse_pairs(pairs, ':', "Header", "Name: value")?));
         set("oauth", nonempty(oauth));
     } else {
-        for key in ["url", "headers", "oauth", "auth"] {
+        for key in ["url", "headers", "oauth"] {
             set(key, None);
         }
         let mut words = split_words(run)?.into_iter();
@@ -667,8 +663,8 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
 }
 
 fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let host = &this.providers.host;
-    let login = this.providers.login.as_ref().filter(|l| l.kind == LoginKind::McpServer);
+    let host = &this.login.host;
+    let login = this.login.login.as_ref();
     let content = match (login, &this.mcp.list) {
         (Some(l), _) => login_panel(l, this, cx),
         (None, None) if !this.connected(host) => hint(format!("{host} is offline")),

@@ -983,8 +983,8 @@ fn board_hero(this: &Dirigent, model: &Model, what: Vec<AnyElement>) -> Div {
 
 /// Proxy has no headline: its list says where the accounts stand. This is what is in the
 /// way of that, if anything: why a host's look at its proxy failed (its accounts are then
-/// as of the last one that worked), or that no host has a proxy, with the way to Settings
-/// › Proxy, where one is set up.
+/// as of the last one that worked), or why there is no account to list (`unlisted`), with
+/// the way to Settings › Proxy, where that is mended.
 fn proxy_notice(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let s = &this.usage;
     let t = theme::t();
@@ -994,14 +994,32 @@ fn proxy_notice(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     if !errors.is_empty() {
         return Some(div().flex().flex_col().gap_1().pb_3().children(errors.into_iter().map(|e| line(t.error).child(e))));
     }
-    // Nothing to say while a host has one, or before any host has answered.
-    if s.proxies.is_empty() || s.proxies.values().any(|p| !p.url.is_empty()) {
-        return None;
-    }
+    let (why, host) = unlisted(&s.proxies)?;
     let setup = theme::button("proxy-setup", "settings", "Set up in Settings")
         .text_size(text::sm())
-        .on_click(cx.listener(|this, _, _, cx| this.open_proxy_settings(cx)));
-    Some(div().flex().flex_row().items_center().gap_3().pb_3().child(line(t.fg_1).child("No host has a CLIProxyAPI set up")).child(setup))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_proxy_settings(host.clone(), cx)));
+    Some(div().flex().flex_row().items_center().gap_3().pb_3().child(line(t.fg_1).child(why)).child(setup))
+}
+
+/// Why Proxy lists no account though no host's look at its proxy failed, and the host
+/// whose Settings › Proxy mends it (`None`: any): no host has a proxy, or those that have
+/// one hold no management key for it (threads run without, the accounts aren't read).
+/// Nothing to say while accounts show, or before any host has answered.
+fn unlisted(proxies: &HashMap<String, Proxy>) -> Option<(String, Option<String>)> {
+    if proxies.is_empty() || proxies.values().any(|p| !p.accounts.is_empty()) {
+        return None;
+    }
+    let mut keyless: Vec<&str> =
+        proxies.iter().filter(|(_, p)| !p.url.is_empty() && !p.management_key).map(|(host, _)| host.as_str()).collect();
+    keyless.sort();
+    match keyless.first() {
+        Some(host) => {
+            let why = format!("{}: no management key for the proxy, so its accounts can't be read", keyless.join(", "));
+            Some((why, Some((*host).to_owned())))
+        }
+        None if proxies.values().all(|p| p.url.is_empty()) => Some(("No host has a CLIProxyAPI set up".into(), None)),
+        None => None,
+    }
 }
 
 /// `Oct 14 – Oct 20` for day-wide slots, `Oct 20 09:00 – Oct 21 09:00` for finer ones
@@ -1710,6 +1728,26 @@ mod tests {
         assert_eq!((trouble(&ProxyAccount::default()), trouble(&failing)), (None, Some("failing")));
         assert_eq!(trouble(&ProxyAccount { disabled: true, ..failing }), Some("disabled"));
         assert_eq!([time_left(59_000, 0), time_left(125 * MINUTE, 0), time_left(100 * HOUR, 0)], ["0m", "2h 05m", "4d 4h"]);
+    }
+
+    #[test]
+    fn proxy_without_accounts_says_why() {
+        let proxy = |url: &str, management_key: bool| Proxy { url: url.into(), key: !url.is_empty(), management_key, ..Proxy::default() };
+        let why = |hosts: &[(&str, &Proxy)]| unlisted(&hosts.iter().map(|(host, p)| (host.to_string(), (*p).clone())).collect());
+        let (none, keyless, read) = (proxy("", false), proxy("http://p", false), proxy("http://p", true));
+        // No host has answered yet.
+        assert_eq!(why(&[]), None);
+        assert_eq!(why(&[("local", &none)]), Some(("No host has a CLIProxyAPI set up".into(), None)));
+        // Threads run on an address and an API key; the accounts need the management key.
+        let (text, host) = why(&[("local", &keyless), ("box", &none)]).unwrap();
+        assert_eq!(
+            (text.as_str(), host.as_deref()),
+            ("local: no management key for the proxy, so its accounts can't be read", Some("local"))
+        );
+        assert_eq!(why(&[("local", &read)]), None);
+        // Another host's accounts show: the list isn't empty.
+        let listed = Proxy { accounts: vec![ProxyAccount::default()], ..read };
+        assert_eq!(why(&[("local", &keyless), ("box", &listed)]), None);
     }
 
     #[test]
