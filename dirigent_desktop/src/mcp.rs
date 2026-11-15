@@ -13,8 +13,11 @@
 //!
 //! The form adds or edits a server: its name, then a command (split into words as a shell
 //! would, without running one) or an `http(s)://` URL, the command's environment or the
-//! URL's headers (a line each), and a description. An edit keeps the entry's other fields
-//! (`cwd`, `timeout`, `oauth`, `toolExposure`…), which only a hand edit of the file sets.
+//! URL's headers (a line each), and a description. A URL also takes a client name: who its
+//! OAuth sign-in says the app is (`oauth.clientName`), for a server that only lets clients it
+//! knows register (Figma's refuses pi, and takes "Claude Code"). An edit keeps the entry's
+//! other fields (`cwd`, `timeout`, the rest of `oauth`, `toolExposure`…), which only a hand
+//! edit of the file sets.
 //!
 //! The host is Settings › Providers' (`providers.host`, its chip). A sign-in is a login of
 //! that tab's (`LoginKind::McpServer`), shown here in place of the list.
@@ -48,6 +51,7 @@ const EXPOSURES: [(&str, &str); 4] = [
 const RUN_PLACEHOLDER: &str = "npx -y @modelcontextprotocol/server-filesystem ~, or https://…/mcp";
 const ENV_PLACEHOLDER: &str = "KEY=value, a line each";
 const HEADERS_PLACEHOLDER: &str = "Authorization: Bearer ${TOKEN}, a line each";
+const CLIENT_PLACEHOLDER: &str = "Claude Code, if the server refuses unknown clients";
 
 /// The tab's state, on `Dirigent`.
 pub struct State {
@@ -69,6 +73,8 @@ pub struct State {
     run: Entity<TextInput>,
     /// The command's environment, or the URL's headers.
     pairs: Entity<TextInput>,
+    /// The name a URL's OAuth sign-in registers the app under, when not pi's own.
+    client: Entity<TextInput>,
     description: Entity<TextInput>,
 }
 
@@ -98,8 +104,9 @@ impl State {
         let name = cx.new(|cx| TextInput::new(cx, "filesystem", true));
         let run = cx.new(|cx| TextInput::new(cx, RUN_PLACEHOLDER, true));
         let pairs = cx.new(|cx| TextInput::new(cx, ENV_PLACEHOLDER, false));
+        let client = cx.new(|cx| TextInput::new(cx, CLIENT_PLACEHOLDER, true));
         let description = cx.new(|cx| TextInput::new(cx, "What it offers, in a sentence (optional)", true));
-        for input in [&name, &run, &pairs, &description] {
+        for input in [&name, &run, &pairs, &client, &description] {
             // Enter saves (ctrl+Enter in the multiline one).
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.save_mcp_form(cx)).detach();
             cx.subscribe(input, |this, _, _: &input::Changed, cx| {
@@ -131,12 +138,13 @@ impl State {
             name,
             run,
             pairs,
+            client,
             description,
         }
     }
 
-    pub fn inputs(&self) -> [Entity<TextInput>; 4] {
-        [self.name.clone(), self.run.clone(), self.pairs.clone(), self.description.clone()]
+    pub fn inputs(&self) -> [Entity<TextInput>; 5] {
+        [self.name.clone(), self.run.clone(), self.pairs.clone(), self.client.clone(), self.description.clone()]
     }
 
     /// The server whose check is request `id`, still running.
@@ -387,8 +395,9 @@ impl Dirigent {
         self.drop_mcp_form();
         let (run, pairs, description) = editing.as_ref().map(|s| fields_of(&s.config)).unwrap_or_default();
         let name = editing.as_ref().map(|s| s.name.as_str()).unwrap_or_default();
+        let client = editing.as_ref().map(|s| client_name(&s.config)).unwrap_or_default();
         let m = &self.mcp;
-        for (input, text) in [(&m.name, name), (&m.run, &run), (&m.pairs, &pairs), (&m.description, &description)] {
+        for (input, text) in [(&m.name, name), (&m.run, &run), (&m.pairs, &pairs), (&m.client, client), (&m.description, &description)] {
             self.set_input(input, text, cx);
         }
         let url = is_url(&run);
@@ -419,7 +428,8 @@ impl Dirigent {
         } else if form.editing.is_none() && listed {
             Err(format!("There's already a server named {name}"))
         } else {
-            config_from(form.editing.as_ref().map(|s| &s.config), &text(&m.run), &text(&m.pairs), &text(&m.description))
+            let base = form.editing.as_ref().map(|s| &s.config);
+            config_from(base, &text(&m.run), &text(&m.pairs), &text(&m.client), &text(&m.description))
         };
         let host = self.providers.host.clone();
         let made = made.and_then(|config| if self.connected(&host) { Ok(config) } else { Err(format!("{host} is offline")) });
@@ -520,8 +530,14 @@ fn with(config: &Value, key: &str, value: Option<Value>) -> Value {
     config
 }
 
+/// The name its OAuth sign-in registers the app under (`oauth.clientName`), if it sets one.
+fn client_name(config: &Value) -> &str {
+    config.pointer("/oauth/clientName").and_then(Value::as_str).unwrap_or_default()
+}
+
 /// The form's fields for an entry: its command line (or URL), its environment (or headers),
-/// its description. What isn't of the right type shows as nothing.
+/// its description (the client name is `client_name`'s). What isn't of the right type shows
+/// as nothing.
 fn fields_of(config: &Value) -> (String, String, String) {
     let str_of = |key: &str| config.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
     let pairs = |key: &str, sep: &str| {
@@ -538,11 +554,18 @@ fn fields_of(config: &Value) -> (String, String, String) {
 }
 
 /// The entry the form's fields make, from `base` (an edit's: its other fields stay), or
-/// what's wrong with them. pi checks the rest when the host saves it.
-fn config_from(base: Option<&Value>, run: &str, pairs: &str, description: &str) -> Result<Value, String> {
+/// what's wrong with them. `client` is a URL's alone: a command doesn't sign in. pi checks
+/// the rest when the host saves it.
+fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, description: &str) -> Result<Value, String> {
     let mut config = base.and_then(Value::as_object).cloned().unwrap_or_default();
     // Implied by `command` or `url`; one left from the other kind would contradict it.
     config.remove("type");
+    // The client name goes into the entry's `oauth`, whose other fields stay.
+    let mut oauth = config.get("oauth").and_then(Value::as_object).cloned().unwrap_or_default();
+    match client.trim() {
+        "" => oauth.remove("clientName"),
+        name => oauth.insert("clientName".to_owned(), json!(name)),
+    };
     let mut set = |key: &str, value: Option<Value>| match value {
         Some(v) => config.insert(key.to_owned(), v),
         None => config.remove(key),
@@ -558,6 +581,7 @@ fn config_from(base: Option<&Value>, run: &str, pairs: &str, description: &str) 
         }
         set("url", Some(json!(run)));
         set("headers", nonempty(parse_pairs(pairs, ':', "Header", "Name: value")?));
+        set("oauth", nonempty(oauth));
     } else {
         for key in ["url", "headers", "oauth", "auth"] {
             set(key, None);
@@ -906,6 +930,7 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
         .when(f.editing.is_none(), |d| d.child(line("Name", &m.name)))
         .child(line(if url { "URL" } else { "Command" }, &m.run))
         .child(line(if url { "Headers" } else { "Environment" }, &m.pairs))
+        .when(url, |d| d.child(line("Client name", &m.client)))
         .child(line("Description", &m.description))
         .child(footer)
 }
@@ -934,19 +959,38 @@ mod tests {
 
     #[test]
     fn form_fields_make_an_entry() {
-        let c = config_from(None, "npx -y srv ~", "A=1\n\n B = two=2 ", "  Files ").unwrap();
+        let c = config_from(None, "npx -y srv ~", "A=1\n\n B = two=2 ", "", "  Files ").unwrap();
         assert_eq!(c, json!({"command": "npx", "args": ["-y", "srv", "~"], "env": {"A": "1", "B": "two=2"}, "description": "Files"}));
-        let c = config_from(None, "https://x.dev/mcp", "Authorization: Bearer ${T}", "").unwrap();
+        let c = config_from(None, "https://x.dev/mcp", "Authorization: Bearer ${T}", "", "").unwrap();
         assert_eq!(c, json!({"url": "https://x.dev/mcp", "headers": {"Authorization": "Bearer ${T}"}}));
-        assert!(config_from(None, " ", "", "").is_err());
-        assert!(config_from(None, "srv", "no separator", "").is_err());
+        assert!(config_from(None, " ", "", "", "").is_err());
+        assert!(config_from(None, "srv", "no separator", "", "").is_err());
         // An edit keeps what the form doesn't show, but not the other kind's fields.
         let base =
             json!({"command": "old", "args": ["x"], "env": {"A": "1"}, "cwd": "/w", "timeout": 5, "exposure": "direct", "type": "stdio"});
-        let c = config_from(Some(&base), "new", "", "").unwrap();
+        let c = config_from(Some(&base), "new", "", "", "").unwrap();
         assert_eq!(c, json!({"command": "new", "cwd": "/w", "timeout": 5, "exposure": "direct"}));
-        let c = config_from(Some(&base), "https://x.dev/mcp", "", "").unwrap();
+        let c = config_from(Some(&base), "https://x.dev/mcp", "", "", "").unwrap();
         assert_eq!(c, json!({"url": "https://x.dev/mcp", "timeout": 5, "exposure": "direct"}));
+    }
+
+    #[test]
+    fn the_client_name_is_the_sign_ins() {
+        let url = "https://x.dev/mcp";
+        let c = config_from(None, url, "", " Claude Code ", "").unwrap();
+        assert_eq!(c, json!({"url": url, "oauth": {"clientName": "Claude Code"}}));
+        assert_eq!(client_name(&c), "Claude Code");
+        // Set or cleared, the rest of `oauth` stays; an `oauth` left empty goes.
+        let base = json!({"url": url, "oauth": {"clientName": "Old", "scope": "read"}});
+        let c = config_from(Some(&base), url, "", "New", "").unwrap();
+        assert_eq!(c, json!({"url": url, "oauth": {"clientName": "New", "scope": "read"}}));
+        let c = config_from(Some(&base), url, "", "", "").unwrap();
+        assert_eq!(c, json!({"url": url, "oauth": {"scope": "read"}}));
+        assert_eq!(config_from(Some(&c), url, "", "", "").unwrap(), c);
+        let c = config_from(Some(&json!({"url": url, "oauth": {"clientName": "Old"}})), url, "", "", "").unwrap();
+        assert_eq!(c, json!({"url": url}));
+        // A command doesn't sign in.
+        assert_eq!(config_from(Some(&base), "srv", "", "Claude Code", "").unwrap(), json!({"command": "srv"}));
     }
 
     #[test]
@@ -956,7 +1000,7 @@ mod tests {
         let c = json!({"url": "https://x.dev/mcp", "headers": {"X-Key": "k"}});
         assert_eq!(fields_of(&c), ("https://x.dev/mcp".into(), "X-Key: k".into(), String::new()));
         let (run, pairs, description) = fields_of(&c);
-        assert_eq!(config_from(Some(&c), &run, &pairs, &description).unwrap(), c);
+        assert_eq!(config_from(Some(&c), &run, &pairs, client_name(&c), &description).unwrap(), c);
         assert_eq!(fields_of(&json!({})), Default::default());
     }
 }
