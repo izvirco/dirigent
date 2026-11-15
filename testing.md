@@ -8,7 +8,7 @@ scripts/ui.sh start DISPLAY          # build + (re)launch on your private screen
 scripts/ui.sh setup [DIR] [MODEL]    # add DIR ("" = <session>/scratch) as a project, pick MODEL; restarts the app
 scripts/ui.sh wait-idle [SECS]       # until no thread runs or has jobs (timeout 300 s)
 scripts/ui.sh rpc JSON [EXPR]        # one protocol request to the session's service; EXPR is JS over the reply `r`
-scripts/ui.sh run CMD...             # CMD with sqlite3, xdotool, DISPLAY, UI_DIR (session dir), UI_PORT
+scripts/ui.sh run CMD...             # CMD with sqlite3, xdotool, magick, DISPLAY, UI_DIR (session dir), UI_PORT
 scripts/ui.sh log [N]                # last N lines of the app's output (service and runtime included)
 scripts/ui.sh stop                   # kill the app
 scripts/ui.sh reset                  # stop + wipe the session's data
@@ -17,8 +17,8 @@ scripts/ui.sh reset                  # stop + wipe the session's data
 - The window is the screen (1280x800, scale 1): click where the picture shows it.
 - Take the picture after an action in the same script, or in a later message; never in a second tool call of the
   same message: those run at the same time, and the picture shows the app as it was before.
-- A look at one region: `get_desktop_state({screenshot_out_file: "/tmp/s.png"})`, then
-  `scripts/ui.sh run magick /tmp/s.png -crop WxH+X+Y /tmp/part.png` and read that.
+- A look at one region: `get_desktop_state({screenshot_out_file: "<session>/s.png"})`, then
+  `scripts/ui.sh run sh -c 'magick $UI_DIR/s.png -crop WxH+X+Y $UI_DIR/part.png'` and read that.
 - `start` after every code change; it ends with `ready` or `build failed` (`<session>/build.log`).
 - `reset` for a clean state, `wait-idle` instead of `sleep`, `stop` when done.
 - The app dies with the screen: open it again and `start`.
@@ -45,7 +45,7 @@ scripts/ui.sh run sh -c 'sqlite3 $UI_DIR/data/service.db "select id, name from t
 ```
 
 The app shows what the service pushes at once. Its own state (`data/desktop.db`: model, drafts, pane) is read at
-launch only. What it copied: the screen's `clipboard_read`.
+launch only. What it copied: the screen's `clipboard_read({include_text: true})`.
 
 ## States that take setting up
 

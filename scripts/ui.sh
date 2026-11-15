@@ -30,7 +30,7 @@ BASE=/tmp/dirigent-ui-$(id -un)
 mkdir -p "$BASE"
 [ -O "$BASE" ] || { echo "$BASE belongs to another user" >&2; exit 1; }
 
-# Tools (xdotool, sqlite, lavapipe, setsid, ss, pgrep; Lilex for the build)
+# Tools (xdotool, sqlite, imagemagick, lavapipe, setsid, ss, pgrep; Lilex for the build)
 # and the app's runtime libs come from the dev shell, not from the caller's PATH, which differs
 # from user to user. `nix develop` costs seconds per call, so its environment is cached
 # until flake.nix / flake.lock change. Always sourced: a shell the caller entered before the
