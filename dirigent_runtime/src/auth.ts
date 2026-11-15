@@ -4,10 +4,11 @@
 // progress) that it leaves to the app to show. Each goes to the service as a `login_step`;
 // answers come back by prompt number. Credentials land in pi's `auth.json`, which the
 // terminal pi shares, and the shared `ModelRuntime` sees them at once: live sessions included.
+// An MCP server's sign-in (`mcp.ts`) runs the same way (`Logins.run`).
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
+import type { AuthEvent, AuthInteraction, AuthPrompt } from "@earendil-works/pi-ai";
 import { getAgentDir, type ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 export type Method = "oauth" | "api_key";
@@ -41,6 +42,9 @@ export type Step =
       options: { id: string; label: string; description?: string }[];
     }
   | { type: "prompt_closed"; n: number };
+
+/** What a login's flow asks the user through, and the signal a cancel aborts. */
+export type Interaction = AuthInteraction & { signal: AbortSignal };
 
 /** A login in progress: what cancels it, and its open prompts by number. */
 interface Live {
@@ -92,23 +96,29 @@ export class Logins {
    */
   async login(id: number, provider: string, method: Method): Promise<void> {
     const rt = await this.models;
+    await this.run(id, async (interaction) => {
+      await rt.login(provider, method, interaction, { getDeviceId });
+      // Saved by now: a cancel only cuts this short, the login still succeeds.
+      interaction.notify({ type: "progress", message: "Fetching the model list…" });
+      const signal = AbortSignal.any([interaction.signal, AbortSignal.timeout(15_000)]);
+      await rt.refresh({ providers: [provider], signal }).catch(() => {});
+    });
+  }
+
+  /**
+   * Run `flow` as login `id`: its prompts and notices go out as `login_step`s, `answer`
+   * answers its prompts and `cancel` aborts its signal. Throws what it throws, and "Login
+   * cancelled" once cancelled.
+   */
+  async run(id: number, flow: (interaction: Interaction) => Promise<void>): Promise<void> {
     const live: Live = { abort: new AbortController(), prompts: new Map(), next: 0 };
     this.live.set(id, live);
     try {
-      await rt.login(
-        provider,
-        method,
-        {
-          signal: live.abort.signal,
-          prompt: (p) => this.prompt(id, live, p),
-          notify: (e) => this.send(id, step(e)),
-        },
-        { getDeviceId },
-      );
-      // Saved by now: a cancel only cuts this short, the login still succeeds.
-      this.send(id, { type: "progress", message: "Fetching the model list…" });
-      const signal = AbortSignal.any([live.abort.signal, AbortSignal.timeout(15_000)]);
-      await rt.refresh({ providers: [provider], signal }).catch(() => {});
+      await flow({
+        signal: live.abort.signal,
+        prompt: (p) => this.prompt(id, live, p),
+        notify: (e) => this.send(id, step(e)),
+      });
     } catch (e) {
       throw live.abort.signal.aborted ? cancelled() : e;
     } finally {

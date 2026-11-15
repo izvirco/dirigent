@@ -2,7 +2,9 @@
 //! The runtime is stateless, so a crash just means "nothing is loaded anymore".
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{Ask, AuthMethod, ImageAttachment, LoginStep, ModelInfo, PromptMode, ProviderInfo, TitleGen};
+use dirigent_protocol::{
+    Ask, AuthMethod, ImageAttachment, LoginStep, McpServer, McpServerStatus, ModelInfo, PromptMode, ProviderInfo, TitleGen,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -148,6 +150,10 @@ enum Command_<'a> {
         provider: &'a str,
         method: AuthMethod,
     },
+    McpLogin {
+        id: u64,
+        name: &'a str,
+    },
     LoginAnswer {
         id: u64,
         n: u32,
@@ -160,6 +166,35 @@ enum Command_<'a> {
         id: u64,
         provider: &'a str,
     },
+    ListMcpServers {
+        id: u64,
+    },
+    CheckMcpServer {
+        id: u64,
+        name: &'a str,
+    },
+    SaveMcpServer {
+        id: u64,
+        name: &'a str,
+        config: &'a Value,
+    },
+    RemoveMcpServer {
+        id: u64,
+        name: &'a str,
+    },
+    McpLogout {
+        id: u64,
+        name: &'a str,
+    },
+}
+
+/// What a login signs in to (`Runtime::login`).
+#[derive(Debug, Clone, Copy)]
+pub enum Login<'a> {
+    /// A model provider, as pi's `/login` does.
+    Provider(&'a str, AuthMethod),
+    /// An MCP server that signs in with OAuth, as `pi mcp login` does.
+    McpServer(&'a str),
 }
 
 /// Where a login's steps go while it runs (`Runtime::login`). Called with the runtime's
@@ -171,6 +206,13 @@ pub type Steps = Box<dyn Fn(LoginStep) + Send>;
 pub struct Providers {
     pub providers: Vec<ProviderInfo>,
     pub auth_path: String,
+}
+
+/// What `ListMcpServers` gives.
+#[derive(Deserialize)]
+pub struct McpServers {
+    pub servers: Vec<McpServer>,
+    pub path: String,
 }
 
 /// A generated title and what it cost (see `ServerMessage::Title`).
@@ -400,7 +442,11 @@ impl Runtime {
     }
 
     fn send(&self, cmd: &Command_) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
+        Self::write(&self.inner.lock().unwrap(), cmd)
+    }
+
+    /// `send` with the state already locked.
+    fn write(inner: &Inner, cmd: &Command_) -> Result<()> {
         let stdin = inner.stdin.as_ref().ok_or_else(|| anyhow!("runtime not running"))?;
         let mut line = serde_json::to_string(cmd)?;
         line.push('\n');
@@ -493,18 +539,20 @@ impl Runtime {
     /// while it moves into its workspace, and whoever waited on a load that failed settles
     /// the run and pushes that.
     pub fn unload(&self, thread_id: &str) -> Result<()> {
-        {
-            let mut inner = self.inner.lock().unwrap();
-            if inner.loaded.remove(thread_id) {
-                inner.running.remove(thread_id);
-            }
-            inner.compacting.remove(thread_id);
-            inner.last_activity.remove(thread_id);
-            for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
-                let _ = w.send(Err("unloaded while loading".into()));
-            }
+        Self::unload_locked(&mut self.inner.lock().unwrap(), thread_id)
+    }
+
+    /// `unload` with the state already locked.
+    fn unload_locked(inner: &mut Inner, thread_id: &str) -> Result<()> {
+        if inner.loaded.remove(thread_id) {
+            inner.running.remove(thread_id);
         }
-        self.send(&Command_::Unload { thread_id })
+        inner.compacting.remove(thread_id);
+        inner.last_activity.remove(thread_id);
+        for w in inner.pending_loads.remove(thread_id).unwrap_or_default() {
+            let _ = w.send(Err("unloaded while loading".into()));
+        }
+        Self::write(inner, &Command_::Unload { thread_id })
     }
 
     /// Hand the thread's model a message and wait until pi has it (its run started, or it is
@@ -587,9 +635,13 @@ impl Runtime {
 
     /// Run login `id` (from `next_id`) to its end, handing its steps to `steps` meanwhile.
     /// No timeout: it waits on the user (`login_cancel` ends it).
-    pub async fn login(&self, id: u64, provider: &str, method: AuthMethod, steps: Steps) -> Result<()> {
+    pub async fn login(&self, id: u64, login: Login<'_>, steps: Steps) -> Result<()> {
         self.inner.lock().unwrap().login_steps.insert(id, steps);
-        let result = self.request::<Value>(id, None, Command_::Login { id, provider, method }).await;
+        let cmd = match login {
+            Login::Provider(provider, method) => Command_::Login { id, provider, method },
+            Login::McpServer(name) => Command_::McpLogin { id, name },
+        };
+        let result = self.request::<Value>(id, None, cmd).await;
         self.inner.lock().unwrap().login_steps.remove(&id);
         result.map(drop)
     }
@@ -608,6 +660,32 @@ impl Runtime {
         self.request::<Value>(id, Some(LOAD_TIMEOUT), Command_::Logout { id, provider }).await.map(drop)
     }
 
+    pub async fn list_mcp_servers(&self) -> Result<McpServers> {
+        let id = self.next_id();
+        self.request(id, Some(LOAD_TIMEOUT), Command_::ListMcpServers { id }).await
+    }
+
+    /// Answered within `LOAD_TIMEOUT`: the runtime gives up on a server sooner.
+    pub async fn check_mcp_server(&self, name: &str) -> Result<McpServerStatus> {
+        let id = self.next_id();
+        self.request(id, Some(LOAD_TIMEOUT), Command_::CheckMcpServer { id, name }).await
+    }
+
+    pub async fn save_mcp_server(&self, name: &str, config: &Value) -> Result<()> {
+        let id = self.next_id();
+        self.request::<Value>(id, Some(LOAD_TIMEOUT), Command_::SaveMcpServer { id, name, config }).await.map(drop)
+    }
+
+    pub async fn remove_mcp_server(&self, name: &str) -> Result<()> {
+        let id = self.next_id();
+        self.request::<Value>(id, Some(LOAD_TIMEOUT), Command_::RemoveMcpServer { id, name }).await.map(drop)
+    }
+
+    pub async fn mcp_logout(&self, name: &str) -> Result<()> {
+        let id = self.next_id();
+        self.request::<Value>(id, Some(LOAD_TIMEOUT), Command_::McpLogout { id, name }).await.map(drop)
+    }
+
     pub fn abort(&self, thread_id: &str) -> Result<()> {
         self.send(&Command_::Abort { thread_id })
     }
@@ -616,18 +694,25 @@ impl Runtime {
         self.send(&Command_::CancelQueued { thread_id, text })
     }
 
-    /// Loaded, not running, no jobs running (unloading would kill them, even those it left
-    /// running), and quiet for longer than `max_idle`.
-    pub fn idle_threads(&self, max_idle: Duration) -> Vec<String> {
-        let inner = self.inner.lock().unwrap();
-        inner
+    /// Unload the idle threads: loaded, not running, no jobs running (unloading would kill
+    /// them, even those it left running), and quiet for longer than `max_idle`. Found and
+    /// unloaded under one lock, so a prompt can't slip in between (and find its session gone
+    /// under it), and the `unload` reaches the runtime before a load of the thread that
+    /// follows. Returns them.
+    pub fn unload_idle(&self, max_idle: Duration) -> Vec<String> {
+        let mut inner = self.inner.lock().unwrap();
+        let idle: Vec<String> = inner
             .loaded
             .iter()
             .filter(|id| !inner.running.contains_key(*id))
             .filter(|id| !inner.jobs.contains_key(*id))
             .filter(|id| inner.last_activity.get(*id).is_none_or(|t| t.elapsed() > max_idle))
             .cloned()
-            .collect()
+            .collect();
+        for id in &idle {
+            let _ = Self::unload_locked(&mut inner, id);
+        }
+        idle
     }
 }
 
@@ -687,6 +772,25 @@ mod tests {
             rt.on_crash()
         };
         assert!(tokio::join!(prompt(), die).0.is_err());
+    }
+
+    /// Unloading the idle threads leaves one that runs, or has jobs, alone; the runtime is
+    /// told to drop the others.
+    #[test]
+    fn unload_idle_spares_busy_threads() {
+        let rt = Runtime { cmd: vec![], url: String::new(), inner: Mutex::default() };
+        let (tx, mut sent) = mpsc::unbounded_channel();
+        {
+            let mut inner = rt.inner.lock().unwrap();
+            inner.stdin = Some(tx);
+            inner.loaded.extend(["idle", "running", "jobs"].map(String::from));
+            inner.running.insert("running".into(), 0);
+            inner.jobs.insert("jobs".into(), (0, 1));
+        }
+        assert_eq!(rt.unload_idle(Duration::ZERO), ["idle"]);
+        assert!(!rt.is_loaded("idle") && rt.is_loaded("running") && rt.is_loaded("jobs"));
+        assert_eq!(sent.try_recv().unwrap(), "{\"type\":\"unload\",\"thread_id\":\"idle\"}\n");
+        assert!(sent.try_recv().is_err());
     }
 
     /// Unloading ends a run in the session it drops, not one begun for a session still to

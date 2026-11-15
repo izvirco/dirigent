@@ -5,6 +5,7 @@
 - Projects: link with a search that shows paths, unlink one directory at a time ([#162])
 - Threads have pi's codemode and MCP servers (`dirigent pi mcp add …`) ([#165])
 - Codemode is on by default: agents can batch tool calls in one script. Settings › Agent tools has its switch ([#172])
+- Settings › MCP servers: add, edit, remove and turn off a host's MCP servers, see each one's tools or why it fails, pick how its tools reach the model, and sign in to one that uses OAuth. Idle threads pick a change up with their next message ([#176])
 - Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title. `/mcp` in a thread says how its servers are ([#165])
 - A message the model can't take (no credentials for its provider) comes back: a new thread's draft returns with its text and images, one sent to a thread goes back into its composer, and the toast says how to fix it ([#173])
 - Several new threads can start at once: a draft no longer waits for the last one to start ([#173])
@@ -30,6 +31,7 @@
 [#172]: https://forge.sebba.dev/izvir/dirigent/changes/172
 [#173]: https://forge.sebba.dev/izvir/dirigent/changes/173
 [#175]: https://forge.sebba.dev/izvir/dirigent/changes/175
+[#176]: https://forge.sebba.dev/izvir/dirigent/changes/176
 
 ## 0.0.9
 

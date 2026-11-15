@@ -297,6 +297,43 @@ pub enum ClientMessage {
         id: u64,
         provider: String,
     },
+    /// The MCP servers in this host's pi `mcp.json` (Settings › MCP servers), as configured:
+    /// nothing is connected to (`CheckMcpServer` does that).
+    ListMcpServers {
+        id: u64,
+    },
+    /// Connect to configured server `name` as a session would (from the host's home), and
+    /// say how that went and what tools it offers. Disconnects again.
+    CheckMcpServer {
+        id: u64,
+        name: String,
+    },
+    /// Add server `name` to `mcp.json`, or replace its entry, with `config` (an entry of
+    /// pi's `mcpServers` shape). Sessions read the file when they start: the host unloads
+    /// its idle ones, so their next prompt sees the change.
+    SaveMcpServer {
+        id: u64,
+        name: String,
+        config: Value,
+    },
+    /// Remove server `name` from `mcp.json` (its OAuth credentials stay, as with
+    /// `pi mcp remove`). Idle sessions are unloaded, as for `SaveMcpServer`.
+    RemoveMcpServer {
+        id: u64,
+        name: String,
+    },
+    /// Sign in to OAuth server `name`, as `Login` does to a provider: its steps, answers
+    /// (`LoginAnswer`), cancel (`LoginCancel`) and end are the same. Sessions waiting for
+    /// the sign-in pick it up on their next turn.
+    McpLogin {
+        id: u64,
+        name: String,
+    },
+    /// Remove the OAuth credentials stored for server `name`.
+    McpLogout {
+        id: u64,
+        name: String,
+    },
     /// The other hosts this host's `hosts.toml` lists (what its agents can reach).
     ListHosts {
         id: u64,
@@ -405,8 +442,19 @@ pub enum ServerMessage {
         providers: Vec<ProviderInfo>,
         auth_path: String,
     },
-    /// A step of the login started by request `login` (`ClientMessage::Login`), to the
-    /// connection that started it.
+    /// Reply to `ListMcpServers`: in `mcp.json`'s order; `path` is the file.
+    McpServers {
+        reply_to: u64,
+        servers: Vec<McpServer>,
+        path: String,
+    },
+    /// Reply to `CheckMcpServer`.
+    McpStatus {
+        reply_to: u64,
+        status: McpServerStatus,
+    },
+    /// A step of the login started by request `login` (`ClientMessage::Login` or
+    /// `McpLogin`), to the connection that started it.
     LoginStep {
         login: u64,
         step: LoginStep,
@@ -491,6 +539,52 @@ pub struct ProviderInfo {
     /// What a `Login` stored for it: what `Logout` removes.
     #[serde(default)]
     pub stored: Option<AuthMethod>,
+}
+
+/// An MCP server in a host's `mcp.json` (see `ClientMessage::ListMcpServers`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServer {
+    pub name: String,
+    /// Its entry as the file has it (pi's `mcpServers` shape): what an edit starts from,
+    /// so the fields a client doesn't show stay as they are.
+    pub config: Value,
+    /// Why pi skips the entry (a field it rejects, a name clashing with another's).
+    #[serde(default)]
+    pub error: Option<String>,
+    /// OAuth credentials are stored for it: what `McpLogout` removes.
+    #[serde(default)]
+    pub signed_in: bool,
+}
+
+/// How connecting to an MCP server went (`ClientMessage::CheckMcpServer`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpServerStatus {
+    pub state: McpState,
+    #[serde(default)]
+    pub tools: Vec<McpTool>,
+    /// Why it isn't connected: pi's message (with a failed command's last stderr lines).
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpState {
+    Connected,
+    /// It wants an OAuth sign-in (`McpLogin`).
+    NeedsAuth,
+    Failed,
+    /// A state a newer host knows.
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpTool {
+    pub name: String,
+    /// The first line of its description.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 /// A step of a login (`ServerMessage::LoginStep`): pi's prompts and notices, in order.
@@ -1103,6 +1197,12 @@ mod tests {
         roundtrip(ClientMessage::ListProviders { id: 26 });
         roundtrip(ClientMessage::Login { id: 27, provider: "anthropic".into(), method: AuthMethod::ApiKey });
         roundtrip(ClientMessage::LoginAnswer { id: 28, login: 27, prompt: 1, value: "sk-x".into() });
+        roundtrip(ClientMessage::ListMcpServers { id: 31 });
+        roundtrip(ClientMessage::CheckMcpServer { id: 32, name: "docs".into() });
+        roundtrip(ClientMessage::SaveMcpServer { id: 33, name: "docs".into(), config: json!({"url": "https://x/mcp"}) });
+        roundtrip(ClientMessage::RemoveMcpServer { id: 34, name: "docs".into() });
+        roundtrip(ClientMessage::McpLogin { id: 35, name: "docs".into() });
+        roundtrip(ClientMessage::McpLogout { id: 36, name: "docs".into() });
         roundtrip(ClientMessage::LoginCancel { id: 29, login: 27 });
         roundtrip(ClientMessage::Logout { id: 30, provider: "anthropic".into() });
         roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
@@ -1229,6 +1329,19 @@ mod tests {
             }],
             auth_path: "/home/x/.pi/agent/auth.json".into(),
         });
+        roundtrip(ServerMessage::McpServers {
+            reply_to: 3,
+            servers: vec![McpServer { name: "fs".into(), config: json!({"command": "npx"}), error: None, signed_in: false }],
+            path: "/home/x/.pi/agent/mcp.json".into(),
+        });
+        // As the runtime writes it; a state from a newer host is no error.
+        let status: McpServerStatus =
+            serde_json::from_value(json!({"state":"needs_auth","tools":[{"name":"search"}],"error":"401"})).unwrap();
+        assert_eq!(status.state, McpState::NeedsAuth);
+        assert_eq!(status.tools, [McpTool { name: "search".into(), description: None }]);
+        roundtrip(ServerMessage::McpStatus { reply_to: 4, status });
+        let newer: McpServerStatus = serde_json::from_value(json!({"state":"sleeping"})).unwrap();
+        assert_eq!(newer.state, McpState::Other);
         // As the runtime writes them.
         let step: LoginStep = serde_json::from_value(json!({"type":"prompt","n":2,"kind":"manual_code","message":"Paste it"})).unwrap();
         assert_eq!(

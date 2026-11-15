@@ -23,10 +23,8 @@ pub mod tunnel;
 mod vcs;
 
 use anyhow::{Result, anyhow};
-use dirigent_protocol::{
-    AuthMethod, ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs,
-};
-use runtime::{Runtime, RuntimeMessage, now};
+use dirigent_protocol::{ClientMessage, FirstPrompt, HostInfo, PromptMode, Report, ServerMessage, Setup, ThreadSummary, TitleGen, Vcs};
+use runtime::{Login, Runtime, RuntimeMessage, now};
 use serde_json::{Value, json};
 use server::Conn;
 use std::collections::HashMap;
@@ -64,7 +62,8 @@ pub struct Service {
     /// Threads being created with their first prompt, until it is delivered: they take no
     /// other prompt meanwhile. `Some(Workspace)` while their workspace is being made.
     starting: Mutex<HashMap<String, Option<Setup>>>,
-    /// Logins (`ClientMessage::Login`), by the connection and request id that started them.
+    /// Logins (`ClientMessage::Login`, `McpLogin`), by the connection and request id that
+    /// started them.
     logins: Mutex<Logins>,
     /// This host's CLIProxyAPI as last seen (`proxy.rs`).
     proxy: proxy::Poller,
@@ -186,6 +185,12 @@ impl Service {
             | ClientMessage::LoginAnswer { id, .. }
             | ClientMessage::LoginCancel { id, .. }
             | ClientMessage::Logout { id, .. }
+            | ClientMessage::ListMcpServers { id }
+            | ClientMessage::CheckMcpServer { id, .. }
+            | ClientMessage::SaveMcpServer { id, .. }
+            | ClientMessage::RemoveMcpServer { id, .. }
+            | ClientMessage::McpLogin { id, .. }
+            | ClientMessage::McpLogout { id, .. }
             | ClientMessage::ListHosts { id }
             | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
@@ -383,17 +388,8 @@ impl Service {
                 let p = self.runtime.list_providers().await?;
                 ServerMessage::Providers { reply_to: id, providers: p.providers, auth_path: p.auth_path }
             }
-            ClientMessage::Login { id, provider, method } => match self.login(conn, id, &provider, method).await {
-                Ok(()) => {
-                    info!(%provider, "logged in");
-                    ServerMessage::Ok { reply_to: id }
-                }
-                // Logged once, here: a cancel or a mistyped key is no failure of the service.
-                Err(e) => {
-                    info!(%provider, "login ended: {e:#}");
-                    ServerMessage::Error { reply_to: Some(id), message: format!("{e:#}") }
-                }
-            },
+            ClientMessage::Login { id, provider, method } => self.login(conn, id, Login::Provider(&provider, method)).await,
+            ClientMessage::McpLogin { id, name } => self.login(conn, id, Login::McpServer(&name)).await,
             ClientMessage::LoginAnswer { id, login, prompt, value } => {
                 let login = self.logins.lock().unwrap().running.get(&(conn.id, login)).copied().ok_or_else(|| anyhow!("no such login"))?;
                 self.runtime.login_answer(login, prompt, &value)?;
@@ -417,6 +413,30 @@ impl Service {
             ClientMessage::Logout { id, provider } => {
                 self.runtime.logout(&provider).await?;
                 info!(%provider, "logged out");
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::ListMcpServers { id } => {
+                let list = self.runtime.list_mcp_servers().await?;
+                ServerMessage::McpServers { reply_to: id, servers: list.servers, path: list.path }
+            }
+            ClientMessage::CheckMcpServer { id, name } => {
+                ServerMessage::McpStatus { reply_to: id, status: self.runtime.check_mcp_server(&name).await? }
+            }
+            ClientMessage::SaveMcpServer { id, name, config } => {
+                self.runtime.save_mcp_server(&name, &config).await?;
+                info!(server = %name, "MCP server saved");
+                self.unload_idle_sessions();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::RemoveMcpServer { id, name } => {
+                self.runtime.remove_mcp_server(&name).await?;
+                info!(server = %name, "MCP server removed");
+                self.unload_idle_sessions();
+                ServerMessage::Ok { reply_to: id }
+            }
+            ClientMessage::McpLogout { id, name } => {
+                self.runtime.mcp_logout(&name).await?;
+                info!(server = %name, "signed out of MCP server");
                 ServerMessage::Ok { reply_to: id }
             }
             // Read on every request, so edits to the file apply at once. Each host as its
@@ -542,23 +562,45 @@ impl Service {
         })
     }
 
-    /// Run login `id` of connection `conn` to its end, its steps going to that connection.
-    async fn login(&self, conn: &Conn, id: u64, provider: &str, method: AuthMethod) -> Result<()> {
+    /// Run login `id` of connection `conn` to its end, its steps going to that connection;
+    /// the reply ends it. Logged here, not as a failed request: a cancel or a mistyped key
+    /// is no failure of the service.
+    async fn login(&self, conn: &Conn, id: u64, what: Login<'_>) -> ServerMessage {
         let (key, login) = ((conn.id, id), self.runtime.next_id());
         {
             let mut logins = self.logins.lock().unwrap();
-            anyhow::ensure!(!logins.cancelled.remove(&key), "Login cancelled");
+            if logins.cancelled.remove(&key) {
+                return ServerMessage::Error { reply_to: Some(id), message: "Login cancelled".into() };
+            }
             logins.running.insert(key, login);
         }
-        info!(%provider, ?method, "login started");
+        info!(?what, "login started");
         // Straight into the connection, in order: the steps all come before the reply.
         let out = conn.out.clone();
         let steps = Box::new(move |step| {
             let _ = out.send(ServerMessage::LoginStep { login: id, step });
         });
-        let result = self.runtime.login(login, provider, method, steps).await;
+        let result = self.runtime.login(login, what, steps).await;
         self.logins.lock().unwrap().running.remove(&key);
-        result
+        match result {
+            Ok(()) => {
+                info!(?what, "logged in");
+                ServerMessage::Ok { reply_to: id }
+            }
+            Err(e) => {
+                info!(?what, "login ended: {e:#}");
+                ServerMessage::Error { reply_to: Some(id), message: format!("{e:#}") }
+            }
+        }
+    }
+
+    /// `mcp.json` changed. Sessions read it when they start, so the idle ones go: their
+    /// next prompt loads them with the change. Running ones (and those with jobs, which
+    /// unloading would kill) keep the servers they have until they are unloaded idle.
+    fn unload_idle_sessions(&self) {
+        for id in self.runtime.unload_idle(Duration::ZERO) {
+            info!(thread = %id, "unloaded idle session: the MCP servers changed");
+        }
     }
 
     /// A connection is gone: the logins it started are cancelled, as nobody is left to
@@ -1120,9 +1162,8 @@ pub async fn run(port: u16) -> Result<()> {
                 svc.sweep_workspaces();
                 n += 1;
                 if n.is_multiple_of(6) {
-                    for id in svc.runtime.idle_threads(IDLE_UNLOAD) {
-                        info!(thread = %id, "unloading idle session");
-                        let _ = svc.runtime.unload(&id);
+                    for id in svc.runtime.unload_idle(IDLE_UNLOAD) {
+                        info!(thread = %id, "unloaded idle session");
                     }
                 }
                 tokio::time::sleep(Duration::from_secs(10)).await;

@@ -7,7 +7,9 @@
 //! pi shares), and the host's model list is fetched again once a login or logout is done.
 //! Closing the modal cancels a login; so does the host's connection dropping.
 //!
-//! Settings › Proxy (`proxy.rs`) is about the same host: it shares `State::host` and the chip.
+//! Settings › Proxy (`proxy.rs`) and MCP servers (`mcp.rs`) are about the same host: they
+//! share `State::host` and the chip. An MCP server's sign-in is a login too, the same steps
+//! from the host: it runs in `State::login`, shown on the MCP tab (`LoginKind`).
 
 use crate::app::{Dirigent, Menu};
 use crate::input::TextInput;
@@ -30,35 +32,53 @@ pub struct State {
     list_request: Option<u64>,
     search: Entity<TextInput>,
     /// The login in progress, or the one that just failed (until `Back`).
-    login: Option<Login>,
+    pub(crate) login: Option<Login>,
     /// The field the login's open question is answered in.
-    answer: Entity<TextInput>,
+    pub(crate) answer: Entity<TextInput>,
     /// `Logout` requests in flight, with their host and provider.
     logouts: HashMap<u64, (String, ProviderInfo)>,
     /// Logins cancelled here: their end needs no showing (but a login that got through
     /// anyway still changes the list).
-    cancelled: HashSet<u64>,
+    cancelled: HashMap<u64, LoginKind>,
 }
 
-struct Login {
-    host: String,
-    /// The `Login` request, whose id names the login in its steps and answers.
+pub(crate) struct Login {
+    pub host: String,
+    /// The `Login` (or `McpLogin`) request, whose id names the login in its steps and answers.
     request: u64,
-    name: String,
-    method: AuthMethod,
+    /// The provider's or the server's.
+    pub name: String,
+    pub kind: LoginKind,
     /// What pi showed so far, oldest first. A prompt leaves once answered or withdrawn.
     steps: Vec<LoginStep>,
     /// Why it failed; it is over then.
     error: Option<String>,
 }
 
+/// What a login signs in to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginKind {
+    Provider(AuthMethod),
+    /// An MCP server that signs in with OAuth (`mcp.rs`).
+    McpServer,
+}
+
 impl Login {
+    pub fn new(host: String, request: u64, name: String, kind: LoginKind) -> Self {
+        Self { host, request, name, kind, steps: vec![], error: None }
+    }
+
     /// The question waiting for an answer (pi asks one at a time): its number and kind.
     fn prompt(&self) -> Option<(u32, PromptKind)> {
         self.steps.iter().rev().find_map(|s| match s {
             LoginStep::Prompt { n, kind, .. } => Some((*n, *kind)),
             _ => None,
         })
+    }
+
+    /// Its open question is answered by typing (into `State::answer`).
+    pub fn typing(&self) -> bool {
+        self.prompt().is_some_and(|(_, kind)| kind != PromptKind::Select)
     }
 }
 
@@ -76,7 +96,7 @@ impl State {
             login: None,
             answer,
             logouts: HashMap::new(),
-            cancelled: HashSet::new(),
+            cancelled: HashMap::new(),
         }
     }
 }
@@ -85,20 +105,28 @@ impl Dirigent {
     /// Settings on the Providers tab, for `host` if given (the model picker's "sign in" for
     /// the composer's host).
     pub fn open_providers(&mut self, host: Option<String>, cx: &mut Context<Self>) {
-        if let Some(host) = host.filter(|h| *h != self.providers.host) {
-            self.providers.host = host;
-            self.providers.list = None;
+        if let Some(host) = host {
+            self.show_host(host);
         }
         self.settings.tab = crate::settings::Tab::Providers;
         self.open_settings(cx);
+    }
+
+    /// Show `host` on the tabs about one host (Providers, Proxy, MCP servers): what they
+    /// hold of the last one goes. The tab showing asks for the rest.
+    pub(crate) fn show_host(&mut self, host: String) {
+        if host != self.providers.host {
+            self.providers.host = host;
+            self.providers.list = None;
+            self.mcp.reset();
+        }
     }
 
     /// The tab (or the setup's step) shows: a host since removed gives way to `local`, the
     /// list is asked for anew and the keys go where the tab wants them.
     pub fn enter_providers(&mut self, cx: &mut Context<Self>) {
         if self.host(&self.providers.host).is_none() {
-            self.providers.host = hosts::LOCAL.to_owned();
-            self.providers.list = None;
+            self.show_host(hosts::LOCAL.to_owned());
         }
         self.request_providers();
         self.focus_providers(cx);
@@ -115,10 +143,12 @@ impl Dirigent {
     pub fn set_providers_host(&mut self, host: String, cx: &mut Context<Self>) {
         self.menu = None;
         if host != self.providers.host {
-            self.providers.host = host;
-            self.providers.list = None;
+            self.show_host(host);
             self.request_providers();
             self.request_proxy_settings(cx);
+            if self.mcp_open() {
+                self.enter_mcp(cx);
+            }
         }
         cx.notify();
     }
@@ -128,9 +158,11 @@ impl Dirigent {
         if self.host(&host).is_none_or(|h| h.status != HostStatus::Connected) {
             return self.toast(format!("{host} is offline"), cx);
         }
+        // One login at a time: an MCP server's sign-in left running on its tab goes.
+        self.cancel_login(cx);
         let id = provider.id.clone();
         let request = self.request(&host, |rid| ClientMessage::Login { id: rid, provider: id, method });
-        self.providers.login = Some(Login { host, request, name: provider.name.clone(), method, steps: vec![], error: None });
+        self.providers.login = Some(Login::new(host, request, provider.name.clone(), LoginKind::Provider(method)));
         self.focus_providers(cx);
         cx.notify();
     }
@@ -144,10 +176,10 @@ impl Dirigent {
     pub fn cancel_login(&mut self, cx: &mut Context<Self>) {
         let Some(login) = self.providers.login.take() else { return };
         if login.error.is_none() {
-            self.providers.cancelled.insert(login.request);
+            self.providers.cancelled.insert(login.request, login.kind);
             self.request(&login.host, |id| ClientMessage::LoginCancel { id, login: login.request });
         }
-        self.focus_providers(cx);
+        self.focus_login(login.kind, cx);
         cx.notify();
     }
 
@@ -158,10 +190,10 @@ impl Dirigent {
         let Some(login) = &mut self.providers.login else { return };
         let Some((n, _)) = login.prompt() else { return };
         login.steps.retain(|s| !matches!(s, LoginStep::Prompt { n: m, .. } if *m == n));
-        let (host, request) = (login.host.clone(), login.request);
+        let (host, request, kind) = (login.host.clone(), login.request, login.kind);
         self.request(&host, |id| ClientMessage::LoginAnswer { id, login: request, prompt: n, value });
         self.set_input(&self.providers.answer, "", cx);
-        self.focus_providers(cx);
+        self.focus_login(kind, cx);
         cx.notify();
     }
 
@@ -217,7 +249,8 @@ impl Dirigent {
             LoginStep::PromptClosed { n } => l.steps.retain(|s| !matches!(s, LoginStep::Prompt { n: m, .. } if *m == n)),
             step => l.steps.push(step),
         }
-        self.focus_providers(cx);
+        let kind = l.kind;
+        self.focus_login(kind, cx);
     }
 
     /// The reply to one of this tab's requests (`Err`: an `Error` reply). False when the
@@ -225,9 +258,9 @@ impl Dirigent {
     pub(crate) fn on_providers_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
         let p = &mut self.providers;
         // Cancelled too late (it was fetching the model list): it is set up all the same.
-        if p.cancelled.remove(&reply_to) {
+        if let Some(kind) = p.cancelled.remove(&reply_to) {
             if outcome.is_ok() {
-                self.refresh_after_auth(host);
+                self.refresh_after_login(host, kind, None, cx);
             }
             return true;
         }
@@ -257,24 +290,33 @@ impl Dirigent {
             return true;
         }
         let Some(login) = p.login.as_mut().filter(|l| l.host == host && l.request == reply_to) else { return false };
+        let (kind, name) = (login.kind, login.name.clone());
         match outcome {
             Ok(()) => {
-                let message = match login.method {
-                    AuthMethod::Oauth => format!("Signed in to {}", login.name),
-                    AuthMethod::ApiKey => format!("{} is set up", login.name),
+                let message = match kind {
+                    LoginKind::Provider(AuthMethod::ApiKey) => format!("{name} is set up"),
+                    _ => format!("Signed in to {name}"),
                 };
                 p.login = None;
                 self.toast(message, cx);
-                self.refresh_after_auth(host);
             }
-            Err(e) => {
-                login.error = Some(too_old(e));
-                // pi may have saved it and failed after (updating its model list).
-                self.refresh_after_auth(host);
-            }
+            // A host's service may predate the request (`McpLogin`).
+            Err(e) => login.error = Some(too_old(e)),
         }
-        self.focus_providers(cx);
+        // Also after a failure: pi may have saved the credentials and failed after (updating
+        // its model list, connecting to the server).
+        self.refresh_after_login(host, kind, Some(&name), cx);
+        self.focus_login(kind, cx);
         true
+    }
+
+    /// A login changed what the host offers: for a provider its providers and models, for an
+    /// MCP server (`name`, if known) its state.
+    fn refresh_after_login(&mut self, host: &str, kind: LoginKind, name: Option<&str>, cx: &mut Context<Self>) {
+        match kind {
+            LoginKind::Provider(_) => self.refresh_after_auth(host),
+            LoginKind::McpServer => self.mcp_changed(host, name, cx),
+        }
     }
 
     /// A login or logout changed what the host offers: its providers and models anew.
@@ -307,20 +349,33 @@ impl Dirigent {
         {
             self.request_proxy_settings(cx);
         }
+        // And Settings › MCP servers.
+        if host == self.providers.host {
+            self.mcp_status(status, cx);
+        }
     }
 
     /// Keys go where the tab wants them: the field of an open question, else the search
-    /// (no login), else the modal itself, so Esc closes it.
+    /// (no login), else the modal itself, so Esc closes it. An MCP server's sign-in shows on
+    /// its own tab (`focus_mcp`), not here.
     pub(crate) fn focus_providers(&self, cx: &mut Context<Self>) {
         if !self.providers_open() {
             return;
         }
         let p = &self.providers;
-        let typing = p.login.as_ref().and_then(Login::prompt).is_some_and(|(_, kind)| kind != PromptKind::Select);
-        match (&p.login, typing) {
-            (_, true) => self.focus(p.answer.focus_handle(cx), cx),
-            (None, _) => self.focus(p.search.focus_handle(cx), cx),
+        let login = p.login.as_ref().filter(|l| l.kind != LoginKind::McpServer);
+        match login {
+            Some(l) if l.typing() => self.focus(p.answer.focus_handle(cx), cx),
+            None => self.focus(p.search.focus_handle(cx), cx),
             _ => self.focus_root(cx),
+        }
+    }
+
+    /// A login of `kind` went on: the keys go where the tab showing it wants them.
+    fn focus_login(&self, kind: LoginKind, cx: &mut Context<Self>) {
+        match kind {
+            LoginKind::Provider(_) => self.focus_providers(cx),
+            LoginKind::McpServer => self.focus_mcp(cx),
         }
     }
 
@@ -333,12 +388,8 @@ impl Dirigent {
 
 /// An `Error` reply from a service that doesn't know the request yet (see the generic
 /// case in `Dirigent::on_server_message`).
-fn too_old(message: String) -> String {
-    if message.starts_with("bad request: unknown variant") {
-        "This host's service is too old to manage providers; update it".into()
-    } else {
-        message
-    }
+pub(crate) fn too_old(message: String) -> String {
+    if message.starts_with("bad request: unknown variant") { "This host's service is too old for this; update it".into() } else { message }
 }
 
 /// The tab: the host's providers (set up first), or the login in progress.
@@ -356,15 +407,16 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
 pub fn body(this: &Dirigent, intro: bool, cx: &mut Context<Dirigent>) -> Div {
     let p = &this.providers;
     let up = this.host(&p.host).is_some_and(|h| h.status == HostStatus::Connected);
-    let body = match (&p.login, &p.list) {
+    let login = p.login.as_ref().filter(|l| l.kind != LoginKind::McpServer);
+    let body = match (login, &p.list) {
         (Some(login), _) => login_panel(login, this, cx),
         (None, None) if !up => hint(format!("{} is offline", p.host)),
         (None, None) => hint("Loading…"),
         (None, Some(Err(e))) => div().text_size(text::sm()).text_color(rgba(theme::t().error)).child(e.clone()),
         (None, Some(Ok((providers, _)))) => list(providers, this, cx),
     };
-    // Not during a login: it is the host's it started on.
-    let chip = this.hosts.len() > 1 && p.login.is_none();
+    // Not during a login shown here: it is the host's it started on.
+    let chip = this.hosts.len() > 1 && login.is_none();
     let header = (intro || chip).then(|| {
         div()
             .flex()
@@ -384,7 +436,7 @@ pub fn body(this: &Dirigent, intro: bool, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_col().gap_3().children(header).child(body)
 }
 
-/// `Host  local ▾`: whose providers show (and whose proxy, in Settings › Proxy).
+/// `Host  local ▾`: whose providers show (and whose proxy and MCP servers, in their tabs).
 pub(crate) fn host_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.menu == Some(Menu::ProvidersHost);
     let menu = open.then(|| {
@@ -505,7 +557,7 @@ fn provider_row(p: &ProviderInfo, signing_out: bool, cx: &mut Context<Dirigent>)
 const ACTION_H: f32 = 24.;
 
 /// A small outlined text button; `tip` explains it on hover.
-fn action(id: String, label: &'static str, tip: Option<String>) -> Stateful<Div> {
+pub(crate) fn action(id: String, label: &'static str, tip: Option<String>) -> Stateful<Div> {
     let t = theme::t();
     div()
         .id(SharedString::from(id))
@@ -526,11 +578,11 @@ fn action(id: String, label: &'static str, tip: Option<String>) -> Stateful<Div>
 }
 
 /// The login in progress: its title and Cancel, then pi's steps in order.
-fn login_panel(login: &Login, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+pub(crate) fn login_panel(login: &Login, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
-    let title = match login.method {
-        AuthMethod::Oauth => format!("Sign in to {}", login.name),
-        AuthMethod::ApiKey => format!("Set up {}", login.name),
+    let title = match login.kind {
+        LoginKind::Provider(AuthMethod::ApiKey) => format!("Set up {}", login.name),
+        _ => format!("Sign in to {}", login.name),
     };
     let close = if login.error.is_some() { "Back" } else { "Cancel" };
     let header = div()
@@ -660,6 +712,6 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
 }
 
 /// Small grey text: waiting, progress, an empty list.
-fn hint(text: impl Into<SharedString>) -> Div {
+pub(crate) fn hint(text: impl Into<SharedString>) -> Div {
     div().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text.into())
 }

@@ -63,8 +63,7 @@ impl Dirigent {
     /// proxy and the key field takes the keys.
     pub(crate) fn enter_proxy_settings(&mut self, cx: &mut Context<Self>) {
         if self.host(&self.providers.host).is_none() {
-            self.providers.host = hosts::LOCAL.to_owned();
-            self.providers.list = None;
+            self.show_host(hosts::LOCAL.to_owned());
         }
         self.request_proxy_settings(cx);
         self.focus(self.proxy.key.focus_handle(cx), cx);
@@ -119,10 +118,8 @@ impl Dirigent {
             let placeholder = if proxy.url.is_empty() { KEY_UNSET } else { KEY_SET };
             self.proxy.key.update(cx, |key, cx| key.set_placeholder(placeholder, cx));
         }
-        self.proxy.shown = Some(outcome.map_err(|e| {
-            // A service from before `ListProxy`: serde's list of what it does know says little.
-            if e.starts_with("bad request: unknown variant") { "This host's service is too old for this; update it".into() } else { e }
-        }));
+        // A service from before `ListProxy`: serde's list of what it does know says little.
+        self.proxy.shown = Some(outcome.map_err(crate::providers::too_old));
         true
     }
 }

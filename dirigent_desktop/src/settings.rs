@@ -1,8 +1,9 @@
 //! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
 //! sections on the right. General, Thread titles and Agent tools are the UI over
 //! `config.toml` (`config.rs`); Hosts over `hosts.toml`, Providers over a host's pi
-//! credentials, Proxy over a host's CLIProxyAPI and Forge providers over the forge sign-in
-//! have their own flows (`hosts_tab.rs`, `providers.rs`, `proxy.rs`, `account.rs`).
+//! credentials, Proxy over a host's CLIProxyAPI, MCP servers over a host's pi `mcp.json` and
+//! Forge providers over the forge sign-in have their own flows (`hosts_tab.rs`,
+//! `providers.rs`, `proxy.rs`, `mcp.rs`, `account.rs`).
 //! Everything else saves as it is changed: the text fields (fonts, title prompt) 300ms
 //! after the last keystroke, with a warning mark on a font field whose family isn't
 //! installed; theme, text size, background, title model, reasoning, the agent tools and
@@ -39,13 +40,15 @@ pub enum Tab {
     Proxy,
     Titles,
     Tools,
+    /// A host's MCP servers (`mcp.rs`).
+    Mcp,
     Hosts,
     /// The forge sign-in (`account.rs`).
     Forge,
 }
 
 impl Tab {
-    const ALL: [Tab; 7] = [Tab::General, Tab::Providers, Tab::Proxy, Tab::Titles, Tab::Tools, Tab::Hosts, Tab::Forge];
+    const ALL: [Tab; 8] = [Tab::General, Tab::Providers, Tab::Proxy, Tab::Titles, Tab::Tools, Tab::Mcp, Tab::Hosts, Tab::Forge];
 
     fn label(self) -> &'static str {
         match self {
@@ -54,6 +57,7 @@ impl Tab {
             Tab::Proxy => "Proxy",
             Tab::Titles => "Thread titles",
             Tab::Tools => "Agent tools",
+            Tab::Mcp => "MCP servers",
             Tab::Hosts => "Hosts",
             Tab::Forge => "Forge providers",
         }
@@ -158,6 +162,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         Tab::Proxy => crate::proxy::render(this, cx),
         Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
         Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
+        Tab::Mcp => crate::mcp::render(this, cx),
         Tab::Hosts => hosts_tab::render(this, cx),
         Tab::Forge => crate::account::render(this, cx),
     };
@@ -424,8 +429,8 @@ fn test_result(s: &State) -> Option<Div> {
 }
 
 /// A switch: a pill with a knob at one end or the other.
-fn switch(
-    id: &'static str,
+pub(crate) fn switch(
+    id: impl Into<gpui::ElementId>,
     on: bool,
     cx: &mut Context<Dirigent>,
     toggle: impl Fn(&mut Dirigent, &mut Context<Dirigent>) + 'static,
