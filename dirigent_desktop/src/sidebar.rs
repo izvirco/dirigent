@@ -10,7 +10,7 @@
 //! behind the sidebar only, draws its own), floating it has its own copy.
 
 use crate::ambient::Reach;
-use crate::app::{ArchiveAt, Dirigent, DragProject, Menu, Pane, Renaming, Resize, Section, Target};
+use crate::app::{ArchiveAt, Dirigent, DragProject, Menu, PANE_MIN, Pane, Renaming, Resize, Section, Target};
 use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -24,7 +24,8 @@ use gpui::{
     Stateful, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
 };
 
-/// Default width; the user can drag it between `app::SIDEBAR_MIN` and `SIDEBAR_MAX`.
+/// Default width; the user can drag it from `app::SIDEBAR_MIN` up to all of the window but
+/// `app::PANE_MIN`.
 pub const WIDTH: f32 = 240.;
 /// Width of the invisible strip along the window's left edge that reveals a hidden sidebar.
 /// Narrower than the ruler's inset (`ruler::INSET`), so it never covers the ruler's marks.
@@ -88,12 +89,13 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Sidebar, cx)));
-    // A hairline on its right edge parts it from the main pane.
+    // A hairline on its right edge parts it from the main pane. It shrinks, whatever is in
+    // it, when the window is too narrow for its width and the pane's `app::PANE_MIN`.
     div()
         .relative()
         .w(u(this.sidebar_width))
+        .min_w_0()
         .h_full()
-        .flex_shrink_0()
         .border_r_1()
         .border_color(rgba(theme::t().line_soft))
         // Behind the sidebar only, the pattern is drawn here, inside the border: the picture
@@ -118,7 +120,9 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .left_0()
         .top_0()
         .h_full()
-        .w(u(if open { this.sidebar_width + 2. * theme::GUTTER } else { PEEK_ZONE }))
+        // Open, it is as wide as the sidebar and its gutters, up to all of the window but
+        // `PANE_MIN`: a strip to move the mouse to stays, which closes it.
+        .map(|d| if open { d.right(u(PANE_MIN)).max_w(u(this.sidebar_width + 2. * theme::GUTTER)) } else { d.w(u(PEEK_ZONE)) })
         .on_hover(cx.listener(|this, hovered, _, cx| this.set_peek(*hovered, cx)))
         // Open, it hides the main pane's grab strip (`titlebar.rs`), which would otherwise
         // take the presses on its title's buttons; its title drags the window instead. Only
@@ -130,8 +134,7 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
             d.p(u(theme::GUTTER)).child(
                 div()
                     .relative()
-                    .w(u(this.sidebar_width))
-                    .h_full()
+                    .size_full()
                     .rounded_lg()
                     .bg(rgba(theme::alpha(theme::t().canvas, 0xff)))
                     .border_1()

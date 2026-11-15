@@ -21,7 +21,7 @@
 //! Steers (typed, or the answers to an ask) are user bubbles: `steer · pending` below the
 //! work line while pi holds them, `steer` above it once the model has them.
 
-use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, Pane, PanelPart, Resize, Target, default_base};
+use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, PANE_MIN, Pane, PanelPart, Resize, Target, default_base};
 use crate::icons::icon;
 use crate::lists::{Via, breadcrumb, header};
 use crate::markdown;
@@ -48,7 +48,8 @@ pub const TAIL: usize = usize::MAX;
 const MAX_RESULT_CHARS: usize = 20_000;
 /// Tool rows are compact and table-like: this tall, their text `text::sm`.
 const ROW_H: f32 = 22.;
-/// Default log panel width; the user can drag it between `app::LOG_MIN` and `LOG_MAX`.
+/// Default log panel width; the user can drag it from `app::LOG_MIN` up to all of the pane
+/// but `app::PANE_MIN`.
 pub const LOG_WIDTH: f32 = 400.;
 
 pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
@@ -260,7 +261,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (actions, panel) = if panel_open { (None, Some(side_panel(this, actions, cx))) } else { (Some(actions), None) };
     let main = div()
         .flex_1()
-        .min_w_0()
+        .min_w(u(PANE_MIN))
         .h_full()
         .flex()
         .flex_col()
@@ -326,7 +327,8 @@ fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
     Some(div().absolute().top(-lift).left_0().right_0().h_0().flex().flex_col().items_center().justify_end().child(button))
 }
 
-/// The right panel, split off the pane by a full-height hairline, `log_width` wide, with
+/// The right panel, split off the pane by a full-height hairline, `log_width` wide (less
+/// in a pane too narrow for that and the transcript's `PANE_MIN`), with
 /// a drag handle on its left edge below the header. Its header: a toggle per section on
 /// the left, the thread's header `actions` on the right. Below it the thread's screen while
 /// its agent uses the computer (`screen::section`, no toggle: it comes and goes), its family
@@ -393,9 +395,9 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
     div()
         .relative()
         .w(u(this.log_width))
-        .flex_shrink_0()
-        // Half the pane at most: a narrow window (or a big text size) keeps room for the transcript.
-        .max_w(relative(0.5))
+        // It shrinks, whatever is in it, when the pane is too narrow for its width and the
+        // transcript's `PANE_MIN`.
+        .min_w_0()
         .h_full()
         .border_l_1()
         .border_color(rgba(theme::t().line_soft))
