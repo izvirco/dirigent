@@ -805,7 +805,7 @@ impl Dirigent {
         })
         .detach();
 
-        let composer = cx.new(|cx| TextInput::new(cx, "Calibre - The Game", false));
+        let composer = cx.new(|cx| TextInput::new(cx, "Makoto - Golden Girl feat. MC Conrad (Lenzman VIP)", false));
         let path_input = cx.new(|cx| TextInput::new(cx, "~/path/to/project", true));
         cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(s.queued, window, cx)).detach();
         cx.subscribe(&composer, |this, _, p: &ImagePasted, cx| this.attach(p.0.clone(), cx)).detach();
