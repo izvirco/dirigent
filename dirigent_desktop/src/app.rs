@@ -7,6 +7,7 @@ use crate::ambient::{self, Pattern, Reach};
 use crate::cache::Cache;
 use crate::hosts_tab;
 use crate::input::{self, Arrow, ImagePasted, Submitted, TextInput, image_token};
+use crate::mcp;
 use crate::net::{HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
 use crate::projects::{self, HostState, Links};
@@ -524,6 +525,8 @@ pub enum Menu {
     /// Settings › Hosts: `Add host`'s choice of auth, and the form's auth chip.
     AddHost,
     HostAuth,
+    /// Settings › MCP servers: the unfolded server's exposure chip.
+    McpExposure,
     /// Sidebar: the update button's restart menu (`update.rs`).
     Update,
     /// Sidebar: a thread card's right-click menu (rename, regenerate title), at the click
@@ -685,6 +688,8 @@ pub struct Dirigent {
     pub providers: providers::State,
     /// Settings › Proxy: the same host's CLIProxyAPI, its address and management key.
     pub proxy: proxy::State,
+    /// Settings › MCP servers: the same host's MCP servers, and the form adding or editing one.
+    pub mcp: mcp::State,
     /// Threads whose title is being generated (since their first prompt, or a `Regenerate
     /// title`), with when it started.
     titling: HashMap<(String, String), Instant>,
@@ -824,6 +829,7 @@ impl Dirigent {
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
         let providers = providers::State::new(cx);
         let proxy = proxy::State::new(cx);
+        let mcp = mcp::State::new(cx);
         let (fonts, missing) = config.fonts.resolve(cx);
         settings.missing_fonts = missing.clone();
         theme::set_text_size(config.fonts.size());
@@ -886,6 +892,7 @@ impl Dirigent {
             settings,
             providers,
             proxy,
+            mcp,
             titling: HashMap::new(),
             retitles: HashMap::new(),
             attachments: vec![],
@@ -1377,9 +1384,11 @@ impl Dirigent {
             ServerMessage::Ok { reply_to } => {
                 // The model has the message.
                 self.prompts.remove(&reply_to);
-                self.on_providers_reply(&host, reply_to, Ok(()), cx);
+                let _ = self.on_providers_reply(&host, reply_to, Ok(()), cx) || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
             }
             ServerMessage::Providers { reply_to, providers, auth_path } => self.on_providers(&host, reply_to, providers, auth_path),
+            ServerMessage::McpServers { reply_to, servers, path } => self.on_mcp_servers(&host, reply_to, servers, path, cx),
+            ServerMessage::McpStatus { reply_to, status } => self.on_mcp_status(&host, reply_to, status),
             ServerMessage::LoginStep { login, step } => self.on_login_step(&host, login, step, cx),
             ServerMessage::Projects { projects, .. } => {
                 if let Some(h) = self.host_mut(&host) {
@@ -1607,10 +1616,11 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
-                // Settings › Providers shows its own failures.
+                // Settings › Providers, Proxy and MCP servers show their own failures.
                 if let Some(id) = reply_to
                     && (self.on_providers_reply(&host, id, Err(message.clone()), cx)
-                        || self.on_proxy_settings(id, Err(message.clone()), cx))
+                        || self.on_proxy_settings(id, Err(message.clone()), cx)
+                        || self.on_mcp_reply(&host, id, Err(message.clone()), cx))
                 {
                     return;
                 }
@@ -2483,7 +2493,7 @@ impl Dirigent {
     }
 
     /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
-    /// form, if open; Providers and Proxy ask their host and focus a field of theirs; the
+    /// form, if open; Providers, Proxy and MCP servers ask their host and focus a field of theirs; the
     /// others take focus off the inputs, so keys don't type under the modal (Forge providers
     /// also loads the account's picture).
     pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
@@ -2498,6 +2508,8 @@ impl Dirigent {
             self.enter_providers(cx);
         } else if tab == settings::Tab::Proxy {
             self.enter_proxy_settings(cx);
+        } else if tab == settings::Tab::Mcp {
+            self.enter_mcp(cx);
         } else {
             if tab == settings::Tab::Forge {
                 self.fetch_forge_picture(cx);
@@ -2528,13 +2540,15 @@ impl Dirigent {
     }
 
     /// Esc or a press on the dim: back to the pane, with the composer focused if it has one.
-    /// A login in Settings › Providers is cancelled: nobody would see its questions.
+    /// A login (Settings › Providers, or an MCP server's) is cancelled: nobody would see its
+    /// questions.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         self.menu = None;
         self.cancel_login(cx);
-        // A host form left open is cancelled: reopened, the tab shows the hosts as they are.
+        // A form left open is cancelled: reopened, the tab shows what is there.
         self.hosts_tab.form = None;
+        self.drop_mcp_form();
         // The chart's hover-out never fires once it's gone; a reopen would show a stale readout.
         self.usage.hover = None;
         // The changelog's (any other went with the press that opened the modal).
@@ -4007,7 +4021,7 @@ impl Dirigent {
         if self.onboarding_open() {
             return self.cancel_login(cx);
         }
-        if self.host_form_escape(cx) {
+        if self.host_form_escape(cx) || self.mcp_form_escape(cx) {
             return;
         }
         if self.modal.is_some() {
@@ -4077,6 +4091,7 @@ impl Dirigent {
             self.settings.sample.clone(),
         ];
         inputs.extend(self.hosts_tab.inputs());
+        inputs.extend(self.mcp.inputs());
         if let Pane::Thread(t) = &self.pane {
             inputs.extend(t.asks.iter().flat_map(|f| f.custom.iter().flatten().cloned()));
         }

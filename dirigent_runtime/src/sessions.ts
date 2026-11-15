@@ -131,8 +131,8 @@ const CODEMODE = "codemode";
  * Pi's built-in codemode, tool search and MCP, which its CLI loads and an SDK session doesn't
  * (pi's `builtInExtensions`, not exported). As `builtin:<name>` resources, like the CLI's,
  * `-builtin:mcp` in the `extensions` setting turns one off and an installed extension that
- * registers the same tool or `/mcp` replaces it. MCP servers are pi's to manage
- * (`dirigent pi mcp …`, `<agent dir>/mcp.json`); the MCP extension activates `codemode` or
+ * registers the same tool or `/mcp` replaces it. MCP servers are pi's `<agent dir>/mcp.json`
+ * (Settings › MCP servers, `mcp.ts`, or `dirigent pi mcp …`); the MCP extension activates `codemode` or
  * `tool_search` for them, and the `defaultTools` setting can activate `tool_search` without.
  * `codemode` follows the user's switch instead, on by default (`create`, `applyTools`).
  */

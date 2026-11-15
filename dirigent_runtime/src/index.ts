@@ -12,6 +12,7 @@
 import "../node_modules/@earendil-works/pi-coding-agent/dist/bun/runtime-setup.js";
 import { main as piMain } from "@earendil-works/pi-coding-agent";
 import { Logins, type Method } from "./auth";
+import * as mcp from "./mcp";
 import { type Attachment, refusal, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
 
@@ -56,7 +57,13 @@ type Inbound =
   | { type: "login"; id: number; provider: string; method: Method }
   | { type: "login_answer"; id: number; n: number; value: string }
   | { type: "login_cancel"; id: number }
-  | { type: "logout"; id: number; provider: string };
+  | { type: "logout"; id: number; provider: string }
+  | { type: "list_mcp_servers"; id: number }
+  | { type: "check_mcp_server"; id: number; name: string }
+  | { type: "save_mcp_server"; id: number; name: string; config: unknown }
+  | { type: "remove_mcp_server"; id: number; name: string }
+  | { type: "mcp_login"; id: number; name: string }
+  | { type: "mcp_logout"; id: number; name: string };
 
 const send = (msg: unknown) => process.stdout.write(JSON.stringify(msg) + "\n");
 /** Answer request `id` with what `work` gives (`reply`), or why it failed (`failed`). The
@@ -134,6 +141,22 @@ async function handle(sessions: Sessions, logins: Logins, msg: Inbound): Promise
       return logins.cancel(msg.id);
     case "logout":
       return reply(msg.id, logins.logout(msg.provider));
+    case "list_mcp_servers":
+      return reply(msg.id, mcp.list());
+    case "check_mcp_server":
+      return reply(msg.id, mcp.check(msg.name, sessions.modelRuntime));
+    case "save_mcp_server":
+      return reply(msg.id, mcp.save(msg.name, msg.config));
+    case "remove_mcp_server":
+      return reply(msg.id, mcp.remove(msg.name));
+    // A login like a provider's: answered and cancelled by its id.
+    case "mcp_login":
+      return reply(
+        msg.id,
+        logins.run(msg.id, (i) => mcp.signIn(msg.name, sessions.modelRuntime, i)),
+      );
+    case "mcp_logout":
+      return reply(msg.id, mcp.signOut(msg.name));
     default:
       throw new Error(`unknown message type: ${(msg as { type: string }).type}`);
   }

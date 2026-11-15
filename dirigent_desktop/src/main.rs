@@ -19,6 +19,7 @@ mod instance;
 mod leaderboard;
 mod lists;
 mod markdown;
+mod mcp;
 mod menu;
 mod modal;
 mod net;
