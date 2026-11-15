@@ -15,7 +15,10 @@ scripts/ui.sh reset                  # stop + wipe the session's data
 ```
 
 - The window is the screen (1280x800, scale 1): click where the picture shows it.
-- Take the picture in the call after an action, not in the same script: the app needs ~0.5 s to draw.
+- Take the picture after an action in the same script, or in a later message; never in a second tool call of the
+  same message: those run at the same time, and the picture shows the app as it was before.
+- A look at one region: `get_desktop_state({screenshot_out_file: "/tmp/s.png"})`, then
+  `scripts/ui.sh run magick /tmp/s.png -crop WxH+X+Y /tmp/part.png` and read that.
 - `start` after every code change; it ends with `ready` or `build failed` (`<session>/build.log`).
 - `reset` for a clean state, `wait-idle` instead of `sleep`, `stop` when done.
 - The app dies with the screen: open it again and `start`.
