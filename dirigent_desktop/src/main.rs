@@ -31,6 +31,7 @@ mod projects;
 mod providers;
 mod proxy;
 mod ruler;
+mod screen;
 mod select;
 mod settings;
 mod sidebar;

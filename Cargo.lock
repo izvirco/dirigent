@@ -1409,6 +1409,7 @@ dependencies = [
  "form_urlencoded",
  "futures-util",
  "getrandom 0.4.3",
+ "image",
  "libc",
  "rusqlite",
  "serde",

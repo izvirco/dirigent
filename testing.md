@@ -1,216 +1,113 @@
 # Testing the desktop UI
 
-`scripts/ui.sh` runs a debug `dirigent_desktop` on a private, invisible X display (Xvfb) and drives it with
-synthetic input. It never touches Seb's screen, mouse, keyboard, data, or his service on :7777, so test whenever
-you like. Call it directly (no `nix develop` needed); it pulls its tools from the dev shell itself.
-
-## Controls
+Open your private screen (`computer`, `screen: "private"`), `scripts/ui.sh start` the app on it, and operate it with
+the screen's tools. Never on the desktop. The app has its own port, data and config: nothing of Seb's is touched.
 
 ```
-scripts/ui.sh start [W H]            # build + (re)launch, window = screen = WxH (default 1100x720)
-scripts/ui.sh setup [DIR] [MODEL]    # add DIR (default <session>/scratch) as a project, pick MODEL (opus 5.5),
-                                     #   land on its new-thread page with the composer focused. Restarts
-                                     #   the app: runs in the session die, the pane resets
-scripts/ui.sh shot [path] [X Y W H]  # screenshot → a fresh <session>/shot-XXXX.png (printed), optionally cropped
-scripts/ui.sh click X Y [right]      # click
-scripts/ui.sh move X Y               # hover (reveals hover-only controls)
-scripts/ui.sh drag X1 Y1 X2 Y2       # press, move, release (e.g. the sidebar handle)
-scripts/ui.sh scroll X Y N           # N wheel notches down at X Y; negative scrolls up
-scripts/ui.sh type "text"            # type text into the focused input
-scripts/ui.sh key KEY...             # chords, xdotool names: Return Escape Tab BackSpace ctrl+n shift+Return ctrl+Return
-scripts/ui.sh wait-idle [SECS]       # until no thread runs or has async_bash jobs, for ~2 s (timeout 300 s)
-scripts/ui.sh rpc JSON [EXPR]        # one protocol request to the session's service (`id` added), print the reply
-scripts/ui.sh run CMD...             # CMD with the dev-shell tools (sqlite3, xclip, xdotool, magick) and
-                                     #   DISPLAY, UI_DIR (session dir), UI_PORT (service port) set
-scripts/ui.sh log [N]                # last N lines of app stdout/stderr (incl. embedded service + pi runtime)
-scripts/ui.sh stop                   # kill the app and its display
-scripts/ui.sh reset                  # stop + wipe the session's data: fresh service.db/desktop.db
+scripts/ui.sh start DISPLAY          # build + (re)launch on your private screen (e.g. :3), filling it
+scripts/ui.sh setup [DIR] [MODEL]    # add DIR ("" = <session>/scratch) as a project, pick MODEL; restarts the app
+scripts/ui.sh wait-idle [SECS]       # until no thread runs or has jobs (timeout 300 s)
+scripts/ui.sh rpc JSON [EXPR]        # one protocol request to the session's service; EXPR is JS over the reply `r`
+scripts/ui.sh run CMD...             # CMD with sqlite3, xdotool, DISPLAY, UI_DIR (session dir), UI_PORT
+scripts/ui.sh log [N]                # last N lines of the app's output (service and runtime included)
+scripts/ui.sh stop                   # kill the app
+scripts/ui.sh reset                  # stop + wipe the session's data
 ```
 
-- **Coordinates are screenshot pixels.** Scale is 1 and the window fills the screen at (0, 0), so a position you read
-  off a shot is exactly what you pass to `click`.
-- Read shots with the `read` tool, in the call _after_ the shot: in the same batch the read runs first and gets
-  an empty file (that is not render lag; there is none under Xvfb). Crop (`shot path X Y W H`) when you
-  only care about one region; it saves context, but a cropped shot's pixels are offset by its X Y: add them back
-  before you click.
-- Every input command waits 150 ms and `shot` 300 ms first, which is enough for clicks and typing. For agent work use
-  `wait-idle`, not a guessed `sleep`.
-- `start` rebuilds and relaunches the app; run it again after every code change. Its last line says `ready` or
-  `build failed` (with the errors above it; full output in `<session>/build.log`). It runs `bun install` in a
-  checkout without `node_modules`. Builds go to the checkout's own `target/`, the one `cargo test` uses; the
-  dev shell's sccache (`RUSTC_WRAPPER`) serves a fresh workspace the dependencies other checkouts compiled.
-- The data survives restarts (projects, threads, picked model, the pane you were on), so a restart can land you
-  somewhere else than the last shot showed: take a shot before clicking on. `reset` for a clean slate.
-- After `start`, a click chain without shots in between is only safe on a known layout (`setup` gives you one).
-
-## Isolation and sessions
-
-Each session lives in `/tmp/dirigent-ui-<user>/<session>/` (a directory per user, so several users of one machine
-never share or block each other) and has its own Xvfb display, service port (7800 + display number),
-data dir (`data/`: `service.db`, `desktop.db`, `workspaces/`, `jobs/`), config dir (`config/`, so `hosts.toml` starts
-empty and `config.toml` is written with defaults), `app.log`, and pid files. The app gets them as
-`--data-dir` / `--config-dir` (not `XDG_*`, so the agents it runs keep the real git / jj config). It runs its local
-service embedded on that port (`DIRIGENT_PORT`), so prompting tests work out of the box and real pi auth is used.
-
-The session defaults to the last 8 characters of your thread id (`PI_SESSION_ID`; `default` outside dirigent), so
-every agent has its own without doing anything; `start` prints the name. Set `UI_SESSION=name` to pick one, e.g. to
-look at another agent's session. `stop`/`reset` kill only the session's own process groups. `stop` when you're done. Sessions made before the
-`--data-dir` change kept their dbs in `data/dirigent/` and now start empty: `reset` them.
-
-## Typical loop
+- The window is the screen (1280x800, scale 1): click where the picture shows it.
+- Take the picture in the call after an action, not in the same script: the app needs ~0.5 s to draw.
+- `start` after every code change; it ends with `ready` or `build failed` (`<session>/build.log`).
+- `reset` for a clean state, `wait-idle` instead of `sleep`, `stop` when done.
+- The app dies with the screen: open it again and `start`.
+- Session: `/tmp/dirigent-ui-<user>/<session>/` (`data/`, `config/`, `app.log`), named after your thread id;
+  `UI_SESSION=name` picks another. Service port: 7800 + the display's number.
+- Models: `anthropic/claude-opus-5-5` (the default) for parents, `anthropic/claude-haiku-5-5` for children.
 
 ```sh
-scripts/ui.sh start
-scripts/ui.sh setup                           # project <session>/scratch, opus 5.5, new-thread page, composer focused
-scripts/ui.sh type "Reply with just the word pong."
-scripts/ui.sh key ctrl+Return                 # creates the thread and sends
-scripts/ui.sh wait-idle; scripts/ui.sh shot   # then, in the next call, read the path it printed
+# computer({ screen: "private" })   → names your display, say :3
+scripts/ui.sh start :3
+scripts/ui.sh setup
+# on the screen: ctrl+n, type a prompt, ctrl+Return
+scripts/ui.sh wait-idle
 scripts/ui.sh stop
 ```
 
-`setup DIR` takes any directory (a git / jj repo for workspace tests: `git -c user.name=t -c user.email=t@t commit`
-if the repo needs a first commit). Use `anthropic/claude-opus-5-5` for the parent and `anthropic/claude-haiku-5-5`
-for children; the default model may be rate-limited.
-
-**State without clicking.** `rpc` speaks the service protocol (`dirigent_protocol/src/lib.rs`; requests are the
-`ClientMessage` variants in snake_case). `EXPR` is JavaScript over the reply `r`; arrays print one item per line:
+`rpc` requests are the `ClientMessage` variants of `dirigent_protocol/src/lib.rs`, in snake_case:
 
 ```sh
 scripts/ui.sh rpc '{"type":"list_threads"}' 'r.threads.map(t => t.id + " " + t.name)'
 scripts/ui.sh rpc '{"type":"create_thread","project_id":"…","name":"child","parent":"<thread id>"}'
 scripts/ui.sh rpc '{"type":"prompt","thread_id":"…","text":"hi","mode":"prompt","model":"anthropic/claude-haiku-5-5"}'
 scripts/ui.sh run sh -c 'sqlite3 $UI_DIR/data/service.db "select id, name from threads"'
-scripts/ui.sh run xclip -o -selection clipboard   # what the app copied
 ```
 
-The app sees pushes from the service at once (a thread created over `rpc` shows up in the sidebar). The desktop's own
-state (picked model, drafts, pane) lives in `data/desktop.db` and is read at launch only.
+The app shows what the service pushes at once. Its own state (`data/desktop.db`: model, drafts, pane) is read at
+launch only. What it copied: the screen's `clipboard_read`.
 
-Landmarks at 1100×720 with the default 240 px sidebar and text size 13 (they move when the layout changes; trust the shot;
-ctrl = / ctrl - zoom the whole UI, ctrl 0 resets):
-compose button (217, 19) with the Projects folder (191, 19) left of it (lit while the Projects page is open). Pinned
-projects sit right under the title, the first at (43, 53) and the next ones 32 px apart, each with a hover-revealed
-new-thread `+` (217); drag one onto another row's y to reorder. Nothing is pinned on a fresh db, and an added project
-isn't either (its pin toggle on the Projects page). The Inbox and Workpool rows only show once they have a thread: Inbox right under
-the pins (at (35, 53) with none) with its cards below it; the Workpool row sits above the bottom bar (its cards stack
-up on it; folded by default, the chevron at x = 217 on a nav row folds / unfolds, the counts just left of it, remembered across restarts).
-Right click a card: `Rename thread` (its title turns into a field, Enter or a click elsewhere saves, Esc cancels) and
-`Regenerate title`, at the click.
-Projects page (folder): a row per project, pin toggle at x ≈ 333 (first row y = 81, rows 40 px apart; `drag` one onto another
-row's y to reorder: one order for this page, the sidebar's pins and the draft's project chip), hover-revealed
-`⋯` at x ≈ 1006 (rename: the name turns into a field, Enter or a click elsewhere saves, Esc cancels, empty = the directory name; `Link another project`: a popup in the menu's place with a search focused over the other projects, each with its hosts and paths, Enter links the top match into this row and expands it, Esc closes; unlink / remove); Esc goes back. A row is its name and, at its right, its hosts and a chevron (x ≈ 970; both expand the row): a 28 px line per directory under it (the first 32 px below the row, the next row 42 px below the last), with its host, its path (a tooltip has all of it), a `linked ×` chip right after the path on one linked in by hand (a click unlinks it), and at the right its thread count and a hover-revealed copy-path button at x ≈ 1006 (no tooltip; a check for a moment once clicked); the rows below move down, so take a shot before clicking on. Expanded rows are forgotten at restart. `Add project` (1020, 19) in its top bar (opened by itself with no
-project yet) is a centered modal: host chip (305, 243), path field (starts at `~/`) and `Add` (790, 243), the host's subdirectories
-under it filtered by the typed name (Up / Down select, Enter goes in, ctrl+Enter or `Add` adds). A project with no
-git-origin match but a same-named one on another host gets a second page: `Link` / `Don't link` (Esc = don't).
-First list row (500, 58), draft page project chip (395, 289; its popup opens with a search focused, projects whose name has the text before those whose path has it, Enter picks the top match) and model chip (365, 379) → its "All models ›" link (680, 309), all-models search focused, Enter picks the top match.
-Every menu takes the keys while open, from the composer or its search too: Up / Down move the lit row (from the selected one, round the ends, scrolled into view; the mouse moves it too), Left / Right the lit header button (the model picker's `Save preset` / `All models ›`), Enter clicks it, Esc closes. A search lights its top match until you move.
-The draft's model chip moves right (to ~425–495) when the project is a git / jj repo: the `in project` chip comes first. Thread composer
-model chip (365, 676), thread header copy id (912, 19) (left of snooze, or at 942 without one), snooze / pin / archive / delete (942, 19) / (972, 19) / (1002, 19) / (1033, 19) and the right panel's icon button (1070, 19) at its far right; a sidebar card's snooze replaces its run time on hover (x = 216). The sidebar's bottom bar: hide/show (22, 699), usage chart (191, 699) and settings gear (217, 699), each opening a modal over the pane (Esc or a press on the dim closes it; ctrl n does nothing under it). Settings has its tabs down the left (General (140, 96), Providers (140, 126), Proxy (140, 156), Thread titles (140, 186), Agent tools (140, 216), Hosts (140, 246), Forge providers (140, 276); it reopens on the last one): General has the theme chip (895, 114), the text size stepper (`−` (895, 156), `+` (953, 156)), font fields (710, 202 / 251 / 300; apply as you type) and the telemetry switch (949, 483); Thread titles the model chip (866, 114), reasoning chip (900, 156) and `Test` under the prompt (348, 533), which opens the sample message with `Name it` under it; Agent tools a switch per tool (x 949; async_bash at y 112, and while it is on its `bash_background` option under it at y 140; pi's `codemode` last, at y 251); Hosts a 38 px row per host from (500, 112), `local` first (a failing one says `error`, why in a tooltip over its status at x ≈ 820); clicking a row (or its hover-revealed pencil at x ≈ 923; the × at 947 removes it) turns it into the form, filled in. `Add host` (372, 156 with no remote hosts; 38 px lower per host) opens its auth menu (none / API key / forge account, at the button's y + 64 / + 90 / + 116), which puts the empty form in its place: the title and `Auth` chip (886) at the button's y + 13, the Name / Address / API key fields (x ≈ 680) at + 53 / + 96 / + 139 and Cancel / Save (or `Add host`, x ≈ 915) at + 182 (+ 139 without the key field). Enter saves, Esc cancels, what's wrong shows on the form's bottom line. While the forge isn't signed in, a forge host says `not signed in` instead of `error` and the form with forge auth says so at its bottom left: both link to Forge providers, which has the forge's row with Sign in / Cancel / Sign out (x ≈ 920, y 112; the browser: see Gotchas) and the account page link under it (410, 153; 23 px lower while the forge has ended the sign-in, 38 px lower while the account is on the leaderboard: its `Leave and delete my usage` is then at (857, 150)). The leaderboard's `Sign in to join` (768, 72, left of its ranges) opens that tab too. To try `ssh://` hosts without an ssh server, put a fake `ssh` in a directory you `start` with in `UI_PATH` (put before the dev shell's `PATH`; it gets `-N -L 127.0.0.1:L:127.0.0.1:R … dest`; forwarding L to a test service is enough). A test ssh host always names its test service's port (`ssh://…/<port>`): the 7777 default is Seb's own service. Usage: range chips `1d 7d 30d custom` (1d at (767, 75)), `‹ ›` and the grouping chip top right, legend rows under the chart toggle series.
-Hovering a message reveals its buttons at its top right, from the right: copy, pin, fork and, on a user message while the thread is idle, edit (a bubble's at x ≈ 1025 / 995 / 965 / 935, y ≈ its top + 22; a reply's on its first line, without edit). Edit puts the composer in the bubble (its model / effort chips open downward, `Cancel`, send; ctrl+Enter sends, Esc cancels) with `Editing a message above` in the composer's place. Fork opens the new thread once its host has made it (from a user message, with that message in its composer); a fork's header has a fork icon left of copy id (882, 19) that opens its source.
-An `ask_user` form sits above the composer, one call at a time (the oldest; the header says `· n more after this` while others wait, and the next shows once it is answered or dismissed): a stack: the open question as a card (option rows, a text-field row for free-text / custom answers, `Next` / `Answer` at its bottom right; Enter in the field = Next) with the other questions as one-line rows above (answered) and below (pending) it, `Insert into composer` (the questions go into the composer as a draft reply and the ask closes without telling the model) and `Dismiss` in the header; the thread shows an amber question mark before its title in the header and in lists. **Workspaces**: when the draft's project is a git / jj repo the composer starts with an `in project` chip; clicking it opens a popup: `in project` on top, then `New workspace from`, a searchable list of branches / tags / bookmarks with `HEAD` (`@-` for jj) first (Enter = top match, or the typed text as is; refreshes every 2 s while open); picking one turns the chip into `workspace from <base>` (remembered; the `in project` row undoes it); a dirty checkout or another thread working in it puts a centered warning line under the composer, ending in `isolate it`. Sending a draft opens its thread at once; until it can take a message its work line reads `Creating a workspace…`, then `Activating nix dev shell…` (projects with a `flake.nix`), and send stays grey and only toasts why. Both steps are quick on a small repo with a cached shell: to see them, slow them down in a test repo with a `sleep` in `.git/hooks/post-checkout` (`git worktree add` runs it) and in the flake's `shellHook`, and keep test repos outside the session dir, which `ui.sh reset` wipes. A thread in its project directory has the same chip and popup, and picking moves it right away; while the checkout is dirty or the thread runs the chevron is faint, the click does nothing and hovering shows why. One in a workspace shows `dirigent-xxxxxxxx` in blue, a menu above it: copy path, back to project (remove / keep on disk; greyed out while the thread runs). Archiving a thread with a workspace opens a confirm under the archive button (remove at ~y 80, keep at ~y 106). Delete a workspace dir under `<session>/data/workspaces/` (named like its branch, `dirigent-xxxxxxxx`), or forget it from the project (`jj workspace forget dirigent-xxxxxxxx`, which leaves the files), and (re)open the thread: an amber banner with `Recreate` / `Back to project` sits above the composer within 10 s, and no error toasts. Pinned project rows are 32 px apart; `drag` one onto another row's y to reorder (the order survives `start`). The sidebar's drag handle is at
-x = sidebar width; `[` hides the sidebar and hovering x < 6 peeks it. Clicking a thread's work line (`› model effort ·
-duration · n tool calls`, under the user bubble) opens the 400 px right panel with its log under the lineage tree (when there is a family); its drag
-handle is the hairline on its left; `]` / the header's panel button toggle the panel (opening it on the run in progress, else the last work) and Esc drops the log. The log is sticky: with it showing, opening another thread (a sub-agent from the tree, the parent again) shows that thread's latest work; so does a run starting in the open thread, whatever started it (a sent message, an `async_bash` job or sub-agent ending, a follow-up's turn). The ruler is the 28 px strip at the pane's left edge: while the marks fit they are vertically centered at a 7 px pitch, so mark `i` of `n` is at y = middle of the pane under the header (transcript + composer) + 7·(i − (n − 1) / 2); `move` onto it for the preview, `click` to center that message, `drag` from a mark to scrub (the mouse may leave the strip). Past 32 marks (fewer in a short window) it scrolls with the transcript through a 32-mark band (217 px) in the strip's middle, keeping the marks in view in the band's middle (it holds still while the mouse is on the strip, so take shots with the mouse elsewhere): the first, last and pinned marks stack just outside the band (a 35 px gap and fade between), the rest fading out past its ends; hovering the gap shows how many messages are past it, and dragging (or holding the button) past the band scrolls it. 17 turns are enough (`rpc` prompts in a loop).
+## States that take setting up
 
-**Sub-agents** (the `dirigent` tool, on by default; Settings › Agent tools has its switch): prompt a thread to "use the dirigent tool to spawn a sub-agent named … with model anthropic/claude-haiku-5-5 whose task is …" (opus for the parent, haiku for children keeps the limits happy). The child is listed under its parent in the panel (below) with the name the parent gave it, never in the sidebar or lists; the parent's transcript gets a `↳ sub-agent "…" started` line under the work line as soon as it is spawned and a `↳ sub-agent "…" finished` line once it settles (both click → the child); a child's header shows `project › parent › <status glyph> title`. A thread idle with children working, or with an `async_bash` job still running, shows an hourglass (Waiting) in the Workpool and before its title in the header; a job started with `notify: "never"` (a dev server) doesn't hold it: it lands in the Inbox, its card's hover popup says `1 job left running`, and archiving it stops the job. Stopping a run kills the jobs the thread waits on (none wakes it again), not those left running. While a thread with relations is open, the right panel (400 px, no title row) shows the **lineage** tree at its top, over the work log when one is open; it is how you reach sub-agents. It shows the thread's family as a tree (30 px rows, 16 px per level, model and run time on the right, the family's `in (n% cached) / out · $` line under it; click a row to open that thread; a parent's sub-agents in the order they were last given a task, so a child the parent `send`s a new turn moves last; at most half the panel's height, scrolling past that). A parent's sub-agents archived along with everything under them fold into one short `› n archived` line under its live ones (click to unfold; the open thread's branch stays out of a closed fold); hovering a row swaps its run time for archive (at rest) or restore, at x ≈ 1077. `create_thread` without a prompt pushes nothing: an `archive_thread` after it makes the desktop see it. `open` makes the desktop jump to a thread.
-
-**Refused messages**: a message pi won't take starts no run and comes back to where it was typed, with a toast saying why: a new thread's goes back to the draft page (the thread is gone again), one sent to a thread goes back into its composer, both in front of anything typed there since. No credentials for the model's provider is the easy way to get one: pick a model of a provider the session isn't signed in to (Settings › Providers signs one out), or, to give an existing thread such a model without clicking, `UPDATE threads SET model = 'provider/id'` in `service.db` while the app is stopped. Over `rpc`, the `create_thread` / `prompt` itself answers with the error.
-
-**Compaction**: while pi compacts a thread's context its live work line reads `Compacting context… · 3s`; a failed compaction leaves its error as a red line in the transcript. To force them, give a test project (outside the session dir) a `.pi/settings.json` of `{"compaction":{"reserveTokens":5000000,"keepRecentTokens":1}}` (pi then compacts after every turn) and a `.pi/extensions/x.ts` whose `pi.on("session_before_compact", …)` handler sleeps a few seconds (to watch the line) and returns `{ compaction: { get summary() { throw new Error("…") } } }` (to fail it) or nothing (pi's own summary).
+- **`ssh://` hosts**: a fake `ssh` in a `UI_PATH` directory (put before `PATH`) that forwards
+  `-L 127.0.0.1:L:127.0.0.1:R` to a test service. Always name the port (`ssh://…/<port>`): 7777 is Seb's.
+- **Workspaces**: to see `Creating a workspace…` / `Activating nix dev shell…`, `sleep` in the test repo's
+  `.git/hooks/post-checkout` and its flake's `shellHook`. Missing-workspace banner: delete the dir under
+  `<session>/data/workspaces/`, or `jj workspace forget dirigent-xxxxxxxx`, and reopen the thread (within 10 s).
+  Keep test repos outside the session dir.
+- **A long thread** (the ruler scrolls past 32 marks): `rpc` prompts in a loop.
+- **Sub-agents**: prompt "use the dirigent tool to spawn a sub-agent named … with model
+  anthropic/claude-haiku-5-5 whose task is …". A job with `notify: "never"` leaves a finished thread with a job
+  running. `create_thread` without a prompt pushes nothing until an `archive_thread`. `open` jumps to a thread.
+- **Refused messages**: a model of a provider the session isn't signed in to (Settings › Providers signs out), or
+  `UPDATE threads SET model = 'provider/id'` in `service.db` with the app stopped.
+- **Compaction** every turn: a test project with this `.pi/settings.json`:
+  `{"compaction":{"reserveTokens":5000000,"keepRecentTokens":1}}`. To slow or fail it: `.pi/extensions/x.ts` with a
+  `pi.on("session_before_compact", …)` that sleeps, and returns `{ compaction: { get summary() { throw … } } }`.
+- **Computer use in the app under test** (`"computer"` in a prompt's `tools`): its `desktop` is your private screen.
+  - An app there: `scripts/ui.sh run sh -c 'setsid xcalc -geometry 300x400+500+200 &'` (`nixpkgs#xcalc`).
+  - The app back on top: `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent$" | xargs xdotool windowraise'`.
+  - A covered window is only captured under a compositor: `picom --backend xrender` (`nixpkgs#picom`).
+  - The fallback to the desktop: a `UI_PATH` directory with an `Xvfb` that exits 1.
+  - Over `rpc`: `screen` events, `get_screen`, and `screen: true` in `list_threads`.
+- **The setup** (`onboarding.rs`): `UI_ONBOARDING=1 scripts/ui.sh start :3`. It animates: ~2 s title card, ~0.6 s
+  per step, ~1 s fade out.
+- **The changelog modal**: lower `kv.last_version` in `data/desktop.db` and `start`. Esc closes it.
+- **Window placement** (`kv.window`, `placement.rs`): `start` resizes the window after launch, so relaunch the
+  binary as `launch` in `ui.sh` does without the `xdotool` line, and check `xdotool getwindowgeometry`.
+- **Open in Dirigent**: run the binary with the session's dirs and a folder,
+  `target/debug/dirigent_desktop --data-dir <session>/data --config-dir <session>/config /some/dir`.
+  Never without `--data-dir`: that hands off to Seb's desktop.
+- **The update button**: `dirigent_api serve` with `S3_PREFIX=test/` and a newer `linux-x86_64` release
+  (`dirigent_api publish`, `packaging/README.md`), then
+  `DIRIGENT_UPDATE_URL=http://127.0.0.1:<port>/api/v0/updates/<channel> scripts/ui.sh start :3`. The release is a
+  tarball of `dirigent/` with the debug binary as `dirigent` and `packaging/linux/install.sh`, signed with your
+  own key (`DIRIGENT_UPDATE_KEY=<public key>`). It installs into `<session>/prefix`
+  (`<session>/data/logs/install.log`). "Restart when idle" needs an agent working.
+- **Forge sign-in**, never against the real forge: a local `vir_central` with a public app (redirect
+  `http://127.0.0.1/forge/callback`), `DIRIGENT_FORGE_URL` / `DIRIGENT_FORGE_CLIENT_ID`, and a fake `xdg-open`
+  that approves (`POST /api/oauth/authorize?<the url's query>` with `{"allow":true}` and a test user's session as
+  bearer, then `curl` the redirect). `dirigent_service --data-dir … login`: `POST /api/oauth/device/decide`.
+  Only for the look of Settings › Forge providers: a dead `DIRIGENT_FORGE_URL` (`http://127.0.0.1:9`) and a
+  hand-written `data/forge.json` (`null` for signed out by the forge), reread every 5 s:
+  `{"forge": "<url>", "client_id": "<id>", "sub": "u1", "username": "seb", "picture": "", "refresh_token": "x"}`.
+- **The leaderboard**: a local `dirigent_api serve` with `DIRIGENT_API_DB`, `DIRIGENT_API_BIND`,
+  `DIRIGENT_API_URL`, `FORGE_URL` / `DIRIGENT_FORGE_CLIENT_ID` and
+  `S3_ENDPOINT=http://s3.invalid S3_REGION=x S3_BUCKET=x`. Without a forge: a stand-in on `DIRIGENT_FORGE_URL` whose `POST /api/oauth/token` answers an RS256
+  `at+jwt` (`iss`, `aud` = the form's `resource`, `client_id`, `sub`, `exp`, `preferred_username`) signed with
+  `dirigent_auth/src/test_key.der`, served at `/api/oauth/jwks`.
 
 ## Gotchas
 
-- Popups snap inside the window. A tall menu can end up under the next click target, so take a shot after opening one.
-- `log` shows dirigent at info and its dependencies at warn. `DIRIGENT_LOG` adds `RUST_LOG`-style directives
-  (`start` passes your environment through to the app): `DIRIGENT_LOG=dirigent_service=debug` adds every ws client
-  connecting, `dirigent_desktop=debug` every keystroke with its key-context stack (fastest way to debug a binding),
-  `dirigent=debug` both. Not a bare `debug`: that is thousands of lines of wgpu shader chatter. Keystrokes land in the
-  session's log file too (`data/logs/`), which `reset` wipes.
-- This runs gpui's **X11** backend with software Vulkan (lavapipe). Layout, input and behaviour match Wayland.
-  Wayland-only details (IME, clipboard, window decorations) need a check on the real desktop by Seb. Xvfb has no
-  compositor, so a translucent theme renders on black: leave that check to Seb too.
-- Key repeat is Wayland-only code as well (gpui's client repeats a held key itself, `rekey_repeats` in `main.rs`),
-  but one you can check: `nix shell nixpkgs#sway-unwrapped nixpkgs#wtype nixpkgs#grim`, start
-  `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway` on a private `XDG_RUNTIME_DIR` (config:
-  `output HEADLESS-1 resolution 1100x720`, `default_border none`, `xwayland disable`) and launch the binary as `launch`
-  in `ui.sh` does, with that `XDG_RUNTIME_DIR`, its `WAYLAND_DISPLAY` and no `DISPLAY` (`ui.sh stop` first: one desktop
-  per data dir). `wtype -k End -s 300 -P Left -s 1000 -M ctrl -s 400 -p Left -m ctrl` holds Left and adds ctrl after a
-  second (the first key of every `wtype` run is lost, hence the `End`); `grim shot.png` takes the shot.
-- Fractional scaling: `GPUI_X11_SCALE_FACTOR=1.25 scripts/ui.sh start 1375 900` (shot pixels are then device pixels).
-- **The browser.** Anything the app opens (`cx.open_url`: the forge sign-in, links) goes to `xdg-open`, which can
-  land in Seb's real browser. Before clicking one, put a fake `xdg-open` in `UI_PATH` that logs its url (or plays
-  the browser). The forge sign-in never touches the real forge in tests: run a local `vir_central` (the forge's
-  repo, its `pm` services), register a public app with the redirect URI `http://127.0.0.1/forge/callback` and
-  `start` with `DIRIGENT_FORGE_URL` / `DIRIGENT_FORGE_CLIENT_ID` (and `DIRIGENT_API_URL` for a local `dirigent_api
-serve`, the leaderboard). A fake `xdg-open` can approve the sign-in as a test user (`POST
-/api/oauth/authorize?<the url's query>` with `{"allow":true}` and that user's session as bearer) and then `curl`
-  the redirect it gets back. `dirigent_service --data-dir … login` signs a test service in the same way through
-  `POST /api/oauth/device/decide`. For how Settings › Forge providers looks, no forge is needed: write the session's
-  `data/forge.json` by hand (`{"forge": "<DIRIGENT_FORGE_URL>", "client_id": "<DIRIGENT_FORGE_CLIENT_ID>", "sub": "u1",
-"username": "seb", "picture": "", "refresh_token": "x"}`, `null` for the signed-out-by-the-forge state, with a dead
-  `DIRIGENT_FORGE_URL` such as `http://127.0.0.1:9`); the desktop rereads it every 5 s.
-- **The leaderboard** needs a local `dirigent_api serve` (no forge app or secret of its own): `DIRIGENT_API_DB` (a
-  test db: without one the leaderboard is off), `DIRIGENT_API_BIND`, `DIRIGENT_API_URL` (its url, as the desktop
-  gets it), `FORGE_URL` / `DIRIGENT_FORGE_CLIENT_ID` (the desktop's `DIRIGENT_FORGE_*`) and any `S3_*`
-  (`S3_ENDPOINT=http://s3.invalid S3_REGION=x S3_BUCKET=x`). A hand-written `forge.json` can join, upload and leave
-  without a real forge: a stand-in on `DIRIGENT_FORGE_URL` that answers `POST /api/oauth/token` with an RS256
-  `at+jwt` (`iss` its url, `aud` the form's `resource`, `client_id`, `sub`, `exp`, `preferred_username`) signed with
-  `dirigent_auth/src/test_key.der`, and serves that key at `/api/oauth/jwks` (a few lines of `bun` with `node:crypto`).
-
-## How it works (if you need to go off-script)
-
-- `Xvfb -displayfd` picks a free display; the number is in `<session>/display`. `ui.sh run` sets
-  `DISPLAY` for you: `scripts/ui.sh run xdotool mousedown 1` (e.g. to shoot a drag halfway), `scripts/ui.sh run import …`.
-- The app is launched with `VK_ICD_FILENAMES=$DIRIGENT_UI_VK_ICD` (lavapipe; Xvfb can't present GPU frames),
-  `--data-dir <session>/data --config-dir <session>/config`, `DIRIGENT_PORT=<port>`, `DIRIGENT_BIND=127.0.0.1` (the
-  embedded service stays off the tailnet), `DIRIGENT_RUNTIME` (this checkout's runtime) and `DIRIGENT_PREFIX`
-  (`<session>/prefix`, where an update installs instead of `~/.local`), in its own process group (`setsid`).
-  Lilex, the default font, is built into the binary. An app that restarted itself (an update) has a new pid and
-  group: `ui.sh` finds it by its command line (binary + session data dir), so `stop` and friends still work.
-- The tool paths from `nix develop` are cached in `/tmp/dirigent-ui-<user>/devenv-<hash>.sh`, keyed by `flake.nix` +
-  `flake.lock`, so calls take well under a second. `start` still builds through `nix develop` (unless you're in a dev
-  shell already).
-- `ui.sh rpc` is `scripts/ui-rpc.ts` (bun); `wait-idle` and `setup` are built on it.
-
-## Launches and updates
-
-- **The setup** (`onboarding.rs`): a data dir that hasn't finished or skipped it launches into it, over the whole
-  window (no changelog then). `ui.sh` marks it done in every session, so the landmarks above hold;
-  `UI_ONBOARDING=1 scripts/ui.sh start` brings it back, on its welcome. At 1100×720 the welcome has `Set up`
-  (512, 432) and its skip (671, 432); then each step's `Continue` (782, 670) and `Back` (285, 670), and `Skip setup`
-  (1039, 19). Enter continues while no input has the keys (and from the empty provider search), but not during a
-  login; Esc only stops a login (or closes the project browser). Providers is Settings › Providers' list;
-  Project, the last step, has the Add project browser in it, path field focused, while there is no project yet,
-  and ends the setup: `Start a thread` (a draft in the newest project) or, with no project, `Done` (the Inbox),
-  both at Continue's right edge.
-  It moves: the welcome is a title card for its first ~2 s, a step glides in for ~0.6 s, and the way out (either
-  skip, or the last button) fades the app in over ~1 s, taking no presses meanwhile. `sleep` that long before a
-  shot that should show it settled. To look at a frame, scale `ms()` and `LEAVE_MS` in `onboarding.rs` up for the
-  build. The app isn't drawn under the setup: it lies on the window's canvas like the sidebar, so a translucent
-  theme stays see-through (on Xvfb, as everywhere there, that's black).
-
-- **Window placement**: the app reopens as it was last left (`kv.window` in `data/desktop.db`, e.g.
-  `windowed 200 100 900 600`; `placement.rs`), unless that no longer fits the screen; `start` still makes it fill
-  the screen right after. To see it come back, relaunch the binary as `launch` in `ui.sh` does, without its
-  `xdotool windowmove … windowsize …`, and check `xdotool getwindowgeometry` or the `window opens` line in `log`.
-- **The changelog**: the first launch of a session whose `desktop.db` last ran an older version (after a version
-  bump) opens the changelog modal over the pane, with keys going to it, not the composer: Esc closes it, and later
-  launches (`setup` relaunches) don't show it. To see it, set `kv.last_version` in `data/desktop.db` lower and
-  `start`, or click the version beside the sidebar title (~(104, 19)).
-
-- **Open in Dirigent** / a second launch: run the binary on the session's dirs with a folder,
-  `target/debug/dirigent_desktop --data-dir <session>/data --config-dir <session>/config /some/dir`. It hands the
-  folder to the session's app and exits at once (`instance.rs`); the app adds it as a local project if it isn't
-  one and opens a new-thread draft in it. Never without `--data-dir`: that would hand off to Seb's desktop.
-- **The update button** needs an update api with a newer release for `linux-x86_64`: `dirigent_api serve` with
-  `S3_PREFIX=test/` (releases published there with `dirigent_api publish`, see `packaging/README.md`), then
-  `DIRIGENT_UPDATE_URL=http://127.0.0.1:<api port>/api/v0/updates/<channel> scripts/ui.sh start` (and `setup`, which
-  relaunches). Checked at launch; the download lands in `<session>/data/updates/`. The release is a Linux
-  tarball laid out as the release workflow packs it (a `dirigent/` with the debug binary as `dirigent` and
-  `packaging/linux/install.sh`; `runtime/` can be left out, `DIRIGENT_RUNTIME` stands in). "Restart" installs it
-  into `<session>/prefix/lib/dirigent` and starts it from there (`<session>/data/logs/install.log` has the
-  script's output); "Restart when idle" shows with a local agent working (a prompt with `sleep 20`). Signed with
-  your own key in a debug build: `DIRIGENT_UPDATE_KEY=<its public key>`.
+- **Links open Seb's real browser** (`xdg-open`): put a fake one in `UI_PATH` before clicking any.
+- Logs: `DIRIGENT_LOG=dirigent_desktop=debug` (every keystroke with its key context), `dirigent_service=debug`,
+  `dirigent=debug` for both. Not a bare `debug`.
+- This is gpui's X11 backend on software Vulkan. Wayland-only details (IME, clipboard, decorations) and
+  translucent themes are Seb's to check.
+- Key repeat (Wayland-only, `rekey_repeats` in `main.rs`) under headless sway:
+  `nix shell nixpkgs#sway-unwrapped nixpkgs#wtype nixpkgs#grim`,
+  `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway` on a private `XDG_RUNTIME_DIR`
+  (config: `output HEADLESS-1 resolution 1100x720`, `default_border none`, `xwayland disable`), the binary launched
+  as in `ui.sh` with that `WAYLAND_DISPLAY` and no `DISPLAY` (`ui.sh stop` first).
+  `wtype -k End -s 300 -P Left -s 1000 -M ctrl -s 400 -p Left -m ctrl` (the first key of a run is lost), `grim`.
+- Fractional scaling: `GPUI_X11_SCALE_FACTOR=1.25 scripts/ui.sh start :3`.
 
 ## Non-UI crates
 

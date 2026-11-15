@@ -26,6 +26,8 @@ getrandom = "0.4"
 # `logging.rs`: the log setup both binaries share.
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `screen.rs`: a computer-use picture as a small JPEG.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # `proxy.rs`: the CLIProxyAPI management API.
 ureq.workspace = true
 

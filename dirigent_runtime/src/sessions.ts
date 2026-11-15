@@ -24,7 +24,6 @@ import {
   createAgentSession,
   createAgentSessionServices,
   createCodemodeExtension,
-  createMcpExtension,
   createToolSearchExtension,
   DefaultResourceLoader,
   type FileEntry,
@@ -33,6 +32,7 @@ import {
   SessionManager,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { COMPUTER, Computer, type ScreenUpdate } from "./computer";
 import {
   type Ask,
   createBash,
@@ -135,11 +135,11 @@ const CODEMODE = "codemode";
  * (Settings › MCP servers, `mcp.ts`, or `dirigent pi mcp …`); the MCP extension activates `codemode` or
  * `tool_search` for them, and the `defaultTools` setting can activate `tool_search` without.
  * `codemode` follows the user's switch instead, on by default (`create`, `applyTools`).
+ * The MCP extension is each session's own (`Computer.extensions`).
  */
 const BUILTIN_EXTENSIONS = [
   { name: "codemode", factory: createCodemodeExtension(), replaceable: true, builtin: true },
   { name: "tool-search", factory: createToolSearchExtension(), replaceable: true, builtin: true },
-  { name: "mcp", factory: createMcpExtension(), replaceable: true, builtin: true },
 ];
 
 /** How long the same extension notice stays quiet once sent (`extensionNotice`). */
@@ -152,6 +152,7 @@ export type Outbound =
   | { type: "ask"; thread_id: string; ask: Ask }
   | { type: "jobs"; thread_id: string; running: number; free: number }
   | { type: "nix_shell"; thread_id: string; active: boolean }
+  | ({ type: "screen"; thread_id: string } & ScreenUpdate)
   | { type: "warning"; thread_id: string; message: string }
   | { type: "error"; thread_id?: string; message: string };
 
@@ -163,6 +164,8 @@ interface Live extends ToolHost {
   nixEnv?: Promise<Record<string, string> | undefined>;
   // While pi takes a prompt in, up to a run starting: an extension command (`/mcp`) runs then.
   takingIn?: boolean;
+  // The thread's computer use: the `computer` tool and the screens it opened.
+  computer: Computer;
 }
 
 /** A `load` in progress; `unloaded` once an `unload` came for it meanwhile. */
@@ -249,6 +252,9 @@ export class Sessions {
       onAsk: (ask: Ask) => this.send({ type: "ask", thread_id: threadId, ask }),
       onJobs: (running: number, free: number) =>
         this.send({ type: "jobs", thread_id: threadId, running, free }),
+      computer: new Computer(threadId, (update) =>
+        this.send({ type: "screen", thread_id: threadId, ...update }),
+      ),
     } as Live;
     // Bash runs through our spawnHook so a captured nix dev-shell env can be injected, and
     // moves a long command to the background (`createBash`).
@@ -260,7 +266,7 @@ export class Sessions {
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: getAgentDir(),
-      extensionFactories: BUILTIN_EXTENSIONS,
+      extensionFactories: [...BUILTIN_EXTENSIONS, ...live.computer.extensions()],
       appendSystemPromptOverride: (base) => [...base, IMAGES_PROMPT],
     });
     await resourceLoader.reload();
@@ -272,7 +278,7 @@ export class Sessions {
       model: fresh && model ? await this.resolveModel(model) : undefined,
       thinkingLevel: fresh ? (thinkingLevel as ThinkingLevel | undefined) : undefined,
       sessionManager: SessionManager.inMemory(cwd, { id: threadId }, entries),
-      customTools: [bash as ToolDefinition, ...createTools(live)],
+      customTools: [bash as ToolDefinition, ...createTools(live), live.computer.tool()],
       // The `codemode` switch, as a change to the tools pi starts with (its `defaultTools`
       // setting, or the ones the transcript records). Off has to be said here: `applyTools`
       // only sees the switch go off in a loaded thread, and a thread's next load would bring
@@ -308,6 +314,7 @@ export class Sessions {
       // Nobody waits for it: the service gave up on this load when it unloaded.
       await shutdownBuiltins(session);
       session.dispose();
+      live.computer.closeAll();
       return;
     }
     // Hand every queued steer to the model in the next turn, not one per turn. Set on the
@@ -325,6 +332,7 @@ export class Sessions {
         session.sessionManager.appendCustomEntry("dirigent:compaction_failed", {
           error: event.errorMessage,
         });
+      live.computer.observe(event);
       this.send({ type: "event", thread_id: threadId, event: slim(event) });
       queueMicrotask(() => this.flushEntries(threadId, live));
     });
@@ -395,6 +403,7 @@ export class Sessions {
     this.flushEntries(threadId, live);
     await shutdownBuiltins(live.session);
     live.session.dispose();
+    live.computer.closeAll();
   }
 
   /** Models this host has credentials for. */
@@ -750,11 +759,14 @@ async function shutdownBuiltins(session: AgentSession): Promise<void> {
  * does it at a load). Not at every prompt without it: pi's MCP extension turns codemode on
  * at `session_start` for servers whose tools only scripts reach, and that has to last. The
  * switch going off mid-thread takes it from those servers too, until the thread's next load.
+ *
+ * `computer` going off also closes the screens the thread has open.
  */
 function applyTools(live: Live, tools: string[]): void {
   const ours = new Set<string>(TOOL_NAMES);
   if (tools.includes(CODEMODE) || live.tools.includes(CODEMODE)) ours.add(CODEMODE);
   live.tools = tools;
+  if (!tools.includes(COMPUTER)) live.computer.closeAll();
   const session = live.session;
   const wanted = session
     .getActiveToolNames()

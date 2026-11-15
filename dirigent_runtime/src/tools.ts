@@ -36,7 +36,8 @@ import {
 import { Type } from "typebox";
 import { Dirigent, describeThread, threadLink } from "./client";
 
-export const TOOL_NAMES = ["async_bash", "ask_user", "dirigent"] as const;
+// (`computer` is defined in `computer.ts`: it has a session's worth of state.)
+export const TOOL_NAMES = ["async_bash", "ask_user", "dirigent", "computer"] as const;
 
 const WINDOWS = process.platform === "win32";
 

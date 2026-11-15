@@ -113,9 +113,9 @@ pub enum ClientMessage {
     /// `model` ("provider/id") and `thinking_level` switch the thread before sending, if they differ.
     /// `images` are attached to the message; pi resizes them to the model's limits.
     /// `title` (sent with a thread's first prompt) asks the host to name the thread from `text`.
-    /// `tools` names the dirigent tools (`async_bash`, `ask_user`) the model gets from now on,
-    /// and `codemode` while its switch is on; the host remembers them for the thread. `None`
-    /// leaves them as they are.
+    /// `tools` names the dirigent tools (`async_bash`, `ask_user`, `computer`) the model gets
+    /// from now on, and `codemode` while its switch is on; the host remembers them for the
+    /// thread. `None` leaves them as they are.
     /// The reply (`Ok`) says the model has the message: its run started, or it is queued
     /// behind the one in progress. An `Error` says it has not, and why (the session didn't
     /// load, no credentials for the model): the conversation has nothing of the message, so
@@ -343,6 +343,23 @@ pub enum ClientMessage {
         id: u64,
         blob_id: String,
     },
+    /// A piece of the picture of the thread's screen (`ThreadSummary::screen`): replies
+    /// `Screen`, an empty one when it has none. A picture comes in small pieces, each asked
+    /// for once the one before is in, so never more than one piece of it is ahead of
+    /// anything else the host has to say, however slow the connection. `offset` 0 asks for
+    /// the first piece of the latest picture (`frame` is ignored); the next ones name the
+    /// `frame` the first came with and how much of it the client has. The host keeps that
+    /// picture for the connection until its last piece is asked for, or another picture is
+    /// started: a client reads one at a time, and starts the next (a `screen` event named a
+    /// newer one) only then, so a slow connection skips pictures instead of queueing them.
+    GetScreen {
+        id: u64,
+        thread_id: String,
+        #[serde(default)]
+        frame: u64,
+        #[serde(default)]
+        offset: u64,
+    },
     /// Token / cost usage of every assistant message with `since <= timestamp < until`,
     /// summed per `bucket_ms`-wide slot (counted from `since`) and per provider + model.
     ListUsage {
@@ -427,7 +444,13 @@ pub enum ServerMessage {
         thread_id: String,
         entry: Entry,
     },
-    /// Pi `AgentSessionEvent`, forwarded as JSON.
+    /// Pi `AgentSessionEvent`, forwarded as JSON, its inline images without their `data`
+    /// (the entry that follows has them, as `blob`s). Two are the host's own: `warning` (with a
+    /// `message`) and `screen`, a step of the thread's computer use: `frame` is the id of
+    /// the picture its screen shows now (0: none yet; `GetScreen` has it), `action` what the
+    /// agent just did there, in a few words, and `cursor` where it clicked, as fractions
+    /// `[x, y]` of the picture; both absent when only the picture changed. `desktop: true`
+    /// when it happened on the desktop of the host's user, not on a screen of the thread's own.
     Event {
         thread_id: String,
         event: Value,
@@ -464,6 +487,21 @@ pub enum ServerMessage {
         reply_to: u64,
         blob_id: String,
         mime_type: String,
+        data: String,
+    },
+    /// Reply to `GetScreen`: a piece of the picture `frame` (see `Event`). The picture is
+    /// an image file made small for the wire (a JPEG) as base64 text, `total` characters
+    /// long; `data` is the part of that text from `offset` on, a few KB of it. The piece
+    /// with which `offset` + its length reaches `total` is the last. A `total` of 0: there
+    /// is no picture (the thread has no screen any more, or the host no longer holds the one
+    /// asked to go on with). Sent when nothing else waits, as `Blob`s are.
+    Screen {
+        reply_to: u64,
+        thread_id: String,
+        frame: u64,
+        mime_type: String,
+        total: u64,
+        offset: u64,
         data: String,
     },
     Usage {
@@ -981,6 +1019,12 @@ pub struct ThreadSummary {
     /// `compaction_start` to `compaction_end`). Runtime state, never stored.
     #[serde(default)]
     pub compacting_since: Option<i64>,
+    /// Its agent is using a screen in this run (one of its own, or its host's desktop), and
+    /// there is a picture of the window it works in to show (`ClientMessage::GetScreen`;
+    /// `screen` events tell of every step).
+    /// Runtime state, never stored.
+    #[serde(default)]
+    pub screen: bool,
 }
 
 /// Where a fork came from (`ThreadSummary::forked_from`): its source thread and the last
@@ -1206,6 +1250,7 @@ mod tests {
         roundtrip(ClientMessage::LoginCancel { id: 29, login: 27 });
         roundtrip(ClientMessage::Logout { id: 30, provider: "anthropic".into() });
         roundtrip(ClientMessage::GetBlob { id: 10, blob_id: "abc".into() });
+        roundtrip(ClientMessage::GetScreen { id: 33, thread_id: "t".into(), frame: 3, offset: 16384 });
         roundtrip(ClientMessage::ListUsage { id: 11, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         roundtrip(ClientMessage::ListProxy { id: 31, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         roundtrip(ClientMessage::SetProxy { id: 32, url: "http://127.0.0.1:8317".into(), key: "k".into() });
@@ -1300,6 +1345,7 @@ mod tests {
             forked_from: Some(ForkedFrom { thread_id: "t1".into(), entry_id: "e1".into() }),
             setup: Some(Setup::NixShell),
             compacting_since: Some(6),
+            screen: true,
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });
@@ -1389,6 +1435,15 @@ mod tests {
         roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });
         roundtrip(ServerMessage::Event { thread_id: "t".into(), event: json!({"type":"agent_start"}) });
         roundtrip(ServerMessage::Blob { reply_to: 5, blob_id: "abc".into(), mime_type: "image/png".into(), data: "AAAA".into() });
+        roundtrip(ServerMessage::Screen {
+            reply_to: 8,
+            thread_id: "t".into(),
+            frame: 3,
+            mime_type: "image/jpeg".into(),
+            total: 40000,
+            offset: 16384,
+            data: "AAAA".into(),
+        });
         roundtrip(ServerMessage::VcsStatus {
             reply_to: 7,
             path: "/x".into(),

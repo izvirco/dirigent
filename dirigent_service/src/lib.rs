@@ -16,6 +16,7 @@ mod logging;
 pub mod platform;
 mod proxy;
 mod runtime;
+mod screen;
 mod server;
 mod storage;
 mod title;
@@ -67,6 +68,8 @@ pub struct Service {
     logins: Mutex<Logins>,
     /// This host's CLIProxyAPI as last seen (`proxy.rs`).
     proxy: proxy::Poller,
+    /// The pictures of the threads using the computer (`screen.rs`).
+    screens: screen::Screens,
     /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
@@ -102,8 +105,17 @@ impl Service {
             t.workspace_missing = missing.contains(&t.id);
             t.setup = starting.get(&t.id).copied().flatten().or(self.runtime.nix_shell(&t.id).then_some(Setup::NixShell));
             t.compacting_since = self.runtime.compacting_since(&t.id);
+            // A screen is its run's: one left by a run that never settled doesn't count.
+            t.screen = t.running_since.is_some() && self.screens.has(&t.id);
         }
         Ok(threads)
+    }
+
+    /// Drop the thread's session (`Runtime::unload`), and with it the screen of the run it
+    /// may have been in: no `agent_settled` comes for that one.
+    fn unload(&self, thread_id: &str) {
+        self.screens.clear(thread_id);
+        let _ = self.runtime.unload(thread_id);
     }
 
     fn push_threads(&self) {
@@ -194,6 +206,7 @@ impl Service {
             | ClientMessage::ListHosts { id }
             | ClientMessage::GenerateTitle { id, .. }
             | ClientMessage::GetBlob { id, .. }
+            | ClientMessage::GetScreen { id, .. }
             | ClientMessage::ListUsage { id, .. }
             | ClientMessage::ListProxy { id, .. }
             | ClientMessage::SetProxy { id, .. } => *id,
@@ -474,6 +487,18 @@ impl Service {
                     data: base64::Engine::encode(&base64::prelude::BASE64_STANDARD, bytes),
                 }
             }
+            ClientMessage::GetScreen { id, thread_id, frame, offset } => {
+                let piece = self.screens.piece(&conn.reading, &thread_id, frame, usize::try_from(offset)?).await;
+                ServerMessage::Screen {
+                    reply_to: id,
+                    thread_id,
+                    frame: piece.frame,
+                    mime_type: "image/jpeg".into(),
+                    total: piece.total as u64,
+                    offset,
+                    data: piece.data,
+                }
+            }
             ClientMessage::ListUsage { id, since, until, bucket_ms } => {
                 ServerMessage::Usage { reply_to: id, buckets: self.storage.lock().unwrap().usage(since, until, bucket_ms)? }
             }
@@ -508,7 +533,7 @@ impl Service {
                     storage.set_archived(&thread_id, archived, now())?;
                     for t in family.iter().filter(|t| self.runtime.free_jobs(t) > 0) {
                         info!(thread = %t, "archived: stopping the jobs it left running");
-                        let _ = self.runtime.unload(t);
+                        self.unload(t);
                     }
                 }
                 self.push_threads();
@@ -683,7 +708,7 @@ impl Service {
     /// Delete a thread and what is its alone: its loaded session, workspace and job logs.
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
         // Also when it is still loading, or its session would go live in a deleted thread.
-        let _ = self.runtime.unload(thread_id);
+        self.unload(thread_id);
         // Its workspace has no owner without the thread.
         if self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some()
             && let Err(e) = self.remove_workspace(thread_id, false)
@@ -838,7 +863,7 @@ impl Service {
         self.missing.lock().unwrap().remove(thread_id);
         // Also when it is still loading, or its session would go live at the old cwd. The run
         // begun for a new thread's first prompt goes on: it has no session yet (`Runtime::unload`).
-        let _ = self.runtime.unload(thread_id);
+        self.unload(thread_id);
         Ok(())
     }
 
@@ -875,6 +900,8 @@ impl Service {
         match msg {
             RuntimeMessage::Loaded { thread_id, model, header, .. } => {
                 info!(thread = %thread_id, model = model.as_deref().map(tracing::field::display), "session loaded");
+                // A new session has done nothing on the computer yet.
+                self.screens.clear(&thread_id);
                 if let Err(e) = self.storage.lock().unwrap().set_header(&thread_id, &header) {
                     error!(thread = %thread_id, "set header: {e:#}");
                 }
@@ -886,7 +913,10 @@ impl Service {
                 }
                 self.push_threads();
             }
-            RuntimeMessage::Event { thread_id, event } => {
+            RuntimeMessage::Event { thread_id, mut event } => {
+                // No client draws an event's images, and on a slow connection they would
+                // hold up everything else: they come with the entry.
+                blobs::shed(&mut event);
                 let kind = event.get("type").and_then(Value::as_str).unwrap_or("");
                 // Changes the thread list shows (`running_since`, `compacting_since`).
                 let lifecycle = matches!(kind, "agent_start" | "agent_settled" | "compaction_start" | "compaction_end");
@@ -899,6 +929,7 @@ impl Service {
                     }
                 }
                 if kind == "agent_settled" {
+                    self.screens.clear(&thread_id);
                     let ms = self.runtime.settle(&thread_id);
                     info!(thread = %thread_id, secs = ms.map(|ms| ms / 1000), "agent settled");
                     if let Some(ms) = ms
@@ -941,6 +972,25 @@ impl Service {
                 self.push_threads();
             }
             RuntimeMessage::Jobs { .. } | RuntimeMessage::NixShell { .. } => self.push_threads(),
+            RuntimeMessage::Screen { thread_id, image, action, cursor, desktop } => {
+                let png = image.and_then(|i| base64::Engine::decode(&base64::prelude::BASE64_STANDARD, i.data).ok());
+                let (frame, new) = self.screens.update(&thread_id, png);
+                let mut event = json!({ "type": "screen", "frame": frame });
+                if let Some(action) = action {
+                    event["action"] = action.into();
+                }
+                if let Some(cursor) = cursor {
+                    event["cursor"] = json!(cursor);
+                }
+                if desktop {
+                    event["desktop"] = true.into();
+                }
+                self.push(ServerMessage::Event { thread_id, event });
+                // The thread list says which threads have a screen to show.
+                if new {
+                    self.push_threads();
+                }
+            }
             RuntimeMessage::Error { thread_id, message } => {
                 warn!(thread = thread_id.as_deref().map(tracing::field::display), "runtime error: {message}");
                 // A run that failed outside pi (a prompt throwing after pi took it, a notice or
@@ -961,6 +1011,7 @@ impl Service {
             // `Runtime` hands these to whoever waits on them.
             RuntimeMessage::Reply { .. } | RuntimeMessage::Failed { .. } | RuntimeMessage::LoginStep { .. } => {}
             RuntimeMessage::Crashed => {
+                self.screens.clear_all();
                 self.push(ServerMessage::Error { reply_to: None, message: "runtime restarted".into() });
                 self.push_threads();
             }
@@ -1140,6 +1191,7 @@ pub async fn run(port: u16) -> Result<()> {
         starting: Mutex::new(Default::default()),
         logins: Mutex::new(Default::default()),
         proxy: Default::default(),
+        screens: Default::default(),
         push: broadcast::channel(1024).0,
         host_name,
         service_id,

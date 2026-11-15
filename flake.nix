@@ -73,7 +73,7 @@
       cargoDeps = rustPlatform.fetchCargoVendor {
         name = "dirigent";
         src = rustSrc;
-        hash = "sha256-iVQJZzrH/whn3x4KyMrsMzJHbRrHyGRyDoE2U4MRXqY=";
+        hash = "sha256-T1jqwEQirm4DurtpCl0PPUDUjFFykEn6PhjgQXZDfKk=";
       };
       # One crate's binary, in `bin/`.
       crate =
@@ -125,6 +125,40 @@
         outputHash = "sha256-Ps3XV9TOTj04P7Mo4ytJp/AggJwUlQZVZ46RFM6+7Ec=";
       };
 
+      # Cua Driver, what computer use runs (`dirigent_runtime/src/computer.ts`): the release
+      # binary installs ship (the version and its hash are `build.ts`'s `DRIVER`: bump both
+      # together), patched to find its libraries here. In the dev shell too, where the
+      # runtime takes it from PATH.
+      cuaDriver = pkgs.stdenvNoCC.mkDerivation rec {
+        pname = "cua-driver";
+        version = "0.51.3";
+        src = pkgs.fetchurl {
+          url = "https://github.com/trycua/cua/releases/download/cua-driver-rs-v${version}/cua-driver-rs-${version}-linux-x86_64-binary.tar.gz";
+          hash = "sha256-BERm9l2zl2+h7zAqNCfqEtXU7dlpJjeI0vwW15O5Xd4=";
+        };
+        # The archive has no directory of its own.
+        sourceRoot = ".";
+        nativeBuildInputs = [ pkgs.autoPatchelfHook ];
+        buildInputs = [
+          pkgs.libx11
+          pkgs.libxi
+          pkgs.libxkbcommon
+          pkgs.stdenv.cc.cc.lib
+        ];
+        installPhase = ''
+          install -Dm755 cua-driver $out/bin/cua-driver
+        '';
+        meta = {
+          mainProgram = "cua-driver";
+          license = lib.licenses.mit;
+        };
+      };
+      # Its license, which goes wherever it is shipped (the archive has none).
+      cuaDriverLicense = pkgs.fetchurl {
+        url = "https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v${cuaDriver.version}/LICENSE.md";
+        hash = "sha256-wHeSkMHUeDFpqj2/tV/rUF5WPvigBLv1UpjO/8+9qNk=";
+      };
+
       # The runtime compiled to one executable, plus the files pi reads next to it
       # (`dirigent_runtime/build.ts`): what installs ship as `runtime/`, so no bun at run time.
       runtime = pkgs.stdenvNoCC.mkDerivation {
@@ -144,9 +178,16 @@
           pkgs.bun
           pkgs.writableTmpDirAsHomeHook
         ];
+        # `--no-driver`: the build would download Cua Driver, and can't in the sandbox. Xvfb,
+        # which makes a thread's private screen, comes along: the runtime looks next to
+        # itself before PATH (`program` in `computer.ts`), so the package needs nothing
+        # installed beside it.
         buildPhase = ''
           cp -R ${nodeModules}/. .
-          bun dirigent_runtime/build.ts --out $out
+          bun dirigent_runtime/build.ts --out $out --no-driver
+          cp ${lib.getExe cuaDriver} $out/
+          cp ${cuaDriverLicense} $out/cua-driver-LICENSE.md
+          ln -s ${pkgs.xvfb}/bin/Xvfb $out/Xvfb
         '';
         dontInstall = true;
         # `bun build --compile` appends the bundle to a copy of bun: stripping or patching the
@@ -295,11 +336,11 @@
             pkgs.pkg-config
             pkgs.cmake
             pkgs.sccache
-            # Headless UI testing: virtual X display, input, screenshots (see testing.md)
+            # Computer use in a dev checkout (`dirigent_runtime/src/computer.ts`): the driver, and
+            # Xvfb for a thread's private screen, where the UI is tested too (testing.md)
+            cuaDriver
             pkgs.xvfb
-            pkgs.xdotool
-            pkgs.imagemagick
-            pkgs.xclip # clipboard of the test display (`scripts/ui.sh run xclip ...`)
+            pkgs.xdotool # `scripts/ui.sh` makes the test app's window fill its screen
             (pkgs.lib.getBin pkgs.sqlite) # peek into a test session's dbs
             # What `scripts/ui.sh` runs besides (setsid, ss, pgrep / pkill): not on every user's PATH
             pkgs.util-linux

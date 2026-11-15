@@ -12,6 +12,7 @@
 import "../node_modules/@earendil-works/pi-coding-agent/dist/bun/runtime-setup.js";
 import { main as piMain } from "@earendil-works/pi-coding-agent";
 import { Logins, type Method } from "./auth";
+import { forgetScreens } from "./computer";
 import * as mcp from "./mcp";
 import { type Attachment, refusal, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
@@ -168,6 +169,7 @@ async function handle(sessions: Sessions, logins: Logins, msg: Inbound): Promise
 // line and search only each new chunk for "\n", so reading stays linear. A line
 // is decoded only once complete, so no UTF-8 character is split across chunks.
 async function serve(): Promise<void> {
+  forgetScreens();
   const sessions = new Sessions(send);
   const logins = new Logins(sessions.modelRuntime, (id, step) =>
     send({ type: "login_step", id, step }),

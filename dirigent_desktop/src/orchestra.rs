@@ -297,6 +297,7 @@ mod tests {
             forked_from: None,
             setup: None,
             compacting_since: None,
+            screen: false,
         }
     }
 
