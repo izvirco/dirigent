@@ -266,6 +266,7 @@ mod tests {
             forked_from: None,
             setup: None,
             compacting_since: None,
+            screen: false,
         }
     }
     fn host(name: &str, projects: Vec<Project>, threads: Vec<ThreadSummary>) -> HostState {

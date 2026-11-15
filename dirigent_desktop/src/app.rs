@@ -142,6 +142,8 @@ pub struct OpenThread {
     pub rewound: Option<Rewound>,
     /// The entry to scroll to once the host's entries are in (`Dirigent::open_fork_source`).
     jump_entry: Option<String>,
+    /// What its agent is doing on the computer, once its host has that to show (`screen.rs`).
+    pub screen: Option<crate::screen::Screen>,
 }
 
 /// An edit in progress (`Dirigent::start_edit`): the user message (pi entry id) whose
@@ -211,6 +213,7 @@ impl OpenThread {
             editing: None,
             rewound: None,
             jump_entry: None,
+            screen: None,
         }
     }
 
@@ -706,6 +709,8 @@ pub struct Dirigent {
     fitting: usize,
     /// The image shown full-size over everything; click or Esc closes it.
     pub preview: Option<Arc<gpui::Image>>,
+    /// The open thread's screen is shown enlarged over everything (`screen::preview`).
+    pub screen_preview: bool,
     /// Mouse selection in the transcript or the work log.
     pub selection: Selection,
     /// Images referenced from entries, by blob id: filled from the cache db, else fetched
@@ -898,6 +903,7 @@ impl Dirigent {
             attachments: vec![],
             fitting: 0,
             preview: None,
+            screen_preview: false,
             selection: Selection::default(),
             blobs: HashMap::new(),
             blob_requests: HashMap::new(),
@@ -1299,6 +1305,8 @@ impl Dirigent {
                     if self.open().is_some_and(|t| t.host == host) {
                         self.settle_open();
                         self.unrewind(cx);
+                        // Its screen was the run's, and a picture asked for won't come.
+                        self.drop_screen(cx);
                         // An answer may be lost with the connection: its form takes input
                         // again, or it would hold back the asks behind it. One the host got
                         // leaves with the reconnect's refresh.
@@ -1555,6 +1563,10 @@ impl Dirigent {
                     self.blobs.insert(blob_id, blob);
                 }
             }
+            ServerMessage::Screen { reply_to, frame, total, offset, data, .. } => {
+                let piece = crate::screen::Piece { frame, total: total as usize, offset: offset as usize, data: &data };
+                self.on_screen(&host, reply_to, &piece, cx)
+            }
             ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
                 self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
             }
@@ -1748,6 +1760,11 @@ impl Dirigent {
                     let thread = self.summary(&host, &thread_id).and_then(|t| t.name.as_deref()).unwrap_or("new thread");
                     self.toast(format!("{host}: {thread}: {message}"), cx);
                 }
+                // A step of the thread's computer use, the host's own event too.
+                if event.get("type").and_then(|v| v.as_str()) == Some("screen") {
+                    self.on_screen_event(&host, &thread_id, &event);
+                    return;
+                }
                 if let Pane::Thread(t) = &mut self.pane
                     && t.host == host
                     && t.id == thread_id
@@ -1800,6 +1817,7 @@ impl Dirigent {
             self.end_edit(cx);
         }
         self.stash_log();
+        self.drop_screen(cx);
         self.pane = pane;
         if entering {
             self.load_composer(cx);
@@ -2125,7 +2143,7 @@ impl Dirigent {
         .detach();
     }
 
-    fn focus_composer(&self, cx: &mut Context<Self>) {
+    pub fn focus_composer(&self, cx: &mut Context<Self>) {
         self.focus(self.composer.focus_handle(cx), cx);
     }
 
@@ -2733,6 +2751,7 @@ impl Dirigent {
                 "bash_background" => c.tools.bash_background = !c.tools.bash_background,
                 "ask_user" => c.tools.ask_user = !c.tools.ask_user,
                 "dirigent" => c.tools.dirigent = !c.tools.dirigent,
+                "computer" => c.tools.computer = !c.tools.computer,
                 "codemode" => c.tools.codemode = !c.tools.codemode,
                 _ => {}
             },
@@ -2742,12 +2761,14 @@ impl Dirigent {
 
     // ---- right panel ----
 
-    /// Whether the right panel (lineage over the work log) is showing: the user's
-    /// choice, else whenever there is something to show (a log, or a family while the
-    /// lineage isn't hidden).
+    /// Whether the right panel (the screen, the lineage, the work log) is showing: the
+    /// user's choice, else whenever there is something to show (a screen, a log, or a
+    /// family while the lineage isn't hidden).
     pub fn panel_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
-        t.panel.unwrap_or_else(|| t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && !self.lineage(&t.host, &t.id).is_empty()))
+        t.panel.unwrap_or_else(|| {
+            t.screen.is_some() || t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && !self.lineage(&t.host, &t.id).is_empty())
+        })
     }
 
     /// Whether the right panel shows `part` while open.
@@ -3774,13 +3795,13 @@ impl Dirigent {
         });
     }
 
-    /// Make sure every image the open thread shows is in `blobs`: from the cache db, else
-    /// asked of the host (once per connection: `blob_requests`).
+    /// Make sure every image the open thread shows (`view::blobs_shown`) is in `blobs`: from
+    /// the cache db, else asked of the host (once per connection: `blob_requests`).
     fn fetch_blobs(&mut self) {
         let Pane::Thread(t) = &self.pane else { return };
         let host = t.host.clone();
         let asked = self.blob_requests.get(&host);
-        let ids: Vec<String> = view::blobs_shown(&t.timeline.items)
+        let ids: Vec<String> = view::blobs_shown(&t.timeline.items, &t.expanded)
             .into_iter()
             .filter(|id| !self.blobs.contains_key(id) && !asked.is_some_and(|a| a.values().any(|b| b == id)))
             .collect();
@@ -4007,6 +4028,10 @@ impl Dirigent {
     pub fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
         if self.preview.is_some() {
             self.set_preview(None, cx);
+            return;
+        }
+        if self.screen_preview {
+            self.set_screen_preview(false, cx);
             return;
         }
         if self.menu.is_some() {
@@ -4645,6 +4670,8 @@ impl Dirigent {
             if t.log == Some(key.0) {
                 t.log_list.remeasure_items(key.1..key.1 + 1);
             }
+            // The images in its output are fetched now that they show.
+            self.fetch_blobs();
             // Clicking in the panel blurs the composer; keep typing working.
             self.focus_composer(cx);
             cx.notify();
@@ -4845,6 +4872,7 @@ impl Render for Dirigent {
         menu::Nav::begin(self.menu.as_ref(), cx);
         self.settle_jump(window);
         self.settle_panel();
+        self.sync_screen(cx);
         self.field.want = self.field_spec(window);
         self.redraw_field(false, cx);
         let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
@@ -4944,6 +4972,7 @@ impl Render for Dirigent {
                 Modal::Changelog => changelog::render(self, cx),
             }))
             .children(self.preview.clone().map(|image| thread::preview(image, cx)))
+            .children(crate::screen::preview(self, window.viewport_size(), cx))
             .children((!toasts.is_empty()).then(|| {
                 div().absolute().bottom_4().right_4().flex().flex_col().gap_1().children(toasts.into_iter().map(|m| {
                     div()

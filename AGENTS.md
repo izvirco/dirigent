@@ -1,7 +1,7 @@
 # Dirigent
 
 - The service and app are dogfooded, make sure to not kill the process you are running in.
-- Test the UI only through `scripts/ui.sh`: it runs a debug build on its own invisible display, port and data dir, so you can't disturb users desktop or data (see `testing.md`).
+- Test the UI only on your private screen (the `computer` tool), with the debug build `scripts/ui.sh` starts there on its own port and data dir, so you can't disturb users desktop or data (see `testing.md`). Never on the desktop.
 - Never `pkill -f <string>` from a shell whose own command line contains `<string>` — you kill your shell. Anchor patterns with `^/abs/path`.
 - `dirigent_service` is a lib + bin. The desktop embeds the lib and runs the local service in-process; the binary is only for remote hosts. `dirigent_cli` is the `dirigent` command line: `dirigent pi …` (the bundled pi's CLI), `dirigent [dir]` (execs `dirigent_desktop` next to it). `packaging/README.md` has it.
 - Pi's agent dir (auth, settings, packages, extensions) is `<config dir>/agent`, not `~/.pi/agent`: `PI_CODING_AGENT_DIR` for the runtime (`runtime_env`), seeded by copying an existing one on first use (`agent.rs`). A test instance's `--config-dir` gets a copy of Seb's real one, auth included.

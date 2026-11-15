@@ -465,6 +465,12 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .when(c.async_bash, |d| d.child(sub_row("Move a bash command still running after 10 s to the background", bash_background)))
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
             .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx))))
+            .child(row("computer", switch("tool-computer", c.computer, cx, |this, cx| this.toggle_tool("computer", cx))))
+            // What it is, whether on or off: the name alone doesn't say.
+            .child(sub_row(
+                "Open a screen of its own, or your desktop, to run and operate apps; the thread shows what it does there",
+                div(),
+            ))
             .child(row("codemode", switch("tool-codemode", c.codemode, cx, |this, cx| this.toggle_tool("codemode", cx)))),
     )
 }

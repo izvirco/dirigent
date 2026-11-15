@@ -11,6 +11,7 @@ dirigent.exe                 the command line (below), put on the user's PATH (a
 runtime\dirigent_runtime.exe the bun runtime compiled to one exe (dirigent_runtime/build.ts), no bun needed
 runtime\package.json, docs\, …   what a compiled pi reads next to its exe
 runtime\node_modules\        pi-ai's codex module as source: the CLIProxyAPI provider extension patches it (build.ts)
+runtime\cua-driver.exe       Cua Driver, which computer use runs (below), and its license next to it
 licenses\Lilex-OFL.txt
 ```
 
@@ -56,7 +57,8 @@ Apple silicon only, and the Linux install as is, minus the app menu entry and th
 d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/stable/macos-aarch64 | tar xz -C "$d" && "$d/dirigent/install.sh"
 ```
 
-There's no `.app` yet: it starts from a terminal (`dirigent`), and quits with it.
+There's no `.app` yet: it starts from a terminal (`dirigent`), and quits with it. Nor a Cua Driver (computer use,
+below): macOS gives screen and accessibility access to a signed app, which nothing in the tarball is.
 
 Without an Apple developer account nothing is signed or notarized, and it doesn't need to be: Apple silicon
 runs any binary with an ad-hoc signature (`codesign --sign -`, which the release job makes sure of), and
@@ -65,6 +67,34 @@ don't. A tarball downloaded with a browser does get marked: `xattr -dr com.apple
 installing, or use the curl line.
 
 None of it is tested by us (no Mac): CI only proves it builds.
+
+## Computer use (Cua Driver, Xvfb)
+
+The `computer` tool (Settings › Agent tools, on by default; `dirigent_runtime/src/computer.ts`) opens a screen for
+an agent to run and operate GUI apps on, when it asks for one: nothing runs before that. Two things do the work.
+
+[Cua Driver](https://github.com/trycua/cua) (MIT) operates the screen, as an MCP server of the thread: one
+executable, `cua-driver[.exe]`, which the Windows and Linux installs ship in `runtime/`.
+`dirigent_runtime/build.ts` downloads it from the driver's GitHub release as it builds the runtime, checks its
+sha256 and puts its license next to it; the version and hashes are pinned there (`DRIVER`), and `flake.nix`
+(`cuaDriver`) pins the same version for the nix packages and the dev shell: bump both together. The driver moves
+fast and drops things on dated notices, so an update is a release to try, not a number to raise: `testing.md` has
+how. Where none is shipped (macOS, a dev checkout outside the dev shell) the runtime takes `cua-driver` from PATH;
+a machine without one that starts (`cua-driver --version`, tried once per runtime) has no computer use, and the
+agent that asks is told why. On macOS that is the user's own install
+(`/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"`): its `CuaDriver.app` holds the permissions.
+Untested by us, like the rest of the macOS build. Windows is untested too: the driver is what its release ships.
+Its telemetry, update check and on-screen cursor are off, and it keeps its state under `<data dir>/screens/`,
+which a runtime wipes as it starts. On Linux it drives X11 windows (and XWayland ones in a Wayland session); it
+needs `libX11`, `libXi` and `libxkbcommon`, which a desktop has.
+
+`Xvfb` makes a thread's private screen: an X display nobody sees but in the thread. Linux only. The nix packages
+ship it next to the runtime; the tarball doesn't, and takes it from PATH (`xvfb` on Debian and Ubuntu,
+`xorg-server-xvfb` on Arch, `xorg-x11-server-Xvfb` on Fedora; the dev shell has it). Where there is none (Windows and macOS too), an agent that asks for a
+private screen gets the machine's desktop in its place and is told to say so; the thread's panel marks what
+happens on the desktop either way. A private screen's apps run in the user's session in every other way (the same
+environment and session bus), so an app that is single-instance over D-Bus may open in the copy already running
+on the desktop.
 
 ## The command line (`dirigent`)
 
@@ -266,7 +296,7 @@ builds, dev and nix too), or `DIRIGENT_API_URL` at run time for tests.
 `flake.nix` packages all three: `dirigent_desktop` (the default), `dirigent_service` for remote hosts, and
 `dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The first two come with the `dirigent`
 command line (`dirigent pi` signs in and installs extensions on a remote host too) and are laid out like an
-install: the binaries in `libexec/dirigent/` next to the compiled `runtime/`, symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
+install: the binaries in `libexec/dirigent/` next to the compiled `runtime/` (with Cua Driver in it, patched to find its libraries in the store, and Xvfb), symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
 driver: on NixOS `hardware.graphics.enable`; elsewhere nix's vulkan-loader may not find the system's drivers
 (nixGL).
 

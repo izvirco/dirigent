@@ -10,6 +10,11 @@
 //! runtime's system prompt tells it so) and `link_images` reads the file into `blobs` here,
 //! on the host where it lives, recording its id on the text block so any client can fetch
 //! it (`dirigent_protocol::images`). `inflate` drops that record again.
+//!
+//! Pi's events repeat a tool result's images, inline, several times over (the tool's end,
+//! the result's message, the turn's end, the run's): megabytes per screenshot, pushed to
+//! every client, none of which draws from them. `shed` takes the bytes out; the entry
+//! that follows has the image.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -31,6 +36,13 @@ pub fn strip(value: &mut Value, store: &mut impl FnMut(&str, &str, &[u8])) {
         store(&id, &mime, &bytes);
         obj.remove("data");
         obj.insert("blob".into(), Value::String(id));
+    });
+}
+
+/// Drop every inline image's `data` from an event on its way to the clients.
+pub fn shed(value: &mut Value) {
+    walk(value, &mut |obj| {
+        obj.remove("data");
     });
 }
 
@@ -154,6 +166,23 @@ mod tests {
 
         inflate(&mut v, &mut |id| (id == stored[0].0).then(|| vec![1, 2, 3]));
         assert_eq!(v, original);
+    }
+
+    /// An event keeps its shape and loses its images' bytes, however deep they sit.
+    #[test]
+    fn events_shed_their_images() {
+        let mut event = json!({"type":"tool_execution_end","toolCallId":"c","result":{"content":[
+            {"type":"text","text":"a window"},
+            {"type":"image","data":"AQID","mimeType":"image/png"},
+        ]}});
+        shed(&mut event);
+        assert_eq!(
+            event,
+            json!({"type":"tool_execution_end","toolCallId":"c","result":{"content":[
+                {"type":"text","text":"a window"},
+                {"type":"image","mimeType":"image/png"},
+            ]}})
+        );
     }
 
     #[test]

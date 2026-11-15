@@ -51,6 +51,8 @@ icons!(
     "pin",
     "play",
     "plus",
+    "pointer",
+    "pointer-outline",
     "server",
     "settings",
     "sparkles",

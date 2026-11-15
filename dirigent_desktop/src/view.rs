@@ -6,6 +6,7 @@
 use crate::markdown;
 use dirigent_protocol::PromptMode;
 use serde_json::Value;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
@@ -755,19 +756,21 @@ pub fn blob_links(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// Every blob the timeline shows: user attachments (steers' too), images the model read,
-/// images its replies and interim prose link to.
-pub fn blobs_shown(items: &[Item]) -> Vec<String> {
+/// Every blob the timeline shows: user attachments (steers' too), images its replies and
+/// interim prose link to, and the images in the results of the tool calls that are open in
+/// the log (`expanded`: work item and step index). Not those of the closed ones: an agent
+/// using the computer takes a screenshot every few seconds, and nobody sees them there.
+pub fn blobs_shown(items: &[Item], expanded: &HashSet<(usize, usize)>) -> Vec<String> {
     let mut out = vec![];
-    for item in items {
+    for (i, item) in items.iter().enumerate() {
         match item {
             Item::User { images, .. } => out.extend(images.iter().cloned()),
             Item::Assistant(text) => out.extend(blob_links(text).map(str::to_owned)),
             Item::Work(w) => {
-                for step in &w.steps {
+                for (j, step) in w.steps.iter().enumerate() {
                     match step {
                         Step::Text(text) => out.extend(blob_links(text).map(str::to_owned)),
-                        Step::Tool(t) => out.extend(t.result.iter().flat_map(|r| r.images.iter().cloned())),
+                        Step::Tool(t) if expanded.contains(&(i, j)) => out.extend(t.result.iter().flat_map(|r| r.images.iter().cloned())),
                         Step::Steer { images, .. } => out.extend(images.iter().cloned()),
                         _ => {}
                     }
@@ -1041,7 +1044,7 @@ mod tests {
         assert_eq!(changed[3], Some(1));
         let Item::Work(w) = &t.items[1] else { panic!() };
         assert_eq!(w.steers().collect::<Vec<_>>(), vec![(2, "no, other way", &["abc".to_owned()][..], false)]);
-        assert_eq!(blobs_shown(&t.items), ["abc"]);
+        assert_eq!(blobs_shown(&t.items, &HashSet::new()), ["abc"]);
         assert_eq!(w.tool_count(), 2);
         assert_eq!(t.items[2], Item::Assistant("done".into()));
         assert_eq!(t.items[3], Item::User { text: "next prompt".into(), images: vec![], at: 8 });
@@ -1286,7 +1289,9 @@ mod tests {
         let Item::Work(w) = &t.items[1] else { panic!() };
         let Step::Tool(c) = &w.steps[0] else { panic!() };
         assert_eq!(c.result.as_ref().unwrap().images, vec!["read1".to_owned()]);
-        assert_eq!(blobs_shown(&t.items), vec!["read1".to_owned(), id.clone(), old.clone()]);
+        // The image the model read shows once its tool call is open in the log.
+        assert_eq!(blobs_shown(&t.items, &HashSet::new()), vec![id.clone(), old.clone()]);
+        assert_eq!(blobs_shown(&t.items, &HashSet::from([(1, 0)])), vec!["read1".to_owned(), id.clone(), old.clone()]);
     }
 
     #[test]

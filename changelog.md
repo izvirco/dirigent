@@ -10,6 +10,8 @@
 - A message the model can't take (no credentials for its provider) comes back: a new thread's draft returns with its text and images, one sent to a thread goes back into its composer, and the toast says how to fix it ([#173])
 - Several new threads can start at once: a draft no longer waits for the last one to start ([#173])
 - Pi 1.5.2: Claude OAuth requests report a current Claude Code version ([#175])
+- Computer use: an agent can open a screen to run and operate GUI apps on, when a task needs one: a private one of the thread's own, which nobody sees but in the thread (Linux, with Xvfb installed), or your desktop, where it works in the background where the app allows. Tell it which ("test this on your private screen", "do it on my desktop"); without a private screen it uses the desktop and says so. The thread's right panel shows the window it works in as it goes, with a cursor where it clicks, marked when that is your desktop; click the picture to enlarge it. Windows and Linux installs ship Cua Driver for it; on macOS install it yourself. Settings › Agent tools › `computer` turns it off ([#178])
+- A slow connection stays responsive while an agent takes screenshots: they no longer travel in every event, and the images in a tool call's output are fetched when you open it in the log ([#178])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
@@ -32,6 +34,7 @@
 [#173]: https://forge.sebba.dev/izvir/dirigent/changes/173
 [#175]: https://forge.sebba.dev/izvir/dirigent/changes/175
 [#176]: https://forge.sebba.dev/izvir/dirigent/changes/176
+[#178]: https://forge.sebba.dev/izvir/dirigent/changes/178
 
 ## 0.0.9
 

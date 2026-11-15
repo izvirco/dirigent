@@ -328,7 +328,8 @@ fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
 
 /// The right panel, split off the pane by a full-height hairline, `log_width` wide, with
 /// a drag handle on its left edge below the header. Its header: a toggle per section on
-/// the left, the thread's header `actions` on the right. Below it the thread's family
+/// the left, the thread's header `actions` on the right. Below it the thread's screen while
+/// its agent uses the computer (`screen::section`, no toggle: it comes and goes), its family
 /// (`orchestra::tree`; over the log, at most half the height, scrolling past that) and
 /// the work log (`log_body`), each when there is one and it isn't hidden
 /// (`Dirigent::panel_hidden`); a word on what would show when neither does. Untitled:
@@ -403,6 +404,7 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
         // `justify_end`: actions wider than a narrow panel spill left, over the hairline,
         // not right under the caption buttons.
         .child(header(toggles, Some(actions)).justify_end())
+        .children(crate::screen::section(this, cx))
         .children(tree)
         .children(log)
         .children(empty)

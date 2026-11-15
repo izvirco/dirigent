@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
-# Drive a headless dirigent_desktop for UI tests. Guide: testing.md.
+# Run a debug dirigent_desktop to test, on your private screen. Guide: testing.md.
 #
-#   scripts/ui.sh start [W H]            build, (re)launch on a private virtual display (default 1100x720)
-#   scripts/ui.sh setup [DIR] [MODEL]    add DIR as a project, pick MODEL, open its new-thread page
-#   scripts/ui.sh shot [path] [X Y W H]  screenshot, optionally cropped (default a fresh <session>/shot-XXXX.png, printed)
-#   scripts/ui.sh click X Y [right]      click at window px (screenshot px == window px)
-#   scripts/ui.sh move X Y               hover
-#   scripts/ui.sh drag X1 Y1 X2 Y2       press, move, release
-#   scripts/ui.sh scroll X Y N           N notches down at X Y (negative: up)
-#   scripts/ui.sh type "text"            type text
-#   scripts/ui.sh key KEY...             key chords, xdotool names: Return Escape ctrl+n shift+Return
+#   scripts/ui.sh start DISPLAY          build, (re)launch on your private screen, filling it (DISPLAY as the
+#                                        `computer` tool named it, e.g. :3)
+#   scripts/ui.sh setup [DIR] [MODEL]    add DIR as a project, pick MODEL, restart the app
 #   scripts/ui.sh wait-idle [SECS]       until no thread runs or has async_bash jobs (default 300 s)
 #   scripts/ui.sh rpc JSON [EXPR]        one protocol request to the session's service, print the reply
 #   scripts/ui.sh run CMD...             CMD with the dev-shell tools, DISPLAY, UI_DIR and UI_PORT set
 #   scripts/ui.sh log [N]                last N (40) lines of the app's stdout/stderr
-#   scripts/ui.sh stop                   kill the app and its display
+#   scripts/ui.sh stop                   kill the app
 #   scripts/ui.sh reset                  stop and wipe the session's data (fresh service + desktop dbs)
 #
+# Seeing and operating the app is the `computer` tool's: open a private screen with it, `start` the app
+# there, and use the screen's tools. Only ever a private screen: `start` refuses a display that is not an
+# Xvfb of yours, so the app never opens on a desktop.
+#
 # Each session (UI_SESSION; default: the last 8 chars of the calling agent's thread id, else
-# "default") gets its own Xvfb display, service port, data and config dirs under
-# /tmp/dirigent-ui-<user>/<session>. Nothing touches the real desktop, mouse, keyboard, data, config
-# or the service on :7777, and sessions can run in parallel.
+# "default") gets its own service port, data and config dirs under /tmp/dirigent-ui-<user>/<session>.
+# Nothing touches the real data, config or the service on :7777, and sessions can run in parallel,
+# each on its own screen.
 set -euo pipefail
 CALLER=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -32,7 +30,7 @@ BASE=/tmp/dirigent-ui-$(id -un)
 mkdir -p "$BASE"
 [ -O "$BASE" ] || { echo "$BASE belongs to another user" >&2; exit 1; }
 
-# Tools (Xvfb, xdotool, imagemagick, sqlite, xclip, lavapipe, setsid, ss, pgrep; Lilex for the build)
+# Tools (xdotool, sqlite, lavapipe, setsid, ss, pgrep; Lilex for the build)
 # and the app's runtime libs come from the dev shell, not from the caller's PATH, which differs
 # from user to user. `nix develop` costs seconds per call, so its environment is cached
 # until flake.nix / flake.lock change. Always sourced: a shell the caller entered before the
@@ -73,31 +71,36 @@ mkdir -p "$DIR"
 PREFIX=$DIR/prefix
 APP_CMD="^($BIN|$PREFIX/lib/dirigent/dirigent) --data-dir $DIR/data( |$)"
 alive() {
-  [ -f "$DIR/$1.pid" ] && kill -0 "$(cat "$DIR/$1.pid")" 2>/dev/null && return
-  [ "$1" = app ] && pgrep -f "$APP_CMD" >/dev/null
+  [ -f "$DIR/app.pid" ] && kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null && return
+  pgrep -f "$APP_CMD" >/dev/null
 }
-# Both processes are started with setsid, so pid == process group: this also takes down
-# the app's embedded service and pi runtime, and nothing outside the session. A restarted
-# app is signalled by its command line; its runtime follows it out (stdin closes).
-kill_group() {
-  if alive "$1"; then
-    [ -f "$DIR/$1.pid" ] && { kill -TERM -- "-$(cat "$DIR/$1.pid")" 2>/dev/null || true; }
-    [ "$1" = app ] && { pkill -TERM -f "$APP_CMD" || true; }
-    for _ in $(seq 1 30); do alive "$1" || break; sleep 0.1; done
-    [ -f "$DIR/$1.pid" ] && { kill -KILL -- "-$(cat "$DIR/$1.pid")" 2>/dev/null || true; }
-    [ "$1" = app ] && { pkill -KILL -f "$APP_CMD" || true; }
+# The app is started with setsid, so pid == process group: this also takes down its embedded
+# service and pi runtime, and nothing outside the session. A restarted app is signalled by
+# its command line; its runtime follows it out (stdin closes).
+kill_app() {
+  if alive; then
+    [ -f "$DIR/app.pid" ] && { kill -TERM -- "-$(cat "$DIR/app.pid")" 2>/dev/null || true; }
+    pkill -TERM -f "$APP_CMD" || true
+    for _ in $(seq 1 30); do alive || break; sleep 0.1; done
+    [ -f "$DIR/app.pid" ] && { kill -KILL -- "-$(cat "$DIR/app.pid")" 2>/dev/null || true; }
+    pkill -KILL -f "$APP_CMD" || true
   fi
-  rm -f "$DIR/$1.pid"
+  rm -f "$DIR/app.pid"
+}
+# The session's display is up and a private screen: an Xvfb of this user's serves it.
+private_screen() {
+  ss -Hxlp 2>/dev/null | grep -F "/tmp/.X11-unix/X$1 " | grep -q '"Xvfb"'
 }
 need_display() {
-  alive xvfb || { echo "no running session '$SESSION'; run: scripts/ui.sh start" >&2; exit 1; }
+  [ -s "$DIR/display" ] || { echo "no session '$SESSION'; run: scripts/ui.sh start DISPLAY" >&2; exit 1; }
+  private_screen "$(cat "$DIR/display")" ||
+    { echo "session '$SESSION': its screen :$(cat "$DIR/display") is gone; open your private screen again and start" >&2; exit 1; }
   DISPLAY=:$(cat "$DIR/display"); export DISPLAY
 }
 need_app() {
-  alive app || { echo "the app of session '$SESSION' isn't running; run: scripts/ui.sh start" >&2; exit 1; }
+  alive || { echo "the app of session '$SESSION' isn't running; run: scripts/ui.sh start DISPLAY" >&2; exit 1; }
 }
-settle() { sleep "${1:-0.15}"; }
-# The service port: Xvfb hands every live session its own display number, so no two collide.
+# The service port: every live private screen has its own display number, so no two collide.
 port() { echo $((7800 + $(cat "$DIR/display"))); }
 rpc() { bun "$ROOT/scripts/ui-rpc.ts" "$(port)" "$@"; }
 
@@ -125,40 +128,40 @@ onboarding() {
   sqlite3 "$DIR/data/desktop.db" "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); $sql"
 }
 
-# Launch the app on the session's display (it must be up). Dirs as flags, not XDG_*, so the
-# agents it runs keep the real git / jj config.
+# Launch the app on the session's display (it must be up), filling it: the screen's pixels are
+# the window's. Dirs as flags, not XDG_*, so the agents it runs keep the real git / jj config.
+# Not the caller's PI_SESSION_ID or UI_SESSION: the app's own agents would take them for
+# theirs (a nix dev shell they capture carries them into their commands), and their
+# `ui.sh` would act on this session, the app they run in.
 launch() {
-  W=$(cut -dx -f1 "$DIR/size"); H=$(cut -dx -f2 "$DIR/size")
   DISPLAY=:$(cat "$DIR/display"); export DISPLAY
+  read -r W H < <(xdotool getdisplaygeometry)
   PORT=$(port)
-  ! ss -ltnH "sport = :$PORT" | grep -q . || { echo "port $PORT is taken; scripts/ui.sh stop, then start" >&2; exit 1; }
+  ! ss -ltnH "sport = :$PORT" | grep -q . || { echo "port $PORT is taken: by another session's app on this screen? One app per screen" >&2; exit 1; }
   mkdir -p "$DIR/data" "$DIR/config"
   onboarding
-  env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" \
+  env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR -u PI_SESSION_ID -u UI_SESSION \
+    VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" \
     DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 DIRIGENT_RUNTIME="$ROOT/dirigent_runtime/src/index.ts" \
     DIRIGENT_PREFIX="$PREFIX" setsid "$BIN" --data-dir "$DIR/data" --config-dir "$DIR/config" >"$DIR/app.log" 2>&1 </dev/null &
   echo $! >"$DIR/app.pid"
   WIN=$(timeout 20 xdotool search --sync --onlyvisible --class dirigent | head -1) ||
     { echo "window never appeared, see $DIR/app.log" >&2; exit 1; }
   xdotool windowmove "$WIN" 0 0 windowsize "$WIN" "$W" "$H"
-  settle 1
+  sleep 1
 }
 
 case "${1:-}" in
   start)
-    W=${2:-1100}; H=${3:-720}
+    # No default: the caller's DISPLAY is the user's desktop.
+    D=${2:-}; D=${D#:}
+    private_screen "$D" || {
+      echo "not a private screen: '${2:-}'. Open one with the computer tool (screen: private) and pass the display it names: scripts/ui.sh start :N" >&2
+      exit 1
+    }
     build
-    kill_group app
-    # The screen is exactly the window, so screenshot px == window px.
-    if ! alive xvfb || [ "$(cat "$DIR/size" 2>/dev/null)" != "${W}x$H" ]; then
-      kill_group xvfb
-      rm -f "$DIR/display"
-      setsid Xvfb -displayfd 3 -screen 0 "${W}x${H}x24" -nolisten tcp 3>"$DIR/display" >"$DIR/xvfb.log" 2>&1 </dev/null &
-      echo $! >"$DIR/xvfb.pid"
-      echo "${W}x$H" >"$DIR/size"
-      for _ in $(seq 1 50); do [ -s "$DIR/display" ] && break; sleep 0.1; done
-      [ -s "$DIR/display" ] || { echo "Xvfb failed, see $DIR/xvfb.log" >&2; exit 1; }
-    fi
+    kill_app
+    echo "$D" >"$DIR/display"
     launch
     echo "session '$SESSION' ready: ${W}x$H on $DISPLAY, service :$PORT, dir $DIR"
     ;;
@@ -172,65 +175,12 @@ case "${1:-}" in
     PROJECT=$(cd "$PROJECT" && pwd)
     ID=$(P=$PROJECT rpc '{"type":"list_projects"}' 'r.projects.find(p => p.path === process.env.P)?.id ?? ""')
     [ -n "$ID" ] || ID=$(rpc "{\"type\":\"add_project\",\"path\":\"$PROJECT\"}" 'r.project.id')
-    kill_group app
+    kill_app
     sqlite3 "$DIR/data/desktop.db" "INSERT OR REPLACE INTO kv (key, value) VALUES ('last_model', '$MODEL'),
       ('last_target', 'local' || char(10) || '$ID'); DELETE FROM kv WHERE key IN ('pane', 'last_effort', 'last_isolate');
       DELETE FROM drafts WHERE host = ''; DELETE FROM draft_images WHERE host = '';"
     launch
-    xdotool key ctrl+n
-    settle 0.5
-    echo "project $PROJECT ($ID), model $MODEL: new-thread page open, composer focused"
-    ;;
-  shot)
-    need_display
-    # A fresh name by default: a `read` racing the shot gets an empty file, not the previous frame.
-    OUT=${2:-$(mktemp "$DIR/shot-XXXX.png")}
-    settle 0.3
-    if [ $# -ge 6 ]; then
-      import -window root -crop "${5}x${6}+${3}+${4}" +repage "$OUT"
-    else
-      import -window root "$OUT"
-    fi
-    echo "$OUT"
-    ;;
-  click)
-    need_display
-    xdotool mousemove "$2" "$3" click "$([ "${4:-}" = right ] && echo 3 || echo 1)"
-    settle
-    ;;
-  move)
-    need_display
-    xdotool mousemove "$2" "$3"
-    settle
-    ;;
-  drag)
-    need_display
-    xdotool mousemove "$2" "$3" mousedown 1
-    # Intermediate steps: gpui only sees a drag through motion events while pressed.
-    for i in 1 2 3 4 5 6 7 8 9 10; do
-      xdotool mousemove $(($2 + ($4 - $2) * i / 10)) $(($3 + ($5 - $3) * i / 10))
-      sleep 0.02
-    done
-    xdotool mouseup 1
-    settle
-    ;;
-  scroll)
-    need_display
-    N=$4; BUTTON=5
-    if [ "$N" -lt 0 ]; then N=$((-N)); BUTTON=4; fi
-    xdotool mousemove "$2" "$3" click --repeat "$N" --delay 30 "$BUTTON"
-    settle
-    ;;
-  type)
-    need_display
-    xdotool type --delay 15 -- "$2"
-    settle
-    ;;
-  key)
-    need_display
-    shift
-    xdotool key --delay 30 -- "$@"
-    settle
+    echo "project $PROJECT ($ID), model $MODEL: on the Inbox; ctrl+n opens a new thread in the project"
     ;;
   wait-idle)
     need_app
@@ -255,23 +205,23 @@ case "${1:-}" in
   run)
     shift
     [ $# -ge 1 ] || { echo "usage: scripts/ui.sh run CMD..." >&2; exit 1; }
-    [ -s "$DIR/display" ] && { DISPLAY=:$(cat "$DIR/display"); export DISPLAY; }
+    # Never the caller's DISPLAY, the user's desktop: what CMD opens is on the session's screen or nowhere.
+    unset DISPLAY
+    if [ -s "$DIR/display" ] && private_screen "$(cat "$DIR/display")"; then DISPLAY=:$(cat "$DIR/display"); export DISPLAY; fi
     UI_DIR=$DIR UI_PORT=$(port 2>/dev/null || true) exec "$@"
     ;;
   log)
     tail -n "${2:-40}" "$DIR/app.log"
     ;;
   stop)
-    kill_group app
-    kill_group xvfb
+    kill_app
     ;;
   reset)
-    kill_group app
-    kill_group xvfb
+    kill_app
     rm -rf "$DIR"
     ;;
   *)
-    sed -n '2,23p' "$0"
+    sed -n '2,21p' "$0"
     exit 1
     ;;
 esac

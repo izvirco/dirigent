@@ -57,6 +57,21 @@ pub enum RuntimeMessage {
         thread_id: String,
         active: bool,
     },
+    /// A step of the thread's computer use (the runtime's `computer.ts`): the picture of the
+    /// window it works in, when that changed, what the agent did there and where it clicked
+    /// (as fractions of the picture), and whether that was on the user's desktop (not on a
+    /// screen of the thread's own).
+    Screen {
+        thread_id: String,
+        #[serde(default)]
+        image: Option<ScreenImage>,
+        #[serde(default)]
+        action: Option<String>,
+        #[serde(default)]
+        cursor: Option<[f32; 2]>,
+        #[serde(default)]
+        desktop: bool,
+    },
     Error {
         thread_id: Option<String>,
         message: String,
@@ -80,6 +95,12 @@ pub enum RuntimeMessage {
     Crashed,
 }
 
+/// A screen's picture as the runtime sends it: base64 PNG.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScreenImage {
+    pub data: String,
+}
+
 /// Lines we write to the runtime's stdin.
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -91,7 +112,7 @@ enum Command_<'a> {
         /// Initial model / thinking level; the runtime only applies them to a fresh thread.
         model: Option<&'a str>,
         thinking_level: Option<&'a str>,
-        /// The tool switches that are on (`async_bash`, `ask_user`, `codemode`).
+        /// The tool switches that are on (`async_bash`, `ask_user`, `computer`, `codemode`).
         tools: &'a [String],
     },
     Unload {

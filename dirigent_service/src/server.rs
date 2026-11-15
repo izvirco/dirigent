@@ -79,6 +79,8 @@ const MAX_MESSAGE: usize = 64 << 20;
 pub struct Conn {
     pub id: u64,
     pub out: mpsc::UnboundedSender<ServerMessage>,
+    /// The screen picture it is in the middle of reading (`screen.rs`).
+    pub reading: Arc<std::sync::Mutex<Option<crate::screen::Reading>>>,
 }
 
 /// Checked before the upgrade: a public listener's request without a known bearer gets a
@@ -106,11 +108,14 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let conn = Conn { id: NEXT.fetch_add(1, Ordering::Relaxed), out: out.clone() };
+    let conn = Conn { id: NEXT.fetch_add(1, Ordering::Relaxed), out: out.clone(), reading: Default::default() };
     // Images (`Blob` replies) have a queue of their own, sent from only when nothing else
     // waits: opening a thread asks for all its images at once, possibly hundreds of MB,
     // minutes over a slow link, and every reply and push would wait behind them.
     let (blobs, mut blobs_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    // So do the pictures of a thread's computer use (`Screen` replies), ahead of the images:
+    // they show what happens now, and come a small piece at a time (`screen.rs`).
+    let (screens, mut screens_rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut push_rx = svc.push.subscribe();
 
     let _ = out.send(ServerMessage::Hello {
@@ -119,8 +124,8 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         service_id: svc.service_id.clone(),
     });
 
-    // Writer: this connection's replies, then global pushes, then images. One image already
-    // being written still goes first: a message can't be cut into.
+    // Writer: this connection's replies, then global pushes, then screens, then images. One
+    // image already being written still goes first: a message can't be cut into.
     let writer = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {
@@ -134,6 +139,7 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
+                Some(m) = screens_rx.recv() => m,
                 Some(m) = blobs_rx.recv() => m,
                 else => break,
             };
@@ -164,10 +170,14 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         };
         match serde_json::from_str::<ClientMessage>(&text) {
             Ok(req) => {
-                let (svc, conn, blobs) = (svc.clone(), conn.clone(), blobs.clone());
+                let (svc, conn, blobs, screens) = (svc.clone(), conn.clone(), blobs.clone(), screens.clone());
                 tokio::spawn(async move {
                     let reply = svc.handle(req, &conn).await;
-                    let queue = if matches!(reply, ServerMessage::Blob { .. }) { &blobs } else { &conn.out };
+                    let queue = match reply {
+                        ServerMessage::Blob { .. } => &blobs,
+                        ServerMessage::Screen { .. } => &screens,
+                        _ => &conn.out,
+                    };
                     let _ = queue.send(reply);
                 });
             }
