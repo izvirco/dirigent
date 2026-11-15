@@ -85,12 +85,30 @@ type Reply = { type: string; reply_to?: number | null; [k: string]: any };
 export const LOCAL = "local";
 /** A host that doesn't answer a connect this fast is reported unreachable (an offline tailscale peer never refuses). */
 const CONNECT_MS = 3000;
-/** Every reply is quick (a `prompt` or `create_thread` only waits for a workspace and the session to load), so this is a dead host or a lost reply. */
+/**
+ * Every reply is quick, so this is a dead host or a lost reply. But for a `prompt` or
+ * `create_thread`, which wait until the model has the message: for a workspace, the session
+ * to load, its nix dev shell, and what pi does before a run (compacting a full context). One
+ * of those taking longer times out a request that still goes through: `tellIfLost` says so.
+ */
 const REQUEST_MS = 30_000;
 const LINK = "dirigent://thread/";
 
 /** A request that got no reply in time: it may still have happened. */
 class TimeoutError extends Error {}
+
+/**
+ * `sent`, a request that hands a model a message: its timeout tells the caller that the
+ * message may have gone through (`maybe`), so it looks before it sends it again.
+ */
+async function tellIfLost<T>(sent: Promise<T>, maybe: string): Promise<T> {
+  try {
+    return await sent;
+  } catch (e) {
+    if (e instanceof TimeoutError) throw new TimeoutError(`${e.message}; ${maybe}`);
+    throw e;
+  }
+}
 
 /** One ws connection: numbered requests matched to their replies; pushes are ignored. */
 export class Client {
@@ -378,8 +396,8 @@ export class Dirigent {
     // Picked here so the prompt, which goes with the create, can tell the child its id.
     const id = Bun.randomUUIDv7();
     const text = `${opts.task.trim()}\n\n---\nYou are a sub-agent (thread ${id}) spawned by thread ${this.self.threadId}. ${tail}, so make that reply a complete, self-contained summary of what you did, found and left undone.`;
-    try {
-      const created = await this.req<{ thread: ThreadSummary }>(this.local, {
+    const created = await tellIfLost(
+      this.req<{ thread: ThreadSummary }>(this.local, {
         type: "create_thread",
         thread_id: id,
         project_id: me.project_id,
@@ -391,14 +409,11 @@ export class Dirigent {
         notify: opts.notify ?? "asap",
         // The parent's tools reach the child through the service (`CreateThread { parent }`).
         prompt: firstPrompt(text, model, opts.effort ?? me.thinking_level, null),
-      });
-      // A host from before `thread_id` picks an id of its own: the reply's is the one.
-      return created.thread.id;
-    } catch (e) {
-      if (e instanceof TimeoutError)
-        throw new TimeoutError(`${e.message}; it may have started anyway, as thread ${id}`);
-      throw e;
-    }
+      }),
+      `it may have started anyway, as thread ${id}`,
+    );
+    // A host from before `thread_id` picks an id of its own: the reply's is the one.
+    return created.thread.id;
   }
 
   /**
@@ -412,21 +427,24 @@ export class Dirigent {
     const model = opts.model ?? me.model;
     if (!model) throw new Error("no model: pass `model`");
     await this.checkModel(host, model);
-    const created = await this.req<{ thread: ThreadSummary }>(host, {
-      type: "create_thread",
-      project_id: project.id,
-      workspace: opts.workspace ?? false,
-      base: opts.base ?? null,
-      parent: null,
-      name: opts.name,
-      // No parent to inherit tools from: it gets the ones the caller has.
-      prompt: firstPrompt(
-        opts.task.trim(),
-        model,
-        opts.effort ?? me.thinking_level,
-        this.self.tools,
-      ),
-    });
+    const created = await tellIfLost(
+      this.req<{ thread: ThreadSummary }>(host, {
+        type: "create_thread",
+        project_id: project.id,
+        workspace: opts.workspace ?? false,
+        base: opts.base ?? null,
+        parent: null,
+        name: opts.name,
+        // No parent to inherit tools from: it gets the ones the caller has.
+        prompt: firstPrompt(
+          opts.task.trim(),
+          model,
+          opts.effort ?? me.thinking_level,
+          this.self.tools,
+        ),
+      }),
+      "the thread may have started anyway: `list` shows it if it has",
+    );
     const t = created.thread;
     owners.set(t.id, host.name);
     return { host, thread: t, project };
@@ -476,17 +494,20 @@ export class Dirigent {
   /** Message a thread: a new turn if it is idle, a steer (default) or follow-up if it runs. */
   async send(id: string, text: string, mode: "steer" | "follow_up" = "steer"): Promise<Found> {
     const f = await this.locate(id);
-    await this.req(f.host, {
-      type: "prompt",
-      thread_id: f.thread.id,
-      text,
-      mode: f.thread.running_since ? mode : "prompt",
-      model: null,
-      thinking_level: null,
-      images: [],
-      title: null,
-      tools: null,
-    });
+    await tellIfLost(
+      this.req(f.host, {
+        type: "prompt",
+        thread_id: f.thread.id,
+        text,
+        mode: f.thread.running_since ? mode : "prompt",
+        model: null,
+        thinking_level: null,
+        images: [],
+        title: null,
+        tools: null,
+      }),
+      "the thread may have got the message anyway: `read` it before sending again",
+    );
     return f;
   }
 

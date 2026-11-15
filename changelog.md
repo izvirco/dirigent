@@ -6,6 +6,8 @@
 - Threads have pi's codemode and MCP servers (`dirigent pi mcp add …`) ([#165])
 - Codemode is on by default: agents can batch tool calls in one script. Settings › Agent tools has its switch ([#172])
 - Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title. `/mcp` in a thread says how its servers are ([#165])
+- A message the model can't take (no credentials for its provider) comes back: a new thread's draft returns with its text and images, one sent to a thread goes back into its composer, and the toast says how to fix it ([#173])
+- Several new threads can start at once: a draft no longer waits for the last one to start ([#173])
 - Fixed: a thread scrolled up while it was still loading jumped to its top ([#159])
 - Fixed: adding a folder that already is a project made a second one ([#160])
 - Fixed: a steer sent while the model was writing sat above that message in the work log until it was taken ([#166])
@@ -13,6 +15,7 @@
 - Fixed: on Wayland, ctrl or shift pressed while an arrow or backspace was held did nothing until the key was pressed again ([#169])
 - Fixed: on a remote host, picking a thread up after 30 idle minutes missed the prompt cache and re-billed its whole context ([#170])
 - Fixed: a stopped thread started again when a job it had running ended; stop now ends those jobs too ([#164])
+- Fixed: a sub-agent whose model refused its first message was reported as started and never heard of again ([#173])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
@@ -24,6 +27,7 @@
 [#169]: https://forge.sebba.dev/izvir/dirigent/changes/169
 [#170]: https://forge.sebba.dev/izvir/dirigent/changes/170
 [#172]: https://forge.sebba.dev/izvir/dirigent/changes/172
+[#173]: https://forge.sebba.dev/izvir/dirigent/changes/173
 
 ## 0.0.9
 

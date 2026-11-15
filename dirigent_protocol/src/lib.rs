@@ -62,9 +62,9 @@ pub enum ClientMessage {
     /// without one is titled from its first prompt.
     /// `prompt` sends the thread its first prompt in the same request (a `Prompt` in mode
     /// `prompt`), so it is listed running from the start, never idle meanwhile: if it can't
-    /// be delivered the thread is deleted again and the request fails, so a client never
-    /// ends up with a thread that silently never started. Until it is delivered the thread
-    /// takes no other prompt.
+    /// be delivered (see `Prompt`) the thread is deleted again and the request fails, so a
+    /// client never ends up with a thread that silently never started. Until it is delivered
+    /// the thread takes no other prompt.
     /// `thread_id` (a lowercase, hyphenated uuid) lets the client know the thread's id before
     /// the reply, to open it at once; the host picks one without it. A host from before this
     /// field ignores it: the reply's id is the one.
@@ -116,6 +116,11 @@ pub enum ClientMessage {
     /// `tools` names the dirigent tools (`async_bash`, `ask_user`) the model gets from now on,
     /// and `codemode` while its switch is on; the host remembers them for the thread. `None`
     /// leaves them as they are.
+    /// The reply (`Ok`) says the model has the message: its run started, or it is queued
+    /// behind the one in progress. An `Error` says it has not, and why (the session didn't
+    /// load, no credentials for the model): the conversation has nothing of the message, so
+    /// the client gives it back to its user. A host from before 0.0.10 replied as soon as
+    /// the message was on its way, and told of such a failure in an `Error` push.
     Prompt {
         id: u64,
         thread_id: String,

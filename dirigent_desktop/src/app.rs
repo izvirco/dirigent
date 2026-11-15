@@ -412,6 +412,16 @@ struct PendingDraft {
     thread: ThreadSummary,
 }
 
+/// A message sent to a thread (`ClientMessage::Prompt`), until its host answers: it goes back
+/// into the thread's composer if the model didn't take it.
+struct SentPrompt {
+    host: String,
+    thread_id: String,
+    text: String,
+    images: Vec<Attachment>,
+    mode: PromptMode,
+}
+
 /// A folder to open (`Dirigent::open_folder`); `request`: the `AddProject` adding it.
 struct OpenFolder {
     path: String,
@@ -701,8 +711,10 @@ pub struct Dirigent {
     /// `hosts.toml`) loses the answers: its host's map goes, so the open thread's fetch on
     /// reconnect asks again.
     blob_requests: HashMap<String, HashMap<u64, String>>,
-    /// A draft was sent (`CreateThread` with its first prompt), not yet confirmed.
-    pending: Option<PendingDraft>,
+    /// The drafts sent (`CreateThread` with its first prompt) and not yet confirmed.
+    pending: Vec<PendingDraft>,
+    /// The `Prompt`s not answered yet, by request id.
+    prompts: HashMap<u64, SentPrompt>,
     /// `ForkThread` requests not answered yet, by request id: the host, and the draft the
     /// fork opens with (a fork from a user message gets that message).
     forks: HashMap<u64, (String, Option<Draft>)>,
@@ -882,7 +894,8 @@ impl Dirigent {
             selection: Selection::default(),
             blobs: HashMap::new(),
             blob_requests: HashMap::new(),
-            pending: None,
+            pending: vec![],
+            prompts: HashMap::new(),
             forks: HashMap::new(),
             isolate,
             base: None,
@@ -973,9 +986,15 @@ impl Dirigent {
         self.host(host)?.threads.iter().find(|t| t.id == id)
     }
 
-    /// Our draft's thread, which its host is still creating.
+    /// A draft's thread of ours, which its host is still creating.
     fn is_pending(&self, host: &str, id: &str) -> bool {
-        self.pending.as_ref().is_some_and(|p| p.target.host == host && p.thread.id == id)
+        self.pending.iter().any(|p| p.target.host == host && p.thread.id == id)
+    }
+
+    /// The sent draft `host` answered with reply `request`, no longer pending.
+    fn take_pending(&mut self, host: &str, request: u64) -> Option<PendingDraft> {
+        let i = self.pending.iter().position(|p| p.id == request && p.target.host == host)?;
+        Some(self.pending.remove(i))
     }
 
     /// Why the thread can't take a message yet, if it can't: its host is still creating it
@@ -1302,11 +1321,16 @@ impl Dirigent {
                 self.providers_status(&host, status, cx);
                 // The connection dropped under a sent draft: its request may never have
                 // arrived (a host that got it still runs the thread), so the draft comes back.
-                if status == HostStatus::Disconnected
-                    && let Some(p) = self.pending.take_if(|p| p.target.host == host)
-                {
-                    self.unsend_draft(p, cx);
-                    self.toast(format!("{host}: connection lost, the message is back in the draft"), cx);
+                // A message sent to a thread isn't given back: it may well have arrived.
+                if status == HostStatus::Disconnected {
+                    let lost: Vec<_> = self.pending.extract_if(.., |p| p.target.host == host).collect();
+                    if !lost.is_empty() {
+                        self.toast(format!("{host}: connection lost, the message is back in the draft"), cx);
+                    }
+                    for p in lost {
+                        self.unsend_draft(p, cx);
+                    }
+                    self.prompts.retain(|_, p| p.host != host);
                 }
                 if status == HostStatus::Connected && matches!(self.pane, Pane::Draft { .. }) {
                     self.refresh_draft_vcs();
@@ -1351,6 +1375,8 @@ impl Dirigent {
                 self.upload_usage(&host);
             }
             ServerMessage::Ok { reply_to } => {
+                // The model has the message.
+                self.prompts.remove(&reply_to);
                 self.on_providers_reply(&host, reply_to, Ok(()), cx);
             }
             ServerMessage::Providers { reply_to, providers, auth_path } => self.on_providers(&host, reply_to, providers, auth_path),
@@ -1401,14 +1427,14 @@ impl Dirigent {
                 let was_running = self.is_running();
                 let ran: HashSet<String> =
                     self.host(&host).map(|h| h.threads.iter().filter(|t| t.running()).map(|t| t.id.clone()).collect()).unwrap_or_default();
-                // Our draft's thread stays listed (and open) until its host lists it.
-                let ours = self.pending.as_ref().filter(|p| p.target.host == host).map(|p| p.thread.clone());
+                // Our drafts' threads stay listed (and open) until their host lists them.
+                let ours: Vec<_> = self.pending.iter().filter(|p| p.target.host == host).map(|p| p.thread.clone()).collect();
                 if let Some(h) = self.host_mut(&host) {
                     h.threads = threads;
-                    if let Some(t) = ours
-                        && !h.threads.iter().any(|x| x.id == t.id)
-                    {
-                        h.threads.insert(0, t);
+                    for t in ours {
+                        if !h.threads.iter().any(|x| x.id == t.id) {
+                            h.threads.insert(0, t);
+                        }
                     }
                 }
                 self.request_sidebar_vcs(&host, &ran);
@@ -1534,7 +1560,7 @@ impl Dirigent {
             }
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, thread } => {
-                let pending = self.pending.take_if(|p| p.id == reply_to && p.target.host == host);
+                let pending = self.take_pending(&host, reply_to);
                 // Listed unless a push of the host's lists it already.
                 if let Some(h) = self.host_mut(&host)
                     && !h.threads.iter().any(|t| t.id == thread.id)
@@ -1625,9 +1651,13 @@ impl Dirigent {
                     return;
                 }
                 // A failed create (or first prompt: the host deleted the thread again) puts
-                // the draft back so nothing typed is lost.
-                if let Some(p) = self.pending.take_if(|p| Some(p.id) == reply_to && p.target.host == host) {
+                // the draft back so nothing typed is lost. So does a message to a thread that
+                // its model didn't take.
+                if let Some(p) = reply_to.and_then(|id| self.take_pending(&host, id)) {
                     self.unsend_draft(p, cx);
+                }
+                if let Some(p) = reply_to.and_then(|id| self.prompts.remove(&id)) {
+                    self.unsend_prompt(p, cx);
                 }
                 // So does a refused edit; a refused fork just never opens.
                 if self.open().and_then(|t| t.rewound.as_ref()).is_some_and(|r| Some(r.request) == reply_to) {
@@ -3642,28 +3672,74 @@ impl Dirigent {
 
     /// Our draft's thread didn't start (or may not have: the connection dropped). It leaves
     /// the lists, the message goes back into the draft, and the draft opens again in its
-    /// place if the thread is in view.
+    /// place if the thread is in view. What was typed for the thread while it started (its
+    /// composer takes text, `send` holds it back) goes along, after the message: from the
+    /// composer, as the cache drops a thread's draft once its host lists it no more.
     fn unsend_draft(&mut self, p: PendingDraft, cx: &mut Context<Self>) {
         let (host, id) = (p.target.host.clone(), p.thread.id);
         if let Some(h) = self.host_mut(&host) {
             h.threads.retain(|t| t.id != id);
         }
         self.titling.remove(&(host.clone(), id.clone()));
-        self.restore_draft(p.text, &p.images, cx);
-        if self.open().is_some_and(|t| t.host == host && t.id == id) {
+        let open = self.open().is_some_and(|t| t.host == host && t.id == id);
+        if open {
+            let typed = (self.composer.read(cx).text().to_owned(), self.attachments(cx));
+            self.give_back(DRAFT_KEY, typed, cx);
+        }
+        self.give_back(DRAFT_KEY, (p.text, p.images), cx);
+        if open {
             self.new_draft(Some(p.target), cx);
             self.base = p.base;
         }
     }
 
-    /// Put a sent draft's message back as the draft page's draft: into the cache, and into
-    /// the composer if the draft page is still in view.
-    fn restore_draft(&mut self, text: String, images: &[Attachment], cx: &mut Context<Self>) {
+    /// A message sent to a thread wasn't taken by its model (the host says why, in a toast):
+    /// its echo goes, and the message is back in the thread's composer.
+    fn unsend_prompt(&mut self, p: SentPrompt, cx: &mut Context<Self>) {
+        if self.summary(&p.host, &p.thread_id).is_none() {
+            return;
+        }
+        // No title is on its way for a first message refused (`prompt`).
+        if !self.retitling(&p.host, &p.thread_id) {
+            self.titling.remove(&(p.host.clone(), p.thread_id.clone()));
+        }
+        if let Pane::Thread(t) = &mut self.pane
+            && t.host == p.host
+            && t.id == p.thread_id
+        {
+            if let Some(i) = t.streaming.echo.iter().position(|(text, mode)| *text == p.text && *mode == p.mode) {
+                t.streaming.echo.remove(i);
+            }
+            let tail = t.timeline.items.len();
+            t.list.remeasure_items(tail..tail + 1);
+        }
+        self.give_back((&p.host, &p.thread_id), (p.text, p.images), cx);
+    }
+
+    /// Put a message that wasn't sent after all back where it was typed: in the draft of
+    /// `key` (a thread's, or the draft page's: `composer_key`), in front of what was typed
+    /// there since (`rejoin`), and in the composer if that draft is the one in view. The
+    /// cache has what the composer holds, as every change is saved (`save_draft`); all but
+    /// text an input method is still composing.
+    fn give_back(&mut self, key: (&str, &str), message: Draft, cx: &mut Context<Self>) {
+        let (host, id) = key;
+        if message.0.trim().is_empty() {
+            return;
+        }
+        let typed = self.cache.lock().unwrap().draft(host, id).map(|(c, images)| (c.text, attachments_from(images))).unwrap_or_default();
+        let (text, images) = rejoin(message, typed);
         let content = input::Content { selection: text.len()..text.len(), text, reversed: false };
-        let (host, id) = DRAFT_KEY;
-        let _ = self.cache.lock().unwrap().set_draft(host, id, &content, &image_rows(images));
-        if composer_key(&self.pane).is_some_and(|k| k == DRAFT_KEY) {
-            self.load_composer(cx);
+        let _ = self.cache.lock().unwrap().set_draft(host, id, &content, &image_rows(&images));
+        if composer_key(&self.pane) != Some(key) {
+            return;
+        }
+        // Mid-edit the composer holds the message being edited; the draft is its stash.
+        match &mut self.pane {
+            Pane::Thread(t) if t.editing.is_some() => {
+                let e = t.editing.as_mut().unwrap();
+                (e.stash, e.images) = (content, images);
+            }
+            _ => self.load_composer(cx),
         }
     }
 
@@ -3672,8 +3748,7 @@ impl Dirigent {
     fn load_composer(&mut self, cx: &mut Context<Self>) {
         let Some((host, id)) = composer_key(&self.pane) else { return };
         let (content, images) = self.cache.lock().unwrap().draft(host, id).unwrap_or_default();
-        self.attachments =
-            images.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, blob: blob_from(&mime, bytes)? })).collect();
+        self.attachments = attachments_from(images);
         self.set_composer(content, cx);
     }
 
@@ -3745,10 +3820,6 @@ impl Dirigent {
                 self.menu = Some(Menu::Model);
                 return;
             }
-            if self.pending.is_some() {
-                self.toast("The last new thread is still starting", cx);
-                return;
-            }
             // A request to an offline host is dropped: keep the draft instead.
             if !self.connected(&target.host) {
                 self.toast(format!("{} is offline", target.host), cx);
@@ -3809,7 +3880,7 @@ impl Dirigent {
                 h.threads.insert(0, thread.clone());
             }
             let host = target.host.clone();
-            self.pending = Some(PendingDraft { id, target, base: self.base.clone(), text: text.clone(), images, thread });
+            self.pending.push(PendingDraft { id, target, base: self.base.clone(), text: text.clone(), images, thread });
             self.titling.insert((host.clone(), thread_id.clone()), Instant::now());
             self.remember_model();
             self.select_thread(&host, &thread_id, cx);
@@ -3891,6 +3962,8 @@ impl Dirigent {
                 tools: Some(self.config.tools.enabled()),
             },
         );
+        let sent = SentPrompt { host: host.to_owned(), thread_id: thread_id.to_owned(), text: text.clone(), images: images.to_vec(), mode };
+        self.prompts.insert(id, sent);
         self.remember_model();
         self.echo(host, thread_id, text, mode);
         cx.notify();
@@ -4613,6 +4686,31 @@ fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
         .collect()
 }
 
+/// A message that wasn't sent (`back`) and what its composer holds now (`typed`) as one
+/// draft: `back` first, a blank line, then `typed`. Both number their images from 1, so
+/// `back`'s move past `typed`'s, tokens and all.
+fn rejoin(back: Draft, typed: Draft) -> Draft {
+    let ((mut text, mut images), (typed, typed_images)) = (back, typed);
+    if typed.trim().is_empty() {
+        return (text, images);
+    }
+    let shift = typed_images.iter().map(|a| a.n).max().unwrap_or(0);
+    // The highest first: a token renumbered is then never taken for one still to do.
+    images.sort_by_key(|a| std::cmp::Reverse(a.n));
+    for a in images.iter_mut().filter(|_| shift > 0) {
+        text = text.replace(&image_token(a.n), &image_token(a.n + shift));
+        a.n += shift;
+    }
+    images.extend(typed_images);
+    images.sort_by_key(|a| a.n);
+    (format!("{text}\n\n{typed}"), images)
+}
+
+/// The cache's rows of a draft's images as attachments; one gpui can't decode is left out.
+fn attachments_from(rows: Vec<crate::cache::DraftImage>) -> Vec<Attachment> {
+    rows.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, blob: blob_from(&mime, bytes)? })).collect()
+}
+
 /// Attachments as the cache stores them.
 fn image_rows(images: &[Attachment]) -> Vec<(u32, &str, &[u8])> {
     images.iter().map(|a| (a.n, a.blob.image.format.mime_type(), a.blob.image.bytes.as_slice())).collect()
@@ -4865,6 +4963,22 @@ mod tests {
 
     fn seqs(entries: &[Entry]) -> Vec<u64> {
         entries.iter().map(|e| e.seq).collect()
+    }
+
+    /// A message given back goes in front of what was typed since, its images renumbered
+    /// past that text's (3 → 5 before 1 → 3, or `[image-1]` would end up as `[image-5]` too).
+    #[test]
+    fn a_message_given_back_joins_what_was_typed_since() {
+        let image = |n: u32, byte: u8| Attachment { n, blob: Blob { image: image_from("image/png", vec![byte]).unwrap(), size: None } };
+        let images = |d: &Draft| d.1.iter().map(|a| (a.n, a.blob.image.bytes[0])).collect::<Vec<_>>();
+        let back = || ("a [image-1] b [image-3]".to_owned(), vec![image(1, 11), image(3, 13)]);
+        let d = rejoin(back(), (" \n".into(), vec![]));
+        assert_eq!((d.0.as_str(), images(&d)), ("a [image-1] b [image-3]", vec![(1, 11), (3, 13)]));
+        let d = rejoin(back(), ("no images".into(), vec![]));
+        assert_eq!((d.0.as_str(), images(&d)), ("a [image-1] b [image-3]\n\nno images", vec![(1, 11), (3, 13)]));
+        let d = rejoin(back(), ("new [image-2] [image-1]".into(), vec![image(1, 1), image(2, 2)]));
+        assert_eq!(d.0, "a [image-3] b [image-5]\n\nnew [image-2] [image-1]");
+        assert_eq!(images(&d), [(1, 1), (2, 2), (3, 11), (5, 13)]);
     }
 
     /// A pi `message` entry.
