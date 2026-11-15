@@ -421,6 +421,12 @@ export class Sessions {
    * from now on (see `load`). `edit` is the id of a user message the prompt rewrites
    * (`EditMessage`): the session first goes back to just before it (`rewind`), and comes
    * back if the prompt fails before the new branch has an entry.
+   *
+   * Resolves when the run it starts ends. `taken` is called before that, once pi has the
+   * message: its run started, it is queued, or it was a command, which has run by then. A
+   * throw before it means pi refused the message and its session has nothing of it; one
+   * after it is the run's. (Pi takes a prompt that comes in while it settles a run without
+   * telling, and this resolves at once: not called then.)
    */
   async prompt(
     threadId: string,
@@ -432,10 +438,13 @@ export class Sessions {
     title?: TitleGen,
     tools?: string[],
     edit?: string,
+    taken: () => void = () => {},
   ): Promise<void> {
     const live = this.live.get(threadId);
     if (!live) throw new Error(`thread not loaded: ${threadId}`);
     await live.nixEnv;
+    // Unloaded while its dev shell was captured: the session is disposed.
+    if (this.live.get(threadId) !== live) throw new Error("the thread was unloaded");
     const { session } = live;
     const switchTo =
       model && model !== `${session.model?.provider}/${session.model?.id}`
@@ -453,6 +462,7 @@ export class Sessions {
         attachments,
         title,
         tools,
+        taken,
       );
     } catch (e) {
       undo?.();
@@ -471,6 +481,7 @@ export class Sessions {
     attachments: Attachment[],
     title: TitleGen | undefined,
     tools: string[] | undefined,
+    taken: () => void,
   ): Promise<void> {
     const { session } = live;
     if (switchTo) await session.setModel(switchTo);
@@ -478,8 +489,13 @@ export class Sessions {
       session.setThinkingLevel(thinkingLevel as ThinkingLevel);
     }
     if (tools) applyTools(live, tools);
-    if (title) {
-      this.generateTitle(title, text, session.model)
+    // The thread is named once pi has the message (a refused one may leave no thread to
+    // name), from the text as typed.
+    const typed = text;
+    const took = () => {
+      taken();
+      if (!title) return;
+      this.generateTitle(title, typed, session.model)
         .then((r) => session.setSessionName(r.title))
         .catch((e) =>
           this.send({
@@ -488,13 +504,12 @@ export class Sessions {
             message: `title generation failed: ${(e as Error).message}`,
           }),
         );
-    }
+    };
     const images: ImageContent[] = attachments.map((a) => ({
       type: "image",
       data: a.data,
       mimeType: a.mime_type,
     }));
-    // After the title started: it is named from the text as typed.
     if (attachments.length > 0) {
       try {
         text = linkAttachments(text, attachments);
@@ -513,8 +528,11 @@ export class Sessions {
       // The model is meant to see it now, not after a `wait` times out. (The user's, or a
       // parent's `dirigent send`: hence no who.)
       if ((await session.steer(text, images)) === "queued") wake(live, "a message came in");
-    } else if (mode === "follow_up" && session.isStreaming) await session.followUp(text, images);
-    else {
+      took();
+    } else if (mode === "follow_up" && session.isStreaming) {
+      await session.followUp(text, images);
+      took();
+    } else {
       // An extension command (`/mcp`) runs right here and starts no run, so nothing would
       // settle the run the service began for the message: it is settled here.
       let handled = false;
@@ -526,6 +544,7 @@ export class Sessions {
           preflightResult: (d) => {
             live.takingIn = false;
             handled = d === "handled";
+            took();
           },
         });
       } finally {
@@ -639,6 +658,22 @@ export class Sessions {
     const unloads = Array.from(ids, (id) => this.unload(id));
     await Promise.race([Promise.allSettled(unloads), Bun.sleep(3000)]);
   }
+}
+
+/**
+ * Why a prompt was refused, as said to whoever sent it. Pi's words for missing or expired
+ * credentials are for its terminal's user (`/login`, then paths into its docs): here the
+ * way to sign in is the desktop's.
+ */
+export function refusal(e: unknown): string {
+  // A string whatever was thrown: the service waits for these words.
+  const message = String((e as Error | undefined)?.message ?? e);
+  if (!/^(No API key|Authentication failed) /.test(message)) return message;
+  const said = message
+    .split("\n\n")[0]!
+    .replace(/\s*Run '\/login[^']*' to re-authenticate\.$/, "")
+    .replace(/\.$/, "");
+  return `${said}. Sign in under Settings › Providers.`;
 }
 
 /** Longer than this, a reply is the model talking (commentary on its instructions), not a title. */

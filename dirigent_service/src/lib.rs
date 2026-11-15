@@ -94,7 +94,9 @@ impl Service {
         let missing = self.missing.lock().unwrap();
         let starting = self.starting.lock().unwrap();
         for t in &mut threads {
-            t.running_since = self.runtime.running_since(&t.id);
+            // A thread still starting works, whatever its session is up to: `abandon` drops
+            // the session, and the run in it, before the thread is gone.
+            t.running_since = self.runtime.running_since(&t.id).or(t.prompted_at.filter(|_| starting.contains_key(&t.id)));
             t.jobs = self.runtime.jobs(&t.id);
             t.free_jobs = self.runtime.free_jobs(&t.id);
             // A workspace removed outside dirigent: the thread can't run until it is dealt with.
@@ -579,7 +581,8 @@ impl Service {
         // A steer or follow-up into a run that is over (the sender's view was stale: it
         // ended, or this service restarted under it) is a new turn. The runtime does the
         // same when the run ends while the message is on its way (`deliver`).
-        let mode = if self.runtime.running_since(thread_id).is_none() { PromptMode::Prompt } else { mode };
+        let idle = self.runtime.running_since(thread_id).is_none();
+        let mode = if idle { PromptMode::Prompt } else { mode };
         // A message brings an archived thread back.
         let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
         // The run starts now, not at pi's `agent_start`: loading the session (and a nix
@@ -595,14 +598,18 @@ impl Service {
             self.push_threads();
         }
         let sent = self.deliver(thread_id, mode, p, edit).await;
-        if sent.is_err() && self.runtime.settle(thread_id).is_some() {
+        // The run begun above never started. A message refused under a run in progress (a
+        // steer, a prompt from a client that didn't know of the run) leaves that run alone.
+        if sent.is_err() && idle && self.runtime.settle(thread_id).is_some() {
             self.push_threads();
         }
         sent
     }
 
-    /// `prompt` after the run's start: load the session and send the prompt. On an error the
-    /// caller settles the run.
+    /// `prompt` after the run's start: load the session and hand it the prompt. Returns once
+    /// pi has the message, or with why it has not (the session didn't load, pi refused the
+    /// message: `Runtime::prompt`); the caller settles the run then, and the sender still
+    /// has the message to give back to its user.
     async fn deliver(&self, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
         let (model, thinking_level) = (p.model.as_deref(), p.thinking_level.as_deref());
         info!(thread = %thread_id, ?mode, model = model.map(tracing::field::display), "prompt");
@@ -610,7 +617,7 @@ impl Service {
             self.storage.lock().unwrap().set_tools(thread_id, tools)?;
         }
         self.ensure_loaded(thread_id, model, thinking_level).await?;
-        self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref(), edit)
+        self.runtime.prompt(thread_id, &p.text, mode, model, thinking_level, &p.images, p.title.as_ref(), p.tools.as_deref(), edit).await
     }
 
     /// A `CreateThread` with a prompt is still setting the thread up (`starting`).
@@ -619,9 +626,9 @@ impl Service {
     }
 
     /// A thread being created couldn't be set up or prompted: it goes again, so the creator
-    /// keeps its draft instead of a thread that never started. Its run is settled only once
-    /// it is gone, so no push lists it idle: the deletion's push drops it. Returns `e` for
-    /// the request's error.
+    /// keeps its draft instead of a thread that never started. It stays `starting` until it
+    /// is gone, so no push lists it idle (`threads`): the deletion's push drops it. Returns
+    /// `e` for the request's error.
     fn abandon(&self, thread_id: &str, e: anyhow::Error) -> anyhow::Error {
         if let Err(e) = self.delete_thread(thread_id) {
             error!(thread = %thread_id, "delete unstarted thread: {e:#}");
@@ -894,7 +901,8 @@ impl Service {
             RuntimeMessage::Jobs { .. } | RuntimeMessage::NixShell { .. } => self.push_threads(),
             RuntimeMessage::Error { thread_id, message } => {
                 warn!(thread = thread_id.as_deref().map(tracing::field::display), "runtime error: {message}");
-                // A prompt that failed before pi started (unknown model, nix shell) never settles.
+                // A run that failed outside pi (a prompt throwing after pi took it, a notice or
+                // answers that couldn't be handed over) never settles.
                 // A thread still starting is deleted next (`abandon`): its push is the one.
                 if let Some(t) = &thread_id
                     && self.runtime.settle(t).is_some()

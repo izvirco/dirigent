@@ -96,6 +96,7 @@ enum Command_<'a> {
         thread_id: &'a str,
     },
     Prompt {
+        id: u64,
         thread_id: &'a str,
         text: &'a str,
         mode: PromptMode,
@@ -506,8 +507,13 @@ impl Runtime {
         self.send(&Command_::Unload { thread_id })
     }
 
+    /// Hand the thread's model a message and wait until pi has it (its run started, or it is
+    /// queued behind the one in progress) or refused it (no credentials for the model, say):
+    /// an error then, and nothing of the message is left in the session. No timeout: a
+    /// session just loaded finishes capturing its nix dev shell first, and pi may compact a
+    /// full context before it starts the run. A runtime that exits fails it.
     #[allow(clippy::too_many_arguments)]
-    pub fn prompt(
+    pub async fn prompt(
         &self,
         thread_id: &str,
         text: &str,
@@ -520,7 +526,9 @@ impl Runtime {
         edit: Option<&str>,
     ) -> Result<()> {
         self.inner.lock().unwrap().last_activity.insert(thread_id.to_owned(), Instant::now());
-        self.send(&Command_::Prompt { thread_id, text, mode, model, thinking_level, images, title, tools, edit })
+        let id = self.next_id();
+        let cmd = Command_::Prompt { id, thread_id, text, mode, model, thinking_level, images, title, tools, edit };
+        self.request::<Value>(id, None, cmd).await.map(drop)
     }
 
     pub fn answer(&self, thread_id: &str, ask: &Ask, answers: Option<&[Vec<String>]>) -> Result<()> {
@@ -659,6 +667,26 @@ mod tests {
         let loaded = r#"{"type":"loaded","thread_id":"t","thinking_level":"off","header":null}"#;
         rt.observe(&serde_json::from_str(loaded).unwrap());
         assert!(!rt.is_loaded("t"));
+    }
+
+    /// A prompt is answered when pi has the message, with pi's words if it refused it; a
+    /// runtime that dies first fails it, so nobody waits on a message that went nowhere.
+    #[tokio::test]
+    async fn a_prompt_waits_for_pis_answer() {
+        let rt = Runtime { cmd: vec![], url: String::new(), inner: Mutex::default() };
+        let (tx, mut sent) = mpsc::unbounded_channel();
+        rt.inner.lock().unwrap().stdin = Some(tx);
+        let prompt = || rt.prompt("t", "hi", PromptMode::Prompt, None, None, &[], None, None, None);
+        let id = |line: Option<String>| serde_json::from_str::<Value>(&line.unwrap()).unwrap()["id"].as_u64().unwrap();
+        let refuse = async { rt.observe(&RuntimeMessage::Failed { id: id(sent.recv().await), message: "no key".into() }) };
+        assert_eq!(tokio::join!(prompt(), refuse).0.unwrap_err().to_string(), "no key");
+        let take = async { rt.observe(&RuntimeMessage::Reply { id: id(sent.recv().await), value: Value::Null }) };
+        assert!(tokio::join!(prompt(), take).0.is_ok());
+        let die = async {
+            sent.recv().await;
+            rt.on_crash()
+        };
+        assert!(tokio::join!(prompt(), die).0.is_err());
     }
 
     /// Unloading ends a run in the session it drops, not one begun for a session still to

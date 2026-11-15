@@ -12,7 +12,7 @@
 import "../node_modules/@earendil-works/pi-coding-agent/dist/bun/runtime-setup.js";
 import { main as piMain } from "@earendil-works/pi-coding-agent";
 import { Logins, type Method } from "./auth";
-import { type Attachment, Sessions, type TitleGen } from "./sessions";
+import { type Attachment, refusal, Sessions, type TitleGen } from "./sessions";
 import type { Ask, Notify } from "./tools";
 
 type Inbound =
@@ -28,6 +28,7 @@ type Inbound =
   | { type: "unload"; thread_id: string }
   | {
       type: "prompt";
+      id: number;
       thread_id: string;
       text: string;
       mode: "prompt" | "steer" | "follow_up";
@@ -80,18 +81,36 @@ async function handle(sessions: Sessions, logins: Logins, msg: Inbound): Promise
       );
     case "unload":
       return sessions.unload(msg.thread_id);
-    case "prompt":
-      return sessions.prompt(
-        msg.thread_id,
-        msg.text,
-        msg.mode,
-        msg.model,
-        msg.thinking_level,
-        msg.images,
-        msg.title,
-        msg.tools,
-        msg.edit,
-      );
+    // The service waits to hear whether pi took the message: `reply` as soon as it has
+    // (the run goes on long after), `failed` if it refused it. What goes wrong later is
+    // the thread's error, like any other (`serve`).
+    case "prompt": {
+      let taken = false;
+      const take = () => {
+        if (!taken) send({ type: "reply", id: msg.id, value: null });
+        taken = true;
+      };
+      try {
+        await sessions.prompt(
+          msg.thread_id,
+          msg.text,
+          msg.mode,
+          msg.model,
+          msg.thinking_level,
+          msg.images,
+          msg.title,
+          msg.tools,
+          msg.edit,
+          take,
+        );
+        // Pi took it without telling (`Sessions.prompt`): the service is still waiting.
+        take();
+      } catch (e) {
+        if (taken) throw e;
+        send({ type: "failed", id: msg.id, message: refusal(e) });
+      }
+      return;
+    }
     case "answer":
       return sessions.answer(msg.thread_id, msg.ask, msg.answers);
     case "notify":
