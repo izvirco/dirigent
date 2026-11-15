@@ -44,9 +44,16 @@ pub fn frame(card: Div, cx: &mut Context<Dirigent>) -> AnyElement {
 /// Settings tab list goes on the sidebar's canvas) and the row lines and hover fills
 /// made for that surface show. Under it is the canvas made solid, as the window is under
 /// the app: a translucent theme's clear or see-through surfaces then look as they do in the
-/// window, not tinted by the card's `popup` fill. An opaque theme's panel covers it.
+/// window, not tinted by the card's `popup` fill. An opaque theme's panel covers it. `body`
+/// and the canvas under it take the card's width by their own style, not by stretching,
+/// which keeps laying out what is in them cheap (`theme::stack`).
 pub fn large(body: Div) -> Div {
     let t = theme::t();
-    let base = div().flex_1().min_h_0().flex().flex_col().rounded_lg().bg(rgba(theme::alpha(t.canvas, 0xff)));
-    div().w_full().max_w(u(LARGE_W)).h_full().max_h(u(LARGE_H)).child(base.child(body.flex_1().min_h_0().rounded_lg().bg(rgba(t.panel))))
+    let base = theme::stack().flex_1().min_h_0().rounded_lg().bg(rgba(theme::alpha(t.canvas, 0xff)));
+    div()
+        .w_full()
+        .max_w(u(LARGE_W))
+        .h_full()
+        .max_h(u(LARGE_H))
+        .child(base.child(body.w_full().flex_1().min_h_0().rounded_lg().bg(rgba(t.panel))))
 }

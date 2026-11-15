@@ -39,6 +39,9 @@ use std::path::Path;
 /// A server row's height, in design px.
 const ROW_H: f32 = 38.;
 
+/// The most of a tool's description its row is given (`summary`).
+const SUMMARY_CHARS: usize = 300;
+
 /// How a server's tools can reach the model (pi's `exposure`), with what that means; the
 /// first is pi's default.
 const EXPOSURES: [(&str, &str); 4] = [
@@ -683,7 +686,7 @@ fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .gap_3()
         .child(div().text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child("Servers whose tools the agents on this host can use."))
         .children(chip.then(|| host_chip(this, cx)));
-    div().flex().flex_col().gap_3().child(header).child(content)
+    theme::stack().gap_3().child(header).child(content)
 }
 
 /// The rows (the unfolded one with its details under it, the edited one as the form), then
@@ -715,7 +718,7 @@ fn list(servers: &[McpServer], this: &Dirigent, cx: &mut Context<Dirigent>) -> D
             )),
         };
     let empty = (servers.is_empty() && form.is_none()).then(|| hint("No MCP servers yet."));
-    div().flex().flex_col().children(empty).children(rows).children(below)
+    theme::stack().children(empty).children(rows).children(below)
 }
 
 /// `● name   command or URL   state   [Sign in]   (switch)`: one line, whatever its state.
@@ -808,14 +811,14 @@ fn details(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Div {
         _ => &[],
     };
     let tool_list = (!tools.is_empty()).then(|| {
-        div().flex().flex_col().gap_0p5().children(tools.iter().map(|tool| {
+        theme::stack().gap_0p5().children(tools.iter().map(|tool| {
             div()
                 .flex()
                 .flex_row()
                 .gap_2()
                 .text_size(text::sm())
                 .child(div().flex_shrink_0().font_family(mono.clone()).text_color(rgba(t.fg)).child(tool.name.clone()))
-                .children(tool.description.clone().map(|d| div().min_w_0().truncate().text_color(rgba(t.fg_2)).child(d)))
+                .children(tool.description.as_deref().map(|d| div().min_w_0().truncate().text_color(rgba(t.fg_2)).child(summary(d))))
         }))
     });
     let name = s.name.clone();
@@ -846,9 +849,7 @@ fn details(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Div {
             .on_click(cx.listener(move |this, _, _, cx| this.remove_mcp(&remove, cx)))
             .into_any_element(),
     );
-    div()
-        .flex()
-        .flex_col()
+    theme::stack()
         .gap_3()
         .mt_1()
         .mb_2()
@@ -861,6 +862,15 @@ fn details(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Div {
         .children(error.map(|e| div().font_family(mono.clone()).text_size(text::sm()).text_color(rgba(t.error)).child(e)))
         .children(tool_list)
         .child(div().flex().flex_row().flex_wrap().items_center().gap_1p5().children(actions))
+}
+
+/// A tool's description as its row shows it: its first paragraph on one line, cut to more
+/// than a row holds at its widest. The row truncates it to its width, but gpui shapes all of
+/// the text it is given first, and a description can be pages long.
+fn summary(description: &str) -> String {
+    let blank = |line: &&str| line.trim().is_empty();
+    let words = description.lines().skip_while(blank).take_while(|line| !blank(line)).flat_map(str::split_whitespace);
+    words.collect::<Vec<_>>().join(" ").chars().take(SUMMARY_CHARS).collect()
 }
 
 /// `Tools  codemode ▾`: how the server's tools reach the model, changeable.
@@ -917,9 +927,7 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
         .child(div().flex_1().min_w_0().text_size(text::sm()).children(note))
         .child(settings::text_button("mcp-form-cancel", "Cancel").on_click(cx.listener(|this, _, _, cx| this.close_mcp_form(cx))))
         .child(settings::primary_button("mcp-form-save", save).on_click(cx.listener(|this, _, _, cx| this.save_mcp_form(cx))));
-    div()
-        .flex()
-        .flex_col()
+    theme::stack()
         .gap_2p5()
         .p_4()
         .rounded_lg()
@@ -991,6 +999,13 @@ mod tests {
         assert_eq!(c, json!({"url": url}));
         // A command doesn't sign in.
         assert_eq!(config_from(Some(&base), "srv", "", "Claude Code", "").unwrap(), json!({"command": "srv"}));
+    }
+
+    #[test]
+    fn a_tools_row_gets_the_start_of_its_description() {
+        assert_eq!(summary("\n  Lists files\r\n  in a folder.\n\nIMPORTANT: pages of rules"), "Lists files in a folder.");
+        assert_eq!(summary(&"é".repeat(2 * SUMMARY_CHARS)), "é".repeat(SUMMARY_CHARS));
+        assert_eq!(summary(" \n"), "");
     }
 
     #[test]

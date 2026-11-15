@@ -23,6 +23,7 @@
 - Fixed: on a remote host, picking a thread up after 30 idle minutes missed the prompt cache and re-billed its whole context ([#170])
 - Fixed: a stopped thread started again when a job it had running ended; stop now ends those jobs too ([#164])
 - Fixed: a sub-agent whose model refused its first message was reported as started and never heard of again ([#173])
+- Fixed: Settings froze for seconds at a time on Providers and on an MCP server with its tools unfolded ([#184])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
@@ -41,6 +42,7 @@
 [#178]: https://forge.sebba.dev/izvir/dirigent/changes/178
 [#180]: https://forge.sebba.dev/izvir/dirigent/changes/180
 [#183]: https://forge.sebba.dev/izvir/dirigent/changes/183
+[#184]: https://forge.sebba.dev/izvir/dirigent/changes/184
 
 ## 0.0.9
 
