@@ -1,16 +1,20 @@
 ## 0.0.10 (draft)
 
+- Dirigent runs its own agent, built into the app: pi, bun and the bundled runtime are gone, and an install is the app and its command line. The first start brings your threads, instructions (`AGENTS.md`), skills, MCP servers and proxy over, in a window that shows how far it is and what could not be brought; what was there before is copied to `dirigent.bck` beside the data and the config dir first ([#191])
+- Models come through your CLIProxyAPI alone: the setup and Settings › Proxy take its address and API key. Settings › Providers and signing in to providers are gone ([#191])
+- Gone with pi: `dirigent pi`, pi packages and extensions, `/skill:name` and prompt templates, a project's own `.pi/` settings, `/mcp` in a thread. The agent's settings are Settings and `agent.toml` in the config dir ([#191])
+- Update the app and every host together: this version and older ones don't understand each other. Settings › Hosts says which host to update ([#191])
+- Usage and a thread's spend count what compacting its context cost, for the compactions it already had too ([#191])
 - Agents can add a project: "clone this repo and add it to dirigent" ([#160])
 - Projects: expand a project to see where it lives, a line per host and path ([#162])
 - Projects: link with a search that shows paths, unlink one directory at a time ([#162])
-- Threads have pi's codemode and MCP servers (`dirigent pi mcp add …`) ([#165])
+- Threads have codemode and MCP servers ([#165])
 - Codemode is on by default: agents can batch tool calls in one script. Settings › Agent tools has its switch ([#172])
 - Settings › MCP servers: add, edit, remove and turn off a host's MCP servers, see each one's tools or why it fails, pick how its tools reach the model, and sign in to one that uses OAuth. Idle threads pick a change up with their next message ([#176])
-- Settings › MCP servers: a URL server takes a client name, for one that only lets clients it knows sign in (Figma's refuses pi and takes "Claude Code"); a sign-in refused that way says so ([#180])
-- Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title. `/mcp` in a thread says how its servers are ([#165])
-- A message the model can't take (no credentials for its provider) comes back: a new thread's draft returns with its text and images, one sent to a thread goes back into its composer, and the toast says how to fix it ([#173])
+- Settings › MCP servers: a URL server takes a client name, for one that only lets clients it knows sign in (Figma's takes "Claude Code"); a sign-in refused that way says so ([#180])
+- Warnings show as toasts: an MCP server that won't connect, a failed nix shell or title ([#165])
+- A message the model can't take (its host's proxy doesn't serve it) comes back: a new thread's draft returns with its text and images, one sent to a thread goes back into its composer, and the toast says how to fix it ([#173])
 - Several new threads can start at once: a draft no longer waits for the last one to start ([#173])
-- Pi 1.5.2: Claude OAuth requests report a current Claude Code version ([#175])
 - Computer use: an agent can open a screen to run and operate GUI apps on, when a task needs one: a private one of the thread's own, which nobody sees but in the thread (Linux, with Xvfb installed), or your desktop, where it works in the background where the app allows. Tell it which ("test this on your private screen", "do it on my desktop"); without a private screen it uses the desktop and says so. The thread's right panel shows the window it works in as it goes, with a cursor where it clicks, marked when that is your desktop; click the picture to enlarge it. Windows and Linux installs ship Cua Driver for it; on macOS install it yourself. Settings › Agent tools › `computer` turns it off ([#178])
 - A slow connection stays responsive while an agent takes screenshots: they no longer travel in every event, and the images in a tool call's output are fetched when you open it in the log ([#178])
 - The sidebar and the right panel can be dragged as wide as you like ([#177])
@@ -23,7 +27,8 @@
 - Fixed: on a remote host, picking a thread up after 30 idle minutes missed the prompt cache and re-billed its whole context ([#170])
 - Fixed: a stopped thread started again when a job it had running ended; stop now ends those jobs too ([#164])
 - Fixed: a sub-agent whose model refused its first message was reported as started and never heard of again ([#173])
-- Fixed: Settings froze for seconds at a time on Providers and on an MCP server with its tools unfolded ([#184])
+- Fixed: Settings froze for seconds at a time on an MCP server with its tools unfolded ([#184])
+- Fixed: a run that a job or sub-agent ending started showed the time since your last message, not its own ([#191])
 
 [#159]: https://forge.sebba.dev/izvir/dirigent/changes/159
 [#160]: https://forge.sebba.dev/izvir/dirigent/changes/160
@@ -36,13 +41,13 @@
 [#170]: https://forge.sebba.dev/izvir/dirigent/changes/170
 [#172]: https://forge.sebba.dev/izvir/dirigent/changes/172
 [#173]: https://forge.sebba.dev/izvir/dirigent/changes/173
-[#175]: https://forge.sebba.dev/izvir/dirigent/changes/175
 [#176]: https://forge.sebba.dev/izvir/dirigent/changes/176
 [#177]: https://forge.sebba.dev/izvir/dirigent/changes/177
 [#178]: https://forge.sebba.dev/izvir/dirigent/changes/178
 [#180]: https://forge.sebba.dev/izvir/dirigent/changes/180
 [#183]: https://forge.sebba.dev/izvir/dirigent/changes/183
 [#184]: https://forge.sebba.dev/izvir/dirigent/changes/184
+[#191]: https://forge.sebba.dev/izvir/dirigent/changes/191
 
 ## 0.0.9
 

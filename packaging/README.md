@@ -8,11 +8,8 @@ into `%LOCALAPPDATA%\Programs\Dirigent`:
 ```
 dirigent_desktop.exe         the app, with Lilex, the icon and version info built in (build.rs)
 dirigent.exe                 the command line (below), put on the user's PATH (a ticked installer task, applied again on each update; uninstalling takes it off)
-runtime\dirigent_runtime.exe the bun runtime compiled to one exe (dirigent_runtime/build.ts), no bun needed
-runtime\package.json, docs\, …   what a compiled pi reads next to its exe
-runtime\node_modules\        pi-ai's codex module as source: the CLIProxyAPI provider extension patches it (build.ts)
-runtime\cua-driver.exe       Cua Driver, which computer use runs (below), and its license next to it
-licenses\Lilex-OFL.txt
+cua-driver.exe               Cua Driver, which computer use runs (below)
+licenses\                    Lilex-OFL.txt, cua-driver-LICENSE.md
 ```
 
 plus a Start menu entry, an uninstaller and, unless unticked, "Open in Dirigent" on folders (Windows 11:
@@ -27,10 +24,10 @@ its bash.
 ```
 dirigent_desktop      the app, with Lilex built in (build.rs)
 dirigent              the command line (below)
-runtime/              the compiled runtime, as on Windows
+cua-driver            Cua Driver, which computer use runs (below)
 install.sh            linux/install.sh
 dirigent.png          the icon
-licenses/Lilex-OFL.txt
+licenses/             Lilex-OFL.txt, cua-driver-LICENSE.md
 ```
 
 Installing, on any distro, per user and without root:
@@ -77,7 +74,7 @@ above holds for it with these names in the place of the stable ones:
 |                          | stable                                          | nightly                                        |
 | ------------------------ | ----------------------------------------------- | ---------------------------------------------- |
 | data dir                 | `~/.local/share/dirigent`                       | `~/.local/share/dirigent-nightly`              |
-| config dir (pi's too)    | `~/.config/dirigent`                            | `~/.config/dirigent-nightly`                   |
+| config dir               | `~/.config/dirigent`                            | `~/.config/dirigent-nightly`                   |
 | Windows data, config     | `%LOCALAPPDATA%\dirigent`, `%APPDATA%\dirigent` | `…\dirigent-nightly` in both                   |
 | local service port       | 7777                                            | 7776                                           |
 | install (Linux, macOS)   | `~/.local/lib/dirigent`                         | `~/.local/lib/dirigent-nightly`                |
@@ -93,8 +90,7 @@ pick the rest: `install.sh` from the `nightly` file a nightly's tarball has next
 version. Inside an install the files are named the same in both, but for the command on Windows
 (`dirigent-nightly.exe`: both install dirs are on PATH there, which leaves `dirigent_desktop.exe` the one name
 they share on it; nothing starts the app that way). So a nightly starts empty, as a first install
-does: its own setup, sign-ins, hosts and threads (pi's agent dir is seeded from `~/.pi/agent` if there is one, as
-on any first start; never from the stable install's). Its service being on 7776, another desktop reaches it as
+does: its own setup, proxy, hosts and threads (nothing comes from the stable install's). Its service being on 7776, another desktop reaches it as
 `ws://<host>:7776/ws`.
 
 Installing one is the stable line with `nightly` for `stable`:
@@ -105,28 +101,28 @@ d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/nightly/
 
 ## Computer use (Cua Driver, Xvfb)
 
-The `computer` tool (Settings › Agent tools, on by default; `dirigent_runtime/src/computer.ts`) opens a screen for
+The `computer` tool (Settings › Agent tools, on by default; `dirigent_agent/src/tools/computer.rs`) opens a screen for
 an agent to run and operate GUI apps on, when it asks for one: nothing runs before that. Two things do the work.
 
 [Cua Driver](https://github.com/trycua/cua) (MIT) operates the screen, as an MCP server of the thread: one
-executable, `cua-driver[.exe]`, which the Windows and Linux installs ship in `runtime/`.
-`dirigent_runtime/build.ts` downloads it from the driver's GitHub release as it builds the runtime, checks its
-sha256 and puts its license next to it; the version and hashes are pinned there (`DRIVER`), and `flake.nix`
-(`cuaDriver`) pins the same version for the nix packages and the dev shell: bump both together. The driver moves
+executable, `cua-driver[.exe]`, which the Windows and Linux installs ship next to the binaries.
+`packaging/cua-driver.sh` downloads it from the driver's GitHub release for the release workflow, checks its
+sha256 and fetches its license; the version and hashes are pinned there, and `flake.nix` (`cuaDriver`) pins the
+same version for the nix packages and the dev shell: bump both together. The driver moves
 fast and drops things on dated notices, so an update is a release to try, not a number to raise: `testing.md` has
 how. A private screen offers a named few of its tools and a guide of ours in the place of its own (`PRIVATE_TOOLS`,
-`privateGuide` in `computer.ts`), both written against the pinned version: read them against a new one. Where none
-is shipped (macOS, a dev checkout outside the dev shell) the runtime takes `cua-driver` from PATH; a machine
-without one that starts (`cua-driver --version`, tried once per runtime) has no computer use, and the agent that
-asks is told why. On macOS that is the user's own install
+`private_guide` in `computer.rs`), both written against the pinned version: read them against a new one. The agent
+looks for the driver next to its own executable, then on PATH (macOS, a dev checkout: the dev shell has it); a
+machine without one that starts (`cua-driver --version`) has no computer use, and the agent that asks is told
+why. On macOS that is the user's own install
 (`/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"`): its `CuaDriver.app` holds the permissions.
 Untested by us, like the rest of the macOS build. Windows is untested too: the driver is what its release ships.
 Its telemetry, update check and on-screen cursor are off, and it keeps its state under `<data dir>/screens/`,
-which a runtime wipes as it starts. On Linux it drives X11 windows (and XWayland ones in a Wayland session); it
+which a service wipes as it starts. On Linux it drives X11 windows (and XWayland ones in a Wayland session); it
 needs `libX11`, `libXi` and `libxkbcommon`, which a desktop has.
 
 `Xvfb` makes a thread's private screen: an X display nobody sees but in the thread. Linux only. The nix packages
-ship it next to the runtime; the tarball doesn't, and takes it from PATH (`xvfb` on Debian and Ubuntu,
+ship it next to the binaries; the tarball doesn't, and takes it from PATH (`xvfb` on Debian and Ubuntu,
 `xorg-server-xvfb` on Arch, `xorg-x11-server-Xvfb` on Fedora; the dev shell has it). Where there is none (Windows and macOS too), an agent that asks for a
 private screen gets the machine's desktop in its place and is told to say so; the thread's panel marks what
 happens on the desktop either way. A private screen's apps run in the user's session in every other way (the same
@@ -139,18 +135,61 @@ on the desktop.
 
 ```
 dirigent [dir]        start the desktop (a running one gets the folder)
-dirigent pi [args…]   the bundled pi's own CLI: `dirigent pi install npm:…`, `dirigent pi config`, a terminal session
 dirigent key …        API keys of the embedded service's public listener (below): add <name>, list, revoke <name>
 dirigent login        sign this data dir in to the forge with a code (below); `dirigent logout`, `dirigent whoami`
 ```
 
-`--data-dir` / `--config-dir` go first and apply to both. It finds the desktop and `runtime/` next to its own
-(real) path, so it works from an install, a nix package and `target/`.
+`--data-dir` / `--config-dir` go first and apply to all of them. It finds the desktop next to its own (real)
+path, so it works from an install, a nix package and `target/`.
 
-Pi (the runtime and `dirigent pi` alike) keeps its agent dir (`auth.json`, `settings.json`, installed packages,
-extensions, skills…) in `<config dir>/agent`, apart from `~/.pi/agent`. The first start without one copies
-`~/.pi/agent` (minus `sessions/` and caches; `dirigent_service/src/agent.rs`), so nothing needs signing in again;
-a `--config-dir` instance copies the real install's instead.
+## The agent's files
+
+The agent is part of the service (`dirigent_agent`): an install ships nothing for it but the binaries. What it
+reads is the user's, in the config dir:
+
+```
+agent.toml   the proxy's address and API key, compaction, MCP servers (`dirigent_agent/src/config.rs`); owner-only
+AGENTS.md    the user's instructions, in every thread's system prompt
+skills/      a directory per skill, each with its SKILL.md
+```
+
+and, in the data dir, `service.db` (the threads), `mcp-auth.json` (MCP sign-ins), `proxy.json` (the proxy's
+management key, for Usage), `jobs/` (the logs of the commands agents run) and caches. Settings writes
+`agent.toml`; editing it by hand works too, and applies to the next request.
+
+Models come through a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) the user runs, and only that
+way: the setup and Settings › Proxy ask for its address and API key. Dirigent neither installs nor starts one.
+
+Dirigent used to run pi, as a bundled runtime. The first start of a version with its own agent brings an install
+over where it is, once (`dirigent_service/src/migration.rs`). A desktop does it in a window that opens before the
+app does and stays until Continue; a service without one says it in its log. In order:
+
+- A backup: `service.db` and `desktop.db` are copied to `<data dir>.bck`, and the whole config dir to
+  `<config dir>.bck`, beside the directories they are of (`~/.local/share/dirigent.bck`, `~/.config/dirigent.bck`;
+  `.bck.2` and so on where there is one already). Not the rest of the data dir: workspaces stay as they are.
+  Nothing removes the backups; they are the user's to delete.
+- `<data dir>/service.db`, pi's, is converted and replaced by the agent's, under the same name (`migrate` in
+  `dirigent_service/src/storage.rs`). A thread whose history can't be read as the agent's stays in the list,
+  locked: it opens, but takes no more messages.
+- `<config dir>/agent` (pi's agent dir) becomes the files above: the proxy from the CLIProxyAPI provider's
+  `cliproxyapi.json`, the compaction settings, `AGENTS.md`, the skills, the MCP servers of `mcp.json` and their
+  sign-ins (`dirigent_service/src/agent.rs`). Then it is removed, with all of it in the backup and nothing
+  that was brought over still linking into it; the report names a file of pi's where it is from then on.
+
+What can't be brought over (an `APPEND_SYSTEM.md`, a file that would not copy, an MCP server or sign-in that
+doesn't work as it was, a thread that is locked) doesn't stop the rest: the window lists it, the log has it, and
+it is in `migration.txt` in the backups. A step that fails as a whole (no room for the backup) stops the
+migration with the data as that step found it. The next start goes on from there with the backup there is (a
+file `unfinished` in it says so), so trying again makes no second one, and says again what the try before
+could not bring over; pi's agent dir then stays where it is.
+
+A migration is of an install, and has it to itself. It stops, with nothing changed, when another Dirigent
+has `service.db` open (an older one that still runs), when another migration is under way on the data dir, and
+for an instance with only one of `--data-dir` and `--config-dir` given: the other directory is the real
+install's, so pass both.
+
+A `--config-dir` instance without an `agent.toml` copies the real install's `agent.toml`, `AGENTS.md` and
+`skills/` instead (the proxy's API key with them, the management key not).
 
 ## Remote hosts
 
@@ -292,9 +331,9 @@ were on `beta`, which gets no more releases: they move to `stable` by installing
 The workflow (`.github/workflows/release.yml`) works the version out once (its `version` job), then has a job per
 platform. Each builds the desktop with that version (`DIRIGENT_BUILD_VERSION`, which becomes
 `dirigent_protocol::release::VERSION`; other builds are the workspace version) and the channel's update url baked
-in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), compiles the runtime,
-builds the installer (Windows) or the tarball (Linux, macOS) and runs `dirigent_api publish`, which signs it and
-uploads it to the bucket, the channel file last. If one job fails, re-run it alone ("Re-run failed jobs": it keeps
+in (`DIRIGENT_BUILD_UPDATE_URL`; dev builds have none and never check), fetches Cua Driver
+(`packaging/cua-driver.sh`; not on macOS), builds the installer (Windows) or the tarball (Linux, macOS) and runs
+`dirigent_api publish`, which signs it and uploads it to the bucket, the channel file last. If one job fails, re-run it alone ("Re-run failed jobs": it keeps
 the run's version; re-running all jobs makes a new nightly). Not once a newer nightly is out: the re-run would point
 its platform's channel back at the older one, so run a new nightly then. Testers download the latest from
 `https://dirigent.sebba.dev/api/v0/download/<channel>/<windows-x86_64|linux-x86_64|macos-aarch64>`. Unsigned by Authenticode for
@@ -344,14 +383,13 @@ builds, dev and nix too), or `DIRIGENT_API_URL` at run time for tests.
 
 `flake.nix` packages all three: `dirigent_desktop` (the default), `dirigent_service` for remote hosts, and
 `dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The first two come with the `dirigent`
-command line (`dirigent pi` signs in and installs extensions on a remote host too) and are laid out like an
-install: the binaries in `libexec/dirigent/` next to the compiled `runtime/` (with Cua Driver in it, patched to find its libraries in the store, and Xvfb), symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
+command line and are laid out like an install: the binaries in `libexec/dirigent/`, next to Cua Driver (patched
+to find its libraries in the store) and Xvfb, and symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
 driver: on NixOS `hardware.graphics.enable`; elsewhere nix's vulkan-loader may not find the system's drivers
 (nixGL).
 
-Two hashes in `flake.nix` follow the lockfiles: `cargoDeps` (Cargo.lock) and `nodeModules` (bun.lock). After
-changing a lockfile, set the hash to `lib.fakeHash` and run `nix build .#dirigent_service`, which needs both but
-doesn't build gpui; it prints the right hash.
+One hash in `flake.nix` follows the lockfile: `cargoDeps` (Cargo.lock). After changing it, set the hash to
+`lib.fakeHash` and run `nix build .#dirigent_service`, which doesn't build gpui; it prints the right hash.
 
 Not built yet: the standalone `dirigent_service` for remote hosts could ship as a tarball the same way; an AUR
 package could repackage the Linux tarball (pacman would then update it, so its installs shouldn't self-update).

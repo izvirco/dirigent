@@ -30,20 +30,19 @@ either: `examples/run.rs` is a session with a printer for a host, the tests scri
 
 ## Modules
 
-| module | what | 
-|---|---|
-| `proxy` | the CLIProxyAPI client: model catalog, pricing, the two wires (`anthropic`, `codex`), retries' classification |
-| `session` | a live thread: its branch, queues (steer / follow-up / notices), jobs, MCP connections; `prompt`, `abort`, ... |
-| `run` | the loop of one run: request, stream, tool calls side by side, queues, compaction, retry |
-| `context` | a branch as request messages; compaction |
-| `prompt` | the system prompt: tools, rules, `AGENTS.md` files, skills |
-| `tool` | `Tool`, `ToolSpec`, `ToolOutput` |
-| `tools` | `read`, `bash`, `edit`, `write`, `async_bash` (jobs), `ask_user` |
-| `codemode` | the QuickJS sandbox and the `codemode` tool |
-| `mcp` | the MCP client, a session's servers as tools, the settings' operations |
-| `tools::computer` | the `computer` tool: Xvfb, Cua Driver (an MCP server), the recording |
-| `config` | `agent.toml` |
-| `import` | pi's entries and agent dir into ours (the migration) |
+| module     | what                                                                                                         |
+| ---------- | ------------------------------------------------------------------------------------------------------------ |
+| `proxy`    | the CLIProxyAPI client: the models and their prices, the two wires (`anthropic`, `codex`), what a failure is |
+| `session`  | a live thread: its branch, queues (steer / follow-up / notices), jobs, MCP servers; `prompt`, `abort`, …     |
+| `run`      | the loop of one run: request, stream, tool calls side by side, queues, compaction, retry                     |
+| `context`  | a branch as request messages; compaction                                                                     |
+| `prompt`   | the system prompt: tools, rules, `AGENTS.md` files, skills                                                   |
+| `tool`     | `Tool`, `ToolSpec`, `ToolOutput`                                                                             |
+| `tools`    | `read`, `bash`, `edit`, `write`, `async_bash` (jobs), `ask_user`, `computer`                                 |
+| `codemode` | the QuickJS sandbox and the `codemode` tool                                                                  |
+| `mcp`      | the MCP client, a session's servers as tools, what Settings does to them                                     |
+| `config`   | `agent.toml`                                                                                                 |
+| `import`   | pi's entries and agent dir as ours (Dirigent ran pi before it had this crate)                                |
 
 ## How a run goes
 

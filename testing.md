@@ -9,7 +9,7 @@ scripts/ui.sh setup [DIR] [MODEL]    # add DIR ("" = <session>/scratch) as a pro
 scripts/ui.sh wait-idle [SECS]       # until no thread runs or has jobs (timeout 300 s)
 scripts/ui.sh rpc JSON [EXPR]        # one protocol request to the session's service; EXPR is JS over the reply `r`
 scripts/ui.sh run CMD...             # CMD with sqlite3, xdotool, magick, DISPLAY, UI_DIR (session dir), UI_PORT
-scripts/ui.sh log [N]                # last N lines of the app's output (service and runtime included)
+scripts/ui.sh log [N]                # last N lines of the app's output (its service's included)
 scripts/ui.sh stop                   # kill the app
 scripts/ui.sh reset                  # stop + wipe the session's data
 ```
@@ -24,7 +24,8 @@ scripts/ui.sh reset                  # stop + wipe the session's data
 - The app dies with the screen: open it again and `start`.
 - Session: `/tmp/dirigent-ui-<user>/<session>/` (`data/`, `config/`, `app.log`), named after your thread id;
   `UI_SESSION=name` picks another. Service port: 7800 + the display's number.
-- Models: `anthropic/claude-opus-5-5` (the default) for parents, `anthropic/claude-haiku-5-5` for children.
+- Models: by their id at the proxy. `claude-opus-5-5` is `setup`'s default; use `claude-haiku-5-5` and short
+  prompts wherever the model doesn't matter (the proxy is Seb's subscription).
 
 ```sh
 # computer({ screen: "private" })   → names your display, say :3
@@ -40,7 +41,7 @@ scripts/ui.sh stop
 ```sh
 scripts/ui.sh rpc '{"type":"list_threads"}' 'r.threads.map(t => t.id + " " + t.name)'
 scripts/ui.sh rpc '{"type":"create_thread","project_id":"…","name":"child","parent":"<thread id>"}'
-scripts/ui.sh rpc '{"type":"prompt","thread_id":"…","text":"hi","mode":"prompt","model":"anthropic/claude-haiku-5-5"}'
+scripts/ui.sh rpc '{"type":"prompt","thread_id":"…","text":"hi","mode":"prompt","model":"claude-haiku-5-5"}'
 scripts/ui.sh run sh -c 'sqlite3 $UI_DIR/data/service.db "select id, name from threads"'
 ```
 
@@ -57,18 +58,41 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   Keep test repos outside the session dir.
 - **A long thread** (the ruler scrolls past 32 marks): `rpc` prompts in a loop.
 - **Sub-agents**: prompt "use the dirigent tool to spawn a sub-agent named … with model
-  anthropic/claude-haiku-5-5 whose task is …". A job with `notify: "never"` leaves a finished thread with a job
+  claude-haiku-5-5 whose task is …". A job with `notify: "never"` leaves a finished thread with a job
   running. `create_thread` without a prompt pushes nothing until an `archive_thread`. `open` jumps to a thread.
-- **Refused messages**: a model of a provider the session isn't signed in to (Settings › Providers signs out), or
-  `UPDATE threads SET model = 'provider/id'` in `service.db` with the app stopped.
-- **Compaction** every turn: a test project with this `.pi/settings.json`:
-  `{"compaction":{"reserveTokens":5000000,"keepRecentTokens":1}}`. To slow or fail it: `.pi/extensions/x.ts` with a
-  `pi.on("session_before_compact", …)` that sleeps, and returns `{ compaction: { get summary() { throw … } } }`.
+- **Refused messages**: a model the proxy doesn't serve: `"model":"nope"` in an `rpc` prompt, or
+  `UPDATE threads SET model = 'nope'` in `service.db` with the app stopped. A host without a proxy: Settings › Proxy ›
+  Remove (the setup's proxy step and the model picker's `Set up the proxy` show then).
+- **Compaction** every turn: in `<session>/config/agent.toml`, `[compaction]` with `reserve = 5000000` and
+  `keep_recent = 1` (the file is read for every turn, no restart).
+- **A failed compaction's line, a locked thread**: in `service.db`, with the app stopped:
+
+  ```sql
+  INSERT INTO entries (thread_id, seq, id, parent_id, at, kind, json)
+    SELECT thread_id, seq + 1, 'f1', id, at, 'compaction_failed', '{"type":"compaction_failed","error":"Compaction failed: 529"}'
+    FROM entries WHERE thread_id = '…' ORDER BY seq DESC LIMIT 1;
+  UPDATE threads SET locked = 1 WHERE id = '…';
+  ```
+
+- **The migration from pi** (the window a first start opens on, `dirigent_desktop/src/migration.rs`): a session
+  as pi left it. After `reset`, make `<session>/config/agent` with a `cliproxyapi.json`
+  (`{"baseUrl": "…", "apiKey": "…"}`) and something that doesn't come over (an `APPEND_SYSTEM.md`; a `mcp.json`
+  entry with `"type": "sse"`), put a snapshot of a real `service.db` (below) in `<session>/data`, then `start`: a
+  debug build is seconds over the threads. `start` makes the window fill the screen (what it shows stays a
+  column in the middle); the app's own comes with Continue. The backups are `<session>/config.bck` and
+  `<session>/data.bck`. Without a window: `target/debug/dirigent_service --data-dir … --config-dir …` on such
+  dirs (with `DIRIGENT_PORT` set) logs it.
+- **A host on another protocol** (`update that host` in Settings › Hosts, on the status word's tooltip): a
+  websocket server that answers `{"type":"hello","host_name":"old","version":"0.0.9"}` and nothing else, as a
+  `ws://127.0.0.1:<port>/ws` entry of `<session>/config/hosts.toml`.
+- **MCP servers**: `[mcp.<name>]` in that `agent.toml`, or Settings › MCP servers. A stdio server to try:
+  `command = "npx"`, `args = ["-y", "@modelcontextprotocol/server-everything"]`.
 - **Computer use in the app under test** (`"computer"` in a prompt's `tools`): its `desktop` is your private screen.
   - An app there: `scripts/ui.sh run sh -c 'setsid xcalc -geometry 300x400+500+200 &'` (`nixpkgs#xcalc`).
   - The app back on top: `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | xargs xdotool windowraise'`.
   - A covered window is only captured under a compositor: `picom --backend xrender` (`nixpkgs#picom`).
-  - The fallback to the desktop: a `UI_PATH` directory with an `Xvfb` that exits 1.
+  - A private screen that doesn't start (an error, not the desktop): a `UI_PATH` directory with an `Xvfb` that exits 1.
+    The fallback to the desktop is for a machine with no `Xvfb` at all: a `PATH` without one.
   - Over `rpc`: `screen` events, `get_screen`, and `screen: true` in `list_threads`.
 - **The setup** (`onboarding.rs`): `UI_ONBOARDING=1 scripts/ui.sh start :3`. It animates: ~2 s title card, ~0.6 s
   per step, ~1 s fade out.
@@ -106,6 +130,12 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 ## Gotchas
 
 - **Links open Seb's real browser** (`xdg-open`): put a fake one in `UI_PATH` before clicking any.
+- **The picture stops changing, or typing seems to land nowhere**: seen after moving the pointer with `xdotool`
+  (a hover), on a screen without a window manager. What was typed and clicked meanwhile is not lost: it took
+  effect, or does once the window has the keyboard focus again, so look before doing it over. To set it right:
+  `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | head -1 | xargs xdotool windowfocus'`.
+- **A model under test reads what it can reach**, the session's `config/agent.toml` with the proxy's API key
+  included: don't print the tool results of a thread you didn't write the prompt for.
 - Logs: `DIRIGENT_LOG=dirigent_desktop=debug` (every keystroke with its key context), `dirigent_service=debug`,
   `dirigent=debug` for both. Not a bare `debug`.
 - This is gpui's X11 backend on software Vulkan. Wayland-only details (IME, clipboard, decorations) and
@@ -120,14 +150,17 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 
 ## Non-UI crates
 
-- `dirigent_runtime`: `bun run dirigent_runtime/src/index.ts`, feed JSONL on stdin, e.g.
-  `{"type":"load","thread_id":"t1","cwd":"/tmp/x","entries":[]}` then `{"type":"prompt","thread_id":"t1","text":"hi","mode":"prompt"}`.
+- `dirigent_agent`: `cargo run -p dirigent_agent --example run -- --cwd /tmp/x "…"` gives the agent one prompt
+  and prints what comes of it (a session without a service; `--model`, `--effort`, `--tools codemode,async_bash`);
+  `--example ask` is one request to the proxy. Both take the proxy from `DIRIGENT_PROXY_URL` /
+  `DIRIGENT_PROXY_KEY`. Tests against the real thing are `#[ignore]`d and run with `-- --ignored`:
+  `cargo test -p dirigent_agent proxy::live` (the proxy), `cua_driver` and `public_http` (`mcp`: the real driver,
+  real servers), `a_private_screen` (computer use, on an Xvfb of its own).
 - `dirigent_service`: the standalone binary is for remote hosts; the desktop embeds the lib. `cargo run -p dirigent_service`, poke it with `websocat ws://localhost:7778/ws` (`nix run nixpkgs#websocat`):
-  `{"type":"list_threads","id":1}`, `{"type":"add_project","id":2,"path":"/tmp/x"}`, `{"type":"create_thread","id":3,"project_id":"..."}`, `{"type":"prompt","id":4,"thread_id":"...","text":"hi","mode":"prompt"}`.
+  `{"type":"list_threads","id":1}`, `{"type":"add_project","id":2,"path":"/tmp/x"}`, `{"type":"create_thread","id":3,"project_id":"..."}`, `{"type":"prompt","id":4,"thread_id":"...","text":"hi","mode":"prompt","model":"claude-haiku-5-5"}`.
   Use `DIRIGENT_PORT=7778 cargo run -p dirigent_service -- --data-dir /tmp/somewhere --config-dir /tmp/somewhere-config`
   to keep a test instance away from the real one.
-- `dirigent_cli`: `cargo run -p dirigent_cli -- --config-dir /tmp/somewhere-config pi --help` runs the bundled pi on that agent dir.
-- `dirigent_runtime` compiled, as installs run it: `cd dirigent_runtime && bun run build` writes `dist/runtime/`;
-  feed `dist/runtime/dirigent_runtime` the same JSONL.
+- The migration from pi, against a copy of a real `service.db`:
+  `DIRIGENT_MIGRATE=/tmp/copy/service.db cargo test -p dirigent_service --release a_real_service_db -- --ignored --nocapture`.
 - `dirigent_api`: see `packaging/README.md` and the top of `dirigent_api/src/main.rs`.
-- Unit tests: `cargo test --workspace` (protocol round-trips, storage, view parsing). `bun run typecheck`, `bun run lint`, `bun run fmt:check` for the runtime.
+- Unit tests: `cargo test --workspace` (protocol round-trips, storage, view parsing, the agent with a scripted model).

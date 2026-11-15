@@ -3,9 +3,8 @@
 # (dirigent-<version>-<linux-x86_64|macos-aarch64>.tar.gz, built by
 # .github/workflows/release.yml):
 #
-#   ~/.local/lib/dirigent/                        the tarball's dirigent/: the two binaries, runtime/, this script
-#   ~/.local/bin/dirigent                         a link to the command line (`dirigent [dir]` starts the
-#                                                 desktop, `dirigent pi …` the bundled pi)
+#   ~/.local/lib/dirigent/                        the tarball's dirigent/: the two binaries, Cua Driver (Linux), this script
+#   ~/.local/bin/dirigent                         a link to the command line (`dirigent [dir]` starts the desktop)
 #   ~/.local/share/applications/dirigent.desktop  the app menu entry, also offered for folders (not on macOS)
 #
 # A nightly's tarball (it has a `nightly` file next to this script) installs as an app of its
@@ -92,6 +91,6 @@ if [ -z "$update" ]; then
   fi
   case ":$PATH:" in
     *":$prefix/bin:"*) ;;
-    *) echo "($prefix/bin isn't on your PATH: add it to start $title as \`$name\`, and pi as \`$name pi\`.)" ;;
+    *) echo "($prefix/bin isn't on your PATH: add it to start $title as \`$name\`.)" ;;
   esac
 fi

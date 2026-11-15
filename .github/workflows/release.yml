@@ -78,14 +78,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-
       - uses: Swatinem/rust-cache@v2
-
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
 
       # The update endpoint is baked in: dev builds have none and never check.
       - name: Build the desktop and the command line
@@ -93,15 +86,14 @@ jobs:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
         run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
-      - name: Build the runtime
-        working-directory: dirigent_runtime
-        run: bun run build
-
       - name: Stage the install
         shell: bash
         run: |
-          cp target/release/dirigent_desktop.exe target/release/dirigent.exe dist/
           mkdir -p dist/licenses
+          cp target/release/dirigent_desktop.exe target/release/dirigent.exe dist/
+          # Cua Driver, which computer use runs, next to them.
+          packaging/cua-driver.sh dist
+          mv dist/cua-driver-LICENSE.md dist/licenses/
           # Lilex (embedded in dirigent_desktop.exe by dirigent_desktop/build.rs) is under the OFL,
           # which goes along with it.
           curl -fsSL -o dist/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
@@ -146,10 +138,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-
       - uses: Swatinem/rust-cache@v2
 
       # What gpui links against (xcb, xkbcommon) and what its build scripts probe for
@@ -159,17 +147,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfontconfig-dev libxcb1-dev libxkbcommon-x11-dev libwayland-dev
 
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
-
       - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
         run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
-
-      - name: Build the runtime
-        working-directory: dirigent_runtime
-        run: bun run build
 
       # The layout packaging/linux/install.sh expects, and installs as is.
       - name: Pack the tarball
@@ -178,7 +159,9 @@ jobs:
         run: |
           mkdir -p dist/dirigent/licenses
           cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
-          mv dist/runtime dist/dirigent/runtime
+          # Cua Driver, which computer use runs, next to them.
+          packaging/cua-driver.sh dist/dirigent
+          mv dist/dirigent/cua-driver-LICENSE.md dist/dirigent/licenses/
           cp packaging/linux/install.sh dist/dirigent/
           # A nightly installs as an app of its own (the `nightly` file tells install.sh), with
           # its own icon.
@@ -221,41 +204,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-
       - uses: Swatinem/rust-cache@v2
 
       # gpui compiles its shaders with Xcode's metal, which Xcode 26 only downloads on demand.
       - name: Metal toolchain
         run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
 
-      - name: Install JS dependencies
-        run: bun install --frozen-lockfile
-
       - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
         run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
-      - name: Build the runtime
-        working-directory: dirigent_runtime
-        run: bun run build
-
-      # Linux's layout and install.sh. Without a developer account nothing is signed for real:
-      # Apple silicon runs any binary with an ad-hoc signature (the linker and bun make one;
-      # this makes sure), and Gatekeeper only checks quarantined files, which a curl install
-      # and the app's own updates never are.
+      # Linux's layout and install.sh, without a Cua Driver (packaging/cua-driver.sh says why).
+      # Without a developer account nothing is signed for real: Apple silicon runs any binary
+      # with an ad-hoc signature (the linker makes one; this makes sure), and Gatekeeper only
+      # checks quarantined files, which a curl install and the app's own updates never are.
       - name: Pack the tarball
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
           cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
-          mv dist/runtime dist/dirigent/runtime
-          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/runtime/dirigent_runtime
-          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/runtime/dirigent_runtime
+          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop
+          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop
           cp packaging/linux/install.sh dist/dirigent/
           # A nightly installs as an app of its own (the `nightly` file tells install.sh).
           case "$VERSION" in *-nightly.*) touch dist/dirigent/nightly ;; esac
