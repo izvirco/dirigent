@@ -58,12 +58,16 @@ const GROUP_ORDER_KEY: &str = "group_order";
 /// Where the user was when the app last closed (see `remember_pane`).
 const PANE_KEY: &str = "pane";
 const SIDEBAR_MIN: f32 = 180.;
-const SIDEBAR_MAX: f32 = 420.;
+/// What the sidebar leaves of the window for the main pane, and the right panel of the pane
+/// for the transcript, however wide they are dragged (or the window shrinks under them):
+/// a strip that keeps their resize handles apart and on screen, and the panel's off the
+/// transcript's ruler (`ruler::WIDTH`). The layout holds it, not the stored widths, which
+/// are only what the user asked for.
+pub const PANE_MIN: f32 = 32.;
 const LOG_WIDTH_KEY: &str = "log_width";
 /// The right panel's hidden section: `lineage`, `log`, or empty for none (`PanelPart`).
 const PANEL_HIDDEN_KEY: &str = "panel_hidden";
 const LOG_MIN: f32 = 280.;
-const LOG_MAX: f32 = 800.;
 /// How long a copy button shows its check (`Dirigent::copy_item`).
 const COPIED_TTL: Duration = Duration::from_millis(1200);
 /// How often the Usage modal re-asks the hosts while it shows a window that ends now.
@@ -4160,11 +4164,11 @@ impl Dirigent {
         }
         match self.resizing {
             // Widths are in design pixels (`theme::u`), so they zoom with the text.
-            Some(Resize::Sidebar) => self.sidebar_width = (f32::from(ev.position.x) / theme::zoom()).clamp(SIDEBAR_MIN, SIDEBAR_MAX),
+            Some(Resize::Sidebar) => self.sidebar_width = (f32::from(ev.position.x) / theme::zoom()).max(SIDEBAR_MIN),
             Some(Resize::Log) => {
                 // The panel's right edge is the window's.
                 let width = window.viewport_size().width - ev.position.x;
-                self.log_width = (f32::from(width) / theme::zoom()).clamp(LOG_MIN, LOG_MAX);
+                self.log_width = (f32::from(width) / theme::zoom()).max(LOG_MIN);
             }
             None => return,
         }
@@ -4898,7 +4902,7 @@ impl Render for Dirigent {
             let panel = div()
                 .relative()
                 .flex_1()
-                .min_w_0()
+                .min_w(u(PANE_MIN))
                 .bg(rgba(fill))
                 .overflow_hidden()
                 .flex()
