@@ -30,6 +30,8 @@ sha2 = "0.10"
 getrandom = "0.4"
 # Images cross between tools, scripts, servers and requests as base64.
 base64 = "0.22"
+# QuickJS (QuickJS-NG), the VM codemode scripts run in. Its C sources are built by `cc`.
+rquickjs = "0.14"
 
 # `mcp/stdio.rs`, `tools/shell.rs`: signals to a process group.
 [target.'cfg(unix)'.dependencies]
