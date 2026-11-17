@@ -1,3 +1,5 @@
+## 0.0.11 (draft)
+
 ## 0.0.10
 
 Pi was irrational, so we wrote our own agent: MCP servers, codemode and computer use.
