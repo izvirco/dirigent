@@ -32,6 +32,18 @@ getrandom = "0.4"
 base64 = "0.22"
 # QuickJS (QuickJS-NG), the VM codemode scripts run in. Its C sources are built by `cc`.
 rquickjs = "0.14"
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4"] }
+# `tools/images.rs`: an image made fit to send.
+image = { version = "0.25", default-features = false, features = [
+  "png",
+  "jpeg",
+  "gif",
+  "webp",
+  "bmp",
+] }
+# `tools/files.rs`: file names and edits the model typed in another Unicode form.
+unicode-normalization = "0.1"
 
 # `mcp/stdio.rs`, `tools/shell.rs`: signals to a process group.
 [target.'cfg(unix)'.dependencies]

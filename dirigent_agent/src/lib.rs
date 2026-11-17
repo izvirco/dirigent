@@ -1,27 +1,43 @@
 //! dirigent's agent: what turns a thread's history and a prompt into a model's work. It
 //! talks to the model (`proxy`), runs the loop of replies and tool calls (`session`, `run`),
 //! and has the tools (`tools`, `codemode`, `mcp`). A library: the host (`dirigent_service`)
-//! owns the threads and their storage, loads one into a session here when it has work,
-//! and hears what comes of it through `Host`.
+//! owns the threads and their storage, loads one into a session here when it has work
+//! (`Agent::load`), and hears what comes of it through `Host`.
 //!
 //! `DESIGN.md` has the whole picture.
 
 pub mod codemode;
 pub mod config;
+mod context;
 pub mod mcp;
+mod prompt;
 pub mod proxy;
+mod run;
+pub mod session;
+#[cfg(test)]
+mod testing;
 pub mod tool;
+mod tools;
 
+use async_trait::async_trait;
+use config::Dirs;
 use dirigent_protocol::Ask;
 use dirigent_protocol::transcript::{Entry, Event};
-use std::sync::Arc;
+use proxy::{Chunk, Model, Reply, Request};
+use session::{Session, Thread};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tool::Tool;
+
+pub use context::complete;
 
 /// What comes of a session, for its host to keep and pass on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Out {
-    /// The thread's next entry (`seq` is the host's to give): what was said is only said
-    /// once the host has it.
+    /// The thread's next entry (`seq` is the host's to give).
     Entry(Entry),
     Event(Event),
     /// The model called `ask_user`: the host keeps the ask until the user answers it.
@@ -50,10 +66,10 @@ pub struct Screen {
     pub desktop: bool,
 }
 
-/// What the agent needs of its host. Called from the sessions' tasks: every method returns
-/// at once (none may wait on a session).
+/// What the agent needs of its host.
 pub trait Host: Send + Sync + 'static {
-    /// Take what came of the thread's session.
+    /// Take what came of the thread's session. One at a time and in the order it came
+    /// about, across all threads: an entry is only said once the host has it.
     fn emit(&self, thread_id: &str, out: Out);
 
     /// Keep an image's bytes and return their blob id (their sha256, hex): what entries
@@ -69,4 +85,182 @@ pub trait Host: Send + Sync + 'static {
 
     /// The host's own tools for a session of the thread (`dirigent`).
     fn tools(&self, thread_id: &str) -> Vec<Arc<dyn Tool>>;
+}
+
+/// The way to a model: `proxy::Proxy`, or a stand-in under test.
+#[async_trait]
+pub trait Llm: Send + Sync + 'static {
+    /// The model `id`, as it is served now. An error says why it can't be used, in words
+    /// for the user (it isn't served, no proxy is set up).
+    async fn model(&self, id: &str) -> anyhow::Result<Model>;
+
+    /// Stream one reply: its pieces go to `on` as they come, the whole of it is returned.
+    /// Never fails: a failure is in the `Reply`. `cancel` ends it with what it has.
+    async fn stream(&self, request: &Request<'_>, on: &mut (dyn FnMut(Chunk) + Send), cancel: &CancellationToken) -> Reply;
+}
+
+#[async_trait]
+impl Llm for proxy::Proxy {
+    async fn model(&self, id: &str) -> anyhow::Result<Model> {
+        proxy::Proxy::model(self, id).await
+    }
+
+    async fn stream(&self, request: &Request<'_>, on: &mut (dyn FnMut(Chunk) + Send), cancel: &CancellationToken) -> Reply {
+        proxy::Proxy::stream(self, request, on, cancel).await
+    }
+}
+
+/// A host's agent: its live threads.
+pub struct Agent {
+    pub dirs: Dirs,
+    host: Arc<dyn Host>,
+    pub llm: Arc<dyn Llm>,
+    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Where sessions put what comes of them: handed to the host by one task, in order,
+    /// so no session calls into the host with a lock of its own held.
+    out: mpsc::UnboundedSender<(String, Out)>,
+}
+
+impl Agent {
+    /// Must be called within a tokio runtime.
+    pub fn new(dirs: Dirs, host: Arc<dyn Host>, llm: Arc<dyn Llm>) -> Arc<Self> {
+        let (out, mut outs) = mpsc::unbounded_channel::<(String, Out)>();
+        tokio::spawn({
+            let host = host.clone();
+            async move {
+                while let Some((thread_id, out)) = outs.recv().await {
+                    // A host that panics over one thing still gets the next: this task is
+                    // the only way out of every session.
+                    let taken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.emit(&thread_id, out)));
+                    if let Err(panic) = taken {
+                        tracing::error!(thread = %thread_id, "the host panicked over what came of a session: {}", panic_message(&*panic));
+                    }
+                }
+            }
+        });
+        Arc::new(Self { dirs, host, llm, sessions: Mutex::default(), out })
+    }
+
+    /// The thread's session: the live one if it has one (`thread` is not looked at then),
+    /// else a new one from `thread`.
+    pub fn load(&self, thread: Thread) -> Arc<Session> {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.get(&thread.id) {
+            return session.clone();
+        }
+        let id = thread.id.clone();
+        let session = Session::new(&self.dirs, self.host.clone(), self.llm.clone(), self.out.clone(), thread);
+        sessions.insert(id, session.clone());
+        session
+    }
+
+    /// The thread's live session, if it has one.
+    pub fn session(&self, thread_id: &str) -> Option<Arc<Session>> {
+        self.sessions.lock().unwrap().get(thread_id).cloned()
+    }
+
+    /// Drop the thread's session: its run stops, its jobs are killed, nothing more comes of it.
+    pub fn unload(&self, thread_id: &str) {
+        if let Some(session) = self.sessions.lock().unwrap().remove(thread_id) {
+            session.unload();
+        }
+    }
+
+    /// Unload the sessions that do nothing (no run, no message on its way in, no jobs:
+    /// unloading would kill them, even those left running) and have done nothing for longer
+    /// than `max_idle`. Returns their threads. Found and dropped under one lock: no prompt
+    /// finds its session gone under it.
+    pub fn unload_idle(&self, max_idle: Duration) -> Vec<String> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let idle: Vec<String> = sessions.iter().filter(|(_, s)| !s.busy() && s.idle_for() >= max_idle).map(|(id, _)| id.clone()).collect();
+        for id in &idle {
+            if let Some(session) = sessions.remove(id) {
+                session.unload();
+            }
+        }
+        idle
+    }
+
+    /// The host is going (the desktop quits, the service is told to stop): end what the
+    /// sessions started, none of which may outlive it. Every job's process group is killed
+    /// before this first waits, and at once: the process is about to exit, and no task
+    /// lives to see a grace through. Then the sessions' MCP servers and screens are closed,
+    /// which waits for their commands to exit (a few seconds at the most). No session is
+    /// left, nothing more comes of any, and no job starts in one. Call it last.
+    pub async fn shutdown(&self) {
+        let sessions: Vec<Arc<Session>> = self.sessions.lock().unwrap().drain().map(|(_, session)| session).collect();
+        for session in &sessions {
+            session.end(true);
+        }
+        futures_util::future::join_all(sessions.iter().map(|session| session.close())).await;
+    }
+}
+
+/// What a caught panic said.
+pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("no message")
+}
+
+/// Unix millis.
+pub(crate) fn now() -> i64 {
+    std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+/// A random id of `len` hex characters: an entry's, a job's, an ask's.
+pub(crate) fn short_id(len: usize) -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..len].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Prompt;
+    use crate::testing::{Script, Step, agent, prompt, session, text, thread};
+
+    /// What a job would not end for when asked is gone when `shutdown` returns: no grace,
+    /// which the process would not live to see through.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_kills_the_jobs_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, agent) = agent(dir.path(), Script::new(vec![]), vec![]);
+        let session = agent.load(thread(dir.path()));
+        let job = session.jobs.spawn(&session.env, "trap '' TERM; sleep 30", dir.path()).unwrap();
+        agent.shutdown().await;
+        let ended = tokio::time::timeout(Duration::from_secs(1), job.exited()).await;
+        assert_eq!(ended.expect("the job outlived the shutdown"), 128 + libc::SIGKILL);
+        assert!(agent.session("thread").is_none());
+        assert!(session.jobs.spawn(&session.env, "true", dir.path()).is_err());
+    }
+
+    /// A session whose prompt is on its way in (its model is being looked up, nothing runs
+    /// yet) is not idle: what unloads the idle ones doesn't take it from under the prompt.
+    #[tokio::test]
+    async fn a_session_taking_a_prompt_in_is_not_unloaded_as_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let (host, agent) = agent(dir.path(), Script::new(vec![Step::Say(vec![text("hi")])]), vec![]);
+        let session = agent.load(thread(dir.path()));
+        let sent = tokio::spawn({
+            let session = session.clone();
+            async move { session.prompt(Prompt { model: Some("slow".into()), ..prompt("go") }).await }
+        });
+        while !session.busy() {
+            tokio::task::yield_now().await;
+        }
+        assert!(session.state.lock().unwrap().run.is_none());
+        assert!(agent.unload_idle(Duration::ZERO).is_empty());
+        sent.await.unwrap().unwrap();
+        host.settled(1).await;
+        assert_eq!(agent.unload_idle(Duration::ZERO), ["thread"]);
+    }
+
+    #[tokio::test]
+    async fn the_host_gets_what_comes_after_something_it_panicked_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let (host, session) = session(dir.path(), Script::new(vec![]));
+        host.trip.store(true, std::sync::atomic::Ordering::Relaxed);
+        session.warn("lost".into());
+        session.warn("kept".into());
+        host.until(|outs| *outs == [Out::Event(Event::Warning { message: "kept".into() })]).await;
+    }
 }
