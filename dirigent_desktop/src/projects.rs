@@ -244,7 +244,7 @@ mod tests {
             cwd: "/x".into(),
             name: None,
             model: None,
-            thinking_level: None,
+            effort: None,
             created_at: 0,
             updated_at,
             entry_count: 0,

@@ -8,7 +8,8 @@
 
 use crate::input::Content;
 use anyhow::Result;
-use dirigent_protocol::{Entry, ModelInfo, Project, ThreadSummary};
+use dirigent_protocol::transcript::Entry;
+use dirigent_protocol::{ModelInfo, Project, ThreadSummary};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
@@ -26,7 +27,9 @@ CREATE TABLE IF NOT EXISTS threads (
     archived INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (host, id)
 );
-CREATE TABLE IF NOT EXISTS entries (
+-- A thread's entries (`transcript::Entry`, as JSON). (`entries` was this table while hosts
+-- ran pi and its entries were pi's: `init` drops it.)
+CREATE TABLE IF NOT EXISTS transcript (
     host TEXT NOT NULL, thread_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL,
     PRIMARY KEY (host, thread_id, seq)
 );
@@ -51,11 +54,11 @@ CREATE TABLE IF NOT EXISTS draft_images (
 pub type DraftImage = (u32, String, Vec<u8>);
 
 /// Tables keyed by thread that go with it when it is deleted.
-const PER_THREAD: [&str; 3] = ["entries", "drafts", "draft_images"];
+const PER_THREAD: [&str; 3] = ["transcript", "drafts", "draft_images"];
 
 /// Tables keyed by host: what goes with a host removed, or moves with one renamed.
 const HOST_TABLES: [&str; 10] =
-    ["projects", "links", "threads", "entries", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"];
+    ["projects", "links", "threads", "transcript", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"];
 
 /// Columns added after the table first shipped: `(table, column, declaration)`.
 const COLUMNS: &[(&str, &str, &str)] = &[
@@ -108,6 +111,9 @@ impl Cache {
         for (table, column, decl) in COLUMNS {
             ensure_column(&conn, table, column, decl)?;
         }
+        // What a build from before `dirigent_agent` cached of pi's entries: hosts have them
+        // in the format that took their place.
+        conn.execute_batch("DROP TABLE IF EXISTS entries")?;
         Ok(Self { conn })
     }
 
@@ -195,7 +201,7 @@ impl Cache {
                 cwd: r.get(2)?,
                 name: r.get(3)?,
                 model: r.get(4)?,
-                thinking_level: r.get(5)?,
+                effort: r.get(5)?,
                 created_at: r.get(6)?,
                 updated_at: r.get(7)?,
                 entry_count: r.get::<_, i64>(8)? as u64,
@@ -234,7 +240,7 @@ impl Cache {
             tx.execute(
                 "INSERT INTO threads (host, id, project_id, cwd, name, model, thinking_level, created_at, updated_at, entry_count, archived, last_run_ms, workspace, parent_id, snoozed, prompted_at, pinned, seen_at, pinned_entries, spend, forked_from)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21)",
-                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.snoozed, t.prompted_at, t.pinned, t.seen_at, serde_json::to_string(&t.pinned_entries)?, serde_json::to_string(&t.spend)?, t.forked_from.as_ref().map(serde_json::to_string).transpose()?],
+                params![host, t.id, t.project_id, t.cwd, t.name, t.model, t.effort, t.created_at, t.updated_at, t.entry_count as i64, t.archived, t.last_run_ms, t.workspace, t.parent_id, t.snoozed, t.prompted_at, t.pinned, t.seen_at, serde_json::to_string(&t.pinned_entries)?, serde_json::to_string(&t.spend)?, t.forked_from.as_ref().map(serde_json::to_string).transpose()?],
             )?;
         }
         for table in PER_THREAD {
@@ -247,8 +253,16 @@ impl Cache {
         Ok(())
     }
 
+    /// The cached threads' models as ids, from `provider/id`: how hosts named them while
+    /// they ran pi (asked once: `name_models_by_id` in `app.rs`). The id is everything
+    /// after the first `/`.
+    pub fn thread_models_as_ids(&self) -> Result<()> {
+        self.conn.execute("UPDATE threads SET model = substr(model, instr(model, '/') + 1) WHERE instr(model, '/') > 0", [])?;
+        Ok(())
+    }
+
     pub fn entries(&self, host: &str, thread_id: &str) -> Result<Vec<Entry>> {
-        let mut stmt = self.conn.prepare("SELECT json FROM entries WHERE host = ?1 AND thread_id = ?2 ORDER BY seq")?;
+        let mut stmt = self.conn.prepare("SELECT json FROM transcript WHERE host = ?1 AND thread_id = ?2 ORDER BY seq")?;
         let rows = stmt.query_map(params![host, thread_id], |r| r.get::<_, String>(0))?;
         Ok(rows.filter_map(|r| r.ok()).filter_map(|s| serde_json::from_str(&s).ok()).collect())
     }
@@ -258,10 +272,10 @@ impl Cache {
     pub fn set_entries(&mut self, host: &str, thread_id: &str, entries: &[Entry]) -> Result<()> {
         let end = entries.last().map_or(-1, |e| e.seq as i64);
         let tx = self.conn.transaction()?;
-        tx.execute("DELETE FROM entries WHERE host = ?1 AND thread_id = ?2 AND seq <= ?3", params![host, thread_id, end])?;
+        tx.execute("DELETE FROM transcript WHERE host = ?1 AND thread_id = ?2 AND seq <= ?3", params![host, thread_id, end])?;
         for e in entries {
             tx.execute(
-                "INSERT INTO entries (host, thread_id, seq, json) VALUES (?1,?2,?3,?4)",
+                "INSERT INTO transcript (host, thread_id, seq, json) VALUES (?1,?2,?3,?4)",
                 params![host, thread_id, e.seq as i64, serde_json::to_string(e)?],
             )?;
         }
@@ -274,7 +288,7 @@ impl Cache {
     pub fn remove_entries(&self, host: &str, thread_id: &str, after: Option<u64>, to: u64) -> Result<()> {
         let after = after.map_or(-1, |s| s as i64);
         self.conn.execute(
-            "DELETE FROM entries WHERE host = ?1 AND thread_id = ?2 AND seq > ?3 AND seq <= ?4",
+            "DELETE FROM transcript WHERE host = ?1 AND thread_id = ?2 AND seq > ?3 AND seq <= ?4",
             params![host, thread_id, after, to as i64],
         )?;
         Ok(())
@@ -282,7 +296,7 @@ impl Cache {
 
     pub fn add_entry(&self, host: &str, thread_id: &str, entry: &Entry) -> Result<()> {
         self.conn.execute(
-            "INSERT OR REPLACE INTO entries (host, thread_id, seq, json) VALUES (?1,?2,?3,?4)",
+            "INSERT OR REPLACE INTO transcript (host, thread_id, seq, json) VALUES (?1,?2,?3,?4)",
             params![host, thread_id, entry.seq as i64, serde_json::to_string(entry)?],
         )?;
         Ok(())
@@ -452,7 +466,7 @@ mod tests {
             cwd: "/p".into(),
             name: None,
             model: None,
-            thinking_level: None,
+            effort: None,
             created_at: 0,
             updated_at: 0,
             entry_count: 0,
@@ -525,7 +539,13 @@ mod tests {
     #[test]
     fn entries_past_a_snapshot_stay_unless_stale() {
         let mut cache = Cache::in_memory().unwrap();
-        let entry = |seq| Entry { seq, id: format!("e{seq}"), parent_id: None, kind: "message".into(), json: serde_json::json!({}) };
+        let entry = |seq| Entry {
+            seq,
+            id: format!("e{seq}"),
+            parent_id: None,
+            at: 0,
+            body: dirigent_protocol::transcript::Body::User { content: vec![] },
+        };
         for seq in [0, 2, 3] {
             cache.add_entry("h", "t", &entry(seq)).unwrap();
         }

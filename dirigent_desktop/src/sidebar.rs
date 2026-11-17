@@ -648,14 +648,13 @@ fn vcs_label(host: &str, t: &ThreadSummary, this: &Dirigent) -> String {
     }
 }
 
-/// Icon of the lab behind a `provider/model` key: by provider, else by model family (a
-/// gateway like openrouter serves both), else a generic spark.
+/// Icon of the lab behind a model: by the vendor its id starts with, if a proxy names it
+/// `vendor/model-id`, else by its family, else a generic spark.
 fn lab_logo(model: &str) -> &'static str {
-    let (provider, name) = model.split_once('/').unwrap_or(("", model));
-    if provider == "anthropic" || name.contains("claude") {
+    let (vendor, name) = model.split_once('/').unwrap_or(("", model));
+    if vendor == "anthropic" || name.contains("claude") {
         "claude"
-    } else if provider == "openai" || name.starts_with("gpt") || name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4")
-    {
+    } else if vendor == "openai" || name.starts_with("gpt") || name.starts_with("o1") || name.starts_with("o3") || name.starts_with("o4") {
         "openai"
     } else {
         "sparkles"
@@ -666,7 +665,7 @@ fn lab_logo(model: &str) -> &'static str {
 /// `project, host` / model (effort) / workspace name or branch / run time, plus the jobs it
 /// left running, if any.
 fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent) -> Vec<AnyElement> {
-    let model = match (&t.model, &t.thinking_level) {
+    let model = match (&t.model, &t.effort) {
         (Some(m), Some(e)) => format!("{m} ({e})"),
         (Some(m), None) => m.clone(),
         (None, _) => String::new(),

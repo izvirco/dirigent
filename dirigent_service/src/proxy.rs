@@ -1,11 +1,14 @@
-//! This host's CLIProxyAPI (github.com/router-for-me/CLIProxyAPI), read through its
-//! management API: the accounts behind the proxy and how much of each one's limits is used
-//! (`Proxy`), for the desktop's Usage › Proxy tab.
+//! This host's CLIProxyAPI (github.com/router-for-me/CLIProxyAPI): where it is set up
+//! (Settings › Proxy, `SetProxy`), and what its management API says of it: the accounts
+//! behind the proxy and how much of each one's limits is used (`Proxy`), for the desktop's
+//! Usage › Proxy tab.
 //!
-//! The proxy's address and management key come from Settings › Proxy (`SetProxy`) and are
-//! kept in `<data dir>/proxy.json`, owner-only as `forge.json` is: the key opens the
-//! proxy's management API, which hands out every account's tokens, so it stays out of the
-//! db. `poll_proxy` asks the proxy for its credentials: every `SAMPLE_MS` on its own, so the
+//! The proxy's address and its API key, which every model request is made with, are the
+//! agent's (`agent.toml`, `dirigent_agent::config`). Its management key is kept apart, in
+//! `<data dir>/proxy.json` (with the address it is for), owner-only as `forge.json` is: it
+//! opens the proxy's management API, which hands out every account's tokens, so it stays
+//! out of the db, and out of the config dir a test instance copies. Without one the proxy
+//! works all the same; only its accounts can't be read. `poll_proxy` asks the proxy for its credentials: every `SAMPLE_MS` on its own, so the
 //! limits get a history (`proxy_samples`, kept for `KEEP_MS`), and whenever a client asks
 //! (`ListProxy`) and the last answer is older than `FRESH_MS`.
 //!
@@ -15,8 +18,9 @@
 //! its own: Anthropic's and Codex's are read (`limits`), other accounts are listed without.
 
 use crate::Service;
-use crate::runtime::now;
+use crate::now;
 use anyhow::Context;
+use dirigent_agent::config::Config;
 use dirigent_protocol::{Proxy, ProxyAccount, ProxyLimit, ProxySample};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,8 +70,9 @@ impl File {
         let url = url.trim().trim_end_matches('/');
         if url.is_empty() {
             match std::fs::remove_file(path) {
+                Ok(()) => info!("proxy: management key removed"),
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("remove {}", path.display())),
-                _ => info!("proxy removed"),
+                Err(_) => {}
             }
             return Ok(());
         }
@@ -76,7 +81,7 @@ impl File {
         let key = Some(key.trim().to_owned()).filter(|k| !k.is_empty()).or(held);
         let file = File { url: url.to_owned(), key: key.context("The proxy's management key is needed")? };
         crate::hosts::write_private(path, &serde_json::to_string_pretty(&file)?).with_context(|| format!("write {}", path.display()))?;
-        info!(url, "proxy set");
+        info!(url, "proxy: management key set");
         Ok(())
     }
 }
@@ -150,21 +155,62 @@ impl Service {
         }
     }
 
-    /// Point the service at the proxy at `url` with `key`, or at none (`File::save`), and
-    /// look at it at once.
-    pub(crate) async fn set_proxy(&self, url: &str, key: &str) -> anyhow::Result<()> {
-        File::save(&path(), url, key)?;
+    /// Point the service at the proxy at `url`, with its API key `key` and, to read its
+    /// accounts, its management key; or at none (an empty `url`). An empty key is the one
+    /// held for that address. Then look at it at once.
+    pub(crate) async fn set_proxy(&self, url: &str, key: &str, management_key: &str) -> anyhow::Result<()> {
+        let url = url.trim().trim_end_matches('/');
+        anyhow::ensure!(
+            url.is_empty() || url.starts_with("http://") || url.starts_with("https://"),
+            "The address starts with http:// or https://"
+        );
+        Config::update(&self.agent.dirs, |config| {
+            let held = (config.proxy.url == url).then(|| std::mem::take(&mut config.proxy.key));
+            let key = Some(key.trim().to_owned()).filter(|k| !k.is_empty()).or(held).filter(|_| !url.is_empty());
+            anyhow::ensure!(url.is_empty() || key.is_some(), "The proxy's API key is needed");
+            config.proxy = dirigent_agent::config::Proxy { url: url.to_owned(), key: key.unwrap_or_default() };
+            Ok(())
+        })?;
+        info!(url, "proxy set");
+        // The management key is optional: with none given, and none held for this address,
+        // the proxy has none.
+        let held = File::read(&path()).is_some_and(|held| held.url == url);
+        File::save(&path(), if management_key.trim().is_empty() && !held { "" } else { url }, management_key)?;
         // What the last proxy (or key) answered says nothing about this one.
         *self.proxy.state.lock().unwrap() = State::default();
         self.poll_proxy(0).await;
         Ok(())
     }
 
-    /// The proxy as last seen, with `samples` for its history.
-    pub(crate) fn proxy(&self, samples: Vec<ProxySample>) -> Proxy {
-        let url = File::read(&path()).map(|file| file.url).unwrap_or_default();
+    /// The proxy as it is set up and was last seen, with `samples` for its history. `ask`:
+    /// it is asked for its models now (an address or a key was just entered), where
+    /// otherwise what it said last will do.
+    pub(crate) async fn proxy(&self, samples: Vec<ProxySample>, ask: bool) -> Proxy {
+        let config = match Config::load(&self.agent.dirs) {
+            Ok(config) => config.proxy,
+            Err(e) => return Proxy { models_error: Some(format!("{e:#}")), ..Proxy::default() },
+        };
+        let served = match (config.url.is_empty(), ask) {
+            (true, _) => Ok(vec![]),
+            (false, true) => self.models.refresh().await,
+            (false, false) => self.models.models().await,
+        };
+        let (models, models_error) = match served {
+            Ok(models) => (models.len() as u32, None),
+            Err(e) => (0, Some(format!("{e:#}"))),
+        };
+        let management_key = File::read(&path()).is_some_and(|file| file.url == config.url);
         let state = self.proxy.state.lock().unwrap();
-        Proxy { url, error: state.error.clone(), accounts: state.accounts.clone(), samples }
+        Proxy {
+            url: config.url,
+            key: !config.key.is_empty(),
+            management_key,
+            models,
+            models_error,
+            error: state.error.clone(),
+            accounts: state.accounts.clone(),
+            samples,
+        }
     }
 }
 

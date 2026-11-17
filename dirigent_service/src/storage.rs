@@ -1,28 +1,39 @@
-//! Sqlite persistence: the host's source of truth for threads and their pi entries.
-//! `entries.seq` is append order; replaying a thread is `SELECT json ORDER BY seq`.
-//! Images are kept out of the entry JSON in a content-addressed `blobs` table (see `blobs`).
-//! `usage` is derived from the assistant messages (one row each) so spend over time is
-//! one indexed query rather than a scan of every entry's JSON; each thread's totals are
-//! kept on its row the same way (`spend_*`, `ADD_SPEND`). `asks` holds the model's
-//! open questions to the user (`ask_user`) until they are answered. `entries_fts` is a
-//! full-text index of every message's text (derived like `usage`, backfilled once), for
-//! `SearchThreads`. `meta` holds the service's own settings, like its id (`service_id`).
+//! Sqlite persistence, `<data dir>/service.db`: the host's source of truth for threads and
+//! their entries (`dirigent_protocol::transcript`). `entries.seq` is append order; a thread
+//! is `SELECT ... ORDER BY seq`, `json` the entry's `Body` and `kind` its `type`. Images
+//! are not in there: an entry names them by their id in the content-addressed `blobs`
+//! (`put_blob`).
+//!
+//! Three things are derived from an entry as it is appended (`append_entry`): a `usage`
+//! row for what a reply or a compaction used, so spend over time is one indexed query
+//! (the rows outlive their thread: the money was spent); the same on its thread's row
+//! (`spend_*`); and what a message says in `entries_fts`, the full-text index behind
+//! `SearchThreads`.
+//!
+//! `asks` holds the model's open questions to the user (`ask_user`) until they are
+//! answered. `meta` holds the service's own settings, like its id (`service_id`).
 //! `api_keys` holds the public listener's API keys, as hashes (`auth.rs`). `proxy_samples`
 //! is the history of the CLIProxyAPI accounts' limits (`proxy.rs`), a row per account and
 //! limit for every five minutes the service looked (the proxy's key is not in here).
 //!
-//! Schema changes are additive and self-applying: new tables through `CREATE TABLE IF NOT
-//! EXISTS`, new columns through `ensure_column`, so an existing db upgrades on open. Nothing
-//! is dropped: older dbs still carry the removed workflow feature's `workflow_runs` /
-//! `workflow_steps` tables and `threads.run_id`, unused and harmless.
+//! A db from when Dirigent ran pi has the same name and another schema (`from_pi`): the
+//! first start of a build with its own agent converts it where it is (`migrate`).
+//!
+//! From here on schema changes are additive and self-applying, so an existing db upgrades
+//! on open: a new table through `CREATE TABLE IF NOT EXISTS` in `SCHEMA`, a new column
+//! through an `ALTER TABLE ... ADD COLUMN` that `init` runs unless the column is there.
+//! Nothing is dropped or renamed, and no version is kept.
 
 use anyhow::{Context, Result};
+use dirigent_agent::import;
+use dirigent_protocol::transcript::{self, Body, Entry, Stop, Usage, text_of};
 use dirigent_protocol::{
-    Ask, Entry, ForkedFrom, Notify, Project, ProxySample, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title,
+    Ask, ForkedFrom, Notify, Project, ProxySample, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
-use std::collections::HashMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 const SCHEMA: &str = "
@@ -37,20 +48,51 @@ CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
     project_id TEXT,
     cwd TEXT NOT NULL,
+    -- Its isolated workspace directory (see `vcs`), while attached.
+    workspace TEXT,
     name TEXT,
-    header TEXT,
+    -- Named by hand or by a retitle (`set_name`): a generated title no longer applies.
+    renamed INTEGER NOT NULL DEFAULT 0,
+    -- What its last prompt ran with: the model's id, the effort, and the tool switches
+    -- that were on, as JSON (`[\"async_bash\", ...]`).
     model TEXT,
-    thinking_level TEXT,
+    effort TEXT,
+    tools TEXT,
+    -- The thread that spawned this one as a sub-agent (`dirigent` tool), and its `Report` /
+    -- `Notify` (snake_case names): what that parent hears when it ends, and when. NULL: the
+    -- defaults.
+    parent_id TEXT,
+    report TEXT,
+    notify TEXT,
+    -- A fork's source thread and the last entry it copied (`fork_thread`).
+    forked_from TEXT,
+    forked_at TEXT,
+    -- Migrated from pi with entries that could not be converted: read-only.
+    locked INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    -- When it was last given a task (a `Prompt` that started a turn).
+    prompted_at INTEGER,
     last_run_ms INTEGER,
-    archived_at INTEGER
+    archived_at INTEGER,
+    -- On top of its status group in the clients' lists.
+    pinned INTEGER NOT NULL DEFAULT 0,
+    -- `updated_at` as of when it was snoozed: snoozed while `updated_at` hasn't moved past it.
+    snoozed_at INTEGER,
+    -- `updated_at` as of the user's last look (unread tracking, shared by every client).
+    seen_at INTEGER,
+    -- What its agent has consumed (`ThreadSummary::spend`).
+    spend_cost REAL NOT NULL DEFAULT 0,
+    spend_input INTEGER NOT NULL DEFAULT 0,
+    spend_output INTEGER NOT NULL DEFAULT 0,
+    spend_cached INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS entries (
     thread_id TEXT NOT NULL,
     seq INTEGER NOT NULL,
     id TEXT NOT NULL,
     parent_id TEXT,
+    at INTEGER NOT NULL,
     kind TEXT NOT NULL,
     json TEXT NOT NULL,
     PRIMARY KEY (thread_id, seq)
@@ -99,90 +141,6 @@ CREATE TABLE IF NOT EXISTS proxy_samples (
 ) WITHOUT ROWID;
 ";
 
-/// Columns added after the table first shipped: `(table, column, declaration)`.
-const COLUMNS: &[(&str, &str, &str)] = &[
-    // The tool switches the thread's last prompt had on, as JSON (`["async_bash", ...]`).
-    ("threads", "tools", "TEXT"),
-    // The thread's isolated workspace directory (see `vcs`), while attached.
-    ("threads", "workspace", "TEXT"),
-    // The thread that spawned this one as a sub-agent (`dirigent` tool), if any.
-    ("threads", "parent_id", "TEXT"),
-    // `updated_at` as of when the thread was snoozed; snoozed while `updated_at` hasn't moved past it.
-    ("threads", "snoozed_at", "INTEGER"),
-    // When the thread was last given a task (a `Prompt` that started a turn).
-    ("threads", "prompted_at", "INTEGER"),
-    // A sub-agent's `Report` / `Notify` (snake_case names): what its parent hears when it
-    // ends, and when. NULL = the defaults.
-    ("threads", "report", "TEXT"),
-    ("threads", "notify", "TEXT"),
-    // On top of its status group in the clients' lists.
-    ("threads", "pinned", "INTEGER NOT NULL DEFAULT 0"),
-    // `updated_at` as of the user's last look (unread tracking, shared by every client).
-    ("threads", "seen_at", "INTEGER"),
-    // What the thread's agent has consumed (`ThreadSummary::spend`), kept up by
-    // `ADD_SPEND`. Filled in from the entries when the columns are added.
-    ("threads", "spend_cost", "REAL NOT NULL DEFAULT 0"),
-    ("threads", "spend_input", "INTEGER NOT NULL DEFAULT 0"),
-    ("threads", "spend_output", "INTEGER NOT NULL DEFAULT 0"),
-    ("threads", "spend_cached", "INTEGER NOT NULL DEFAULT 0"),
-    // Named by hand or by a retitle (`set_name`): a first prompt's title landing after
-    // that doesn't replace the name.
-    ("threads", "renamed", "INTEGER NOT NULL DEFAULT 0"),
-    // A fork's source thread and the last entry it copied (`fork_thread`).
-    ("threads", "forked_from", "TEXT"),
-    ("threads", "forked_at", "TEXT"),
-];
-
-/// The searchable text of a message entry: user and assistant text blocks. Used both to
-/// backfill `entries_fts` once and to index each new entry, so the two can't disagree.
-const FTS_FROM_ENTRIES: &str = "
-    SELECT thread_id,
-           COALESCE(json_extract(json, '$.message.content'),
-                    (SELECT group_concat(json_extract(b.value, '$.text'), ' ')
-                     FROM json_each(json_extract(json, '$.message.content')) b
-                     WHERE json_extract(b.value, '$.type') = 'text'))
-    FROM entries
-    WHERE kind = 'message' AND json_extract(json, '$.message.role') IN ('user', 'assistant')";
-
-/// A `usage` row extracted from an assistant message entry. Used both to backfill the table
-/// from existing entries (once, when it is empty) and to add each new entry's row, so the
-/// two can't disagree. Rows survive their thread's deletion: the money was spent.
-const USAGE_FROM_ENTRIES: &str = "
-    SELECT json_extract(json, '$.message.timestamp'),
-           COALESCE(json_extract(json, '$.message.provider'), ''),
-           COALESCE(json_extract(json, '$.message.model'), ''),
-           COALESCE(json_extract(json, '$.message.usage.input'), 0),
-           COALESCE(json_extract(json, '$.message.usage.output'), 0),
-           COALESCE(json_extract(json, '$.message.usage.cacheRead'), 0),
-           COALESCE(json_extract(json, '$.message.usage.cacheWrite'), 0),
-           COALESCE(json_extract(json, '$.message.usage.cost.total'), 0)
-    FROM entries
-    WHERE kind = 'message'
-      AND json_extract(json, '$.message.role') = 'assistant'
-      AND json_extract(json, '$.message.usage') IS NOT NULL
-      AND json_extract(json, '$.message.timestamp') IS NOT NULL";
-
-/// Adds the usage of assistant message entries to their threads' `spend_*` columns. Used
-/// both to recount them (when one of the columns is new) and to add each new entry's, so
-/// the two can't disagree. Narrowed with `AND thread_id = ?1 AND seq = ?2` before the
-/// `GROUP BY` placeholder `{filter}`.
-const ADD_SPEND: &str = "
-    UPDATE threads SET spend_cost = spend_cost + s.cost, spend_input = spend_input + s.input, spend_output = spend_output + s.output,
-                       spend_cached = spend_cached + s.cached
-    FROM (SELECT thread_id,
-                 SUM(COALESCE(json_extract(json, '$.message.usage.cost.total'), 0)) AS cost,
-                 SUM(COALESCE(json_extract(json, '$.message.usage.input'), 0)
-                     + COALESCE(json_extract(json, '$.message.usage.cacheRead'), 0)
-                     + COALESCE(json_extract(json, '$.message.usage.cacheWrite'), 0)) AS input,
-                 SUM(COALESCE(json_extract(json, '$.message.usage.output'), 0)) AS output,
-                 SUM(COALESCE(json_extract(json, '$.message.usage.cacheRead'), 0)) AS cached
-          FROM entries
-          WHERE kind = 'message'
-            AND json_extract(json, '$.message.role') = 'assistant'
-            AND json_extract(json, '$.message.usage') IS NOT NULL {filter}
-          GROUP BY thread_id) s
-    WHERE threads.id = s.thread_id";
-
 pub struct Storage {
     conn: Connection,
 }
@@ -204,32 +162,6 @@ impl Storage {
 
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch(SCHEMA)?;
-        // New columns and their backfill land together or not at all: a backfill cut short
-        // after the columns were added would never run again. (An error drops `conn`,
-        // which rolls back.)
-        conn.execute_batch("BEGIN")?;
-        let mut added = vec![];
-        for (table, column, decl) in COLUMNS {
-            if ensure_column(&conn, table, column, decl)? {
-                added.push(*column);
-            }
-        }
-        // `spend_*` is derived data too: a new one means totals for the history from before
-        // it, recounted from scratch so the older ones aren't counted twice.
-        if added.iter().any(|c| c.starts_with("spend_")) {
-            conn.execute("UPDATE threads SET spend_cost = 0, spend_input = 0, spend_output = 0, spend_cached = 0", [])?;
-            conn.execute(&ADD_SPEND.replace("{filter}", ""), [])?;
-        }
-        conn.execute_batch("COMMIT")?;
-        // `usage` is derived data: an empty table on a db with history gets filled in once.
-        let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM usage)", [], |r| r.get(0))?;
-        if empty {
-            conn.execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES}"), [])?;
-        }
-        let empty: bool = conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM entries_fts)", [], |r| r.get(0))?;
-        if empty {
-            conn.execute(&format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES}"), [])?;
-        }
         Ok(Self { conn })
     }
 
@@ -293,7 +225,8 @@ impl Storage {
         Ok(ws.flatten())
     }
 
-    /// Id of the thread's last entry (pi's leaf), for appending an entry of our own.
+    /// Id of the thread's last entry, the end of its current branch: what the next one is a
+    /// child of.
     pub fn last_entry_id(&self, thread_id: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -301,7 +234,8 @@ impl Storage {
             .optional()?)
     }
 
-    /// Threads ordered by most recently updated. `running_since` and the job counts (runtime state) are always unset here; the caller fills them in.
+    /// Threads ordered by most recently updated. What only a live session knows
+    /// (`running_since`, the job counts, ...) is unset here; the caller fills it in.
     /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
@@ -319,38 +253,35 @@ impl Storage {
             pins.entry(thread_id).or_default().push(entry_id);
         }
         let mut stmt = self.conn.prepare(
-            "SELECT t.id, p.id, t.cwd, t.name, t.model, t.thinking_level, t.created_at, t.updated_at,
+            "SELECT t.id, p.id, t.cwd, t.name, t.model, t.effort, t.created_at, t.updated_at,
                     (SELECT COUNT(*) FROM entries e WHERE e.thread_id = t.id), t.archived_at IS NOT NULL, t.last_run_ms, t.workspace,
                     t.parent_id, t.snoozed_at IS NOT NULL AND t.updated_at <= t.snoozed_at, t.prompted_at, t.pinned, t.seen_at,
-                    t.spend_cost, t.spend_input, t.spend_output, t.spend_cached, t.forked_from, t.forked_at
+                    t.spend_cost, t.spend_input, t.spend_output, t.spend_cached, t.forked_from, t.forked_at, t.locked
              FROM threads t LEFT JOIN projects p ON p.id = t.project_id AND p.deleted_at IS NULL
              ORDER BY t.updated_at DESC",
         )?;
         let rows = stmt.query_map([], |r| {
+            let id: String = r.get(0)?;
             Ok(ThreadSummary {
-                id: r.get(0)?,
+                asks: asks.remove(&id).unwrap_or_default(),
+                pinned_entries: pins.remove(&id).unwrap_or_default(),
+                id,
                 project_id: r.get(1)?,
                 cwd: r.get(2)?,
                 name: r.get(3)?,
                 model: r.get(4)?,
-                thinking_level: r.get(5)?,
+                effort: r.get(5)?,
                 created_at: r.get(6)?,
                 updated_at: r.get(7)?,
                 entry_count: r.get::<_, i64>(8)? as u64,
-                running_since: None,
-                last_run_ms: r.get(10)?,
                 archived: r.get(9)?,
-                asks: vec![],
+                last_run_ms: r.get(10)?,
                 workspace: r.get(11)?,
-                workspace_missing: false,
                 parent_id: r.get(12)?,
                 snoozed: r.get(13)?,
+                prompted_at: r.get(14)?,
                 pinned: r.get(15)?,
                 seen_at: r.get(16)?,
-                pinned_entries: vec![],
-                prompted_at: r.get(14)?,
-                jobs: 0,
-                free_jobs: 0,
                 spend: Spend {
                     cost: r.get(17)?,
                     input: r.get::<_, i64>(18)? as u64,
@@ -361,18 +292,12 @@ impl Storage {
                     .get::<_, Option<String>>(21)?
                     .zip(r.get::<_, Option<String>>(22)?)
                     .map(|(thread_id, entry_id)| ForkedFrom { thread_id, entry_id }),
-                setup: None,
-                compacting_since: None,
-                screen: false,
-                locked: false,
+                locked: r.get(23)?,
+                // The rest is runtime state, never stored.
+                ..Default::default()
             })
         })?;
-        let mut threads = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        for t in &mut threads {
-            t.asks = asks.remove(&t.id).unwrap_or_default();
-            t.pinned_entries = pins.remove(&t.id).unwrap_or_default();
-        }
-        Ok(threads)
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Remember the tool switches the client had on, for the thread's next load.
@@ -405,20 +330,22 @@ impl Storage {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    /// A `Prompt` with `text` started a turn at `now`; `model` / `thinking_level` are what the
-    /// run will use, ahead of pi's `model_change` / `thinking_level_change` entries. A thread
-    /// with no name yet is named after the prompt (`prompt_title`) until its title lands.
-    pub fn set_prompted(&self, id: &str, text: &str, model: Option<&str>, thinking_level: Option<&str>, now: i64) -> Result<()> {
+    /// A `Prompt` with `text` started a turn at `now`; `model` (its id) and `effort` are
+    /// what the run will use: the thread's from now on, where given. A thread with no name
+    /// yet is named after the prompt (`prompt_title`) until its title lands.
+    pub fn set_prompted(&self, id: &str, text: &str, model: Option<&str>, effort: Option<&str>, now: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE threads SET prompted_at = ?2, name = COALESCE(name, ?3) WHERE id = ?1",
-            params![id, now, prompt_title(text)],
+            "UPDATE threads SET prompted_at = ?2, name = COALESCE(name, ?3), model = COALESCE(?4, model), effort = COALESCE(?5, effort)
+             WHERE id = ?1",
+            params![id, now, prompt_title(text), model, effort],
         )?;
-        if let Some(m) = model {
-            self.conn.execute("UPDATE threads SET model = ?2 WHERE id = ?1", params![id, m])?;
-        }
-        if let Some(l) = thinking_level {
-            self.conn.execute("UPDATE threads SET thinking_level = ?2 WHERE id = ?1", params![id, l])?;
-        }
+        Ok(())
+    }
+
+    /// The model and effort the thread's next run uses, as they were before a message that
+    /// was then refused (`set_prompted` sets them ahead of the run).
+    pub fn set_model(&self, id: &str, model: Option<&str>, effort: Option<&str>) -> Result<()> {
+        self.conn.execute("UPDATE threads SET model = ?2, effort = ?3 WHERE id = ?1", params![id, model, effort])?;
         Ok(())
     }
 
@@ -458,11 +385,17 @@ impl Storage {
         Ok(())
     }
 
-    /// A name given by hand or by a retitle. It sticks: a first prompt's title, which comes
-    /// as an entry (`append_entry`) and may still be on its way, no longer applies.
+    /// A name given by hand or by a retitle. It sticks: a first prompt's title (`set_title`),
+    /// which may still be on its way, no longer applies.
     pub fn set_name(&self, id: &str, name: &str) -> Result<()> {
         let n = self.conn.execute("UPDATE threads SET name = ?2, renamed = 1 WHERE id = ?1", params![id, name])?;
         anyhow::ensure!(n == 1, "no such thread");
+        Ok(())
+    }
+
+    /// The title generated from the thread's first prompt. A name given since (`set_name`) wins.
+    pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
+        self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1 AND renamed = 0", params![id, title])?;
         Ok(())
     }
 
@@ -493,6 +426,11 @@ impl Storage {
         Ok(p.flatten())
     }
 
+    /// The thread is read-only (`ThreadSummary::locked`): it takes no prompt.
+    pub fn thread_locked(&self, id: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT locked FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?.unwrap_or(false))
+    }
+
     /// How the sub-agent's parent is told it ended (see `report`).
     pub fn set_report(&self, id: &str, report: Report, notify: Notify) -> Result<()> {
         let name = |v: Value| v.as_str().map(str::to_owned);
@@ -504,7 +442,7 @@ impl Storage {
     }
 
     /// What the sub-agent's parent hears when it ends, and when; the defaults for a thread
-    /// spawned before these existed.
+    /// spawned without them.
     pub fn report(&self, id: &str) -> Result<(Report, Notify)> {
         let (report, notify): (Option<String>, Option<String>) =
             self.conn.query_row("SELECT report, notify FROM threads WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -536,40 +474,27 @@ impl Storage {
         Ok(depth)
     }
 
-    /// The text of the thread's last final assistant message (the reply that ended a turn),
-    /// if it came after the latest user message: an aborted run has no reply.
+    /// The text of the reply that ended the thread's last run, if one did: after the latest
+    /// user message there is none while the run goes on, or when it was aborted or failed.
     pub fn last_reply(&self, thread_id: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT json FROM entries WHERE thread_id = ?1 AND kind = 'message'
-               AND json_extract(json, '$.message.role') = 'assistant'
-               AND json_extract(json, '$.message.stopReason') IN ('stop', 'length')
-               AND seq > (SELECT COALESCE(MAX(seq), -1) FROM entries
-                          WHERE thread_id = ?1 AND kind = 'message' AND json_extract(json, '$.message.role') = 'user')
-             ORDER BY seq DESC LIMIT 1",
-        )?;
-        let json: Option<String> = stmt.query_row([thread_id], |r| r.get(0)).optional()?;
-        let Some(json) = json else { return Ok(None) };
-        Ok(Some(message_text(&serde_json::from_str(&json)?)).filter(|t| !t.trim().is_empty()))
+        let Some(entries) = self.get_thread(thread_id)? else { return Ok(None) };
+        let reply = current_branch(&entries).into_iter().rev().take_while(|e| !matches!(e.body, Body::User { .. })).find_map(final_reply);
+        Ok(reply.filter(|text| !text.trim().is_empty()))
     }
 
     /// What a retitle reads (`title::digest`): the text of the user messages on the
     /// thread's current branch (an edited one's old messages are gone from it), oldest
     /// first, and of its latest final reply (whether or not a run came after it).
     pub fn conversation(&self, thread_id: &str) -> Result<(Vec<String>, Option<String>)> {
-        let (_, entries) = self.get_thread(thread_id)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
-        let branch = entries.last().map(|last| dirigent_protocol::branch(&entries, &last.id)).unwrap_or_default();
-        let role = |e: &Entry| e.json.pointer("/message/role").and_then(Value::as_str).filter(|_| e.kind == "message").map(str::to_owned);
-        let text = |e: &Entry| Some(message_text(&e.json)).filter(|t| !t.trim().is_empty());
-        let prompts = branch.iter().filter(|e| role(e).as_deref() == Some("user")).filter_map(|e| text(e)).collect();
-        let reply = branch
-            .iter()
-            .rev()
-            .find(|e| {
-                role(e).as_deref() == Some("assistant")
-                    && matches!(e.json.pointer("/message/stopReason").and_then(Value::as_str), Some("stop" | "length"))
-            })
-            .and_then(|e| text(e));
-        Ok((prompts, reply))
+        let entries = self.get_thread(thread_id)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
+        let branch = current_branch(&entries);
+        let said = |text: &String| !text.trim().is_empty();
+        let prompts = branch.iter().filter_map(|e| match &e.body {
+            Body::User { content } => Some(text_of(content)).filter(said),
+            _ => None,
+        });
+        let reply = branch.iter().rev().copied().find_map(final_reply).filter(said);
+        Ok((prompts.collect(), reply))
     }
 
     /// Full-text search: the best-matching passage per thread, best thread first. Every
@@ -630,62 +555,40 @@ impl Storage {
             project_id: Some(project_id.into()),
             cwd: cwd.into(),
             name: name.map(str::to_owned),
-            model: None,
-            thinking_level: None,
             created_at: now,
             updated_at: now,
-            entry_count: 0,
-            running_since: None,
-            last_run_ms: None,
-            archived: false,
-            asks: vec![],
-            workspace: None,
-            workspace_missing: false,
             parent_id: parent.map(str::to_owned),
-            snoozed: false,
-            pinned: false,
-            seen_at: None,
-            pinned_entries: vec![],
-            prompted_at: None,
-            jobs: 0,
-            free_jobs: 0,
-            spend: Spend::default(),
-            forked_from: None,
-            setup: None,
-            compacting_since: None,
-            screen: false,
-            locked: false,
+            ..Default::default()
         })
     }
 
     /// Start thread `id` as a fork of `src`: a top-level thread with `src`'s project,
-    /// directory (not its workspace: that stays `src`'s), name and tools, and a copy of the
-    /// branch ending at `entry_id`. The copy is history, not activity: it counts toward
-    /// neither usage nor the fork's spend, but search finds it. Pi's header is left out:
-    /// the fork's first load makes one with its own id. Returns the fork's summary as
-    /// `list_threads` has it.
+    /// directory (not its workspace: that stays `src`'s), name, model, effort and tools, and
+    /// a copy of the branch ending at `entry_id`. The copy is history, not activity: it
+    /// counts toward neither usage nor the fork's spend, but search finds it. A locked
+    /// thread's fork is locked too, unless it forks off before what could not be converted.
+    /// Returns the fork's summary as `list_threads` has it.
     pub fn fork_thread(&self, src: &str, entry_id: &str, id: &str, now: i64) -> Result<ThreadSummary> {
-        let (_, entries) = self.get_thread(src)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
-        let branch = dirigent_protocol::branch(&entries, entry_id);
+        let entries = self.get_thread(src)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
+        let branch = transcript::branch(&entries, entry_id);
         anyhow::ensure!(!branch.is_empty(), "no such entry in the thread");
-        // The model and thinking level it was at, as `append_entry` tracks them.
-        let latest = |kind: &str| branch.iter().rev().find(|e| e.kind == kind).map(|e| &e.json);
-        let s = |j: &Value, k: &str| j.get(k).and_then(Value::as_str).map(str::to_owned);
-        let model = latest("model_change").and_then(|j| Some(format!("{}/{}", s(j, "provider")?, s(j, "modelId")?)));
-        let thinking_level = latest("thinking_level_change").and_then(|j| s(j, "thinkingLevel"));
+        let unread = branch.iter().any(|e| e.body == Body::Unknown);
         let tx = self.conn.unchecked_transaction()?;
         tx.execute(
-            "INSERT INTO threads (id, project_id, cwd, name, model, thinking_level, tools, created_at, updated_at, forked_from, forked_at)
-             SELECT ?1, project_id, cwd, name, ?2, ?3, tools, ?4, ?4, id, ?5 FROM threads WHERE id = ?6",
-            params![id, model, thinking_level, now, entry_id, src],
+            "INSERT INTO threads (id, project_id, cwd, name, model, effort, tools, locked, created_at, updated_at, forked_from, forked_at)
+             SELECT ?1, project_id, cwd, name, model, effort, tools, locked AND ?2, ?3, ?3, id, ?4 FROM threads WHERE id = ?5",
+            params![id, unread, now, entry_id, src],
         )?;
         for (seq, e) in branch.iter().enumerate() {
+            // The row as it is, not as this build reads it: an entry of a kind only a newer
+            // build knows stays whole.
             tx.execute(
-                "INSERT INTO entries (thread_id, seq, id, parent_id, kind, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![id, seq as i64, e.id, e.parent_id, e.kind, e.json.to_string()],
+                "INSERT INTO entries (thread_id, seq, id, parent_id, at, kind, json)
+                 SELECT ?1, ?2, id, parent_id, at, kind, json FROM entries WHERE thread_id = ?3 AND seq = ?4",
+                params![id, seq as i64, src, e.seq as i64],
             )?;
+            index_text(&tx, id, &e.body)?;
         }
-        tx.execute(&format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES} AND thread_id = ?1"), [id])?;
         tx.commit()?;
         self.list_threads()?.into_iter().find(|t| t.id == id).ok_or_else(|| anyhow::anyhow!("fork vanished"))
     }
@@ -693,106 +596,62 @@ impl Storage {
     /// The entry is a message the user typed in the thread: what `EditMessage` rewrites.
     pub fn is_user_message(&self, thread_id: &str, entry_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM entries WHERE thread_id = ?1 AND id = ?2 AND kind = 'message'
-                              AND json_extract(json, '$.message.role') = 'user')",
+            "SELECT EXISTS (SELECT 1 FROM entries WHERE thread_id = ?1 AND id = ?2 AND kind = 'user')",
             params![thread_id, entry_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// The model (its id) and the effort the thread last ran with.
+    pub fn thread_model(&self, id: &str) -> Result<(Option<String>, Option<String>)> {
+        let row = self.conn.query_row("SELECT model, effort FROM threads WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)));
+        Ok(row.optional()?.unwrap_or_default())
     }
 
     pub fn thread_cwd(&self, id: &str) -> Result<Option<String>> {
         Ok(self.conn.query_row("SELECT cwd FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?)
     }
 
-    /// Header (null if the runtime hasn't produced one yet) plus all entries in order.
-    pub fn get_thread(&self, id: &str) -> Result<Option<(Value, Vec<Entry>)>> {
-        let header: Option<Option<String>> =
-            self.conn.query_row("SELECT header FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
-        let Some(header) = header else { return Ok(None) };
-        let header = header.map(|h| serde_json::from_str(&h)).transpose()?.unwrap_or(Value::Null);
-
-        let mut stmt = self.conn.prepare("SELECT seq, id, parent_id, kind, json FROM entries WHERE thread_id = ?1 ORDER BY seq")?;
-        let entries = stmt
-            .query_map([id], |r| {
-                Ok(Entry {
-                    seq: r.get::<_, i64>(0)? as u64,
-                    id: r.get(1)?,
-                    parent_id: r.get(2)?,
-                    kind: r.get(3)?,
-                    json: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or(Value::Null),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(Some((header, entries)))
+    /// All the thread's entries, in order. One this build can't read (a newer one wrote
+    /// it) is a `Body::Unknown`.
+    pub fn get_thread(&self, id: &str) -> Result<Option<Vec<Entry>>> {
+        if self.thread_cwd(id)?.is_none() {
+            return Ok(None);
+        }
+        let mut stmt = self.conn.prepare("SELECT seq, id, parent_id, at, json FROM entries WHERE thread_id = ?1 ORDER BY seq")?;
+        let entries = stmt.query_map([id], |r| {
+            Ok(Entry {
+                seq: r.get::<_, i64>(0)? as u64,
+                id: r.get(1)?,
+                parent_id: r.get(2)?,
+                at: r.get(3)?,
+                body: serde_json::from_str(&r.get::<_, String>(4)?).unwrap_or(Body::Unknown),
+            })
+        })?;
+        Ok(Some(entries.collect::<rusqlite::Result<_>>()?))
     }
 
-    pub fn set_header(&self, id: &str, header: &Value) -> Result<()> {
-        self.conn.execute("UPDATE threads SET header = ?2 WHERE id = ?1", params![id, header.to_string()])?;
-        Ok(())
-    }
-
-    /// Append a pi entry; returns it with its assigned `seq` and its images moved to
-    /// `blobs` (inline ones, and the local files a reply links to; see `blobs.rs`). Bumps
-    /// `updated_at` for what the transcript shows (so a cache warm or a title doesn't
-    /// mark the thread unread or move it up the inbox), tracks the current model /
-    /// thinking level, and takes the thread's name from a `session_info` entry (the
-    /// generated title).
-    pub fn append_entry(&self, thread_id: &str, mut json: Value, now: i64) -> Result<Entry> {
-        let mut failed = None;
-        let mut store = |id: &str, mime: &str, bytes: &[u8]| {
-            if let Err(e) = self.conn.execute("INSERT OR IGNORE INTO blobs (id, mime, bytes) VALUES (?1, ?2, ?3)", params![id, mime, bytes])
-            {
-                failed = Some(e);
-            }
-        };
-        if let Some(cwd) = self.thread_cwd(thread_id)? {
-            crate::blobs::link_images(&mut json, std::path::Path::new(&cwd), &mut store);
+    /// Append an entry; returns it with its `seq`. Counts what it used and indexes what it
+    /// says (see the module doc), and bumps `updated_at` to `now` for what the transcript
+    /// shows, so a script's stored values don't mark the thread unread or move it up the inbox.
+    /// An entry that was on its way when its thread was deleted is refused: nothing of a
+    /// thread is kept without it (a search would find it).
+    pub fn append_entry(&self, thread_id: &str, mut entry: Entry, now: i64) -> Result<Entry> {
+        let tx = self.conn.unchecked_transaction()?;
+        let exists: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM threads WHERE id = ?1)", [thread_id], |r| r.get(0))?;
+        anyhow::ensure!(exists, "no such thread");
+        let seq: i64 = tx.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM entries WHERE thread_id = ?1", [thread_id], |r| r.get(0))?;
+        entry.seq = seq as u64;
+        insert_entry(&tx, thread_id, &entry)?;
+        index_text(&tx, thread_id, &entry.body)?;
+        if let Some((provider, model, usage)) = used(&entry.body) {
+            add_usage(&tx, entry.at, &provider, model, usage)?;
+            add_spend(&tx, thread_id, usage)?;
         }
-        crate::blobs::strip(&mut json, &mut store);
-        if let Some(e) = failed {
-            return Err(e.into());
+        if !matches!(entry.body, Body::Store { .. }) {
+            tx.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
         }
-        let seq: i64 =
-            self.conn.query_row("SELECT COALESCE(MAX(seq) + 1, 0) FROM entries WHERE thread_id = ?1", [thread_id], |r| r.get(0))?;
-        let entry = Entry::from_pi(seq as u64, json);
-        self.conn.execute(
-            "INSERT INTO entries (thread_id, seq, id, parent_id, kind, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![thread_id, seq, entry.id, entry.parent_id, entry.kind, entry.json.to_string()],
-        )?;
-        if matches!(entry.kind.as_str(), "message" | "custom_message" | "compaction") {
-            self.conn.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
-        }
-        if entry.kind == "message" {
-            self.conn
-                .execute(&format!("INSERT INTO usage {USAGE_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
-            self.conn.execute(&ADD_SPEND.replace("{filter}", "AND thread_id = ?1 AND seq = ?2"), params![thread_id, seq])?;
-            self.conn.execute(
-                &format!("INSERT INTO entries_fts (thread_id, text) {FTS_FROM_ENTRIES} AND thread_id = ?1 AND seq = ?2"),
-                params![thread_id, seq],
-            )?;
-        }
-
-        let j = &entry.json;
-        match entry.kind.as_str() {
-            "model_change" => {
-                if let (Some(p), Some(m)) = (j.get("provider").and_then(Value::as_str), j.get("modelId").and_then(Value::as_str)) {
-                    self.conn.execute("UPDATE threads SET model = ?2 WHERE id = ?1", params![thread_id, format!("{p}/{m}")])?;
-                }
-            }
-            "thinking_level_change" => {
-                if let Some(l) = j.get("thinkingLevel").and_then(Value::as_str) {
-                    self.conn.execute("UPDATE threads SET thinking_level = ?2 WHERE id = ?1", params![thread_id, l])?;
-                }
-            }
-            // An explicit name: how the runtime's generated title arrives. A name set since
-            // (`set_name`) wins.
-            "session_info" => {
-                if let Some(name) = j.get("name").and_then(Value::as_str) {
-                    self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1 AND renamed = 0", params![thread_id, name])?;
-                }
-            }
-            _ => {}
-        }
+        tx.commit()?;
         Ok(entry)
     }
 
@@ -857,7 +716,7 @@ impl Storage {
     }
 
     /// Usage in `since..until`, summed per `bucket`-wide slot from `since` and per
-    /// provider + model, oldest slot first.
+    /// provider (who makes the model) + model, oldest slot first.
     pub fn usage(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<UsageBucket>> {
         anyhow::ensure!(bucket > 0, "bucket must be positive");
         let mut stmt = self.conn.prepare(
@@ -882,48 +741,362 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Keep an image's bytes; returns their id (their sha256, hex), what entries name them
+    /// by. Identical images share one row.
+    pub fn put_blob(&self, mime: &str, bytes: &[u8]) -> Result<String> {
+        let id = format!("{:x}", Sha256::digest(bytes));
+        self.conn.execute("INSERT OR IGNORE INTO blobs (id, mime, bytes) VALUES (?1, ?2, ?3)", params![id, mime, bytes])?;
+        Ok(id)
+    }
+
     pub fn blob(&self, id: &str) -> Result<Option<(String, Vec<u8>)>> {
         Ok(self.conn.query_row("SELECT mime, bytes FROM blobs WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional()?)
     }
+}
 
-    /// Entries as pi expects them: image `blob` refs replaced by their inline `data`.
-    pub fn inflate(&self, entries: &mut [Value]) {
-        for e in entries {
-            crate::blobs::inflate(e, &mut |id| self.blob(id).ok().flatten().map(|(_, bytes)| bytes));
+/// The thread's current branch: its last entry and that one's ancestors, oldest first.
+fn current_branch(entries: &[Entry]) -> Vec<&Entry> {
+    entries.last().map(|last| transcript::branch(entries, &last.id)).unwrap_or_default()
+}
+
+/// The text of a reply that ended a run: the model was done, or out of room.
+fn final_reply(entry: &Entry) -> Option<String> {
+    match &entry.body {
+        Body::Assistant(a) if matches!(a.stop, Stop::End | Stop::MaxTokens) => Some(text_of(&a.content)),
+        _ => None,
+    }
+}
+
+fn insert_entry(conn: &Connection, thread_id: &str, entry: &Entry) -> Result<()> {
+    let json = serde_json::to_value(&entry.body)?;
+    let kind = json.get("type").and_then(Value::as_str).unwrap_or_default();
+    conn.prepare_cached("INSERT INTO entries (thread_id, seq, id, parent_id, at, kind, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)")?
+        .execute(params![thread_id, entry.seq as i64, entry.id, entry.parent_id, entry.at, kind, json.to_string()])?;
+    Ok(())
+}
+
+/// Index what a message says for `search`: a user's and an assistant's text.
+fn index_text(conn: &Connection, thread_id: &str, body: &Body) -> Result<()> {
+    let text = match body {
+        Body::User { content } => text_of(content),
+        Body::Assistant(a) => text_of(&a.content),
+        _ => return Ok(()),
+    };
+    if !text.trim().is_empty() {
+        conn.prepare_cached("INSERT INTO entries_fts (thread_id, text) VALUES (?1, ?2)")?.execute(params![thread_id, text])?;
+    }
+    Ok(())
+}
+
+/// What the request behind an entry used, and the provider and model that is summed
+/// under: a reply's, and a compaction's.
+fn used(body: &Body) -> Option<(String, &str, &Usage)> {
+    match body {
+        // A turn the agent closed itself (a stopped run, one that failed outside a
+        // request) is no model's message: nobody made it and it used nothing.
+        Body::Assistant(a) if a.provider.is_empty() && a.usage == Usage::default() => None,
+        Body::Assistant(a) => Some((a.provider.clone(), &a.model, &a.usage)),
+        // A compaction doesn't say who makes its model: the id has to.
+        Body::Compaction { model, usage, .. } => Some((import::provider(model, ""), model, usage)),
+        _ => None,
+    }
+}
+
+/// Count `usage` as used at `at`, under who makes `model`: a row of the `usage` table.
+fn add_usage(conn: &Connection, at: i64, provider: &str, model: &str, usage: &Usage) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT INTO usage (at, provider, model, input, output, cache_read, cache_write, cost) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )?
+    .execute(params![
+        at,
+        provider,
+        model,
+        usage.input as i64,
+        usage.output as i64,
+        usage.cache_read as i64,
+        usage.cache_write as i64,
+        usage.cost.total()
+    ])?;
+    Ok(())
+}
+
+/// Add `usage` to what the thread has consumed (`ThreadSummary::spend`).
+fn add_spend(conn: &Connection, thread_id: &str, usage: &Usage) -> Result<()> {
+    conn.prepare_cached(
+        "UPDATE threads SET spend_cost = spend_cost + ?2, spend_input = spend_input + ?3, spend_output = spend_output + ?4,
+                            spend_cached = spend_cached + ?5
+         WHERE id = ?1",
+    )?
+    .execute(params![thread_id, usage.cost.total(), usage.prompt() as i64, usage.output as i64, usage.cache_read as i64])?;
+    Ok(())
+}
+
+/// What `migrate` did.
+#[derive(Debug, Default, PartialEq)]
+pub struct Migration {
+    pub threads: usize,
+    /// Pi's entries, and how many of them are entries here.
+    pub entries: usize,
+    pub kept: usize,
+    /// The others, counted by what they were (`import::Converted::dropped`).
+    pub dropped: BTreeMap<String, usize>,
+    /// The threads that could not be converted whole, read-only now, each by its name (its
+    /// id, without one) with why (`import::Converted::unreadable`).
+    pub locked: Vec<(String, Vec<String>)>,
+}
+
+/// Whether `db` is pi's: a `service.db` from before the agent was Dirigent's own, which
+/// `migrate` converts. Told by its schema (a thread of pi's has a `thinking_level`); a
+/// file that isn't there is nobody's.
+pub fn from_pi(db: &Path) -> Result<bool> {
+    if !db.exists() {
+        return Ok(false);
+    }
+    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(columns(&conn, "main", "threads")?.iter().any(|column| column == "thinking_level"))
+}
+
+/// Make the file alone all of `db`, with nobody else on it: for a copy of it, and before
+/// it is replaced. Leaving sqlite's WAL mode does both: its log (of a service that was
+/// killed) is folded into the file, and sqlite refuses while another connection is open.
+/// A Dirigent that runs on the db would go on writing into a file that is no longer there.
+pub fn settle(db: &Path) -> Result<()> {
+    let conn = Connection::open(db)?;
+    // No waiting: one that runs on it doesn't go away.
+    conn.busy_timeout(std::time::Duration::ZERO)?;
+    let left = match conn.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get::<_, String>(0)) {
+        Ok(mode) => mode == "delete",
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy => false,
+        Err(e) => return Err(e.into()),
+    };
+    anyhow::ensure!(left, "{} is in use: is another Dirigent running on it?", db.display());
+    conn.close().map_err(|(_, e)| e)?;
+    Ok(())
+}
+
+/// Convert `db`, pi's `service.db` (`from_pi`; `None` for any other), where it is.
+/// Everything comes along: the entries converted (`import::entries`), the rest as it is.
+/// The new db is built under another name and takes the old one's place once whole, so a
+/// migration that dies leaves pi's and the next start runs it again. `progress` is told
+/// how many threads are done, of how many. Call it with the db settled (`settle`: nobody
+/// else is on it) and one migration at a time (`migration.rs`, which has also copied what
+/// was there before).
+pub fn migrate(db: &Path, progress: impl FnMut(usize, usize)) -> Result<Option<Migration>> {
+    if !from_pi(db)? {
+        return Ok(None);
+    }
+    let beside = |suffix: &str| {
+        let mut name = db.as_os_str().to_owned();
+        name.push(suffix);
+        std::path::PathBuf::from(name)
+    };
+    let building = beside(".migrating");
+    let _ = std::fs::remove_file(&building);
+    let built = build(db, &building, progress).and_then(|migration| {
+        // What sqlite left beside pi's db while it was read is not the new one's.
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(beside(suffix));
+        }
+        std::fs::rename(&building, db)?;
+        Ok(migration)
+    });
+    if built.is_err() {
+        let _ = std::fs::remove_file(&building);
+    }
+    Ok(Some(built.with_context(|| format!("migrate {}", db.display()))?))
+}
+
+fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Result<Migration> {
+    let conn = Connection::open(new)?;
+    // No journal: a build cut short is thrown away whole, and the one commit syncs the file.
+    conn.pragma_update(None, "journal_mode", "OFF")?;
+    conn.execute_batch(SCHEMA)?;
+    conn.execute("ATTACH DATABASE ?1 AS old", [read_only_uri(old)])?;
+    conn.execute_batch("BEGIN")?;
+    // As they are, inside sqlite (the blobs are most of the file). `usage` too, not counted
+    // again from the entries: its rows outlive deleted threads. (What the old db never
+    // counted, the compactions, is added below.)
+    for table in ["projects", "threads", "blobs", "usage", "asks", "message_pins", "meta", "api_keys", "proxy_samples"] {
+        let theirs = columns(&conn, "old", table)?;
+        let both: Vec<String> = columns(&conn, "main", table)?.into_iter().filter(|c| theirs.contains(c)).collect();
+        // The columns both have: an older build's db is without the later ones, and
+        // without the later tables. In its order: asks and pins are listed in it.
+        if !both.is_empty() {
+            let (both, order) = (both.join(", "), if table == "proxy_samples" { "at" } else { "rowid" });
+            conn.execute(&format!("INSERT INTO main.{table} ({both}) SELECT {both} FROM old.{table} ORDER BY {order}"), [])?;
         }
     }
+    // Usage is summed under who makes the model now, not under how pi reached it.
+    let models: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT DISTINCT provider, model FROM main.usage")?;
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
+    };
+    for (provider, model) in models {
+        conn.execute(
+            "UPDATE main.usage SET provider = ?1 WHERE provider = ?2 AND model = ?3",
+            params![import::provider(&model, &provider), provider, model],
+        )?;
+    }
+    // Derived from the entries, as they are converted.
+    conn.execute("UPDATE main.threads SET spend_cost = 0, spend_input = 0, spend_output = 0, spend_cached = 0", [])?;
+    let threads: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM main.threads")?;
+        stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
+    };
+    let mut migration = Migration::default();
+    let mut row = conn
+        .prepare("SELECT o.model, o.thinking_level, t.forked_at FROM main.threads t JOIN old.threads o ON o.id = t.id WHERE t.id = ?1")?;
+    let mut read = conn.prepare("SELECT json FROM old.entries WHERE thread_id = ?1 ORDER BY seq")?;
+    let total = threads.len();
+    for id in threads {
+        progress(migration.threads, total);
+        let (model, effort, forked_at): (Option<String>, Option<String>, Option<String>) =
+            row.query_row([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let pi = read.query_map([&id], |r| r.get::<_, String>(0))?;
+        let pi: Vec<Value> = pi.map(|json| Ok(serde_json::from_str(&json?).unwrap_or(Value::Null))).collect::<rusqlite::Result<_>>()?;
+        let converted = import::entries(&pi);
+        // A fork's entries up to where it forked are its source's history, not what it
+        // spent itself (`fork_thread`). Told by pi's entries: where it forked is one of
+        // those, and may be none of ours (a `model_change`, a `session_info`).
+        let forked = forked_at.as_deref().and_then(|at| pi.iter().position(|e| pi_id(e) == Some(at)));
+        let theirs: HashSet<&str> = forked.map(|at| pi[..=at].iter().filter_map(pi_id).collect()).unwrap_or_default();
+        let copied = converted.entries.iter().take_while(|e| theirs.contains(e.id.as_str())).count();
+        // Where it forked is an entry of ours from here on: the last one it copied.
+        if let Some(last) = copied.checked_sub(1).map(|last| &converted.entries[last]) {
+            conn.execute("UPDATE main.threads SET forked_at = ?2 WHERE id = ?1", params![id, last.id])?;
+        }
+        // Who makes the model at work: what a compaction is counted under when its
+        // model's id doesn't say, as that model's replies are.
+        let mut made_by = String::new();
+        for (i, entry) in converted.entries.iter().enumerate() {
+            insert_entry(&conn, &id, entry)?;
+            index_text(&conn, &id, &entry.body)?;
+            if let Body::Assistant(a) = &entry.body {
+                made_by.clone_from(&a.provider);
+            }
+            if i < copied {
+                continue;
+            }
+            match &entry.body {
+                // Its `usage` row came with the old db's (copied above).
+                Body::Assistant(a) => add_spend(&conn, &id, &a.usage)?,
+                // What a compaction used the old db never counted, there or on its thread:
+                // it is from here on, as `append_entry` counts a new one. (Not one of a
+                // thread that is gone, though a fork may hold its copy.)
+                Body::Compaction { model, usage, .. } if *usage != Usage::default() => {
+                    add_usage(&conn, entry.at, &import::provider(model, &made_by), model, usage)?;
+                    add_spend(&conn, &id, usage)?;
+                }
+                _ => {}
+            }
+        }
+        // The row has what the next run uses (a prompt sets it ahead of pi's change entries).
+        let model = model.or(converted.model).map(|m| import::model_id(&m));
+        conn.execute(
+            "UPDATE main.threads SET model = ?2, effort = ?3, locked = ?4 WHERE id = ?1",
+            params![id, model, effort.or(converted.effort), !converted.unreadable.is_empty()],
+        )?;
+        migration.threads += 1;
+        migration.entries += pi.len();
+        migration.kept += converted.entries.len();
+        for (what, n) in converted.dropped {
+            *migration.dropped.entry(what).or_default() += n;
+        }
+        if !converted.unreadable.is_empty() {
+            let name: Option<String> = conn.query_row("SELECT name FROM main.threads WHERE id = ?1", [&id], |r| r.get(0))?;
+            migration.locked.push((name.unwrap_or(id), converted.unreadable));
+        }
+    }
+    progress(total, total);
+    drop((row, read));
+    conn.execute_batch("COMMIT")?;
+    conn.close().map_err(|(_, e)| e)?;
+    Ok(migration)
 }
 
-/// The text of a pi message entry: its string content, or its text blocks (images and tool
-/// calls left out) a line apart.
-fn message_text(entry: &Value) -> String {
-    match entry.pointer("/message/content") {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
+/// The id of an entry of pi's.
+fn pi_id(entry: &Value) -> Option<&str> {
+    entry.get("id").and_then(Value::as_str)
 }
 
-/// `ALTER TABLE ... ADD COLUMN` unless the column is already there; true if it was added.
-fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
-    let exists = stmt.query_map([], |r| r.get::<_, String>(1))?.any(|c| c.is_ok_and(|c| c == column));
-    if !exists {
-        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"), [])?;
-    }
-    Ok(!exists)
+/// The columns of `schema`'s `table`; none when it has no such table.
+fn columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info({table})"))?;
+    Ok(stmt.query_map([], |r| r.get(1))?.collect::<rusqlite::Result<_>>()?)
 }
+
+/// `path` as a URI that sqlite opens read-only (sqlite.org/uri.html has the recipe).
+fn read_only_uri(path: &Path) -> String {
+    let mut path = path.to_string_lossy().replace('%', "%25").replace('?', "%3f").replace('#', "%23");
+    if cfg!(windows) {
+        path = path.replace('\\', "/");
+        // A drive letter is no host name.
+        if !path.starts_with('/') {
+            path.insert(0, '/');
+        }
+    }
+    format!("file:{path}?mode=ro")
+}
+
+/// A `service.db` as a build from before `api_keys`, `proxy_samples` and a thread's
+/// `renamed` left it, with a column and a table of features long gone.
+#[cfg(test)]
+pub(crate) const PI_SCHEMA: &str = "
+    CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT NOT NULL, origin TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER);
+    CREATE TABLE threads (id TEXT PRIMARY KEY, project_id TEXT, cwd TEXT NOT NULL, name TEXT, header TEXT, model TEXT,
+        thinking_level TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_run_ms INTEGER, archived_at INTEGER,
+        run_id TEXT, tools TEXT, workspace TEXT, parent_id TEXT, pinned INTEGER NOT NULL DEFAULT 0,
+        spend_cost REAL NOT NULL DEFAULT 0, spend_input INTEGER NOT NULL DEFAULT 0, spend_output INTEGER NOT NULL DEFAULT 0,
+        spend_cached INTEGER NOT NULL DEFAULT 0, forked_from TEXT, forked_at TEXT);
+    CREATE TABLE entries (thread_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, parent_id TEXT, kind TEXT NOT NULL,
+        json TEXT NOT NULL, PRIMARY KEY (thread_id, seq));
+    CREATE TABLE blobs (id TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes BLOB NOT NULL);
+    CREATE TABLE usage (at INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input INTEGER NOT NULL,
+        output INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, cost REAL NOT NULL);
+    CREATE TABLE asks (thread_id TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY (thread_id, id));
+    CREATE VIRTUAL TABLE entries_fts USING fts5 (thread_id UNINDEXED, text);
+    CREATE TABLE message_pins (thread_id TEXT NOT NULL, entry_id TEXT NOT NULL, PRIMARY KEY (thread_id, entry_id));
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE workflow_runs (id TEXT PRIMARY KEY);
+";
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use dirigent_protocol::Question;
+    use dirigent_protocol::transcript::{Api, Assistant, Block, Cost, Notice, ToolResult};
     use serde_json::json;
+
+    fn entry(id: &str, parent: Option<&str>, at: i64, body: Body) -> Entry {
+        Entry { seq: 0, id: id.into(), parent_id: parent.map(str::to_owned), at, body }
+    }
+
+    fn user(id: &str, parent: Option<&str>, text: &str) -> Entry {
+        entry(id, parent, 1, Body::User { content: vec![Block::text(text)] })
+    }
+
+    /// A reply by model `m` of `anthropic` that used `input` tokens for `cost` dollars.
+    fn reply(id: &str, parent: &str, at: i64, stop: Stop, text: &str, input: u64, cost: f64) -> Entry {
+        let usage = Usage { input, output: 10, cache_read: 100, cache_write: 5, cost: Cost { input: cost, ..Cost::default() } };
+        let content = vec![Block::Thinking { text: "hm".into(), signature: None, redacted: false }, Block::text(text)];
+        let a = Assistant {
+            content,
+            model: "m".into(),
+            provider: "anthropic".into(),
+            api: Api::Anthropic,
+            effort: None,
+            usage,
+            stop,
+            error: None,
+            duration_ms: 0,
+        };
+        entry(id, Some(parent), at, Body::Assistant(a))
+    }
+
+    fn by_id(s: &Storage, id: &str) -> ThreadSummary {
+        s.list_threads().unwrap().into_iter().find(|t| t.id == id).unwrap()
+    }
 
     #[test]
     fn asks_and_tools_live_with_the_thread() {
@@ -944,26 +1117,6 @@ mod tests {
         assert!(!s.list_threads().unwrap()[0].asking());
     }
 
-    /// A db from before `COLUMNS` / `asks` existed gets them on open.
-    #[test]
-    fn old_db_is_upgraded_on_open() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE threads (id TEXT PRIMARY KEY, project_id TEXT, cwd TEXT NOT NULL, name TEXT, header TEXT, model TEXT,
-             thinking_level TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_run_ms INTEGER, archived_at INTEGER);
-             INSERT INTO threads (id, cwd, created_at, updated_at) VALUES ('t1', '/x', 1, 1);",
-        )
-        .unwrap();
-        let s = Storage::init(conn).unwrap();
-        assert_eq!(s.report("t1").unwrap(), (Report::Reply, Notify::Asap));
-        s.set_tools("t1", &["async_bash".into()]).unwrap();
-        assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
-        assert!(s.list_threads().unwrap()[0].asks.is_empty());
-        // Opening again is a no-op.
-        let s = Storage::init(s.conn).unwrap();
-        assert_eq!(s.thread_tools("t1").unwrap(), ["async_bash"]);
-    }
-
     #[test]
     fn adding_a_path_twice_keeps_one_project() {
         let s = Storage::in_memory().unwrap();
@@ -975,62 +1128,72 @@ mod tests {
         assert_eq!(s.add_project("p3", "/x", None, 4).unwrap().id, "p3");
     }
 
-    /// An entry comes back as pi wrote it, keys in their order: pi replays a tool call's
-    /// arguments as stored, and the provider's prompt cache misses on reordered ones
-    /// (`preserve_order` in the workspace `Cargo.toml`).
-    #[test]
-    fn entries_keep_their_key_order() {
-        let s = Storage::in_memory().unwrap();
-        s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
-        let entry = r#"{"type":"message","id":"a","message":{"role":"assistant","content":[{"type":"toolCall","name":"edit","arguments":{"path":"a.rs","edits":[{"oldText":"x","newText":"y"}]}}]}}"#;
-        s.append_entry("t1", serde_json::from_str(entry).unwrap(), 1).unwrap();
-        let (_, entries) = s.get_thread("t1").unwrap().unwrap();
-        assert_eq!(entries[0].json.to_string(), entry);
-    }
-
     #[test]
     fn roundtrip_thread_and_entries() {
         let s = Storage::in_memory().unwrap();
         s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
         s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
-        s.set_header("t1", &json!({"type":"session","id":"t1"})).unwrap();
-        // Named after its first prompt until a title arrives.
-        s.set_prompted("t1", "  hello  \nworld", None, None, 10).unwrap();
+        // Named after its first prompt until a title arrives; the model and effort are the prompt's.
+        s.set_prompted("t1", "  hello  \nworld", Some("claude-opus-5-5"), Some("high"), 10).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("hello"));
-        s.set_prompted("t1", "later", None, None, 10).unwrap();
-        s.append_entry("t1", json!({"type":"model_change","id":"a","parentId":null,"provider":"anthropic","modelId":"m"}), 11).unwrap();
-        let e = s
-            .append_entry("t1", json!({"type":"message","id":"b","parentId":"a","message":{"role":"user","content":"hello\nworld"}}), 12)
-            .unwrap();
-        assert_eq!(e.seq, 1);
-        assert_eq!(e.parent_id.as_deref(), Some("a"));
-        // Images leave the entry for the blobs table and come back on inflate.
-        let img = s
-            .append_entry("t1", json!({"type":"message","id":"c","message":{"role":"user","content":[{"type":"image","data":"AQID","mimeType":"image/png"}]}}), 12)
-            .unwrap();
-        let blob_id = img.json["message"]["content"][0]["blob"].as_str().unwrap().to_owned();
-        assert_eq!(s.blob(&blob_id).unwrap(), Some(("image/png".to_owned(), vec![1, 2, 3])));
-        let mut inflated = vec![img.json.clone()];
-        s.inflate(&mut inflated);
-        assert_eq!(inflated[0]["message"]["content"][0]["data"], "AQID");
+        s.set_prompted("t1", "later", None, Some("low"), 10).unwrap();
+        // An image is a blob, named by the hash of its bytes; the same bytes are the same blob.
+        let blob = s.put_blob("image/png", &[1, 2, 3]).unwrap();
+        assert_eq!(blob, "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81");
+        assert_eq!(s.put_blob("image/png", &[1, 2, 3]).unwrap(), blob);
+        assert_eq!(s.blob(&blob).unwrap(), Some(("image/png".to_owned(), vec![1, 2, 3])));
 
-        let (header, entries) = s.get_thread("t1").unwrap().unwrap();
-        assert_eq!(header["id"], "t1");
-        assert_eq!(entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        let image = Block::Image { mime: "image/png".into(), blob };
+        let call =
+            Block::ToolCall { id: "c".into(), name: "edit".into(), input: json!({"path":"a.rs","edits":[{"oldText":"x","newText":"y"}]}) };
+        let calls = Assistant {
+            content: vec![call],
+            model: "claude-opus-5-5".into(),
+            provider: "anthropic".into(),
+            api: Api::Anthropic,
+            effort: Some("high".into()),
+            usage: Usage::default(),
+            stop: Stop::ToolUse,
+            error: None,
+            duration_ms: 5,
+        };
+        let result =
+            ToolResult { call_id: "c".into(), tool: "edit".into(), content: vec![Block::text("ok")], is_error: false, duration_ms: 3 };
+        let appended = [
+            entry("a", None, 11, Body::User { content: vec![Block::text("hello\nworld"), image] }),
+            entry("b", Some("a"), 12, Body::Assistant(calls)),
+            entry("c", Some("b"), 12, Body::ToolResult(result)),
+            entry("d", Some("c"), 12, Body::Notice(Notice::Info { text: "moved".into() })),
+        ];
+        for (seq, e) in appended.iter().enumerate() {
+            assert_eq!(s.append_entry("t1", e.clone(), 12).unwrap(), Entry { seq: seq as u64, ..e.clone() });
+        }
+        // They come back as they went in (a tool call's input with its keys in their order).
+        let entries = s.get_thread("t1").unwrap().unwrap();
+        assert_eq!(entries.iter().map(|e| Entry { seq: 0, ..e.clone() }).collect::<Vec<_>>(), appended);
+        let Body::Assistant(a) = &entries[1].body else { panic!("not a reply") };
+        assert!(serde_json::to_string(&a.content).unwrap().contains(r#"{"path":"a.rs","edits":[{"oldText":"x","newText":"y"}]}"#));
+        let kinds: Vec<String> = s
+            .conn
+            .prepare("SELECT kind FROM entries ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(kinds, ["user", "assistant", "tool_result", "notice"]);
 
         let threads = s.list_threads().unwrap();
         assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].name.as_deref(), Some("hello"));
-        assert_eq!(threads[0].model.as_deref(), Some("anthropic/m"));
+        assert_eq!((threads[0].model.as_deref(), threads[0].effort.as_deref()), (Some("claude-opus-5-5"), Some("low")));
         assert_eq!(threads[0].project_id.as_deref(), Some("p1"));
-        assert_eq!(threads[0].entry_count, 3);
-        assert_eq!(threads[0].updated_at, 12);
+        assert_eq!((threads[0].entry_count, threads[0].updated_at, threads[0].locked), (4, 12, false));
         assert!(s.get_thread("nope").unwrap().is_none());
-        // The generated title replaces it.
-        s.append_entry("t1", json!({"type":"session_info","id":"n","parentId":"c","name":"Greeting"}), 20).unwrap();
+        // The generated title replaces the prompt's first line.
+        s.set_title("t1", "Greeting").unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("Greeting"));
-        // Neither it nor a cache warm is news: `updated_at` stays put.
-        s.append_entry("t1", json!({"type":"usage","id":"w","parentId":"n","kind":"cache_warm"}), 21).unwrap();
+        // What a script stored is no news: `updated_at` stays put.
+        s.append_entry("t1", entry("w", Some("d"), 21, Body::Store { values: [("k".to_owned(), json!(1))].into() }), 21).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].updated_at, 12);
 
         // A workspace moves the thread's cwd; the project path is still known afterwards.
@@ -1066,28 +1229,34 @@ mod tests {
         let s = Storage::in_memory().unwrap();
         s.create_thread("src", "p", "/ws/src", None, Some("Bug hunt"), 1).unwrap();
         s.set_tools("src", &["ask_user".into()]).unwrap();
-        let user = |id: &str, parent: &str, text: &str| json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":text}});
-        let reply = |id: &str, parent: &str| json!({"type":"message","id":id,"parentId":parent,"message":{"role":"assistant","stopReason":"stop","timestamp":4,"content":[{"type":"text","text":"found it"}],"usage":{"input":5,"output":1,"cost":{"total":0.5}}}});
-        s.append_entry("src", json!({"type":"model_change","id":"m","parentId":null,"provider":"a","modelId":"x"}), 2).unwrap();
-        s.append_entry("src", user("u1", "m", "find the bug"), 3).unwrap();
-        s.append_entry("src", reply("r1", "u1"), 4).unwrap();
-        // An edit of u1: u2 branches off m; r2 is the current branch's reply.
-        s.append_entry("src", user("u2", "m", "find the other bug"), 5).unwrap();
-        s.append_entry("src", reply("r2", "u2"), 6).unwrap();
+        s.set_prompted("src", "find the bug", Some("x"), Some("high"), 2).unwrap();
+        s.append_entry("src", user("u1", None, "find the bug"), 3).unwrap();
+        s.append_entry("src", reply("r1", "u1", 4, Stop::End, "found it", 5, 0.5), 4).unwrap();
+        // An edit of u1: u2 is a root too; r2 is the current branch's reply.
+        s.append_entry("src", user("u2", None, "find the other bug"), 5).unwrap();
+        s.append_entry("src", reply("r2", "u2", 6, Stop::End, "found it", 5, 0.5), 6).unwrap();
         assert!(s.is_user_message("src", "u1").unwrap() && !s.is_user_message("src", "r1").unwrap());
 
         let fork = s.fork_thread("src", "r1", "f", 10).unwrap();
         assert_eq!(fork.forked_from, Some(ForkedFrom { thread_id: "src".into(), entry_id: "r1".into() }));
-        assert_eq!((fork.cwd.as_str(), fork.name.as_deref(), fork.model.as_deref()), ("/ws/src", Some("Bug hunt"), Some("a/x")));
-        assert_eq!((fork.parent_id, fork.workspace, fork.updated_at), (None, None, 10));
+        assert_eq!((fork.cwd.as_str(), fork.name.as_deref(), fork.model.as_deref()), ("/ws/src", Some("Bug hunt"), Some("x")));
+        assert_eq!((fork.parent_id, fork.workspace, fork.updated_at, fork.effort.as_deref()), (None, None, 10, Some("high")));
         assert_eq!(fork.spend, Spend::default());
         assert_eq!(s.thread_tools("f").unwrap(), ["ask_user"]);
-        let (header, entries) = s.get_thread("f").unwrap().unwrap();
-        assert!(header.is_null());
-        assert_eq!(entries.iter().map(|e| (e.seq, e.id.as_str())).collect::<Vec<_>>(), [(0, "m"), (1, "u1"), (2, "r1")]);
+        let source = s.get_thread("src").unwrap().unwrap();
+        let entries = s.get_thread("f").unwrap().unwrap();
+        assert_eq!(entries.iter().map(|e| (e.seq, e.id.as_str())).collect::<Vec<_>>(), [(0, "u1"), (1, "r1")]);
+        assert_eq!(entries[1].body, source[1].body);
         assert_eq!(s.search("find bug", 10).unwrap().len(), 2);
         assert_eq!(s.usage(0, 100, 100).unwrap()[0].messages, 2);
         assert!(s.fork_thread("src", "nope", "g", 10).is_err());
+
+        // A locked thread's fork is locked, unless it forks off before what couldn't be read.
+        s.append_entry("src", entry("x", Some("r2"), 7, Body::Unknown), 7).unwrap();
+        s.conn.execute("UPDATE threads SET locked = 1 WHERE id = 'src'", []).unwrap();
+        assert!(s.thread_locked("src").unwrap() && by_id(&s, "src").locked && !s.thread_locked("f").unwrap());
+        assert!(s.fork_thread("src", "x", "locked", 11).unwrap().locked);
+        assert!(!s.fork_thread("src", "r2", "free", 11).unwrap().locked);
     }
 
     #[test]
@@ -1103,17 +1272,11 @@ mod tests {
         family.sort();
         assert_eq!(family, ["grandkid", "kid", "root"]);
         assert_eq!(s.family("grandkid").unwrap(), ["grandkid"]);
-        let by_id = |s: &Storage, id: &str| s.list_threads().unwrap().into_iter().find(|t| t.id == id).unwrap();
 
         // Snoozed until the thread's next entry moves `updated_at`.
         s.set_snoozed("root", true).unwrap();
         assert!(by_id(&s, "root").snoozed);
-        s.append_entry(
-            "root",
-            json!({"type":"message","id":"u","parentId":null,"message":{"role":"user","content":"find the sqlite bug"}}),
-            50,
-        )
-        .unwrap();
+        s.append_entry("root", user("u", None, "find the sqlite bug"), 50).unwrap();
         assert!(!by_id(&s, "root").snoozed);
         s.set_snoozed("root", true).unwrap();
         s.set_snoozed("root", false).unwrap();
@@ -1133,37 +1296,31 @@ mod tests {
         assert!(by_id(&s, "root").pinned_entries.is_empty());
 
         // Search covers user and assistant text; the last final reply is what a parent reads.
-        let assistant = |id: &str, parent: &str, stop: &str, text: &str| json!({"type":"message","id":id,"parentId":parent,"message":{"role":"assistant","stopReason":stop,"content":[{"type":"text","text":text}]}});
-        s.append_entry("root", assistant("a1", "u", "toolUse", "looking at storage.rs"), 51).unwrap();
-        s.append_entry("root", assistant("a2", "a1", "stop", "The bug is a missing index on usage.at"), 52).unwrap();
-        s.append_entry(
-            "kid",
-            json!({"type":"message","id":"k","message":{"role":"user","content":[{"type":"text","text":"write docs"}]}}),
-            53,
-        )
-        .unwrap();
+        s.append_entry("root", reply("a1", "u", 51, Stop::ToolUse, "looking at storage.rs", 0, 0.), 51).unwrap();
+        s.append_entry("root", reply("a2", "a1", 52, Stop::End, "The bug is a missing index on usage.at", 0, 0.), 52).unwrap();
+        s.append_entry("kid", user("k", None, "write docs"), 53).unwrap();
         assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
         assert_eq!(s.last_reply("kid").unwrap(), None);
+        assert_eq!(s.last_reply("nope").unwrap(), None);
         // Named by its spawner: its first prompt doesn't rename it.
         s.set_prompted("kid", "write docs", None, None, 60).unwrap();
         assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
         assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
         // A new prompt without a reply yet (or aborted): no reply to report.
-        s.append_entry("root", json!({"type":"message","id":"u2","parentId":"a2","message":{"role":"user","content":"and again"}}), 54)
-            .unwrap();
+        s.append_entry("root", user("u2", Some("a2"), "and again"), 54).unwrap();
+        s.append_entry("root", reply("a3", "u2", 55, Stop::Aborted, "The bug is", 0, 0.), 55).unwrap();
         assert_eq!(s.last_reply("root").unwrap(), None);
         // A retitle reads every user message and the latest final reply, a run after it or not.
         let (prompts, reply) = s.conversation("root").unwrap();
         assert_eq!(prompts, ["find the sqlite bug", "and again"]);
         assert_eq!(reply.as_deref(), Some("The bug is a missing index on usage.at"));
         // An edit of u2 drops it from the branch a retitle reads.
-        s.append_entry("root", json!({"type":"message","id":"u3","parentId":"a2","message":{"role":"user","content":"once more"}}), 54)
-            .unwrap();
+        s.append_entry("root", user("u3", Some("a2"), "once more"), 56).unwrap();
         assert_eq!(s.conversation("root").unwrap().0, ["find the sqlite bug", "once more"]);
         s.set_name("root", "Missing usage index").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
         // A first title landing after it doesn't replace it.
-        s.append_entry("root", json!({"type":"session_info","id":"n","name":"Sqlite bug"}), 55).unwrap();
+        s.set_title("root", "Sqlite bug").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
         assert!(s.set_name("nope", "x").is_err());
         let hits = s.search("sqlite", 10).unwrap();
@@ -1171,13 +1328,14 @@ mod tests {
         assert_eq!(hits[0].thread_id, "root");
         assert!(hits[0].snippet.contains("sqlite"));
         assert_eq!(s.search("docs", 10).unwrap()[0].thread_id, "kid");
+        // Thinking is not what was said.
+        assert!(s.search("hm", 10).unwrap().is_empty());
         assert!(s.search("\"weird) syntax", 10).unwrap().is_empty());
         assert_eq!(s.search("", 10).unwrap().len(), 0);
-        // The index is rebuilt from the entries when it is empty (a db from before it existed).
-        s.conn.execute("DELETE FROM entries_fts", []).unwrap();
-        let s = Storage::init(s.conn).unwrap();
-        assert_eq!(s.search("index", 10).unwrap()[0].thread_id, "root");
         s.delete_thread("root").unwrap();
+        assert!(s.search("index", 10).unwrap().is_empty());
+        // Nor does an entry that was still on its way bring any of it back.
+        s.append_entry("root", user("late", None, "the index again"), 60).unwrap_err();
         assert!(s.search("index", 10).unwrap().is_empty());
     }
 
@@ -1206,43 +1364,470 @@ mod tests {
     }
 
     #[test]
-    fn usage_is_bucketed_per_model() {
+    fn usage_is_counted_as_entries_are_appended() {
         let s = Storage::in_memory().unwrap();
         s.create_thread("t1", "p", "/x", None, None, 0).unwrap();
-        let assistant = |at: i64, model: &str, input: u64, cost: f64| {
-            json!({"type":"message","id":"x","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,
-                "usage":{"input":input,"output":10,"cacheRead":100,"cacheWrite":5,"totalTokens":0,"cost":{"total":cost}}}})
-        };
-        s.append_entry("t1", json!({"type":"message","id":"u","message":{"role":"user","content":"hi","timestamp":1}}), 1).unwrap();
-        s.append_entry("t1", assistant(1000, "a", 1, 0.5), 1).unwrap();
-        s.append_entry("t1", assistant(1500, "a", 2, 0.25), 1).unwrap();
-        s.append_entry("t1", assistant(2500, "b", 4, 1.0), 1).unwrap();
-        s.append_entry("t1", assistant(9000, "a", 8, 1.0), 1).unwrap(); // past `until`
+        s.append_entry("t1", user("u", None, "hi"), 1).unwrap();
+        s.append_entry("t1", reply("a", "u", 1000, Stop::ToolUse, "", 1, 0.5), 1).unwrap();
+        s.append_entry("t1", reply("b", "a", 1500, Stop::ToolUse, "", 2, 0.25), 1).unwrap();
+        // What a compaction used counts too, under its model and who makes it.
+        let usage = Usage { input: 4, output: 10, cache_read: 100, cache_write: 5, cost: Cost { output: 1.0, ..Cost::default() } };
+        let compaction =
+            Body::Compaction { summary: "so far".into(), first_kept: "b".into(), tokens_before: 9, model: "claude-x".into(), usage };
+        s.append_entry("t1", entry("c", Some("b"), 2500, compaction), 1).unwrap();
+        s.append_entry("t1", reply("d", "c", 9000, Stop::End, "done", 8, 1.0), 1).unwrap(); // past `until`
+        // A turn the agent closed itself is nobody's message.
+        let mut closed = reply("e", "d", 2600, Stop::Aborted, "", 0, 0.);
+        if let Body::Assistant(a) = &mut closed.body {
+            (a.provider, a.usage) = (String::new(), Usage::default());
+        }
+        s.append_entry("t1", closed, 1).unwrap();
         let b = s.usage(0, 5000, 1000).unwrap();
         assert_eq!(b.len(), 2);
-        assert_eq!((b[0].start, b[0].model.as_str(), b[0].input, b[0].cost, b[0].messages), (1000, "a", 3, 0.75, 2));
-        assert_eq!((b[1].start, b[1].model.as_str(), b[1].input, b[1].cache_read), (2000, "b", 4, 100));
+        assert_eq!((b[0].start, b[0].provider.as_str(), b[0].model.as_str()), (1000, "anthropic", "m"));
+        assert_eq!((b[0].input, b[0].cost, b[0].messages), (3, 0.75, 2));
+        assert_eq!(
+            (b[1].start, b[1].provider.as_str(), b[1].model.as_str(), b[1].input, b[1].cache_read),
+            (2000, "anthropic", "claude-x", 4, 100)
+        );
         // The thread's totals: every prompt token (fresh + cache), output, dollars.
-        let spend = |s: &Storage| s.list_threads().unwrap()[0].spend;
         let want = Spend { input: 15 + 4 * 105, output: 40, cached: 400, cost: 2.75 };
-        assert_eq!(spend(&s), want);
-        // Totals start from the entries when the columns are new (a db from before them),
-        // and a single new one recounts them all rather than adding on top.
-        for c in ["spend_cost", "spend_input", "spend_output", "spend_cached"] {
-            s.conn.execute(&format!("ALTER TABLE threads DROP COLUMN {c}"), []).unwrap();
-        }
-        let s = Storage::init(s.conn).unwrap();
-        assert_eq!(spend(&s), want);
-        s.conn.execute("ALTER TABLE threads DROP COLUMN spend_cached", []).unwrap();
-        let s = Storage::init(s.conn).unwrap();
-        assert_eq!(spend(&s), want);
-        // An empty `usage` table (a db from before it existed) is rebuilt from the entries on open.
-        s.conn.execute("DELETE FROM usage", []).unwrap();
-        let s = Storage::init(s.conn).unwrap();
-        let total = |s: &Storage| s.usage(0, 10_000, 10_000).unwrap().iter().map(|b| b.messages).sum::<u64>();
-        assert_eq!(total(&s), 4);
+        assert_eq!(s.list_threads().unwrap()[0].spend, want);
         // Spend outlives the thread.
         s.delete_thread("t1").unwrap();
-        assert_eq!(total(&s), 4);
+        assert_eq!(s.usage(0, 10_000, 10_000).unwrap().iter().map(|b| b.messages).sum::<u64>(), 4);
+    }
+
+    #[test]
+    fn a_service_db_is_migrated() {
+        let dir = tempfile::tempdir().unwrap();
+        // (A data dir sqlite's URIs have to spell out.)
+        let dir = dir.path().join("50% #1?");
+        std::fs::create_dir(&dir).unwrap();
+        let live = dir.join("service.db");
+        // Nothing to migrate: nothing happens.
+        assert_eq!(migrate(&live, |_, _| {}).unwrap(), None);
+        assert!(!live.exists() && !from_pi(&live).unwrap());
+
+        // As a service has it while it runs: in WAL mode, the latest of it not in the file yet.
+        let conn = Connection::open(&live).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        conn.execute_batch(PI_SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects VALUES ('p', '/x', NULL, 1, NULL);
+             INSERT INTO threads (id, project_id, cwd, name, header, model, thinking_level, created_at, updated_at, tools, pinned, spend_cost)
+                VALUES ('t', 'p', '/x', 'Bug hunt', '{}', 'cliproxyapi/claude-opus-5-5', 'high', 1, 9, '[\"ask_user\"]', 1, 77),
+                       ('fork', 'p', '/x', 'Bug hunt', NULL, NULL, NULL, 5, 5, NULL, 0, 77),
+                       ('late', 'p', '/x', 'Bug hunt', NULL, NULL, NULL, 5, 5, NULL, 0, 77),
+                       ('odd', 'p', '/x', NULL, NULL, 'anthropic/claude-opus-5-5', 'low', 6, 6, NULL, 0, 0);
+             UPDATE threads SET forked_from = 't', forked_at = 'a' WHERE id = 'fork';
+             UPDATE threads SET forked_from = 't', forked_at = 'l' WHERE id = 'late';
+             INSERT INTO blobs VALUES ('ab', 'image/png', x'010203');
+             INSERT INTO usage VALUES (3000, 'cliproxyapi', 'claude-opus-5-5', 1, 2, 3, 4, 0.5), (10, 'cliproxyapi', 'qwen3', 9, 9, 9, 9, 9.0);
+             INSERT INTO asks VALUES ('t', 'q', '{\"id\":\"q\",\"questions\":[{\"text\":\"db?\"}]}', 8);
+             INSERT INTO message_pins VALUES ('t', 'a');
+             INSERT INTO meta VALUES ('service_id', 'the-id');",
+        )
+        .unwrap();
+        let pi_reply = |timestamp: i64| {
+            json!({"role":"assistant","api":"cliproxyapi-codex-responses","provider":"cliproxyapi","model":"claude-opus-5-5","stopReason":"stop",
+                "timestamp":timestamp,"content":[{"type":"text","text":"found it"}],
+                "usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"cost":{"input":0.25,"output":0.25,"total":0.5}}})
+        };
+        let message =
+            |id: &str, parent: Option<&str>, message: Value| json!({"type":"message","id":id,"parentId":parent,"message":message});
+        let image = json!({"type":"image","mimeType":"image/png","blob":"ab"});
+        let model = json!({"type":"model_change","id":"m","parentId":null,"provider":"cliproxyapi","modelId":"claude-opus-5-5"});
+        let named = json!({"type":"session_info","id":"n","parentId":"a","name":"Bug hunt"});
+        let compaction = json!({"type":"compaction","id":"c","parentId":"n","timestamp":"1970-01-01T00:00:04.000Z","summary":"so far",
+            "firstKeptEntryId":"u","tokensBefore":9,"usage":{"input":10,"output":20,"cost":{"input":1.0,"output":1.0,"total":2.0}}});
+        let level = json!({"type":"thinking_level_change","id":"l","parentId":"c","thinkingLevel":"high"});
+        let said = || message("u", Some("m"), json!({"role":"user","timestamp":2000,"content":"find the bug"}));
+        let pi = [
+            ("t", model.clone()),
+            ("t", message("u", Some("m"), json!({"role":"user","timestamp":2000,"content":[{"type":"text","text":"find the bug"},image]}))),
+            ("t", message("a", Some("u"), pi_reply(3000))),
+            ("t", named.clone()),
+            ("t", compaction.clone()),
+            ("t", level.clone()),
+            // The fork's copy of that, and what it did itself.
+            ("fork", json!({"type":"model_change","id":"m","parentId":null,"provider":"cliproxyapi","modelId":"gpt-9"})),
+            ("fork", said()),
+            ("fork", message("a", Some("u"), pi_reply(3000))),
+            ("fork", message("b", Some("a"), pi_reply(6000))),
+            // One that forked later, from an entry that is none of ours, with the compaction in its copy.
+            ("late", model),
+            ("late", said()),
+            ("late", message("a", Some("u"), pi_reply(3000))),
+            ("late", named),
+            ("late", compaction),
+            ("late", level),
+            ("late", message("b", Some("l"), pi_reply(6000))),
+            ("odd", message("x", None, json!({"role":"bashExecution","command":"ls"}))),
+        ];
+        for (seq, (thread, json)) in pi.iter().enumerate() {
+            conn.execute("INSERT INTO entries VALUES (?1, ?2, '', NULL, '', ?3)", params![thread, seq as i64, json.to_string()]).unwrap();
+        }
+        // As that service leaves it when it is killed: the files as they are now.
+        let killed = dir.join("killed");
+        std::fs::create_dir(&killed).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            let name = format!("service.db{suffix}");
+            std::fs::copy(dir.join(&name), killed.join(&name)).unwrap();
+        }
+        drop(conn);
+        let db = killed.join("service.db");
+        assert!(from_pi(&db).unwrap());
+        settle(&db).unwrap();
+        assert!(!killed.join("service.db-wal").exists());
+
+        let mut told = vec![];
+        let migration = migrate(&db, |done, total| told.push((done, total))).unwrap().unwrap();
+        assert_eq!(told, [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)]);
+        assert_eq!((migration.threads, migration.entries, migration.kept), (4, 18, 11));
+        let dropped = [("model_change", 3), ("session_info", 2), ("thinking_level_change", 2)].map(|(what, n)| (what.to_owned(), n));
+        assert_eq!(migration.dropped, dropped.into());
+        assert_eq!(migration.locked, [("odd".to_owned(), vec!["entry x (message): a message of role \"bashExecution\"".to_owned()])]);
+        // The db is pi's no more: it doesn't run again, and nothing is left of the build.
+        assert!(!from_pi(&db).unwrap());
+        assert_eq!(migrate(&db, |_, _| {}).unwrap(), None);
+        let left: Vec<_> = std::fs::read_dir(&killed).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        assert_eq!(left, ["service.db"]);
+
+        let s = Storage::open(&db).unwrap();
+        let t = by_id(&s, "t");
+        assert_eq!((t.name.as_deref(), t.model.as_deref(), t.effort.as_deref()), (Some("Bug hunt"), Some("claude-opus-5-5"), Some("high")));
+        assert_eq!((t.project_id.as_deref(), t.updated_at, t.pinned, t.locked), (Some("p"), 9, true, false));
+        assert_eq!((t.asks.len(), t.pinned_entries.as_slice(), t.entry_count), (1, &["a".to_owned()][..], 3));
+        assert_eq!(s.thread_tools("t").unwrap(), ["ask_user"]);
+        let entries = s.get_thread("t").unwrap().unwrap();
+        assert_eq!(
+            entries.iter().map(|e| (e.seq, e.id.as_str(), e.parent_id.as_deref(), e.at)).collect::<Vec<_>>(),
+            [(0, "u", None, 2000), (1, "a", Some("u"), 3000), (2, "c", Some("a"), 4000)]
+        );
+        let image = Block::Image { mime: "image/png".into(), blob: "ab".into() };
+        assert_eq!(entries[0].body, Body::User { content: vec![Block::text("find the bug"), image] });
+        assert_eq!(s.blob("ab").unwrap(), Some(("image/png".to_owned(), vec![1, 2, 3])));
+        assert_eq!(s.service_id().unwrap(), "the-id");
+        // Spend is counted from the entries again: a thread's own, not what a fork copied.
+        // What its compaction used is in it, which pi left out.
+        let spend = Spend { input: 8, output: 2, cached: 3, cost: 0.5 };
+        assert_eq!((t.spend, by_id(&s, "fork").spend), (Spend { input: 18, output: 22, cached: 3, cost: 2.5 }, spend));
+        // Nor what a fork copied up to an entry that is none of ours: it forked at the
+        // last one it copied.
+        let late = by_id(&s, "late");
+        assert_eq!((late.spend, late.entry_count), (spend, 4));
+        assert_eq!(late.forked_from, Some(ForkedFrom { thread_id: "t".into(), entry_id: "c".into() }));
+        // The fork's model was only in its entries.
+        assert_eq!(by_id(&s, "fork").model.as_deref(), Some("gpt-9"));
+        assert_eq!(by_id(&s, "fork").forked_from, Some(ForkedFrom { thread_id: "t".into(), entry_id: "a".into() }));
+        // Usage is what the old db had counted and what the compaction used (once, whoever
+        // copied it), under who makes the model.
+        let usage = s.usage(0, 10_000, 10_000).unwrap();
+        let mut by: Vec<_> = usage.iter().map(|b| (b.provider.as_str(), b.model.as_str(), b.messages, b.cost)).collect();
+        by.sort_by_key(|by| by.0);
+        assert_eq!(by, [("anthropic", "claude-opus-5-5", 2, 2.5), ("cliproxyapi", "qwen3", 1, 9.0)]);
+        assert_eq!(s.search("bug", 10).unwrap().len(), 3);
+        // What could not be read is there, as an entry of no kind, and its thread is locked.
+        assert!(by_id(&s, "odd").locked);
+        assert_eq!(s.get_thread("odd").unwrap().unwrap()[0].body, Body::Unknown);
+        // The db works from here on.
+        s.append_entry("t", reply("r", "a", 4000, Stop::End, "and another", 1, 0.5), 10).unwrap();
+        assert_eq!(by_id(&s, "t").spend.cost, 3.0);
+    }
+
+    /// The migration of a real `service.db`, checked against it. Never the live one: take
+    /// a snapshot with sqlite, and give its path (a copy of it is what is migrated):
+    ///
+    /// ```sh
+    /// sqlite3 "file:$HOME/.local/share/dirigent/service.db?mode=ro" "VACUUM INTO '/tmp/snapshot/service.db'"
+    /// DIRIGENT_MIGRATE=/tmp/snapshot/service.db cargo test -p dirigent_service --release a_real_service_db -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn a_real_service_db_is_migrated() {
+        let old = std::env::var("DIRIGENT_MIGRATE").expect("DIRIGENT_MIGRATE: the path of a snapshot of a service.db");
+        let old = Path::new(&old);
+        let dir = tempfile::tempdir().unwrap();
+        let new = dir.path().join("service.db");
+        std::fs::copy(old, &new).unwrap();
+        settle(&new).unwrap();
+        let started = std::time::Instant::now();
+        let migration = migrate(&new, |_, _| {}).unwrap().expect("a db to migrate");
+        let size = |path: &Path| path.metadata().unwrap().len() >> 20;
+        println!("migrated in {:.1?}: {} MB to {} MB", started.elapsed(), size(old), size(&new));
+        println!("{} threads, {} entries: {} kept, dropped {:#?}", migration.threads, migration.entries, migration.kept, migration.dropped);
+        println!("locked: {:#?}", migration.locked);
+
+        let s = Storage::open(&new).unwrap();
+        s.conn.execute("ATTACH DATABASE ?1 AS old", [read_only_uri(old)]).unwrap();
+        let count = |sql: &str| s.conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
+        let counts = |sql: &str| -> BTreeMap<String, i64> {
+            let mut stmt = s.conn.prepare(sql).unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+        };
+        let strings = |sql: &str| -> Vec<String> {
+            let mut stmt = s.conn.prepare(sql).unwrap();
+            stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+        };
+
+        // Every thread and every entry is accounted for.
+        assert_eq!(strings("SELECT id FROM main.threads ORDER BY id"), strings("SELECT id FROM old.threads ORDER BY id"));
+        assert_eq!(migration.threads as i64, count("SELECT COUNT(*) FROM old.threads"));
+        assert_eq!(migration.entries as i64, count("SELECT COUNT(*) FROM old.entries"), "entries of threads that are gone?");
+        assert_eq!(migration.kept as i64, count("SELECT COUNT(*) FROM main.entries"));
+        assert_eq!(migration.kept + migration.dropped.values().sum::<usize>(), migration.entries);
+        let before = counts(
+            "SELECT CASE kind WHEN 'message' THEN 'message:' || COALESCE(json_extract(json, '$.message.role'), '?')
+                              WHEN 'custom' THEN 'custom:' || COALESCE(json_extract(json, '$.customType'), '?')
+                              WHEN 'custom_message' THEN 'custom_message:' || COALESCE(json_extract(json, '$.customType'), '?')
+                              ELSE kind END, COUNT(*)
+             FROM old.entries GROUP BY 1",
+        );
+        let after = counts(
+            "SELECT CASE kind WHEN 'notice' THEN 'notice:' || json_extract(json, '$.kind') ELSE kind END, COUNT(*) FROM main.entries GROUP BY 1",
+        );
+        println!("pi's entries: {before:#?}\nours: {after:#?}");
+        let n = |counts: &BTreeMap<String, i64>, kind: &str| counts.get(kind).copied().unwrap_or(0);
+        let dropped = |what: &str| migration.dropped.get(what).copied().unwrap_or(0) as i64;
+        let unread = n(&after, "unknown");
+        assert_eq!(unread, migration.locked.iter().map(|(_, why)| why.len() as i64).sum::<i64>());
+        for (ours, pis) in [
+            ("user", "message:user"),
+            ("assistant", "message:assistant"),
+            ("tool_result", "message:toolResult"),
+            ("notice:job", "custom_message:dirigent:job"),
+            ("notice:child", "custom_message:dirigent:child"),
+            ("notice:answer", "custom_message:dirigent:answer"),
+            ("compaction", "compaction"),
+            ("compaction_failed", "custom:dirigent:compaction_failed"),
+        ] {
+            // Short of pi's only by what could not be read.
+            let (ours, pis) = (n(&after, ours), n(&before, pis));
+            assert!(ours <= pis && pis - ours <= unread, "{ours} of {pis}");
+        }
+        // A script's stored values are kept, but for those pi itself would not read.
+        assert_eq!(n(&after, "store") + dropped("custom:codemode-store"), n(&before, "custom:codemode-store"));
+        for what in migration.dropped.keys().filter(|what| *what != "custom:codemode-store") {
+            assert_eq!(dropped(what), n(&before, what), "{what}");
+        }
+        // A thread is locked for the entries that could not be read, and only for those.
+        assert_eq!(
+            strings("SELECT id FROM main.threads WHERE locked ORDER BY id"),
+            strings("SELECT DISTINCT thread_id FROM main.entries WHERE kind = 'unknown' ORDER BY 1")
+        );
+
+        // What was counted is counted, the usage rows by model and each thread's spend, and
+        // so is what the old db left out: what a thread's own compactions used (not those a
+        // fork copied).
+        let mut compacted: HashMap<String, Vec<(String, Usage)>> = HashMap::new();
+        for thread in s.list_threads().unwrap() {
+            let entries = s.get_thread(&thread.id).unwrap().unwrap();
+            let copied = thread.forked_from.and_then(|from| entries.iter().position(|e| e.id == from.entry_id)).map_or(0, |at| at + 1);
+            for e in &entries[copied..] {
+                if let Body::Compaction { model, usage, .. } = &e.body
+                    && *usage != Usage::default()
+                {
+                    compacted.entry(thread.id.clone()).or_default().push((model.clone(), *usage));
+                }
+            }
+        }
+        // Rows, input, output, cache read, cache write, cost.
+        type Sums = (i64, i64, i64, i64, i64, f64);
+        let by_model = |schema: &str| -> BTreeMap<String, Sums> {
+            let sql = format!(
+                "SELECT model, COUNT(*), SUM(input), SUM(output), SUM(cache_read), SUM(cache_write), SUM(cost) FROM {schema}.usage GROUP BY 1"
+            );
+            let mut stmt = s.conn.prepare(&sql).unwrap();
+            let sums = |r: &rusqlite::Row| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)));
+            stmt.query_map([], sums).unwrap().map(Result::unwrap).collect()
+        };
+        let mut want = by_model("old");
+        for (model, usage) in compacted.values().flatten() {
+            let sums = want.entry(model.clone()).or_default();
+            *sums = (
+                sums.0 + 1,
+                sums.1 + usage.input as i64,
+                sums.2 + usage.output as i64,
+                sums.3 + usage.cache_read as i64,
+                sums.4 + usage.cache_write as i64,
+                sums.5 + usage.cost.total(),
+            );
+        }
+        let ours = by_model("main");
+        assert_eq!(ours.keys().collect::<Vec<_>>(), want.keys().collect::<Vec<_>>());
+        for (model, ours) in &ours {
+            let want = want[model];
+            assert_eq!((ours.0, ours.1, ours.2, ours.3, ours.4), (want.0, want.1, want.2, want.3, want.4), "{model}");
+            assert!((ours.5 - want.5).abs() < 1e-6, "{model} cost ${}, wanted ${}", ours.5, want.5);
+        }
+        println!("usage: {ours:#?}\nunder: {:?}", counts("SELECT provider, COUNT(*) FROM main.usage GROUP BY 1"));
+        let spends = |schema: &str| -> Vec<(String, i64, i64, i64, f64)> {
+            let sql = format!("SELECT id, spend_input, spend_output, spend_cached, spend_cost FROM {schema}.threads ORDER BY id");
+            let mut stmt = s.conn.prepare(&sql).unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap().map(Result::unwrap).collect()
+        };
+        for (ours, mut pis) in spends("main").into_iter().zip(spends("old")) {
+            for (_, usage) in compacted.get(&pis.0).into_iter().flatten() {
+                pis = (
+                    pis.0,
+                    pis.1 + usage.prompt() as i64,
+                    pis.2 + usage.output as i64,
+                    pis.3 + usage.cache_read as i64,
+                    pis.4 + usage.cost.total(),
+                );
+            }
+            assert_eq!((&ours.0, ours.1, ours.2, ours.3), (&pis.0, pis.1, pis.2, pis.3));
+            assert!((ours.4 - pis.4).abs() < 1e-6, "thread {} spent ${}, wanted ${}", ours.0, ours.4, pis.4);
+        }
+        let compactions: Vec<&Usage> = compacted.values().flatten().map(|(_, usage)| usage).collect();
+        println!(
+            "spend: ${:.2}, ${:.2} of it by {} compactions the old db did not count",
+            s.list_threads().unwrap().iter().map(|t| t.spend.cost).sum::<f64>(),
+            compactions.iter().map(|usage| usage.cost.total()).sum::<f64>(),
+            compactions.len()
+        );
+
+        // The rest came along as it was.
+        for table in ["projects", "blobs", "asks", "message_pins", "meta", "api_keys", "proxy_samples"] {
+            let rows = |schema: &str| count(&format!("SELECT COUNT(*) FROM {schema}.{table}"));
+            assert_eq!(rows("main"), rows("old"), "{table}");
+        }
+        let same = count("SELECT COUNT(*) FROM main.blobs b JOIN old.blobs o ON o.id = b.id AND o.mime = b.mime AND o.bytes = b.bytes");
+        assert_eq!(same, count("SELECT COUNT(*) FROM old.blobs"));
+        let id = "SELECT value FROM {}.meta WHERE key = 'service_id'";
+        assert_eq!(strings(&id.replace("{}", "main")), strings(&id.replace("{}", "old")));
+        let rows = "SELECT id || ' ' || COALESCE(name, '-') || ' ' || COALESCE({effort}, '-') || ' ' || COALESCE({model}, '-') || ' ' || updated_at
+                           || ' ' || COALESCE(parent_id, '-') || ' ' || COALESCE(project_id, '-') || ' ' || cwd FROM {db}.threads ORDER BY id";
+        let ours = rows.replace("{effort}", "effort").replace("{model}", "model").replace("{db}", "main");
+        let pis =
+            rows.replace("{effort}", "thinking_level").replace("{model}", "substr(model, instr(model, '/') + 1)").replace("{db}", "old");
+        assert_eq!(strings(&ours), strings(&pis));
+
+        // Pins, forks, parents and images still point at what exists.
+        let dangling = [
+            "SELECT COUNT(*) FROM main.message_pins p
+              WHERE NOT EXISTS (SELECT 1 FROM main.entries e WHERE e.thread_id = p.thread_id AND e.id = p.entry_id)",
+            "SELECT COUNT(*) FROM main.threads t
+              WHERE forked_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.entries e WHERE e.thread_id = t.id AND e.id = t.forked_at)",
+            "SELECT COUNT(*) FROM main.entries e
+              WHERE parent_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM main.entries p WHERE p.thread_id = e.thread_id AND p.id = e.parent_id AND p.seq < e.seq)",
+            "SELECT COUNT(*) FROM main.entries e, json_each(json_extract(e.json, '$.content')) b
+              WHERE e.kind IN ('user', 'tool_result') AND json_extract(b.value, '$.type') = 'image'
+                AND NOT EXISTS (SELECT 1 FROM main.blobs WHERE id = json_extract(b.value, '$.blob'))",
+            "SELECT COUNT(*) FROM main.entries e, json_each(json_extract(e.json, '$.content')) b, json_each(json_extract(b.value, '$.blobs')) l
+              WHERE e.kind = 'assistant' AND NOT EXISTS (SELECT 1 FROM main.blobs WHERE id = l.value)",
+        ];
+        for sql in dangling {
+            assert_eq!(count(sql), 0, "{sql}");
+        }
+
+        // A thread's current branch is the messages and notices it was, in their order (an
+        // edited message leaves it shorter than the thread), and what refers to an entry
+        // finds it.
+        let mut edited = 0;
+        for thread in s.list_threads().unwrap() {
+            let ours = s.get_thread(&thread.id).unwrap().unwrap();
+            let pis: Vec<Value> = strings(&format!("SELECT json FROM old.entries WHERE thread_id = '{}' ORDER BY seq", thread.id))
+                .iter()
+                .map(|json| serde_json::from_str(json).unwrap())
+                .collect();
+            let by_id: HashMap<&str, &Value> = pis.iter().filter_map(|e| Some((e["id"].as_str()?, e))).collect();
+            let mut pis_branch = vec![];
+            let mut next = pis.last();
+            while let Some(e) = next {
+                pis_branch.push(e);
+                next = e["parentId"].as_str().and_then(|parent| by_id.get(parent).copied());
+            }
+            pis_branch.reverse();
+            edited += usize::from(pis_branch.len() < pis.len());
+            let was: Vec<&str> = pis_branch
+                .iter()
+                .filter(|e| match e["type"].as_str() {
+                    Some("message") => e["message"]["role"] != "system",
+                    kind => matches!(kind, Some("custom_message" | "branch_summary" | "compaction")),
+                })
+                .filter_map(|e| e["id"].as_str())
+                .collect();
+            let branch = current_branch(&ours);
+            let is: Vec<&str> = branch
+                .iter()
+                .filter(|e| !matches!(e.body, Body::Store { .. } | Body::CompactionFailed { .. }))
+                .map(|e| e.id.as_str())
+                .collect();
+            // (A locked thread's branch has what could not be read too, whatever that was.)
+            if !thread.locked {
+                assert_eq!(is, was, "thread {}", thread.id);
+            }
+            let calls: std::collections::HashSet<&str> = ours
+                .iter()
+                .flat_map(|e| match &e.body {
+                    Body::Assistant(a) => a.content.as_slice(),
+                    _ => &[],
+                })
+                .filter_map(|b| match b {
+                    Block::ToolCall { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            for e in &ours {
+                match &e.body {
+                    Body::ToolResult(r) => {
+                        assert!(calls.contains(r.call_id.as_str()), "thread {}: result {} answers no call", thread.id, e.id)
+                    }
+                    Body::Compaction { first_kept, .. } => {
+                        assert!(ours.iter().any(|o| &o.id == first_kept), "thread {}: compaction {} keeps from nowhere", thread.id, e.id)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        println!("{edited} threads with an edited message");
+
+        // Search. The old index had every message's content as its raw JSON: thinking,
+        // signatures and tool calls' arguments with what was said, and a word after a line
+        // break (`\nword`) as the word `nword`. Ours has what was said: it finds the threads
+        // whose messages say a word. Where the old one missed one of those, that is why.
+        s.conn
+            .execute_batch(
+                "CREATE VIRTUAL TABLE temp.said USING fts5 (thread_id UNINDEXED, text);
+                 INSERT INTO temp.said
+                 SELECT e.thread_id, CASE json_type(e.json, '$.message.content')
+                     WHEN 'array' THEN (SELECT group_concat(json_extract(b.value, '$.text'), char(10))
+                                        FROM json_each(json_extract(e.json, '$.message.content')) b WHERE json_extract(b.value, '$.type') = 'text')
+                     ELSE json_extract(e.json, '$.message.content') END
+                 FROM old.entries e WHERE e.kind = 'message' AND json_extract(e.json, '$.message.role') IN ('user', 'assistant');",
+            )
+            .unwrap();
+        let words: std::collections::BTreeSet<String> = strings("SELECT name FROM old.threads WHERE name IS NOT NULL")
+            .iter()
+            .flat_map(|name| name.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).collect::<Vec<_>>())
+            .filter(|word| word.chars().count() > 2)
+            .collect();
+        let matching = |table: &str, word: &str| -> Vec<String> {
+            let sql = format!("SELECT DISTINCT thread_id FROM {table} WHERE {} MATCH ?1 ORDER BY 1", table.split('.').next_back().unwrap());
+            let mut stmt = s.conn.prepare(&sql).unwrap();
+            stmt.query_map([format!("\"{word}\"*")], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+        };
+        let (mut more, mut fewer) = (0, 0);
+        for word in &words {
+            let (ours, said, pis) = (matching("main.entries_fts", word), matching("temp.said", word), matching("old.entries_fts", word));
+            assert_eq!(ours, said, "{word}");
+            let missed: Vec<&String> = ours.iter().filter(|thread| !pis.contains(thread)).collect();
+            for thread in &missed {
+                let escaped = ["n", "t", "r"].iter().any(|e| matching("old.entries_fts", &format!("{e}{word}")).contains(thread));
+                assert!(escaped, "{word}: the old index doesn't find thread {thread}");
+            }
+            more += usize::from(!missed.is_empty());
+            fewer += usize::from(pis.iter().any(|thread| !ours.contains(thread)));
+            let hits = s.search(word, 100).unwrap();
+            assert!(hits.iter().all(|hit| ours.contains(&hit.thread_id)) && hits.is_empty() == ours.is_empty(), "{word}");
+        }
+        println!(
+            "search: {} words. Next to the old index, it finds threads the old one missed for {more} of them (a word after a line break), \
+             and fewer threads for {fewer} (words that were not said: thinking, tool calls)",
+            words.len()
+        );
     }
 }

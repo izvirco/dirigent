@@ -21,7 +21,8 @@ pub struct Entry {
     pub seq: u64,
     pub id: String,
     pub parent_id: Option<String>,
-    /// Unix millis.
+    /// When it was written, unix millis: for a reply or a tool's result, when that ended
+    /// (its `duration_ms` earlier it began).
     pub at: i64,
     pub body: Body,
 }
@@ -304,6 +305,8 @@ pub enum Event {
     Warning {
         message: String,
     },
+    /// The thread got the name generated from its first prompt (`ThreadSummary::name`).
+    Titled,
     /// A step of the thread's computer use. `frame` is the id of the picture its screen
     /// shows now (0: none yet; `ClientMessage::GetScreen` has it), `action` what the agent
     /// just did there, in a few words, and `cursor` where it clicked, as fractions `[x, y]`

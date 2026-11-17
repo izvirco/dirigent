@@ -1,5 +1,5 @@
 //! A thread's screen: the latest picture of the window its agent is using the computer in
-//! (the runtime's `computer.ts` sends one whenever it changed), for clients to watch. Only
+//! (the agent's `computer` tool sends one whenever it changed), for clients to watch. Only
 //! the latest is kept, in memory, and only for the run it belongs to: a screen is something
 //! to look at while it happens, not history (what the model itself looked at is in the
 //! transcript).
@@ -57,7 +57,7 @@ struct Screen {
 }
 
 enum Picture {
-    /// As the driver took it.
+    /// As the agent's `computer` tool sent it.
     Png(Arc<Vec<u8>>),
     /// As clients get it (`encode`), base64: made once, in the PNG's place.
     Wire(Arc<str>),
@@ -96,11 +96,6 @@ impl Screens {
     /// a client is in the middle of reading stays until it has it.
     pub fn clear(&self, thread_id: &str) {
         self.threads.lock().unwrap().remove(thread_id);
-    }
-
-    /// The runtime is gone, and every screen with it.
-    pub fn clear_all(&self) {
-        self.threads.lock().unwrap().clear();
     }
 
     /// The piece at `offset` of a picture of the thread's, for the connection that holds

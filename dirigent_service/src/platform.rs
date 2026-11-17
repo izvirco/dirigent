@@ -41,10 +41,9 @@ pub fn host_name() -> String {
     name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()).unwrap_or_else(|| "local".into())
 }
 
-/// `Command::new(program)` for the programs the service runs (git, jj, tailscale, the
-/// runtime). On Windows without a console window: the desktop is a GUI app there, and every
-/// console program it starts would flash one. The runtime's own children inherit its
-/// hidden console.
+/// `Command::new(program)` for the programs the service runs (git, jj, ssh, tailscale). On
+/// Windows without a console window: the desktop is a GUI app there, and every console
+/// program it starts would flash one.
 pub fn command(program: impl AsRef<OsStr>) -> std::process::Command {
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut cmd = std::process::Command::new(program);

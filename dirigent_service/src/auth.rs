@@ -167,14 +167,15 @@ fn new_key() -> Result<String> {
 pub const KEY_USAGE: &str = "key add <name> | key list | key revoke <name>";
 
 /// `key add <name>` (prints the key, once), `key list`, `key revoke <name>`: the public
-/// listener's API keys, in this instance's `service.db`.
+/// listener's API keys, in this instance's `service.db` (where the running service looks
+/// them up; opened as the service opens it, `open_storage`).
 pub fn key_command(args: &[String]) -> Result<()> {
-    let storage = Storage::open(&crate::data_dir().join("service.db"))?;
+    let storage = crate::open_storage(&crate::data_dir())?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match args[..] {
         ["add", name] => {
             let key = new_key()?;
-            storage.add_key(name, &hash(&key), crate::runtime::now())?;
+            storage.add_key(name, &hash(&key), crate::now())?;
             println!("{key}");
             eprintln!("Key {name:?} added. It is shown only now: put it in the client's hosts.toml.");
         }

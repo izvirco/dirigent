@@ -275,7 +275,7 @@ mod tests {
             cwd: "/x".into(),
             name: None,
             model: None,
-            thinking_level: None,
+            effort: None,
             created_at,
             updated_at: created_at,
             entry_count: 0,

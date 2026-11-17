@@ -1,9 +1,9 @@
 //! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
 //! sections on the right. General, Thread titles and Agent tools are the UI over
-//! `config.toml` (`config.rs`); Hosts over `hosts.toml`, Providers over a host's pi
-//! credentials, Proxy over a host's CLIProxyAPI, MCP servers over a host's pi `mcp.json` and
-//! Forge providers over the forge sign-in have their own flows (`hosts_tab.rs`,
-//! `providers.rs`, `proxy.rs`, `mcp.rs`, `account.rs`).
+//! `config.toml` (`config.rs`); Hosts over `hosts.toml`, Proxy over a host's CLIProxyAPI,
+//! MCP servers over the `[mcp.*]` entries of a host's `agent.toml` and Forge providers over
+//! the forge sign-in have their own flows (`hosts_tab.rs`, `proxy.rs`, `mcp.rs`,
+//! `account.rs`).
 //! Everything else saves as it is changed: the text fields (fonts, title prompt) 300ms
 //! after the last keystroke, with a warning mark on a font field whose family isn't
 //! installed; theme, text size, background, title model, reasoning, the agent tools and
@@ -35,7 +35,6 @@ const NAV_W: f32 = 180.;
 pub enum Tab {
     #[default]
     General,
-    Providers,
     /// A host's CLIProxyAPI (`proxy.rs`).
     Proxy,
     Titles,
@@ -48,12 +47,11 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 8] = [Tab::General, Tab::Providers, Tab::Proxy, Tab::Titles, Tab::Tools, Tab::Mcp, Tab::Hosts, Tab::Forge];
+    const ALL: [Tab; 7] = [Tab::General, Tab::Proxy, Tab::Titles, Tab::Tools, Tab::Mcp, Tab::Hosts, Tab::Forge];
 
     fn label(self) -> &'static str {
         match self {
             Tab::General => "General",
-            Tab::Providers => "Providers",
             Tab::Proxy => "Proxy",
             Tab::Titles => "Thread titles",
             Tab::Tools => "Agent tools",
@@ -158,7 +156,6 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .children(Tab::ALL.map(|tab| nav_item(tab, tab == open, cx)));
     let sections = match open {
         Tab::General => vec![appearance(this, cx), telemetry(this, cx), saved_to(&config::path())],
-        Tab::Providers => crate::providers::render(this, cx),
         Tab::Proxy => crate::proxy::render(this, cx),
         Tab::Titles => vec![titles(this, cx), saved_to(&config::path())],
         Tab::Tools => vec![tools(this, cx), saved_to(&config::path())],
@@ -316,7 +313,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         let mut items: Vec<AnyElement> = models
             .iter()
             .map(|m| {
-                let key = m.key();
+                let key = m.id.clone();
                 let selected = key == this.config.title.model;
                 let pick = key.clone();
                 menu::item(format!("tm/{key}"), key, m.name.clone(), selected, move |this, cx| this.set_title_model(pick.clone(), cx), cx)
@@ -325,7 +322,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         if items.is_empty() {
             let up = this.host(hosts::LOCAL).is_some_and(|h| h.status == HostStatus::Connected);
             items.push(menu::header(if up {
-                "No models: sign in to a provider first (Providers)"
+                "No models: set up the local host's proxy first (Proxy)"
             } else {
                 "No models yet: the local host is still connecting"
             }));
@@ -339,11 +336,12 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 
     let effort_open = this.menu == Some(Menu::TitleEffort);
     let effort_menu = effort_open.then(|| {
+        // A model the local host doesn't list (yet): the efforts every model that reasons takes.
         let levels = models
             .iter()
-            .find(|m| m.key() == this.config.title.model)
-            .map(|m| m.thinking_levels.clone())
-            .unwrap_or_else(|| ["off", "minimal", "low", "medium", "high"].map(String::from).to_vec());
+            .find(|m| m.id == this.config.title.model)
+            .map(|m| m.efforts.clone())
+            .unwrap_or_else(|| ["low", "medium", "high"].map(String::from).to_vec());
         let items = levels
             .into_iter()
             .map(|l| {
@@ -442,9 +440,9 @@ pub(crate) fn switch(
         .child(div().size(u(14.)).rounded_full().bg(rgba(t.fg)))
 }
 
-/// The agent tools dirigent adds to pi's, and pi's `codemode`: each a switch; the set goes
-/// out with every prompt, so a change reaches a thread with its next message. `async_bash`
-/// has an option under it, shown while it is on.
+/// The agent's tools that have a switch (`config::ToolsConfig`); the set goes out with every
+/// prompt, so a change reaches a thread with its next message. `async_bash` has an option
+/// under it, shown while it is on.
 fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let c = &this.config.tools;
     let bash_background = switch("tool-bash-background", c.bash_background, cx, |this, cx| this.toggle_tool("bash_background", cx));

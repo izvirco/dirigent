@@ -1469,6 +1469,7 @@ name = "dirigent_service"
 version = "0.0.10"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -1487,6 +1488,8 @@ dependencies = [
  "socket2",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tokio-util",
  "toml 0.8.23",
  "tracing",
  "tracing-appender",

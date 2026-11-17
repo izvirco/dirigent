@@ -1,12 +1,12 @@
 //! The model picker popup, two pages behind the composer's model chip:
 //!
 //! - `Menu::Model`: the current combo (if unsaved) and the saved presets, each a
-//!   `<name> <provider/id> <effort>` row with a hover-revealed ✕, grouped by model
+//!   `<name> <id> <effort>` row with a hover-revealed ✕, grouped by model
 //!   (`ordered`). The header saves the current combo or links to the second page.
 //! - `Menu::AllModels`: back button, search input, and every model the host offers.
 //!
-//! A host that offers no models has no provider set up: both pages then lead to
-//! Settings › Providers, to sign in to one there.
+//! A host that offers no models has no proxy set up: both pages then lead to Settings ›
+//! Proxy, to point the host at its proxy there (`set_up`).
 
 use crate::app::{Dirigent, Menu, Preset};
 use crate::icons::icon;
@@ -48,7 +48,7 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
 
     let mut rows = vec![header.into_any(), menu::separator()];
     // First: nothing here runs without it.
-    rows.extend(sign_in(this, cx));
+    rows.extend(set_up(this, cx));
     if let Some(c) = &current
         && !saved
     {
@@ -65,31 +65,31 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
 }
 
 /// The saved presets in the order they are listed, each with its index in `presets` (what
-/// its ✕ removes): by model name, then `provider/id`, then effort in the model's own level
+/// its ✕ removes): by model name, then id, then effort in the model's own level
 /// order (by name for a model the host doesn't offer).
 fn ordered<'a>(presets: &'a [Preset], models: &[ModelInfo]) -> Vec<(usize, &'a Preset)> {
     let mut rows: Vec<_> = presets.iter().enumerate().collect();
     rows.sort_by_cached_key(|(_, p)| {
-        let levels = models.iter().find(|m| m.key() == p.model).map(|m| m.thinking_levels.as_slice()).unwrap_or(&[]);
+        let levels = models.iter().find(|m| m.id == p.model).map(|m| m.efforts.as_slice()).unwrap_or(&[]);
         let level = levels.iter().position(|l| Some(l) == p.effort.as_ref());
         (model_name(&p.model, models).to_lowercase(), p.model.clone(), level, p.effort.clone())
     });
     rows
 }
 
-/// What a preset's model is called: the host's name for it, else the id from its key.
-fn model_name(key: &str, models: &[ModelInfo]) -> String {
-    models.iter().find(|m| m.key() == key).map(|m| m.name.clone()).unwrap_or_else(|| theme::short_model(key).to_owned())
+/// What a preset's model is called: the host's name for it, else its id.
+fn model_name(id: &str, models: &[ModelInfo]) -> String {
+    models.iter().find(|m| m.id == id).map_or_else(|| id.to_owned(), |m| m.name.clone())
 }
 
-/// When the composer's host is up but offers no models: a row to Settings › Providers, to
-/// sign in to a provider there.
-fn sign_in(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+/// When the composer's host is up but offers no models: a row to Settings › Proxy, to
+/// point the host at its proxy there.
+fn set_up(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let host = this.composer_host()?.to_owned();
     let up = this.host(&host).is_some_and(|h| h.status == HostStatus::Connected);
     (up && this.models().is_empty()).then(|| {
-        let open = move |this: &mut Dirigent, cx: &mut Context<Dirigent>| this.open_providers(Some(host.clone()), cx);
-        menu::item("sign-in", "Sign in to a provider", "this host has no models yet", false, open, cx)
+        let open = move |this: &mut Dirigent, cx: &mut Context<Dirigent>| this.open_proxy_settings(Some(host.clone()), cx);
+        menu::item("set-up", "Set up the proxy", "this host has no models yet", false, open, cx)
     })
 }
 
@@ -126,7 +126,7 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
                 (false, true) => "No models yet. Waiting for the host.",
                 (false, false) => "No models match",
             };
-            vec![sign_in(this, cx).unwrap_or_else(|| menu::header(hint))]
+            vec![set_up(this, cx).unwrap_or_else(|| menu::header(hint))]
         } else {
             models.iter().map(|m| model_row(m, this, cx)).collect()
         }
@@ -134,14 +134,14 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
     vec![header.into_any(), menu::separator(), list]
 }
 
-/// `<name> <provider/id>`; picks the model, keeping the effort when the model supports it.
+/// `<name> <id>`; picks the model, keeping the effort when the model supports it.
 fn model_row(m: &ModelInfo, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
-    let key = m.key();
+    let key = m.id.clone();
     let selected = this.model.as_deref() == Some(&key);
     menu::item(format!("m/{key}"), m.name.clone(), key.clone(), selected, move |this, cx| this.set_model(key.clone(), cx), cx)
 }
 
-/// `<name> <provider/id> <effort>` with a ✕ on hover when `index` names a saved preset.
+/// `<name> <id> <effort>` with a ✕ on hover when `index` names a saved preset.
 fn preset_row(
     id: impl Into<gpui::SharedString>,
     p: &Preset,
@@ -205,22 +205,22 @@ mod tests {
     #[test]
     fn presets_group_by_model_then_effort_level() {
         let model = |id: &str, name: &str| ModelInfo {
-            provider: "p".into(),
             id: id.into(),
             name: name.into(),
+            owner: "o".into(),
             context_window: 0,
-            thinking_levels: ["low", "high", "xhigh"].map(String::from).to_vec(),
+            efforts: ["low", "high", "xhigh"].map(String::from).to_vec(),
         };
         let preset = |model: &str, effort: &str| Preset { model: model.into(), effort: Some(effort.into()) };
         // The host's names order the models, not their keys; `gone` isn't offered any more.
         let models = [model("a", "Opus"), model("b", "Fable")];
         let presets = [
-            preset("p/a", "xhigh"),
-            preset("p/gone", "low"),
-            preset("p/b", "xhigh"),
-            preset("p/b", "low"),
-            preset("p/gone", "high"),
-            preset("p/a", "high"),
+            preset("a", "xhigh"),
+            preset("gone", "low"),
+            preset("b", "xhigh"),
+            preset("b", "low"),
+            preset("gone", "high"),
+            preset("a", "high"),
         ];
         let order: Vec<usize> = ordered(&presets, &models).into_iter().map(|(i, _)| i).collect();
         // Fable low, xhigh; gone high, low (by name); Opus high, xhigh.

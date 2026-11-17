@@ -1,16 +1,17 @@
-//! Turns opaque pi entries / events into what the thread view renders: a timeline of
-//! user messages, *work* (everything the model did between a prompt and its reply:
-//! thinking, interim prose, tool calls), replies, and notices. Anything unrecognised
-//! becomes a `Notice`, so pi format changes degrade gracefully instead of breaking the UI.
+//! Turns a thread's entries and events (`dirigent_protocol::transcript`) into what the
+//! thread view renders: a timeline of user messages, *work* (everything the model did
+//! between a prompt and its reply: thinking, interim prose, tool calls), replies, and
+//! notices. An entry of a kind this build doesn't know (a newer host's) becomes a `Notice`.
 
 use crate::markdown;
 use dirigent_protocol::PromptMode;
+use dirigent_protocol::transcript::{self, Assistant, Block, Body, Entry, Event, Notice, Stop, text_of};
 use serde_json::Value;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    /// `at` is pi's message timestamp (ms); the next `Work` starts there. `images` are
+    /// `at` is when it was sent (unix ms); the next `Work` starts there. `images` are
     /// blob ids (the host keeps image bytes out of entries; see `Dirigent::blobs`).
     User {
         text: String,
@@ -27,7 +28,7 @@ pub enum Item {
     Compaction,
     /// Informational line (warnings, unknown entries, ...).
     Notice(String),
-    /// A sub-agent of this thread finished (`dirigent:child`) between turns: `text` is the
+    /// A sub-agent of this thread finished (`Notice::Child`) between turns: `text` is the
     /// notice line, the thread is a click away.
     Child {
         thread_id: String,
@@ -53,8 +54,8 @@ pub enum Step {
     Text(String),
     Tool(ToolCall),
     /// A message the user steered the run with mid-turn. Stays visible under the work line.
-    /// `queued` until pi hands it to the model (it drains steers one per turn, after the
-    /// turn's tool calls; nothing is persisted or emitted before that). `images`: blob ids of
+    /// `queued` until the agent hands it to the model (after the turn's tool calls; nothing
+    /// is persisted before that). `images`: blob ids of
     /// its attachments, like `Item::User`'s (none while queued: echoes are text only).
     Steer {
         text: String,
@@ -66,7 +67,7 @@ pub enum Step {
     /// A request of the run re-billed what the cache should have held (`CacheBaseline`).
     /// Shown only in the log, not in the transcript.
     CacheMiss(String),
-    /// A sub-agent started (the model's `dirigent` spawn) or finished (`dirigent:child`)
+    /// A sub-agent started (the model's `dirigent` spawn) or finished (`Notice::Child`)
     /// during the run. Shown under the work line like `Item::Child`, and in the log.
     Child {
         thread_id: String,
@@ -87,7 +88,7 @@ pub struct ToolCall {
     /// A `dirigent` spawn: the sub-agent's name. Its thread id comes with the result,
     /// which then adds a `Step::Child` to the work.
     pub spawned: Option<String>,
-    /// Unix ms. Set from the live `tool_execution_start` event or derived from the result.
+    /// Unix ms. Set from the live `Event::ToolStart` or derived from the result.
     pub started: Option<i64>,
     pub ended: Option<i64>,
     pub result: Option<ToolResult>,
@@ -127,7 +128,7 @@ impl Work {
     }
 
     /// Duration in ms of a finished work: to `ended`, else (a run that never got its final
-    /// message: the runtime died under it) to the last thing that happened in it, a tool's
+    /// message: its host died under it) to the last thing that happened in it, a tool's
     /// end or start, else nothing. The run in progress uses `now - started` directly, so
     /// its clock keeps moving between tool calls.
     pub fn duration(&self) -> i64 {
@@ -137,9 +138,9 @@ impl Work {
     }
 }
 
-/// What a thread cost so far, summed over its assistant messages (the context chip's
-/// hover card). `input` is everything fed to the model (fresh + cache read + cache
-/// write); `cached` is the part read from cache.
+/// What a thread cost so far, summed over its requests: the model's replies and the
+/// summaries its compactions wrote (the context chip's hover card). `input` is everything
+/// fed to the model (fresh + cache read + cache write); `cached` is the part read from cache.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Stats {
     pub input: u64,
@@ -152,27 +153,28 @@ pub struct Stats {
 }
 
 impl Stats {
-    pub fn of<'a>(entries: impl IntoIterator<Item = &'a Value>) -> Self {
+    pub fn of<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
         let mut s = Self::default();
         for e in entries {
-            if e.get("type").and_then(Value::as_str) == Some("compaction") {
-                s.compactions += 1;
-            }
-            let Some(msg) = e.get("message") else { continue };
-            match msg.get("role").and_then(Value::as_str) {
-                Some("user") => s.user_messages += 1,
-                Some("assistant") => {
-                    s.assistant_messages += 1;
-                    if let Some(u) = msg.get("usage") {
-                        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-                        s.input += n("input") + n("cacheRead") + n("cacheWrite");
-                        s.cached += n("cacheRead");
-                        s.output += n("output");
-                        s.cost += u.pointer("/cost/total").and_then(Value::as_f64).unwrap_or(0.);
-                    }
+            let usage = match &e.body {
+                Body::User { .. } => {
+                    s.user_messages += 1;
+                    continue;
                 }
-                _ => {}
-            }
+                Body::Assistant(a) => {
+                    s.assistant_messages += 1;
+                    &a.usage
+                }
+                Body::Compaction { usage, .. } => {
+                    s.compactions += 1;
+                    usage
+                }
+                _ => continue,
+            };
+            s.input += usage.prompt();
+            s.cached += usage.cache_read;
+            s.output += usage.output;
+            s.cost += usage.cost.total();
         }
         s
     }
@@ -183,20 +185,19 @@ impl Stats {
     }
 }
 
-/// pi's noise floor: a miss this small is cache breakpoint granularity.
+/// The noise floor: a miss this small is cache breakpoint granularity.
 const MISS_FLOOR: i64 = 1024;
 /// Idle gaps longer than this (Anthropic's default cache TTL) are named as the likely cause.
 const CACHE_TTL_MS: i64 = 5 * 60 * 1000;
 
-/// Spots prompt-cache misses the way pi's TUI does with `showCacheMissNotices` (its
-/// `core/cache-stats.js`, which the SDK doesn't export or emit): every entry goes through
-/// `observe`, which compares each assistant message's prompt with the previous request's.
-/// Dirigent never branches, so the entries in order are pi's `getEntries()`.
+/// Spots prompt-cache misses: every entry of the branch goes through `observe`, which
+/// compares each reply's prompt with the previous request's. What the previous one had
+/// cached and this one didn't read from the cache was billed again.
 #[derive(Debug, Default)]
 struct CacheBaseline {
     prev: Option<Request>,
-    /// $ per cache-read token per `provider/model`, from the last message that read the
-    /// cache: what a full miss should have paid (pi asks its model registry; we have no prices).
+    /// $ per cache-read token per model, from its last reply that read the cache: what a
+    /// full miss should have paid.
     read_rate: std::collections::HashMap<String, f64>,
 }
 
@@ -205,12 +206,11 @@ struct CacheBaseline {
 struct Request {
     /// Prompt tokens: fresh input + cache read + cache write.
     tokens: u64,
-    /// `provider/model`.
     model: String,
     /// When it started (ms).
     at: i64,
-    /// The session reported cache activity by then (a zero-cache turn only counts after that,
-    /// so providers without caching never show a miss).
+    /// The thread reported cache activity by then (a zero-cache turn only counts after that,
+    /// so models without caching never show a miss).
     reported: bool,
 }
 
@@ -225,72 +225,49 @@ struct CacheMiss {
 }
 
 impl CacheBaseline {
-    fn observe(&mut self, entry: &Value) -> Option<CacheMiss> {
-        match entry.get("type")?.as_str()? {
+    fn observe(&mut self, entry: &Entry) -> Option<CacheMiss> {
+        match &entry.body {
             // The context legitimately changed: the next prompt is new content, not re-billed.
-            "compaction" | "branch_summary" => self.prev = None,
-            "usage" if entry.get("kind").and_then(Value::as_str) == Some("cache_warm") => {
-                let usage = entry.get("usage")?;
-                let tokens = prompt_tokens(usage);
-                if tokens > 0 {
-                    let at = entry.get("timestamp").and_then(Value::as_str).and_then(iso_ms).unwrap_or(0);
-                    self.note_read_rate(&model_key(entry), usage);
-                    self.prev = Some(Request { tokens, model: model_key(entry), at, reported: true });
-                }
-            }
-            "message" => {
-                let msg = entry.get("message")?;
-                return if msg.get("role")?.as_str()? == "assistant" { self.assistant(msg) } else { None };
-            }
+            Body::Compaction { .. } => self.prev = None,
+            Body::Assistant(a) => return self.assistant(a, entry.at - a.duration_ms),
             _ => {}
         }
         None
     }
 
-    fn assistant(&mut self, msg: &Value) -> Option<CacheMiss> {
-        let u = msg.get("usage")?;
-        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let cost = |k: &str| u.get("cost").and_then(|c| c.get(k)).and_then(Value::as_f64).unwrap_or(0.);
-        let (input, read, write) = (n("input"), n("cacheRead"), n("cacheWrite"));
-        let tokens = input + read + write;
-        let model = model_key(msg);
-        let at = msg.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
-        self.note_read_rate(&model, u);
+    /// `at`: when the request started.
+    fn assistant(&mut self, a: &Assistant, at: i64) -> Option<CacheMiss> {
+        let u = &a.usage;
+        let (input, read, write, tokens) = (u.input, u.cache_read, u.cache_write, u.prompt());
+        if read > 0 {
+            self.read_rate.insert(a.model.clone(), u.cost.cache_read / read as f64);
+        }
         let miss = self.prev.as_ref().filter(|p| tokens > 0 && (read + write > 0 || p.reported)).and_then(|p| {
             let missed = p.tokens.min(tokens) as i64 - read as i64;
             (missed > MISS_FLOOR).then(|| {
                 // Missed tokens land in input or cache write: the paid rate is theirs.
                 let paid = input + write;
-                let paid_rate = if paid > 0 { (cost("input") + cost("cacheWrite")) / paid as f64 } else { 0. };
-                let read_rate = self.read_rate.get(&model).copied().unwrap_or(0.);
+                let paid_rate = if paid > 0 { (u.cost.input + u.cost.cache_write) / paid as f64 } else { 0. };
+                let read_rate = self.read_rate.get(&a.model).copied().unwrap_or(0.);
                 CacheMiss {
                     tokens: missed as u64,
                     cost: missed as f64 * (paid_rate - read_rate).max(0.),
                     idle_ms: (at - p.at).max(0),
-                    model_changed: model != p.model,
+                    model_changed: a.model != p.model,
                 }
             })
         });
         // A request with no prompt (an error before the call) leaves the baseline alone.
         if tokens > 0 {
             let reported = read + write > 0 || self.prev.as_ref().is_some_and(|p| p.reported);
-            self.prev = Some(Request { tokens, model, at, reported });
+            self.prev = Some(Request { tokens, model: a.model.clone(), at, reported });
         }
         miss
-    }
-
-    /// Remember what `model` pays per cache-read token, if `usage` read any.
-    fn note_read_rate(&mut self, model: &str, usage: &Value) {
-        let read = usage.get("cacheRead").and_then(Value::as_u64).unwrap_or(0);
-        if read > 0 {
-            let cost = usage.pointer("/cost/cacheRead").and_then(Value::as_f64).unwrap_or(0.);
-            self.read_rate.insert(model.to_owned(), cost / read as f64);
-        }
     }
 }
 
 impl CacheMiss {
-    /// The transcript line, pi's wording; `None` under pi's bar for showing one.
+    /// The line for the log; `None` for a miss too small to show.
     fn notice(&self) -> Option<String> {
         if self.tokens < 20_000 && self.cost < 0.1 {
             return None;
@@ -307,33 +284,20 @@ impl CacheMiss {
     }
 }
 
-fn prompt_tokens(usage: &Value) -> u64 {
-    ["input", "cacheRead", "cacheWrite"].iter().map(|k| usage.get(*k).and_then(Value::as_u64).unwrap_or(0)).sum()
-}
-
-/// `provider/model` of an assistant message or usage entry.
-fn model_key(v: &Value) -> String {
-    let s = |k: &str| v.get(k).and_then(Value::as_str).unwrap_or("");
-    format!("{}/{}", s("provider"), s("model"))
-}
-
-/// Builds the timeline entry by entry. Tracks the session's model / thinking level so a
-/// `Work` can be labelled even before its first assistant message says which model ran.
+/// Builds the timeline entry by entry, from the entries of a thread's current branch.
 #[derive(Debug, Default)]
 pub struct Timeline {
     pub items: Vec<Item>,
-    /// Per item, the id of the pi entry that created it: what a message pin names
+    /// Per item, the id of the entry that created it: what a message pin names
     /// (`ThreadSummary::pinned_entries`), stable across clients unlike an index.
     ids: Vec<String>,
     /// Id of the entry being folded in (`push`), for `add`.
     current: String,
-    model: Option<String>,
-    effort: Option<String>,
     cache: CacheBaseline,
 }
 
 impl Timeline {
-    pub fn from_entries<'a>(entries: impl IntoIterator<Item = &'a Value>) -> Self {
+    pub fn from_entries<'a>(entries: impl IntoIterator<Item = &'a Entry>) -> Self {
         let mut t = Self::default();
         for e in entries {
             t.push(e);
@@ -343,167 +307,139 @@ impl Timeline {
 
     /// Fold one persisted entry in. Returns the index of the first item it changed or
     /// created, so the list can remeasure from there.
-    pub fn push(&mut self, entry: &Value) -> Option<usize> {
-        self.current = entry.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+    pub fn push(&mut self, entry: &Entry) -> Option<usize> {
+        self.current = entry.id.clone();
         let miss = self.cache.observe(entry).and_then(|m| m.notice());
-        let kind = entry.get("type").and_then(Value::as_str).unwrap_or("?");
-        match kind {
-            "message" => self.push_message(entry.get("message")?, miss),
-            "thinking_level_change" => {
-                self.effort = entry.get("thinkingLevel").and_then(Value::as_str).map(str::to_owned);
-                None
-            }
-            "model_change" => {
-                self.model = entry.get("modelId").and_then(Value::as_str).map(str::to_owned);
-                None
-            }
-            // The runtime's record of a failed compaction (`sessions.ts`); pi keeps none.
-            "custom" if entry.get("customType").and_then(Value::as_str) == Some("dirigent:compaction_failed") => {
-                let error = entry.pointer("/data/error").and_then(Value::as_str).unwrap_or("Compaction failed");
-                Some(self.add(Item::Error(error.to_owned())))
-            }
-            "session_info" | "label" | "usage" | "custom" => None,
-            "compaction" => Some(self.add(Item::Compaction)),
-            "custom_message" => self.push_custom(entry),
-            other => Some(self.add(Item::Notice(format!("unknown entry: {other}")))),
+        match &entry.body {
+            Body::User { content } => Some(self.said(text_of(content), images_of(content), entry.at)),
+            Body::Assistant(a) => Some(self.push_assistant(a, entry.at, miss)),
+            Body::ToolResult(r) => self.push_result(r, entry.at),
+            Body::Notice(notice) => Some(self.push_notice(notice, entry.at)),
+            Body::Compaction { .. } => Some(self.cut(Item::Compaction, entry.at)),
+            Body::CompactionFailed { error } => Some(self.cut(Item::Error(error.clone()), entry.at)),
+            Body::Store { .. } => None,
+            Body::Unknown => Some(self.add(Item::Notice("an entry this version of dirigent doesn't know".into()))),
         }
     }
 
-    /// A custom message is a user turn the user didn't type: the answers to an `ask_user`
-    /// form read as the user's words (a bubble, or a steer inside a running work); an
-    /// `async_bash` job ending is a notice. Anything else shows its text as a notice.
-    fn push_custom(&mut self, entry: &Value) -> Option<usize> {
-        let at = entry.get("timestamp").and_then(Value::as_str).and_then(iso_ms).unwrap_or(0);
-        let details = entry.get("details");
-        match entry.get("customType").and_then(Value::as_str) {
-            Some("dirigent:answer") => {
-                let text = answer_text(details).unwrap_or_else(|| text_of(entry.get("content")));
-                Some(match self.open_work() {
-                    Some(ix) => {
-                        self.work_mut(ix).steps.push(Step::Steer { text, images: vec![], queued: false });
-                        ix
-                    }
-                    None => self.add(Item::User { text, images: vec![], at }),
-                })
+    /// A compaction, done or failed, as its own `item`. Mid-run, the work so far ends there
+    /// (`at`): the model's next message starts another (`start_work`). Returns that work's
+    /// index, as it changed too, else the item's.
+    fn cut(&mut self, item: Item, at: i64) -> usize {
+        let work = self.open_work();
+        if let Some(ix) = work {
+            self.work_mut(ix).ended = Some(at);
+        }
+        let added = self.add(item);
+        work.unwrap_or(added)
+    }
+
+    /// The user's words: a message of its own, or a steer inside the work in progress (a
+    /// fresh prompt waits for the final assistant message, which closes the work).
+    fn said(&mut self, text: String, images: Vec<String>, at: i64) -> usize {
+        match self.open_work() {
+            Some(ix) => {
+                self.work_mut(ix).steps.push(Step::Steer { text, images, queued: false });
+                ix
             }
-            Some("dirigent:job") => {
-                let text = job_text(details).unwrap_or_else(|| text_of(entry.get("content")));
-                Some(match self.open_work() {
-                    Some(ix) => {
-                        self.work_mut(ix).steps.push(Step::Notice(text));
-                        ix
-                    }
-                    None => self.add(Item::Notice(text)),
-                })
+            None => self.add(Item::User { text, images, at }),
+        }
+    }
+
+    /// A notice is a user turn the user didn't type: the answers to an `ask_user` form read
+    /// as the user's words (a bubble, or a steer inside a running work); a job or a
+    /// sub-agent ending, and what the host says, are a line (a step of a running work).
+    fn push_notice(&mut self, notice: &Notice, at: i64) -> usize {
+        let text = match notice {
+            Notice::Answer { questions, answers, .. } => {
+                let answers = answers.as_ref().map(|a| a.iter().map(Vec::as_slice));
+                return self.said(answer_markdown(questions.iter().map(|q| q.text.as_str()), answers), vec![], at);
             }
-            Some("dirigent:child") => {
-                let text = child_text(details).unwrap_or_else(|| text_of(entry.get("content")));
-                let thread_id = details.and_then(|d| d.get("thread_id")).and_then(Value::as_str).map(str::to_owned);
-                Some(match (self.open_work(), thread_id) {
-                    (Some(ix), Some(thread_id)) => {
+            Notice::Child { thread_id, name, asking, failed, .. } => {
+                let what = match (asking, failed) {
+                    (true, _) => "is asking the user",
+                    (false, true) => "stopped without a reply",
+                    (false, false) => "finished",
+                };
+                let (thread_id, text) = (thread_id.clone(), format!("sub-agent \"{name}\" {what}"));
+                return match self.open_work() {
+                    Some(ix) => {
                         self.work_mut(ix).steps.push(Step::Child { thread_id, text });
                         ix
                     }
-                    (Some(ix), None) => {
-                        self.work_mut(ix).steps.push(Step::Notice(text));
-                        ix
-                    }
-                    (None, Some(thread_id)) => self.add(Item::Child { thread_id, text }),
-                    (None, None) => self.add(Item::Notice(text)),
-                })
-            }
-            _ => Some(self.add(Item::Notice(text_of(entry.get("content"))))),
-        }
-    }
-
-    /// `miss`: the cache-miss notice an assistant message comes with.
-    fn push_message(&mut self, msg: &Value, miss: Option<String>) -> Option<usize> {
-        let role = msg.get("role").and_then(Value::as_str).unwrap_or("?");
-        let at = msg.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
-        match role {
-            // A user message while a work is open can only be a steer: a fresh prompt waits
-            // for the final assistant message, which closes the work.
-            "user" => {
-                let (text, images) = (text_of(msg.get("content")), images_of(msg.get("content")));
-                Some(match self.open_work() {
-                    Some(ix) => {
-                        self.work_mut(ix).steps.push(Step::Steer { text, images, queued: false });
-                        ix
-                    }
-                    None => self.add(Item::User { text, images, at }),
-                })
-            }
-            "assistant" => self.push_assistant(msg, at, miss),
-            "toolResult" => {
-                let id = msg.get("toolCallId").and_then(Value::as_str).unwrap_or("");
-                let result = ToolResult {
-                    text: text_of(msg.get("content")),
-                    is_error: msg.get("isError").and_then(Value::as_bool).unwrap_or(false),
-                    images: images_of(msg.get("content")),
+                    None => self.add(Item::Child { thread_id, text }),
                 };
-                let duration = msg.get("durationMs").and_then(Value::as_i64);
-                let ix = self.open_work()?;
-                let Item::Work(w) = &mut self.items[ix] else { return None };
-                let tool = w.steps.iter_mut().rev().find_map(|s| match s {
-                    Step::Tool(t) if t.id == id => Some(t),
-                    _ => None,
-                })?;
-                tool.ended = Some(at);
-                tool.started = duration.map(|d| at - d).or(tool.started);
-                let spawned = tool
-                    .spawned
-                    .clone()
-                    .zip(spawned_id(&result))
-                    .map(|(name, thread_id)| Step::Child { thread_id, text: format!("sub-agent \"{name}\" started") });
-                tool.result = Some(result);
-                w.steps.extend(spawned);
-                Some(ix)
             }
-            "system" => None,
-            "bashExecution" => Some(self.add(Item::Notice(format!("$ {}", msg.get("command").and_then(Value::as_str).unwrap_or(""))))),
-            "compactionSummary" | "branchSummary" => Some(self.add(Item::Notice(text_of(msg.get("summary"))))),
-            other => Some(self.add(Item::Notice(format!("unknown message role: {other}")))),
+            // `job cargo check · exit 1 · 12s`
+            Notice::Job { command, exit_code, duration_ms, .. } => {
+                format!("job {} · exit {exit_code} · {}", command.lines().next().unwrap_or(""), crate::thread::duration(*duration_ms))
+            }
+            Notice::Info { text } => text.clone(),
+        };
+        match self.open_work() {
+            Some(ix) => {
+                self.work_mut(ix).steps.push(Step::Notice(text));
+                ix
+            }
+            None => self.add(Item::Notice(text)),
         }
     }
 
-    fn push_assistant(&mut self, msg: &Value, at: i64, miss: Option<String>) -> Option<usize> {
-        if let Some(m) = msg.get("model").and_then(Value::as_str) {
-            self.model = Some(m.to_owned());
+    /// A tool's result goes to its call, in the work in progress.
+    fn push_result(&mut self, r: &transcript::ToolResult, at: i64) -> Option<usize> {
+        let result = ToolResult { text: text_of(&r.content), is_error: r.is_error, images: images_of(&r.content) };
+        let ix = self.open_work()?;
+        let w = self.work_mut(ix);
+        let tool = w.steps.iter_mut().rev().find_map(|s| match s {
+            Step::Tool(t) if t.id == r.call_id => Some(t),
+            _ => None,
+        })?;
+        tool.ended = Some(at);
+        if r.duration_ms > 0 {
+            tool.started = Some(at - r.duration_ms);
         }
-        if let Some(e) = msg.get("thinkingLevel").and_then(Value::as_str) {
-            self.effort = Some(e.to_owned());
-        }
-        let ix = self.open_work().unwrap_or_else(|| self.start_work(at));
-        if let Item::Work(w) = &mut self.items[ix] {
-            w.model = self.model.clone();
-            w.effort = self.effort.clone();
-        }
-        let blocks = msg.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
-        let calls_tools = blocks.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("toolCall"));
-        // The message's end: when its tool calls start (their result may refine that).
-        let done = at + msg.get("durationMs").and_then(Value::as_i64).unwrap_or(0);
+        let spawned = tool
+            .spawned
+            .clone()
+            .zip(spawned_id(&result))
+            .map(|(name, thread_id)| Step::Child { thread_id, text: format!("sub-agent \"{name}\" started") });
+        tool.result = Some(result);
+        w.steps.extend(spawned);
+        Some(ix)
+    }
+
+    /// `at`: when the reply ended. `miss`: the cache-miss notice it comes with.
+    fn push_assistant(&mut self, a: &Assistant, at: i64, miss: Option<String>) -> usize {
+        let ix = self.open_work().unwrap_or_else(|| self.start_work(at - a.duration_ms));
+        let w = self.work_mut(ix);
+        w.model = Some(a.model.clone());
+        w.effort = a.effort.clone();
+        let calls_tools = a.content.iter().any(|b| matches!(b, Block::ToolCall { .. }));
         let mut reply = vec![];
-        for b in &blocks {
+        for b in &a.content {
             match step_of(b) {
                 Some(Step::Text(t)) if !calls_tools => reply.push(t),
-                Some(Step::Tool(t)) => self.work_mut(ix).steps.push(Step::Tool(ToolCall { started: Some(done), ..t })),
-                Some(step) => self.work_mut(ix).steps.push(step),
+                // The call starts when the message ends (its result may refine that).
+                Some(Step::Tool(t)) => w.steps.push(Step::Tool(ToolCall { started: Some(at), ..t })),
+                Some(step) => w.steps.push(step),
                 None => {}
             }
         }
-        let stop = msg.get("stopReason").and_then(Value::as_str);
-        let error =
-            msg.get("errorMessage").and_then(Value::as_str).map(str::to_owned).or((stop == Some("aborted")).then(|| "aborted".into()));
-        // A failed request's miss isn't shown (pi doesn't either); it still moved the baseline.
+        let error = a.error.clone().or(match a.stop {
+            Stop::Aborted => Some("aborted".into()),
+            Stop::Error => Some("the request failed".into()),
+            _ => None,
+        });
+        // A failed request's miss isn't shown; it still moved the baseline.
         let miss = miss.filter(|_| error.is_none());
         // Misses go in the work, for the log; one keeps a turn's otherwise empty work.
-        self.work_mut(ix).steps.extend(miss.map(Step::CacheMiss));
+        w.steps.extend(miss.map(Step::CacheMiss));
         if calls_tools && error.is_none() {
-            return Some(ix);
+            return ix;
         }
         // The turn is over: close the work (drop it if nothing happened) and add the reply.
-        self.work_mut(ix).ended = Some(done);
-        if self.work_mut(ix).steps.is_empty() {
+        w.ended = Some(at);
+        if w.steps.is_empty() {
             self.items.remove(ix);
             self.ids.remove(ix);
         }
@@ -513,7 +449,7 @@ impl Timeline {
         if let Some(e) = error {
             self.add(Item::Error(e));
         }
-        Some(ix.min(self.items.len().saturating_sub(1)))
+        ix.min(self.items.len().saturating_sub(1))
     }
 
     fn add(&mut self, item: Item) -> usize {
@@ -522,7 +458,7 @@ impl Timeline {
         self.items.len() - 1
     }
 
-    /// The pi entry id item `ix` came from (`""` for an item built from an entry without one).
+    /// The id of the entry item `ix` came from.
     pub fn entry_id(&self, ix: usize) -> Option<&str> {
         self.ids.get(ix).map(String::as_str)
     }
@@ -537,21 +473,27 @@ impl Timeline {
 
     /// `event` is the model starting a message with no work open: the first one of a new
     /// work, which `push_assistant` starts once the message is persisted.
-    pub fn begins_work(&self, event: &Value) -> bool {
-        self.open_work().is_none()
-            && event.get("type").and_then(Value::as_str) == Some("message_start")
-            && event.pointer("/message/role").and_then(Value::as_str) == Some("assistant")
+    pub fn begins_work(&self, event: &Event) -> bool {
+        self.open_work().is_none() && *event == Event::MessageStart
     }
 
-    /// Start a `Work` at the prompt that triggered it (the last user message), else at `at`.
+    /// When the user prompted the run whose work starts now: their last message, as long as
+    /// only lines came since. Anything else after it is what that message's run made, so
+    /// this run is another, which a notice woke (a job or a sub-agent ending), or the same
+    /// one going on after a compaction (`cut`): neither started at the message.
+    pub fn prompted_at(&self) -> Option<i64> {
+        let prompted = self.items.iter().rev().find_map(|i| match i {
+            Item::User { at, .. } => Some(Some(*at).filter(|a| *a > 0)),
+            Item::Notice(_) | Item::Child { .. } => None,
+            Item::Work(_) | Item::Assistant(_) | Item::Error(_) | Item::Compaction => Some(None),
+        });
+        prompted.flatten()
+    }
+
+    /// Start a `Work` at the message that prompted it (`prompted_at`), else at `at`, the
+    /// start of the model's first message in it.
     fn start_work(&mut self, at: i64) -> usize {
-        let started = self
-            .items
-            .iter()
-            .rev()
-            .find_map(|i| if let Item::User { at, .. } = i { Some(*at).filter(|a| *a > 0) } else { None })
-            .unwrap_or(at);
-        self.add(Item::Work(Work { model: self.model.clone(), effort: self.effort.clone(), started, ended: None, steps: vec![] }))
+        self.add(Item::Work(Work { started: self.prompted_at().unwrap_or(at), ..Work::default() }))
     }
 
     fn work_mut(&mut self, ix: usize) -> &mut Work {
@@ -564,45 +506,35 @@ impl Timeline {
 
 /// A content block of an assistant message as a work step. The images a text links to
 /// become `blob:` links (`markdown::link_blobs`), for markdown to draw.
-fn step_of(b: &Value) -> Option<Step> {
-    Some(match b.get("type")?.as_str()? {
-        "text" => {
-            let text = b.get("text")?.as_str()?;
-            Step::Text(b.get("blobs").and_then(Value::as_object).map_or_else(|| text.to_owned(), |blobs| markdown::link_blobs(text, blobs)))
-        }
-        "thinking" => Step::Thinking(b.get("thinking").and_then(Value::as_str).unwrap_or("(redacted)").to_owned()),
-        "toolCall" => {
-            let args = b.get("arguments");
-            let name = b.get("name").and_then(Value::as_str).unwrap_or("?");
-            // `ask_user`'s arguments are all nested: its first question stands for the call.
-            let primary = match name {
-                "ask_user" => args_primary(args.and_then(|a| a.pointer("/questions/0"))),
-                _ => args_primary(args),
-            };
-            let arg = |k: &str| args.and_then(|a| a.get(k)).and_then(Value::as_str);
-            Step::Tool(ToolCall {
-                id: b.get("id").and_then(Value::as_str).unwrap_or("").to_owned(),
-                name: name.to_owned(),
-                primary,
-                args: args_multiline(args),
-                timeout: args.and_then(|a| a.get("timeout")).and_then(Value::as_f64),
-                spawned: (name == "dirigent" && arg("action") == Some("spawn")).then(|| arg("name").unwrap_or("untitled").to_owned()),
-                ..Default::default()
-            })
-        }
-        _ => return None,
+fn step_of(b: &Block) -> Option<Step> {
+    Some(match b {
+        Block::Text { text, blobs } if blobs.is_empty() => Step::Text(text.clone()),
+        Block::Text { text, blobs } => Step::Text(markdown::link_blobs(text, blobs)),
+        Block::Thinking { redacted: true, .. } => Step::Thinking("(redacted)".into()),
+        // Reasoning the provider keeps to itself leaves a block without text.
+        Block::Thinking { text, .. } if text.is_empty() => return None,
+        Block::Thinking { text, .. } => Step::Thinking(text.clone()),
+        Block::ToolCall { id, name, input } => Step::Tool(tool_call(id, name, input)),
+        Block::Image { .. } => return None,
     })
 }
 
-/// The answers in an `ask_user` reply's `details` as markdown (`answer_markdown`).
-fn answer_text(details: Option<&Value>) -> Option<String> {
-    let d = details?;
-    let questions = d.get("questions")?.as_array()?.iter().map(|q| q.get("text").and_then(Value::as_str).unwrap_or(""));
-    let answers: Option<Vec<Vec<String>>> = d
-        .get("answers")
-        .and_then(Value::as_array)
-        .map(|a| a.iter().map(|v| v.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect()).collect());
-    Some(answer_markdown(questions, answers.as_ref().map(|a| a.iter().map(|v| v.as_slice()))))
+fn tool_call(id: &str, name: &str, input: &Value) -> ToolCall {
+    // `ask_user`'s arguments are all nested: its first question stands for the call.
+    let primary = match name {
+        "ask_user" => args_primary(input.pointer("/questions/0")),
+        _ => args_primary(Some(input)),
+    };
+    let arg = |k: &str| input.get(k).and_then(Value::as_str);
+    ToolCall {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        primary,
+        args: args_multiline(Some(input)),
+        timeout: input.get("timeout").and_then(Value::as_f64),
+        spawned: (name == "dirigent" && arg("action") == Some("spawn")).then(|| arg("name").unwrap_or("untitled").to_owned()),
+        ..Default::default()
+    }
 }
 
 /// The question in bold, the answer under it (a list when there are several, so a typed
@@ -647,16 +579,6 @@ pub fn draft_reply(questions: &[dirigent_protocol::Question], answers: &[Vec<Str
     (text, cursor.unwrap_or(end))
 }
 
-/// One line for a finished `async_bash` job: `job cargo check · exit 1 · 12s`.
-fn job_text(details: Option<&Value>) -> Option<String> {
-    let d = details?;
-    let command = d.get("command")?.as_str()?;
-    let exit = d.get("exit_code").and_then(Value::as_i64).unwrap_or(-1);
-    let ms = d.get("duration_ms").and_then(Value::as_i64).unwrap_or(0);
-    let first = command.lines().next().unwrap_or("");
-    Some(format!("job {first} · exit {exit} · {}", crate::thread::duration(ms)))
-}
-
 /// The new thread's id in a successful `dirigent` spawn's result (`Spawned sub-agent thread <id>. …`).
 fn spawned_id(result: &ToolResult) -> Option<String> {
     if result.is_error {
@@ -666,61 +588,11 @@ fn spawned_id(result: &ToolResult) -> Option<String> {
     Some(rest.split('.').next()?.to_owned())
 }
 
-/// One line for a sub-agent that settled: `sub-agent "Review the diff" finished` (or
-/// `stopped without a reply`, or `is asking the user`).
-fn child_text(details: Option<&Value>) -> Option<String> {
-    let d = details?;
-    let name = d.get("name").and_then(Value::as_str).unwrap_or("untitled");
-    let flag = |k: &str| d.get(k).and_then(Value::as_bool).unwrap_or(false);
-    let what = if flag("asking") {
-        "is asking the user"
-    } else if flag("error") {
-        "stopped without a reply"
-    } else {
-        "finished"
-    };
-    Some(format!("sub-agent \"{name}\" {what}"))
-}
-
-/// Unix millis of an ISO 8601 timestamp (`2026-01-02T03:04:05.678Z`), as pi writes them.
-fn iso_ms(s: &str) -> Option<i64> {
-    let (date, time) = s.split_once('T')?;
-    let mut d = date.split('-').map(|p| p.parse::<i64>());
-    let (y, m, day) = (d.next()?.ok()?, d.next()?.ok()?, d.next()?.ok()?);
-    let time = time.trim_end_matches('Z');
-    let mut t = time.split(':');
-    let (h, min) = (t.next()?.parse::<i64>().ok()?, t.next()?.parse::<i64>().ok()?);
-    let sec: f64 = t.next()?.parse().ok()?;
-    // Days since the epoch, via the civil-from-days algorithm (Howard Hinnant).
-    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    Some(((days * 86_400 + h * 3600 + min * 60) as f64 * 1000. + sec * 1000.).round() as i64)
-}
-
-/// Text of a `string | (TextContent | ImageContent)[]` content field (text blocks only).
-pub fn text_of(content: Option<&Value>) -> String {
-    match content {
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
-        _ => String::new(),
-    }
-}
-
 /// A user message's text without the `[image-N]: <path>` lines its host appended to tell
-/// the model which file each attached image is (`sessions.ts` `linkAttachments`), and the
-/// `N`s of those lines: one per image of the message, in order. Empty for a message
-/// without images, or one sent before hosts saved them. Pi puts its own notes for the
-/// model after them when it resized, converted or dropped an image (`[Image: original …]`);
+/// the model which file each attached image is (`dirigent_agent`'s `Session::attach`), and
+/// the `N`s of those lines: one per image of the message, in order. Empty for a message
+/// without images, or one sent before hosts saved them. The agent's notes for the model
+/// come after them when it resized, converted or dropped an image (`[Image: original …]`);
 /// those go too.
 pub fn split_image_refs(text: &str) -> (&str, Vec<u32>) {
     let mut end = text.len();
@@ -736,14 +608,13 @@ pub fn split_image_refs(text: &str) -> (&str, Vec<u32>) {
     (text, vec![])
 }
 
-/// Blob ids of the image blocks in a content field, in order.
-pub fn images_of(content: Option<&Value>) -> Vec<String> {
-    let Some(Value::Array(blocks)) = content else { return vec![] };
-    blocks
-        .iter()
-        .filter(|b| b.get("type").and_then(Value::as_str) == Some("image"))
-        .filter_map(|b| b.get("blob").and_then(Value::as_str).map(str::to_owned))
-        .collect()
+/// Blob ids of the images in a message's content, in order.
+fn images_of(content: &[Block]) -> Vec<String> {
+    let blobs = content.iter().filter_map(|b| match b {
+        Block::Image { blob, .. } => Some(blob.clone()),
+        _ => None,
+    });
+    blobs.collect()
 }
 
 /// Blob ids of the `blob:<id>` links in markdown text (a reply showing a local image, see
@@ -807,9 +678,9 @@ fn args_multiline(args: Option<&Value>) -> String {
 /// (replaced by the persisted entry when it lands), tools executing right now, and the
 /// optimistic echoes of sent messages with the mode each was sent in, oldest first. A
 /// prompt echo lives until its persisted user entry lands (`confirm_prompt`); steer and
-/// follow-up echoes are replaced by pi's own queues on every `queue_update`. Answers to
-/// `ask_user` are steers too, but pi's queues don't list custom messages, so they echo
-/// in `answers` (by ask id) until their `dirigent:answer` entry lands (`confirm_answer`).
+/// follow-up echoes are replaced by the agent's own queues on every `Event::Queue`. Answers
+/// to `ask_user` are steers too, but the queues list only what the user typed, so they echo
+/// in `answers` (by ask id) until their `Notice::Answer` entry lands (`confirm_answer`).
 ///
 /// Text streams in word by word but is shown a line at a time (`markdown::committed`), so
 /// a delta only counts as a visible change once it completes a line.
@@ -819,27 +690,25 @@ pub struct Streaming {
     /// (tool call id, started at unix ms)
     pub running_tools: Vec<(String, i64)>,
     pub echo: Vec<(String, PromptMode)>,
-    /// (ask id, the answers as `answer_text` renders them)
+    /// (ask id, the answers as `answer_markdown` renders them)
     pub answers: Vec<(String, String)>,
 }
 
 impl Streaming {
-    /// The user answered an ask: show it as a pending steer until pi delivers it.
+    /// The user answered an ask: show it as a pending steer until the model has it.
     pub fn echo_answer(&mut self, ask_id: &str, questions: &[dirigent_protocol::Question], answers: Option<&[Vec<String>]>) {
         let text = answer_markdown(questions.iter().map(|q| q.text.as_str()), answers.map(|a| a.iter().map(|v| v.as_slice())));
         self.answers.push((ask_id.to_owned(), text));
     }
 
-    /// Its `dirigent:answer` entry landed: the echo goes.
-    pub fn confirm_answer(&mut self, entry: &Value) {
-        if let Some(id) = entry.pointer("/details/ask_id").and_then(Value::as_str) {
-            self.answers.retain(|(a, _)| a != id);
-        }
+    /// The entry of the answers to ask `id` landed: the echo goes.
+    pub fn confirm_answer(&mut self, id: &str) {
+        self.answers.retain(|(a, _)| a != id);
     }
 
     /// A persisted user message started a run: drop the oldest prompt echo. Without one,
     /// the message was sent as a steer or follow-up to a model that turned out idle, and
-    /// its host prompted it instead (`sessions.ts` `deliver`): that echo goes, found by its
+    /// its host prompted it instead: that echo goes, found by its
     /// text (the host's has the image links the echo lacks, `split_image_refs`).
     pub fn confirm_prompt(&mut self, text: &str) {
         let i = self
@@ -858,9 +727,9 @@ impl Streaming {
     }
 
     /// What the run in progress adds to its work's persisted steps: the message streaming
-    /// right now (text only up to its last completed line), then the steers pi still holds
+    /// right now (text only up to its last completed line), then the steers still waiting
     /// (typed, or answers on their way) as queued steps. Those go last, where they will
-    /// land: pi hands a steer over after the streaming message and its tool calls.
+    /// land: the model gets a steer after the streaming message and its tool calls.
     pub fn live_steps(&self) -> impl Iterator<Item = Step> {
         let streamed = self.steps.iter().filter_map(|s| match s {
             Step::Text(x) => x.contains('\n').then(|| Step::Text(markdown::committed(x).to_owned())),
@@ -871,66 +740,34 @@ impl Streaming {
         streamed.chain(queued.map(|text| Step::Steer { text: text.to_owned(), images: vec![], queued: true }))
     }
 
-    /// Apply one pi `AgentSessionEvent`. Returns true if anything visible changed.
-    pub fn apply(&mut self, event: &Value, now: i64) -> bool {
-        let ty = event.get("type").and_then(Value::as_str).unwrap_or("");
-        match ty {
-            "message_start" => {
-                if event.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
-                    self.steps.clear();
-                    return true;
-                }
-                false
-            }
-            "message_update" => {
-                let Some(ev) = event.get("assistantMessageEvent") else { return false };
-                let idx = ev.get("contentIndex").and_then(Value::as_u64).unwrap_or(0) as usize;
-                match ev.get("type").and_then(Value::as_str) {
-                    Some("text_delta") => self.append(idx, ev.get("delta"), Step::Text),
-                    Some("thinking_delta") => self.append(idx, ev.get("delta"), Step::Thinking),
-                    Some("toolcall_end") => {
-                        if let Some(s) = ev.get("toolCall").and_then(step_of) {
-                            self.set(idx, s);
-                        }
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            "tool_execution_start" => {
-                let id = event.get("toolCallId").and_then(Value::as_str).unwrap_or("").to_owned();
-                self.running_tools.push((id, now));
-                true
-            }
-            "tool_execution_end" => {
-                let id = event.get("toolCallId").and_then(Value::as_str).unwrap_or("");
-                self.running_tools.retain(|(i, _)| i != id);
-                true
-            }
-            // Pi's queues are the truth for steers and follow-ups (it emits this before
-            // delivering one, and after a cancel). A prompt pi had to queue (sent as the run
-            // started) shows up here as a follow-up, so its prompt echo goes too (pi's text
-            // has the image links the echo lacks: `split_image_refs`). Pi's texts are kept
-            // whole: a steer is cancelled by its text.
-            "queue_update" => {
-                let list = |k| event.get(k).and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
-                let (steering, follow_up): (Vec<_>, Vec<_>) = (list("steering").collect(), list("followUp").collect());
+    /// Apply one event of the thread. Returns true if anything visible changed.
+    pub fn apply(&mut self, event: &Event, now: i64) -> bool {
+        match event {
+            Event::MessageStart => self.steps.clear(),
+            Event::Text { index, delta } => return self.append(*index, delta, Step::Text),
+            Event::Thinking { index, delta } => return self.append(*index, delta, Step::Thinking),
+            Event::ToolCall { index, id, name, input } => self.set(*index, Step::Tool(tool_call(id, name, input))),
+            Event::ToolStart { id } => self.running_tools.push((id.clone(), now)),
+            Event::ToolEnd { id } => self.running_tools.retain(|(i, _)| i != id),
+            // The agent's queues are the truth for steers and follow-ups (it says them when a
+            // message is queued or cancelled, and before it hands one to the model). A prompt
+            // it had to queue (sent as the run started) shows up here as a follow-up, so its
+            // prompt echo goes too (the agent's text has the image links the echo lacks:
+            // `split_image_refs`). Its texts are kept whole: a steer is cancelled by its text.
+            Event::Queue { steering, follow_up } => {
                 self.echo.retain(|(t, m)| *m == PromptMode::Prompt && !follow_up.iter().any(|f| split_image_refs(f).0 == t));
-                self.echo.extend(steering.into_iter().map(|t| (t.to_owned(), PromptMode::Steer)));
-                self.echo.extend(follow_up.into_iter().map(|t| (t.to_owned(), PromptMode::FollowUp)));
-                true
+                self.echo.extend(steering.iter().map(|t| (t.clone(), PromptMode::Steer)));
+                self.echo.extend(follow_up.iter().map(|t| (t.clone(), PromptMode::FollowUp)));
             }
-            // The run is over; an abort strands whatever pi still had queued.
-            "agent_settled" => {
-                self.settle();
-                true
-            }
-            _ => false,
+            // An abort strands whatever was still queued.
+            Event::RunEnd => self.settle(),
+            _ => return false,
         }
+        true
     }
 
-    /// The run is over (pi settled, or the runtime died under it and the host reports the
-    /// thread idle): nothing is streaming, running or queued any more.
+    /// The run is over (`RunEnd`, or its host lists the thread idle without one):
+    /// nothing is streaming, running or queued any more.
     pub fn settle(&mut self) {
         self.steps.clear();
         self.running_tools.clear();
@@ -943,8 +780,7 @@ impl Streaming {
     }
 
     /// Returns true when the delta completed a line (the only time the view changes).
-    fn append(&mut self, idx: usize, delta: Option<&Value>, make: impl FnOnce(String) -> Step) -> bool {
-        let delta = delta.and_then(Value::as_str).unwrap_or("");
+    fn append(&mut self, idx: usize, delta: &str, make: impl FnOnce(String) -> Step) -> bool {
         match self.steps.get_mut(idx) {
             Some(Step::Text(s) | Step::Thinking(s)) => s.push_str(delta),
             _ => self.set(idx, make(delta.to_owned())),
@@ -963,7 +799,64 @@ impl Streaming {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dirigent_protocol::transcript::{Api, Cost, Usage};
     use serde_json::json;
+
+    fn entry(at: i64, body: Body) -> Entry {
+        Entry { seq: 0, id: String::new(), parent_id: None, at, body }
+    }
+
+    fn user(at: i64, text: &str) -> Entry {
+        entry(at, Body::User { content: vec![Block::text(text)] })
+    }
+
+    /// A reply of model `m` that ended at `at`.
+    fn assistant(at: i64, stop: Stop, content: Vec<Block>) -> Entry {
+        let a = Assistant {
+            content,
+            model: "m".into(),
+            provider: "anthropic".into(),
+            api: Api::Anthropic,
+            effort: Some("high".into()),
+            usage: Usage::default(),
+            stop,
+            error: None,
+            duration_ms: 0,
+        };
+        entry(at, Body::Assistant(a))
+    }
+
+    fn call(id: &str, name: &str, input: Value) -> Block {
+        Block::ToolCall { id: id.into(), name: name.into(), input }
+    }
+
+    fn result(at: i64, call_id: &str, content: Vec<Block>, is_error: bool) -> Entry {
+        entry(
+            at,
+            Body::ToolResult(transcript::ToolResult { call_id: call_id.into(), tool: String::new(), content, is_error, duration_ms: 0 }),
+        )
+    }
+
+    fn notice(at: i64, notice: Notice) -> Entry {
+        entry(at, Body::Notice(notice))
+    }
+
+    fn thinking(text: &str) -> Block {
+        Block::Thinking { text: text.into(), signature: None, redacted: false }
+    }
+
+    fn compaction() -> Entry {
+        entry(
+            0,
+            Body::Compaction {
+                summary: "..".into(),
+                first_kept: String::new(),
+                tokens_before: 0,
+                model: "m".into(),
+                usage: Usage::default(),
+            },
+        )
+    }
 
     /// A run that never got its final message stops its clock at its last tool, not at now.
     #[test]
@@ -978,22 +871,32 @@ mod tests {
 
     #[test]
     fn turn_becomes_user_work_reply() {
+        let mut bash = result(2000, "c1", vec![Block::text("a\nb")], false);
+        if let Body::ToolResult(r) = &mut bash.body {
+            r.duration_ms = 300;
+        }
         let entries = [
-            json!({"type":"message","message":{"role":"user","content":"hi","timestamp":1000}}),
-            json!({"type":"message","message":{"role":"assistant","model":"m","thinkingLevel":"high","timestamp":1500,"stopReason":"toolUse","content":[
-                {"type":"thinking","thinking":"hmm"},
-                {"type":"text","text":"looking"},
-                {"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls -la\nnext","timeout":60}}
-            ]}}),
-            json!({"type":"message","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","timestamp":2000,"durationMs":300,"content":[{"type":"text","text":"a\nb"}],"isError":false}}),
-            json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":2500,"durationMs":500,"stopReason":"stop","content":[{"type":"text","text":"done"}]}}),
+            user(1000, "hi"),
+            assistant(
+                1500,
+                Stop::ToolUse,
+                vec![
+                    thinking("hmm"),
+                    thinking(""),
+                    Block::text("looking"),
+                    call("c1", "bash", json!({"command":"ls -la\nnext","timeout":60})),
+                ],
+            ),
+            bash,
+            assistant(3000, Stop::End, vec![Block::text("done")]),
         ];
-        let t = Timeline::from_entries(entries.iter());
+        let t = Timeline::from_entries(&entries);
         assert_eq!(t.items.len(), 3);
         assert_eq!(t.items[0], Item::User { text: "hi".into(), images: vec![], at: 1000 });
         let Item::Work(w) = &t.items[1] else { panic!() };
         assert_eq!((w.model.as_deref(), w.effort.as_deref(), w.started, w.ended), (Some("m"), Some("high"), 1000, Some(3000)));
         assert_eq!(w.tool_count(), 1);
+        // Thinking without text is not a step.
         assert_eq!(w.steps[0], Step::Thinking("hmm".into()));
         assert_eq!(w.steps[1], Step::Text("looking".into()));
         let Step::Tool(c) = &w.steps[2] else { panic!() };
@@ -1006,18 +909,15 @@ mod tests {
     /// spawn doesn't.
     #[test]
     fn spawn_adds_a_child_step() {
-        let spawn = |id: &str| {
-            json!({"type":"message","message":{"role":"assistant","timestamp":1,"stopReason":"toolUse","content":[
-            {"type":"toolCall","id":id,"name":"dirigent","arguments":{"action":"spawn","name":"Review","task":"look"}}]}})
-        };
-        let result = |id: &str, text: &str, err: bool| json!({"type":"message","message":{"role":"toolResult","toolCallId":id,"timestamp":2,"content":text,"isError":err}});
+        let spawn =
+            |id: &str| assistant(1, Stop::ToolUse, vec![call(id, "dirigent", json!({"action":"spawn","name":"Review","task":"look"}))]);
         let entries = [
             spawn("c1"),
-            result("c1", "Spawned sub-agent thread kid. You will get a message when it finishes.", false),
+            result(2, "c1", vec![Block::text("Spawned sub-agent thread kid. You will get a message when it finishes.")], false),
             spawn("c2"),
-            result("c2", "Error: no project to spawn in", true),
+            result(2, "c2", vec![Block::text("no project to spawn in")], true),
         ];
-        let t = Timeline::from_entries(entries.iter());
+        let t = Timeline::from_entries(&entries);
         let Item::Work(w) = &t.items[0] else { panic!() };
         assert_eq!(w.steps.len(), 3);
         assert_eq!(w.steps[1], Step::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" started".into() });
@@ -1026,17 +926,20 @@ mod tests {
 
     #[test]
     fn steer_stays_inside_the_work() {
-        let assistant = |at: i64, stop: &str, content: Value| json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":at,"stopReason":stop,"content":content}});
+        let bash = |id: &str| call(id, "bash", json!({}));
+        let steer = entry(
+            4,
+            Body::User { content: vec![Block::text("no, other way"), Block::Image { mime: "image/png".into(), blob: "abc".into() }] },
+        );
         let entries = [
-            json!({"type":"message","message":{"role":"user","content":"hi","timestamp":1}}),
-            assistant(2, "toolUse", json!([{"type":"text","text":"before"},{"type":"toolCall","id":"c1","name":"bash","arguments":{}}])),
-            json!({"type":"message","message":{"role":"toolResult","toolCallId":"c1","timestamp":3,"content":""}}),
-            json!({"type":"message","message":{"role":"user","timestamp":4,"content":[
-                {"type":"text","text":"no, other way"},{"type":"image","mimeType":"image/png","blob":"abc"}]}}),
-            assistant(5, "toolUse", json!([{"type":"text","text":"after"},{"type":"toolCall","id":"c2","name":"bash","arguments":{}}])),
-            json!({"type":"message","message":{"role":"toolResult","toolCallId":"c2","timestamp":6,"content":""}}),
-            assistant(7, "stop", json!([{"type":"text","text":"done"}])),
-            json!({"type":"message","message":{"role":"user","content":"next prompt","timestamp":8}}),
+            user(1, "hi"),
+            assistant(2, Stop::ToolUse, vec![Block::text("before"), bash("c1")]),
+            result(3, "c1", vec![], false),
+            steer,
+            assistant(5, Stop::ToolUse, vec![Block::text("after"), bash("c2")]),
+            result(6, "c2", vec![], false),
+            assistant(7, Stop::End, vec![Block::text("done")]),
+            user(8, "next prompt"),
         ];
         let mut t = Timeline::default();
         let changed: Vec<_> = entries.iter().map(|e| t.push(e)).collect();
@@ -1057,21 +960,50 @@ mod tests {
         assert_eq!(w.latest_text(), None);
     }
 
-    /// A run woken by a job starts a new work with the model's first message; the messages
-    /// after it go into that work.
+    /// A run woken by a job starts a new work with the model's first message, and at that
+    /// message, not back at the user's (whose run is over); the messages after it go into
+    /// that work.
     #[test]
     fn model_writing_with_no_work_open_begins_a_work() {
-        let assistant = |stop: &str, content: Value| json!({"type":"message","message":{"role":"assistant","timestamp":2,"stopReason":stop,"content":content}});
-        let start = |role: &str| json!({"type":"message_start","message":{"role":role}});
-        let mut t = Timeline::from_entries([
-            &assistant("stop", json!([{"type":"thinking","thinking":"hm"},{"type":"text","text":"waiting on the job"}])),
-            &json!({"type":"custom_message","customType":"dirigent:job","content":"job done"}),
-        ]);
-        assert!(t.begins_work(&start("assistant")));
-        assert!(!t.begins_work(&start("custom")));
-        assert!(!t.begins_work(&json!({"type":"message_update","message":{"role":"assistant"}})));
-        t.push(&assistant("toolUse", json!([{"type":"toolCall","id":"c","name":"bash","arguments":{}}])));
-        assert!(!t.begins_work(&start("assistant")));
+        let job = Notice::Info { text: "job done".into() };
+        let waiting = assistant(2, Stop::End, vec![thinking("hm"), Block::text("waiting on the job")]);
+        let mut t = Timeline::from_entries(&[user(1, "go"), waiting, notice(300, job)]);
+        assert!(t.begins_work(&Event::MessageStart));
+        assert!(!t.begins_work(&Event::RunStart));
+        assert_eq!(t.prompted_at(), None);
+        let mut woken = assistant(400, Stop::ToolUse, vec![call("c", "bash", json!({}))]);
+        if let Body::Assistant(a) = &mut woken.body {
+            a.duration_ms = 50;
+        }
+        t.push(&woken);
+        assert!(!t.begins_work(&Event::MessageStart));
+        let started: Vec<i64> = t.items.iter().filter_map(|i| if let Item::Work(w) = i { Some(w.started) } else { None }).collect();
+        assert_eq!(started, [1, 350]);
+        // A line between the user's message and the model's first leaves the run the user's.
+        let t = Timeline::from_entries(&[user(1, "go"), notice(2, Notice::Info { text: "moved".into() })]);
+        assert_eq!(t.prompted_at(), Some(1));
+    }
+
+    /// A compaction in the middle of a run, done or failed, closes the work so far (which
+    /// the list is told changed); the next one starts at the model's next message, not back
+    /// at the prompt.
+    #[test]
+    fn compaction_splits_a_run_in_two_works() {
+        let mut after = assistant(50, Stop::End, vec![thinking("so"), Block::text("done")]);
+        if let Body::Assistant(a) = &mut after.body {
+            a.duration_ms = 10;
+        }
+        let failed = entry(0, Body::CompactionFailed { error: "Compaction failed: 529".into() });
+        for (cut, item) in [(compaction(), Item::Compaction), (failed, Item::Error("Compaction failed: 529".into()))] {
+            let run = [user(1, "go"), assistant(20, Stop::ToolUse, vec![call("c", "bash", json!({}))]), result(25, "c", vec![], false)];
+            let mut t = Timeline::from_entries(&run);
+            assert_eq!(t.push(&Entry { at: 30, ..cut }), Some(1));
+            t.push(&after);
+            let works: Vec<_> =
+                t.items.iter().filter_map(|i| if let Item::Work(w) = i { Some((w.started, w.ended)) } else { None }).collect();
+            assert_eq!(works, [(1, Some(30)), (40, Some(50))]);
+            assert_eq!(t.items[2], item);
+        }
     }
 
     /// Queued steers ride below the message that is streaming, not above it.
@@ -1088,11 +1020,15 @@ mod tests {
     }
 
     #[test]
-    fn queue_update_owns_steer_and_follow_up_echoes() {
-        let mut s = Streaming::default();
-        s.echo = vec![("p".into(), PromptMode::Prompt), ("s1".into(), PromptMode::Steer), ("s2".into(), PromptMode::Steer)];
-        // s1 was delivered (or cancelled); s2 remains, in pi's order.
-        assert!(s.apply(&json!({"type":"queue_update","steering":["s2"],"followUp":["f"]}), 0));
+    fn the_queue_owns_steer_and_follow_up_echoes() {
+        let queue = |steering: &[&str], follow_up: &[&str]| {
+            let texts = |list: &[&str]| list.iter().map(|t| (*t).to_owned()).collect();
+            Event::Queue { steering: texts(steering), follow_up: texts(follow_up) }
+        };
+        let echo = vec![("p".into(), PromptMode::Prompt), ("s1".into(), PromptMode::Steer), ("s2".into(), PromptMode::Steer)];
+        let mut s = Streaming { echo, ..Streaming::default() };
+        // s1 was delivered (or cancelled); s2 remains, in the agent's order.
+        assert!(s.apply(&queue(&["s2"], &["f"]), 0));
         assert_eq!(s.echo, vec![("p".into(), PromptMode::Prompt), ("s2".into(), PromptMode::Steer), ("f".into(), PromptMode::FollowUp)]);
         assert_eq!(s.queued_steers().collect::<Vec<_>>(), vec!["s2"]);
         s.confirm_prompt("p");
@@ -1100,60 +1036,77 @@ mod tests {
         // A steer the host prompted instead (the model was idle) is claimed by its text.
         s.confirm_prompt("s2\n\n[image-1]: /a.png");
         assert_eq!(s.echo, vec![("f".into(), PromptMode::FollowUp)]);
-        // A prompt pi queued as a follow-up is no longer a prompt.
+        // A prompt the agent queued as a follow-up is no longer a prompt.
         s.echo.push(("late".into(), PromptMode::Prompt));
-        s.apply(&json!({"type":"queue_update","steering":[],"followUp":["late"]}), 0);
+        s.apply(&queue(&[], &["late"]), 0);
         assert_eq!(s.echo, vec![("late".into(), PromptMode::FollowUp)]);
         // Also when the host linked its images to files.
         s.echo = vec![("see [image-1]".into(), PromptMode::Prompt)];
-        s.apply(&json!({"type":"queue_update","steering":[],"followUp":["see [image-1]\n\n[image-1]: /a.png"]}), 0);
+        s.apply(&queue(&[], &["see [image-1]\n\n[image-1]: /a.png"]), 0);
         assert_eq!(s.echo, vec![("see [image-1]\n\n[image-1]: /a.png".into(), PromptMode::FollowUp)]);
-        s.apply(&json!({"type":"agent_settled"}), 0);
+        s.apply(&Event::RunEnd, 0);
         assert!(s.echo.is_empty());
     }
 
     #[test]
-    fn custom_messages_are_answers_or_notices() {
-        let answer = json!({"type":"custom_message","customType":"dirigent:answer","timestamp":"2026-01-02T03:04:05.500Z","content":"raw",
-            "details":{"ask_id":"a","questions":[{"text":"Db?"},{"text":"Tests?"},{"text":"Fruit?"}],"answers":[["pg"],[],["Apple","Kiwi, sliced"]]}});
-        let job = json!({"type":"custom_message","customType":"dirigent:job","timestamp":"2026-01-02T03:04:05.500Z","content":"raw",
-            "details":{"job_id":"j","command":"cargo check\n","exit_code":1,"duration_ms":12000,"log":"/l"}});
-        let assistant = json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":1767323046000i64,"stopReason":"toolUse","content":[{"type":"toolCall","id":"c","name":"ask_user","arguments":{"questions":[{"text":"Db?"}]}}]}});
+    fn notices_are_answers_or_lines() {
+        let q = |text: &str| dirigent_protocol::Question { text: text.into(), options: vec![], allow_custom: false, multi: false };
+        let picks = |list: &[&str]| list.iter().map(|a| (*a).to_owned()).collect::<Vec<_>>();
+        let answer = notice(
+            500,
+            Notice::Answer {
+                text: "raw".into(),
+                ask_id: "a".into(),
+                questions: vec![q("Db?"), q("Tests?"), q("Fruit?")],
+                answers: Some(vec![picks(&["pg"]), vec![], picks(&["Apple", "Kiwi, sliced"])]),
+            },
+        );
+        let job = notice(
+            500,
+            Notice::Job {
+                text: "raw".into(),
+                job_id: "j".into(),
+                command: "cargo check\n".into(),
+                exit_code: 1,
+                duration_ms: 12000,
+                log: "/l".into(),
+            },
+        );
+        let asks = assistant(900, Stop::ToolUse, vec![call("c", "ask_user", json!({"questions":[{"text":"Db?"}]}))]);
         // Idle: the answer is a user turn whose time starts the next work; the job a notice.
-        let t = Timeline::from_entries([&job, &answer, &assistant]);
+        let t = Timeline::from_entries([&job, &answer, &asks]);
         assert_eq!(t.items[0], Item::Notice("job cargo check · exit 1 · 12s".into()));
         assert_eq!(
             t.items[1],
             Item::User {
                 text: "**Db?**\\\npg\n\n**Tests?**\\\n_no answer_\n\n**Fruit?**\n- Apple\n- Kiwi, sliced".into(),
                 images: vec![],
-                at: 1767323045500
+                at: 500
             }
         );
         let Item::Work(w) = &t.items[2] else { panic!() };
-        assert_eq!(w.started, 1767323045500);
+        assert_eq!(w.started, 500);
         let Step::Tool(c) = &w.steps[0] else { panic!() };
         assert_eq!(c.primary, "Db?");
         // Mid-run: both go inside the work.
-        let t = Timeline::from_entries([&assistant, &job, &answer]);
+        let t = Timeline::from_entries([&asks, &job, &answer]);
         let Item::Work(w) = &t.items[0] else { panic!() };
         assert_eq!(w.steps[1], Step::Notice("job cargo check · exit 1 · 12s".into()));
         assert!(matches!(&w.steps[2], Step::Steer { queued: false, .. }));
         // A sub-agent's end is a link to it when idle, a child step of the work mid-run.
-        let child = json!({"type":"custom_message","customType":"dirigent:child","content":"raw",
-            "details":{"thread_id":"kid","name":"Review","reply":"ok","error":false}});
-        let t = Timeline::from_entries([&child]);
+        let child = |asking, failed| {
+            notice(0, Notice::Child { text: "raw".into(), thread_id: "kid".into(), name: "Review".into(), asking, failed })
+        };
+        let t = Timeline::from_entries([&child(false, false)]);
         assert_eq!(t.items[0], Item::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" finished".into() });
-        let t = Timeline::from_entries([&assistant, &child]);
+        let t = Timeline::from_entries([&asks, &child(false, true)]);
         let Item::Work(w) = &t.items[0] else { panic!() };
-        assert_eq!(w.steps[1], Step::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" finished".into() });
-        let dismissed = json!({"type":"custom_message","customType":"dirigent:answer","content":"raw","details":{"ask_id":"a","questions":[],"answers":null}});
+        assert_eq!(w.steps[1], Step::Child { thread_id: "kid".into(), text: "sub-agent \"Review\" stopped without a reply".into() });
+        let dismissed = notice(0, Notice::Answer { text: "raw".into(), ask_id: "a".into(), questions: vec![], answers: None });
         assert_eq!(
             Timeline::from_entries([&dismissed]).items[0],
             Item::User { text: "Dismissed the questions.".into(), images: vec![], at: 0 }
         );
-        assert_eq!(iso_ms("1970-01-01T00:00:01Z"), Some(1000));
-        assert_eq!(iso_ms("2000-03-01T00:00:00.000Z"), Some(951_868_800_000));
     }
 
     #[test]
@@ -1167,65 +1120,71 @@ mod tests {
         assert_eq!(cursor, text.len());
     }
 
-    #[test]
-    fn stats_sum_assistant_usage() {
-        let usage = |input: u64, read: u64, write: u64, output: u64, cost: f64| json!({"type":"message","message":{"role":"assistant","usage":{"input":input,"cacheRead":read,"cacheWrite":write,"output":output,"cost":{"total":cost}}}});
-        let entries = [
-            json!({"type":"message","message":{"role":"user","content":"hi"}}),
-            usage(2, 90, 8, 10, 0.5),
-            json!({"type":"message","message":{"role":"toolResult","content":""}}),
-            usage(0, 95, 5, 20, 0.25),
-            json!({"type":"compaction","summary":".."}),
-            json!({"type":"message","message":{"role":"user","content":"more"}}),
-        ];
-        let s = Stats::of(entries.iter());
-        assert_eq!((s.input, s.output, s.cached, s.cost), (200, 30, 185, 0.75));
-        assert_eq!((s.user_messages, s.assistant_messages, s.compactions), (2, 2, 1));
-        assert_eq!(s.cached_pct(), 93);
+    /// A reply that used `input` fresh, `read` cached and `write` newly cached prompt tokens.
+    fn used(mut e: Entry, input: u64, read: u64, write: u64, output: u64, cost: Cost) -> Entry {
+        if let Body::Assistant(a) = &mut e.body {
+            a.usage = Usage { input, output, cache_read: read, cache_write: write, cost };
+        }
+        e
     }
 
-    /// Misses as pi counts them: against the previous request, reset by a compaction,
-    /// re-based by a cache warm, hidden on failed requests, priced at the model's last
-    /// read rate; they go in the work (for the log), never in the transcript.
+    #[test]
+    fn stats_sum_what_the_requests_used() {
+        let reply = |input, read, write, output, cost| {
+            used(assistant(0, Stop::End, vec![]), input, read, write, output, Cost { output: cost, ..Cost::default() })
+        };
+        let mut summary = compaction();
+        if let Body::Compaction { usage, .. } = &mut summary.body {
+            *usage = Usage { input: 100, output: 5, cost: Cost { input: 0.25, ..Cost::default() }, ..Usage::default() };
+        }
+        let entries =
+            [user(0, "hi"), reply(2, 90, 8, 10, 0.5), result(0, "c", vec![], false), reply(0, 95, 5, 20, 0.25), summary, user(0, "more")];
+        let s = Stats::of(&entries);
+        assert_eq!((s.input, s.output, s.cached, s.cost), (300, 35, 185, 1.));
+        assert_eq!((s.user_messages, s.assistant_messages, s.compactions), (2, 2, 1));
+        assert_eq!(s.cached_pct(), 62);
+    }
+
+    /// Misses are counted against the previous request, reset by a compaction, hidden on
+    /// failed requests, priced at the model's last read rate; they go in the work (for the
+    /// log), never in the transcript.
     #[test]
     fn cache_misses() {
         // Anthropic-ish rates per token: input 5e-6, cache read 0.5e-6, cache write 6.25e-6.
-        let msg = |at: i64, model: &str, input: u64, read: u64, write: u64, stop: &str| {
-            let content = if stop == "toolUse" {
-                json!([{"type":"toolCall","id":"c","name":"bash","arguments":{}}])
-            } else {
-                json!([{"type":"text","text":"ok"}])
-            };
-            json!({"type":"message","message":{"role":"assistant","provider":"anthropic","model":model,"timestamp":at,"stopReason":stop,"content":content,
-                "usage":{"input":input,"cacheRead":read,"cacheWrite":write,"output":10,"cost":{"input":input as f64 * 5e-6,"cacheRead":read as f64 * 0.5e-6,"cacheWrite":write as f64 * 6.25e-6}}}})
+        let msg = |at: i64, model: &str, input: u64, read: u64, write: u64, stop: Stop| {
+            let content = if stop == Stop::ToolUse { vec![call("c", "bash", json!({}))] } else { vec![Block::text("ok")] };
+            let cost =
+                Cost { input: input as f64 * 5e-6, cache_read: read as f64 * 0.5e-6, cache_write: write as f64 * 6.25e-6, output: 0. };
+            let mut e = used(assistant(at, stop, content), input, read, write, 10, cost);
+            if let Body::Assistant(a) = &mut e.body {
+                a.model = model.into();
+            }
+            e
         };
-        let result = json!({"type":"message","message":{"role":"toolResult","toolCallId":"c","timestamp":0,"content":""}});
-        let user = json!({"type":"message","message":{"role":"user","content":"go","timestamp":0}});
         let min = 60_000;
         let entries = [
-            user.clone(),
-            msg(0, "m", 100, 0, 50_000, "toolUse"),
-            result.clone(),
+            user(0, "go"),
+            msg(0, "m", 100, 0, 50_000, Stop::ToolUse),
+            result(0, "c", vec![], false),
             // Mid-run: 40k of the 50k cached came back as fresh input.
-            msg(min, "m", 40_000, 10_000, 0, "toolUse"),
-            result.clone(),
+            msg(min, "m", 40_000, 10_000, 0, Stop::ToolUse),
+            result(0, "c", vec![], false),
             // Full miss after 7 minutes, at the read rate the model last paid.
-            msg(8 * min, "m", 0, 0, 60_000, "stop"),
-            user.clone(),
+            msg(8 * min, "m", 0, 0, 60_000, Stop::End),
+            user(0, "go"),
             // Small (under 20k and $0.10): counted, not shown.
-            msg(9 * min, "m", 0, 50_000, 12_000, "stop"),
-            user.clone(),
+            msg(9 * min, "m", 0, 50_000, 12_000, Stop::End),
+            user(0, "go"),
             // A model switch, but aborted: not shown.
-            msg(10 * min, "other", 62_000, 0, 0, "aborted"),
-            json!({"type":"compaction","summary":".."}),
-            user.clone(),
+            msg(10 * min, "other", 62_000, 0, 0, Stop::Aborted),
+            compaction(),
+            user(0, "go"),
             // Nothing to compare with after the compaction.
-            msg(11 * min, "m", 0, 0, 30_000, "stop"),
-            json!({"type":"usage","kind":"cache_warm","provider":"anthropic","model":"m","timestamp":"1970-01-01T00:16:00Z","usage":{"input":0,"cacheRead":30_000,"cacheWrite":0,"cost":{"cacheRead":0.015}}}),
-            user,
-            msg(17 * min, "m", 0, 0, 30_000, "stop"),
+            msg(11 * min, "m", 0, 0, 30_000, Stop::End),
+            user(0, "go"),
+            msg(12 * min, "m", 0, 0, 30_000, Stop::End),
         ];
-        let t = Timeline::from_entries(entries.iter());
+        let t = Timeline::from_entries(&entries);
         let misses: Vec<_> = t
             .items
             .iter()
@@ -1239,7 +1198,6 @@ mod tests {
             [
                 "cache miss: 40k tokens re-billed (~$0.18)",
                 "cache miss after 7m idle: 50k tokens re-billed (~$0.29)",
-                // 1m after the warm, not 6m after the request before.
                 "cache miss: 30k tokens re-billed (~$0.17)",
             ]
         );
@@ -1251,21 +1209,13 @@ mod tests {
     }
 
     #[test]
-    fn user_message_with_images() {
-        let e = json!({"type":"message","message":{"role":"user","timestamp":1,"content":[
-            {"type":"text","text":"see [image-1]"},{"type":"image","mimeType":"image/png","blob":"abc"}]}});
-        let t = Timeline::from_entries([&e]);
-        assert_eq!(t.items[0], Item::User { text: "see [image-1]".into(), images: vec!["abc".into()], at: 1 });
-    }
-
-    #[test]
     fn image_refs_split_off() {
         let text = "see [image-2] and [image-1]\n\nfoo\n\n[image-1]: /d/a.png\n[image-2]: <C:\\My Docs\\b.png>";
         assert_eq!(split_image_refs(text), ("see [image-2] and [image-1]\n\nfoo", vec![1, 2]));
         // A last paragraph that isn't all definitions is the user's.
         let typed = "x\n\n[image-1]: mine\nand more";
         assert_eq!(split_image_refs(typed), (typed, vec![]));
-        // Pi's notes on a resized image come after the links.
+        // The agent's notes on a resized image come after the links.
         let resized = "see [image-1]\n\n[image-1]: /a.png\n\n[Image: original 4000x3000, displayed at 2000x1500.]";
         assert_eq!(split_image_refs(resized), ("see [image-1]", vec![1]));
         assert_eq!(split_image_refs("plain"), ("plain", vec![]));
@@ -1274,18 +1224,19 @@ mod tests {
     #[test]
     fn images_read_and_shown() {
         let (id, old) = ("a".repeat(64), "b".repeat(64));
+        let read = vec![Block::text("Read image file [image/png]"), Block::Image { mime: "image/png".into(), blob: "read1".into() }];
+        // A link the host stored a blob for, and one that was written as a blob link.
+        let shows = Block::Text {
+            text: format!("Here it is:\n\n![home]( /s/home.png)\n![old](blob:{old})\n\nand not ![x](blob:short)"),
+            blobs: [("/s/home.png".to_owned(), id.clone())].into(),
+        };
         let entries = [
-            json!({"type":"message","message":{"role":"user","content":"look","timestamp":1}}),
-            json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":2,"stopReason":"toolUse","content":[
-                {"type":"toolCall","id":"c1","name":"read","arguments":{"path":"shot.png"}}]}}),
-            json!({"type":"message","message":{"role":"toolResult","toolCallId":"c1","timestamp":3,"content":[
-                {"type":"text","text":"Read image file [image/png]"},{"type":"image","mimeType":"image/png","blob":"read1"}]}}),
-            // A link the host stored a blob for, and one from before text blocks had `blobs`.
-            json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":4,"stopReason":"stop","content":[
-                {"type":"text","text":format!("Here it is:\n\n![home]( /s/home.png)\n![old](blob:{old})\n\nand not ![x](blob:short)"),
-                 "blobs":{"/s/home.png":id}}]}}),
+            user(1, "look"),
+            assistant(2, Stop::ToolUse, vec![call("c1", "read", json!({"path":"shot.png"}))]),
+            result(3, "c1", read, false),
+            assistant(4, Stop::End, vec![shows]),
         ];
-        let t = Timeline::from_entries(entries.iter());
+        let t = Timeline::from_entries(&entries);
         let Item::Work(w) = &t.items[1] else { panic!() };
         let Step::Tool(c) = &w.steps[0] else { panic!() };
         assert_eq!(c.result.as_ref().unwrap().images, vec!["read1".to_owned()]);
@@ -1297,47 +1248,37 @@ mod tests {
     #[test]
     fn plain_reply_has_no_work() {
         let entries = [
-            json!({"type":"message","message":{"role":"user","content":"hi","timestamp":1}}),
-            json!({"type":"message","message":{"role":"assistant","model":"m","timestamp":2,"stopReason":"stop","content":[{"type":"text","text":"yo"}]}}),
-            json!({"type":"compaction","summary":"..."}),
-            json!({"type":"wat"}),
+            user(1, "hi"),
+            assistant(2, Stop::End, vec![Block::text("yo")]),
+            compaction(),
+            entry(0, Body::CompactionFailed { error: "Compaction failed: 529".into() }),
+            entry(0, Body::Store { values: Default::default() }),
+            entry(0, Body::Unknown),
         ];
-        let t = Timeline::from_entries(entries.iter());
+        let t = Timeline::from_entries(&entries);
         assert_eq!(t.items[1], Item::Assistant("yo".into()));
         assert_eq!(t.items[2], Item::Compaction);
-        assert_eq!(t.items[3], Item::Notice("unknown entry: wat".into()));
-    }
-
-    /// The runtime's record of a failed compaction shows as an error; other custom entries don't show.
-    #[test]
-    fn failed_compaction_is_an_error() {
-        let entries = [
-            json!({"type":"custom","customType":"dirigent:compaction_failed","data":{"error":"Auto-compaction failed: 529"}}),
-            json!({"type":"custom","customType":"other","data":{}}),
-        ];
-        let t = Timeline::from_entries(entries.iter());
-        assert_eq!(t.items, vec![Item::Error("Auto-compaction failed: 529".into())]);
+        assert_eq!(t.items[3], Item::Error("Compaction failed: 529".into()));
+        assert!(matches!(&t.items[4], Item::Notice(_)));
+        assert_eq!(t.items.len(), 5);
     }
 
     /// Items keep the id of the entry they came from, through a work dropped for being
     /// empty (an assistant message that only replied).
     #[test]
     fn items_carry_their_entry_id() {
-        let entries = [
-            json!({"type":"message","id":"u1","message":{"role":"user","content":"hi","timestamp":1}}),
-            json!({"type":"message","id":"a1","message":{"role":"assistant","timestamp":2,"stopReason":"stop","content":[{"type":"text","text":"hello"}]}}),
-            json!({"type":"compaction"}),
-        ];
-        let t = Timeline::from_entries(entries.iter());
+        let id = |id: &str, e: Entry| Entry { id: id.into(), ..e };
+        let entries = [id("u1", user(1, "hi")), id("a1", assistant(2, Stop::End, vec![Block::text("hello")])), id("c1", compaction())];
+        let t = Timeline::from_entries(&entries);
         assert_eq!(t.items.len(), 3);
-        assert_eq!((t.entry_id(0), t.entry_id(1), t.entry_id(2), t.entry_id(3)), (Some("u1"), Some("a1"), Some(""), None));
+        assert_eq!((t.entry_id(0), t.entry_id(1), t.entry_id(2), t.entry_id(3)), (Some("u1"), Some("a1"), Some("c1"), None));
     }
 
     #[test]
     fn streaming_accumulates_deltas() {
         let mut s = Streaming::default();
-        assert!(s.apply(&json!({"type":"message_start","message":{"role":"assistant"}}), 0));
-        let delta = |d: &str| json!({"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":d}});
+        assert!(s.apply(&Event::MessageStart, 0));
+        let delta = |d: &str| Event::Text { index: 0, delta: d.into() };
         // Only a delta that completes a line is a visible change.
         assert!(!s.apply(&delta("he"), 0));
         assert!(s.apply(&delta("llo\n"), 0));
@@ -1345,13 +1286,15 @@ mod tests {
         s.steps.clear();
         s.apply(&delta("he"), 0);
         s.apply(&delta("llo"), 0);
-        s.apply(&json!({"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":1,"delta":"t"}}), 0);
-        assert_eq!(s.steps, vec![Step::Text("hello".into()), Step::Thinking("t".into())]);
-        s.apply(&json!({"type":"tool_execution_start","toolCallId":"c","toolName":"bash"}), 42);
+        s.apply(&Event::Thinking { index: 1, delta: "t".into() }, 0);
+        assert!(s.apply(&Event::ToolCall { index: 2, id: "c".into(), name: "bash".into(), input: json!({"command":"ls"}) }, 0));
+        assert_eq!(s.steps[..2], [Step::Text("hello".into()), Step::Thinking("t".into())]);
+        assert!(matches!(&s.steps[2], Step::Tool(c) if c.primary == "ls"));
+        s.apply(&Event::ToolStart { id: "c".into() }, 42);
         assert_eq!(s.running_since("c"), Some(42));
-        s.apply(&json!({"type":"tool_execution_end","toolCallId":"c"}), 50);
+        s.apply(&Event::ToolEnd { id: "c".into() }, 50);
         assert!(s.running_tools.is_empty());
-        s.apply(&json!({"type":"agent_settled"}), 0);
+        s.apply(&Event::RunEnd, 0);
         assert!(s.steps.is_empty());
     }
 }

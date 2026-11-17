@@ -14,12 +14,12 @@
 //! Messages can be pinned (the button next to `copy`); pins colour their marks. Any message
 //! can start a fork (a new thread with the history up to there), and a user message can be
 //! edited in place: its bubble takes the composer (`edit_bubble`), and sending runs the
-//! thread again from there, on a new branch of its pi session (only the current one shows).
+//! thread again from there, on a new branch of its history (only the current one shows).
 //! Questions the model asked (`ask_user`) float above the composer (`ask_card`), out of the
 //! transcript's flow, until they are answered or dismissed: one call at a time, the oldest,
 //! so a model that asks twice doesn't bury the transcript; the next shows once it's gone.
 //! Steers (typed, or the answers to an ask) are user bubbles: `steer · pending` below the
-//! work line while pi holds them, `steer` above it once the model has them.
+//! work line while the agent holds them, `steer` above it once the model has them.
 
 use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, PANE_MIN, Pane, PanelPart, Resize, Target, default_base};
 use crate::icons::icon;
@@ -33,12 +33,12 @@ use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
 use crate::titlebar;
 use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
 use crate::working;
+use dirigent_protocol::transcript::{Body, Stop};
 use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, Bounds, ClipboardItem, Context, Div, ElementId, Focusable, FontWeight, MouseButton,
     ObjectFit, Pixels, SharedString, Stateful, Window, anchored, canvas, deferred, div, img, list, point, prelude::*, px, relative, rgba,
 };
-use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -851,7 +851,7 @@ fn model_chips(this: &Dirigent, below: bool, cx: &mut Context<Dirigent>) -> (Sta
     let effort_label = this.effort.clone().unwrap_or_else(|| "Effort".into());
     let effort_open = this.menu == Some(Menu::Effort);
     let effort_menu = effort_open.then(|| {
-        let levels = this.current_model().map(|m| m.thinking_levels.clone()).unwrap_or_default();
+        let levels = this.current_model().map(|m| m.efforts.clone()).unwrap_or_default();
         let mut items = vec![];
         for l in levels {
             let selected = this.effort.as_deref() == Some(&l);
@@ -1414,27 +1414,20 @@ fn glow() -> impl Iterator<Item = Div> {
     })
 }
 
-/// Context tokens as pi computes them: usage of the last non-error assistant message on
-/// the current branch.
+/// The tokens in the model's context: what the last reply on the current branch that
+/// didn't fail used, its prompt and what it wrote.
 fn context_usage(t: &OpenThread) -> Option<u64> {
-    let branch = t.entries.last().map(|last| dirigent_protocol::branch(&t.entries, &last.id)).unwrap_or_default();
-    branch.into_iter().rev().find_map(|e| {
-        let msg = e.json.get("message")?;
-        if msg.get("role")?.as_str()? != "assistant" || matches!(msg.get("stopReason").and_then(Value::as_str), Some("error" | "aborted")) {
-            return None;
-        }
-        let u = msg.get("usage")?;
-        let n = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
-        let total = n("totalTokens");
-        let total = if total > 0 { total } else { n("input") + n("output") + n("cacheRead") + n("cacheWrite") };
-        (total > 0).then_some(total)
+    let branch = t.entries.last().map(|last| dirigent_protocol::transcript::branch(&t.entries, &last.id)).unwrap_or_default();
+    branch.into_iter().rev().find_map(|e| match &e.body {
+        Body::Assistant(a) if !matches!(a.stop, Stop::Error | Stop::Aborted) => Some(a.usage.prompt() + a.usage.output).filter(|n| *n > 0),
+        _ => None,
     })
 }
 
 /// The thread's totals, floated above the context chip while it is hovered: tokens in
 /// and out, how much of the input was cached, message counts, and the bill so far.
 fn stats_card(t: &OpenThread) -> AnyElement {
-    let s = Stats::of(t.entries.iter().map(|e| &e.json));
+    let s = Stats::of(&t.entries);
     let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
     let dim = |text: String| div().text_color(rgba(theme::t().fg_1)).child(text);
     let card = div()
@@ -1470,7 +1463,8 @@ fn stats_card(t: &OpenThread) -> AnyElement {
 
 /// One list item: a timeline item, or (last index) the live tail: the optimistic echoes of
 /// sent messages (prompts above the work in progress, follow-ups below it), the work and
-/// its latest prose, then the steers pi still holds. Everything sits in the reading column.
+/// its latest prose, then the steers the agent still holds. Everything sits in the reading
+/// column.
 /// Also what `Dirigent::copy_selection` calls to collect an item's text.
 pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
@@ -1529,16 +1523,25 @@ fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// When the current run started: the last user message, else now.
-fn last_prompt_at(t: &OpenThread, now: i64) -> i64 {
-    t.timeline.items.iter().rev().find_map(|i| if let Item::User { at, .. } = i { Some(*at) } else { None }).unwrap_or(now)
+/// When the work that is about to start began, while none is open: at the user's message
+/// that prompted the run, else when its host says the run began (one a notice woke), or
+/// where the run's work so far ended (it goes on after a compaction); now, for a run its
+/// host has yet to begin.
+fn work_started(this: &Dirigent, t: &OpenThread, now: i64) -> i64 {
+    if let Some(prompted) = t.timeline.prompted_at() {
+        return prompted;
+    }
+    let Some(began) = this.summary(&t.host, &t.id).and_then(|thread| thread.running_since) else { return now };
+    // (A work that ended before the run began is an earlier run's.)
+    let cut = t.timeline.items.iter().rev().find_map(|i| if let Item::Work(w) = i { w.ended } else { None });
+    began.max(cut.unwrap_or(0))
 }
 
 /// The run in progress, keyed for `expanded` / `log`: the open work's persisted steps plus
-/// what is in flight (`Streaming::live_steps`: the streaming message, then the steers pi
-/// still holds, so a pending steer rides at the log's end until it is taken). A just-sent
-/// message (the echo) counts as running so the work line and the log panel appear at once
-/// rather than when the host confirms the run.
+/// what is in flight (`Streaming::live_steps`: the streaming message, then the steers the
+/// agent still holds, so a pending steer rides at the log's end until it is taken). A
+/// just-sent message (the echo) counts as running so the work line and the log panel appear
+/// at once rather than when the host confirms the run.
 fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
     let Pane::Thread(t) = &this.pane else { return None };
     if !this.is_running() && t.streaming.echo.is_empty() && t.streaming.answers.is_empty() {
@@ -1551,7 +1554,7 @@ fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
         },
         None => {
             // An echoed message is the run's start until its persisted entry lands.
-            let started = if t.streaming.echo.is_empty() { last_prompt_at(t, now_ms()) } else { now_ms() };
+            let started = if t.streaming.echo.is_empty() { work_started(this, t, now_ms()) } else { now_ms() };
             (TAIL, Work { model: this.model.clone(), effort: this.effort.clone(), started, ..Default::default() })
         }
     };
@@ -1886,9 +1889,10 @@ fn work_block(
 }
 
 /// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
-/// typed steer pi still holds) at the right until the model has it. Answers to an ask are
-/// steers too, but can't be cancelled: the host already has them. Its images go under the
-/// text as in `user_bubble`; `key` is its (work, step) index, for the thumbnails' ids.
+/// typed steer the agent still holds) at the right until the model has it. Answers to an
+/// ask are steers too, but can't be cancelled: the host already has them. Its images go
+/// under the text as in `user_bubble`; `key` is its (work, step) index, for the thumbnails'
+/// ids.
 #[allow(clippy::too_many_arguments)]
 fn steer_bubble(
     text: &str,
@@ -1950,9 +1954,9 @@ fn steer_bubble(
 }
 
 /// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
-/// tool's time sits) until pi hands it to the model, with `cancel` revealed on hover just
-/// before it (typed steers only; see `steer_bubble`). Text only: its images show in the
-/// transcript's bubble.
+/// tool's time sits) until the agent hands it to the model, with `cancel` revealed on hover
+/// just before it (typed steers only; see `steer_bubble`). Text only: its images show in
+/// the transcript's bubble.
 fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
     let cancel = (queued && t.streaming.queued_steers().any(|s| s == text)).then(|| {
         let text = text.to_owned();
