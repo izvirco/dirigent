@@ -41,7 +41,7 @@ either: `examples/run.rs` is a session with a printer for a host, the tests scri
 | `tools` | `read`, `bash`, `edit`, `write`, `async_bash` (jobs), `ask_user` |
 | `codemode` | the QuickJS sandbox and the `codemode` tool |
 | `mcp` | the MCP client, a session's servers as tools, the settings' operations |
-| `computer` | the `computer` tool: Xvfb, Cua Driver (an MCP server), the recording |
+| `tools::computer` | the `computer` tool: Xvfb, Cua Driver (an MCP server), the recording |
 | `config` | `agent.toml` |
 | `import` | pi's entries and agent dir into ours (the migration) |
 

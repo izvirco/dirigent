@@ -1,7 +1,8 @@
 //! The built-in tools: `read`, `bash`, `edit` and `write`, which every thread has, and
-//! `async_bash` and `ask_user`, which a thread has while their switch is on.
+//! `async_bash`, `ask_user` and `computer`, which a thread has while their switch is on.
 
 pub mod bash;
+pub mod computer;
 pub mod files;
 pub mod images;
 pub mod shell;
