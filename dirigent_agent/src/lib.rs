@@ -9,6 +9,7 @@
 pub mod codemode;
 pub mod config;
 mod context;
+pub mod import;
 pub mod mcp;
 mod prompt;
 pub mod proxy;

@@ -19,6 +19,10 @@ mod runtime;
 mod screen;
 mod server;
 mod storage;
+// The storage to come: it takes `storage`'s place and name when the service runs
+// `dirigent_agent` instead of pi. Unused until then.
+#[allow(dead_code)]
+mod storage2;
 mod title;
 pub mod tunnel;
 mod vcs;

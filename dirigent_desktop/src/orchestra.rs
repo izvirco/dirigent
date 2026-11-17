@@ -298,6 +298,7 @@ mod tests {
             setup: None,
             compacting_since: None,
             screen: false,
+            locked: false,
         }
     }
 

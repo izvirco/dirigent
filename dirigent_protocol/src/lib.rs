@@ -1012,6 +1012,10 @@ pub struct ThreadSummary {
     /// was forked at, if it is a fork.
     #[serde(default)]
     pub forked_from: Option<ForkedFrom>,
+    /// It came from pi's storage with entries that could not be converted: it can be read,
+    /// and forked from before them, but takes no message.
+    #[serde(default)]
+    pub locked: bool,
     /// The step its host is setting it up with, before it can take a message. Runtime
     /// state, never stored.
     #[serde(default)]
@@ -1308,6 +1312,7 @@ mod tests {
         assert_eq!(t.spend, Spend::default());
         assert_eq!(t.setup, None);
         assert_eq!(t.forked_from, None);
+        assert!(!t.locked);
         assert!(!t.pinned && t.seen_at.is_none() && t.pinned_entries.is_empty());
         let q: Question = serde_json::from_value(json!({"text":"db?"})).unwrap();
         assert_eq!(q, Question { text: "db?".into(), options: vec![], allow_custom: false, multi: false });
@@ -1347,6 +1352,7 @@ mod tests {
             setup: Some(Setup::NixShell),
             compacting_since: Some(6),
             screen: true,
+            locked: true,
         };
         assert!(t.asking());
         roundtrip(ServerMessage::Focus { thread_id: "t".into() });

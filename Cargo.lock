@@ -1472,6 +1472,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "chrono",
+ "dirigent_agent",
  "dirigent_auth",
  "dirigent_protocol",
  "form_urlencoded",
