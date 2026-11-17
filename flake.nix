@@ -41,8 +41,8 @@
       # remote host), `.#dirigent_api`; the first two come with the `dirigent` command line.
       # They never self-update (no `DIRIGENT_BUILD_UPDATE_URL`).
       #
-      # Two hashes to bump: `cargoDeps` when Cargo.lock changes, `nodeModules` when bun.lock
-      # does. Set it to `lib.fakeHash` and build: nix prints the right one.
+      # One hash to bump: `cargoDeps`, when Cargo.lock changes. Set it to `lib.fakeHash` and
+      # build: nix prints the right one.
       version = (lib.importTOML ./Cargo.toml).workspace.package.version;
       # Without the extensions: with rust-src installed, rustc puts its store path into std's
       # panic locations, which drags the whole toolchain into every package's closure.
@@ -54,13 +54,14 @@
           cargo = toolchain;
           rustc = toolchain;
         };
-      # Only the Rust workspace: editing the runtime doesn't rebuild gpui.
+      # Only the Rust workspace: editing docs or scripts doesn't rebuild gpui.
       rustSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           ./Cargo.toml
           ./Cargo.lock
           ./changelog.md # compiled into the desktop
+          ./dirigent_agent
           ./dirigent_api
           ./dirigent_auth
           ./dirigent_cli
@@ -73,7 +74,7 @@
       cargoDeps = rustPlatform.fetchCargoVendor {
         name = "dirigent";
         src = rustSrc;
-        hash = "sha256-T1jqwEQirm4DurtpCl0PPUDUjFFykEn6PhjgQXZDfKk=";
+        hash = "sha256-HJpzCoMdsKuvUkny1irCZhq5lVPRXxLfCxGNntm3BB4=";
       };
       # One crate's binary, in `bin/`.
       crate =
@@ -94,41 +95,10 @@
           // args
         );
 
-      # The runtime's node_modules, fixed-output: `bun install` needs the network.
-      nodeModules = pkgs.stdenvNoCC.mkDerivation {
-        pname = "dirigent_runtime-node_modules";
-        inherit version;
-        src = lib.fileset.toSource {
-          root = ./.;
-          fileset = lib.fileset.unions [
-            ./package.json
-            ./bun.lock
-            ./dirigent_runtime/package.json
-          ];
-        };
-        nativeBuildInputs = [
-          pkgs.bun
-          pkgs.writableTmpDirAsHomeHook
-        ];
-        buildPhase = ''
-          bun install --frozen-lockfile --production --ignore-scripts --no-progress
-        '';
-        # Both trees: bun's isolated layout links the workspace's packages into the root's.
-        installPhase = ''
-          mkdir -p $out/dirigent_runtime
-          cp -R node_modules $out/
-          cp -R dirigent_runtime/node_modules $out/dirigent_runtime/
-        '';
-        # A fixed output can't refer to the store (patchShebangs would).
-        dontFixup = true;
-        outputHashMode = "recursive";
-        outputHash = "sha256-Ps3XV9TOTj04P7Mo4ytJp/AggJwUlQZVZ46RFM6+7Ec=";
-      };
-
-      # Cua Driver, what computer use runs (`dirigent_runtime/src/computer.ts`): the release
-      # binary installs ship (the version and its hash are `build.ts`'s `DRIVER`: bump both
-      # together), patched to find its libraries here. In the dev shell too, where the
-      # runtime takes it from PATH.
+      # Cua Driver, what computer use runs (`dirigent_agent`'s `computer` tool): the release
+      # binary installs ship (`packaging/cua-driver.sh` pins the same version: bump both
+      # together), patched to find its libraries here. In the dev shell too, where the agent
+      # takes it from PATH.
       cuaDriver = pkgs.stdenvNoCC.mkDerivation rec {
         pname = "cua-driver";
         version = "0.51.3";
@@ -159,49 +129,13 @@
         hash = "sha256-wHeSkMHUeDFpqj2/tV/rUF5WPvigBLv1UpjO/8+9qNk=";
       };
 
-      # The runtime compiled to one executable, plus the files pi reads next to it
-      # (`dirigent_runtime/build.ts`): what installs ship as `runtime/`, so no bun at run time.
-      runtime = pkgs.stdenvNoCC.mkDerivation {
-        pname = "dirigent_runtime";
-        inherit version;
-        src = lib.fileset.toSource {
-          root = ./.;
-          fileset = lib.fileset.unions [
-            ./package.json
-            ./bun.lock
-            ./dirigent_runtime/package.json
-            ./dirigent_runtime/build.ts
-            ./dirigent_runtime/src
-          ];
-        };
-        nativeBuildInputs = [
-          pkgs.bun
-          pkgs.writableTmpDirAsHomeHook
-        ];
-        # `--no-driver`: the build would download Cua Driver, and can't in the sandbox. Xvfb,
-        # which makes a thread's private screen, comes along: the runtime looks next to
-        # itself before PATH (`program` in `computer.ts`), so the package needs nothing
-        # installed beside it.
-        buildPhase = ''
-          cp -R ${nodeModules}/. .
-          bun dirigent_runtime/build.ts --out $out --no-driver
-          cp ${lib.getExe cuaDriver} $out/
-          cp ${cuaDriverLicense} $out/cua-driver-LICENSE.md
-          ln -s ${pkgs.xvfb}/bin/Xvfb $out/Xvfb
-        '';
-        dontInstall = true;
-        # `bun build --compile` appends the bundle to a copy of bun: stripping or patching the
-        # executable would cut it off.
-        dontStrip = true;
-        dontPatchELF = true;
-      };
-
-      # Binaries laid out as installs have them, side by side with `runtime/`, where the
-      # service and `dirigent pi` find it (`runtime_cmd` in dirigent_service) and `dirigent`
-      # finds the desktop: that's next to the executable's real path, so `bin/` symlinks to
-      # them. Copied, not linked: a symlink would resolve to the crate's own store path,
-      # which has no `runtime/`. The first package names the result.
-      withRuntime =
+      # Binaries laid out as installs have them, side by side with what computer use runs
+      # (Cua Driver, and Xvfb, which makes a thread's private screen): the agent looks next to
+      # its executable before PATH, and `dirigent` finds the desktop there. That is next to
+      # the executable's real path, so `bin/` symlinks to them. Copied, not linked: a symlink
+      # would resolve to the crate's own store path, which has none of the others. The first
+      # package names the result.
+      withTools =
         pkgs':
         let
           name = (builtins.head pkgs').meta.mainProgram;
@@ -212,18 +146,20 @@
         in
         pkgs.runCommand "${name}-${version}" { meta.mainProgram = name; } ''
           mkdir -p $out/bin $out/libexec/dirigent
-          ln -s ${runtime} $out/libexec/dirigent/runtime
+          ln -s ${lib.getExe cuaDriver} $out/libexec/dirigent/cua-driver
+          ln -s ${cuaDriverLicense} $out/libexec/dirigent/cua-driver-LICENSE.md
+          ln -s ${pkgs.xvfb}/bin/Xvfb $out/libexec/dirigent/Xvfb
           ${lib.concatMapStrings place pkgs'}
         '';
 
-      # The `dirigent` command line (`dirigent pi`, `dirigent [dir]`).
+      # The `dirigent` command line (`dirigent [dir]`, `dirigent key`, `dirigent login`).
       cli = crate "dirigent_cli" { meta.mainProgram = "dirigent"; };
     in
     {
       packages.${system} = rec {
         default = dirigent_desktop;
 
-        dirigent_desktop = withRuntime [
+        dirigent_desktop = withTools [
           (crate "dirigent_desktop" {
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = gpuiLibs;
@@ -242,9 +178,8 @@
           cli
         ];
 
-        # The service for remote hosts (the desktop embeds its own), with `dirigent pi` to
-        # sign in and install extensions there.
-        dirigent_service = withRuntime [
+        # The service for remote hosts (the desktop embeds its own).
+        dirigent_service = withTools [
           (crate "dirigent_service" { })
           cli
         ];
@@ -329,14 +264,13 @@
         default = pkgs.mkShell {
           packages = [
             rustToolchain
-            pkgs.nodejs
-            pkgs.bun
+            pkgs.nodejs # `scripts/ui-rpc.mjs`
             pkgs.oxlint
             pkgs.oxfmt
             pkgs.pkg-config
             pkgs.cmake
             pkgs.sccache
-            # Computer use in a dev checkout (`dirigent_runtime/src/computer.ts`): the driver, and
+            # Computer use in a dev checkout (`dirigent_agent`'s `computer` tool): the driver, and
             # Xvfb for a thread's private screen, where the UI is tested too (testing.md)
             cuaDriver
             pkgs.xvfb

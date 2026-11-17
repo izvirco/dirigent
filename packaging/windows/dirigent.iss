@@ -2,7 +2,7 @@
 ; downloads the next version's installer and runs it with
 ;   /SILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE /WAITPID=<its pid>
 ; then quits (dirigent_desktop/src/update.rs). Setup waits for that process to exit,
-; replaces the files (closing a runtime that still has them open), and with /UPDATE starts
+; replaces the files (closing whatever still has them open), and with /UPDATE starts
 ; Dirigent again. Every update thus runs the new version's installer: the files, registry
 ; entries and this script itself can all change in any release.
 ;
@@ -15,8 +15,9 @@
 ;
 ; Built by the release workflow (.github/workflows/release.yml):
 ;   iscc /DVersion=0.1.0 /DDist=<dir> packaging\windows\dirigent.iss
-; <dir> holds dirigent_desktop.exe (the app), dirigent.exe (the command line: `dirigent pi`,
-; `dirigent [dir]`; on the user's PATH unless the task is unticked), runtime\ (dirigent_runtime/build.ts) and licenses\;
+; <dir> holds dirigent_desktop.exe (the app), dirigent.exe (the command line: `dirigent [dir]`,
+; `dirigent key`; on the user's PATH unless the task is unticked), cua-driver.exe (computer use:
+; packaging/cua-driver.sh) and licenses\;
 ; the installer is written there as Dirigent-Setup-<version>.exe.
 
 #ifndef Version
@@ -66,7 +67,7 @@ Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Files still in use once Dirigent has exited (its runtime shutting down) are closed.
+; Files still in use once Dirigent has exited (a driver it started, shutting down) are closed.
 CloseApplications=force
 RestartApplications=no
 ; Tells running programs (Explorer, so new terminals) that PATH changed, on install and uninstall.
@@ -77,10 +78,11 @@ Name: contextmenu; Description: "Add ""Open in {#Name}"" to the folder right-cli
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 ; Older installs get this ticked on their next update: Inno restores each task's previous state, and a
 ; task it hasn't seen before keeps its default.
-Name: addtopath; Description: "Add the {#Cli} command to PATH ({#Cli} pi install ...)"
+Name: addtopath; Description: "Add the {#Cli} command to PATH"
 
 [InstallDelete]
-; The runtime's files are replaced wholesale: nothing of an older pi lingers.
+; What earlier versions ran their agents with (pi, as a bun runtime): the agent is built
+; into the app now.
 Type: filesandordirs; Name: "{app}\runtime"
 ; The app's name in the first releases; dirigent.exe is the command line now (the same name on NTFS).
 ; A nightly never had one.
@@ -89,7 +91,7 @@ Type: files; Name: "{app}\Dirigent.exe"
 [Files]
 Source: "{#Dist}\dirigent_desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; DestName: "{#Cli}.exe"; Flags: ignoreversion
-Source: "{#Dist}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#Dist}\cua-driver.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
 [Icons]
@@ -141,8 +143,8 @@ begin
       Result := True;
 end;
 
-{ Where pi looks for bash: Git for Windows in Program Files, else a bash.exe on PATH that
-  isn't WSL's. }
+{ Where the agent looks for bash: Git for Windows in Program Files, else a bash.exe on PATH
+  that isn't WSL's. }
 function BashFound(): Boolean;
 var
   OnPath: String;
