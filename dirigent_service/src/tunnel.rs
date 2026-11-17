@@ -1,16 +1,3 @@
-//! SSH tunnels to `ssh://` hosts (`hosts.toml`): the system `ssh` forwards a free local port
-//! to the remote service's loopback listener, and we connect to `ws://127.0.0.1:<port>/ws`.
-//! ssh is the auth: the remote service sees a loopback client and asks nothing more.
-//!
-//! Process-global, one ssh per host url: the desktop's connections (`net.rs`) and its
-//! embedded service's `ListHosts` (for agents) share them; a remote `dirigent_service` has
-//! its own, for its own `hosts.toml`. A tunnel starts on the first `open` and runs until
-//! ssh exits (then the next `open` starts another), its host leaves `hosts.toml` (`retain`)
-//! or the process ends (`close_all`). Only on Linux does the kernel enforce the last one
-//! (`PR_SET_PDEATHSIG`); elsewhere a parent that crashes can leave its `ssh -N` behind.
-//! `BatchMode`: no password or host key prompts; a host has to work with `ssh <host>`
-//! non-interactively first (keys, `known_hosts`).
-
 use anyhow::{Context, Result, bail, ensure};
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -25,11 +12,8 @@ use tracing::{debug, info, warn};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ssh {
     user: Option<String>,
-    /// A name, an ssh_config alias or an address (IPv6 without brackets).
     host: String,
-    /// The ssh port; none = ssh's own default (or the alias's `Port`).
     port: Option<u16>,
-    /// The remote service's port.
     service_port: u16,
 }
 
@@ -49,7 +33,6 @@ impl Ssh {
             (host, after.strip_prefix(':'))
         } else {
             match host_port.split_once(':') {
-                // One colon: host:port. More is a bare IPv6 address.
                 Some((h, p)) if !p.contains(':') => (h, Some(p)),
                 _ => (host_port, None),
             }
@@ -62,7 +45,6 @@ impl Ssh {
         Ok(Self { user, host: host.to_owned(), port, service_port })
     }
 
-    /// `ssh`'s arguments for a tunnel from `127.0.0.1:<local>`.
     fn args(&self, local: u16) -> Vec<String> {
         let mut args = vec!["-N".to_owned(), "-L".to_owned(), format!("127.0.0.1:{local}:127.0.0.1:{}", self.service_port)];
         for option in ["ExitOnForwardFailure=yes", "BatchMode=yes", "ServerAliveInterval=15", "ServerAliveCountMax=3", "ConnectTimeout=15"]
@@ -81,7 +63,6 @@ impl Ssh {
 }
 
 impl std::fmt::Display for Ssh {
-    /// Canonical: the service port only when it isn't the default.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ssh://")?;
         if let Some(user) = &self.user {
@@ -105,9 +86,7 @@ impl std::fmt::Display for Ssh {
 #[derive(Clone)]
 enum State {
     Starting,
-    /// Forwarding from this local port.
     Up(u16),
-    /// ssh exited (or was stopped): why.
     Exited(String),
 }
 
@@ -116,7 +95,6 @@ struct Tunnel {
     ssh: Arc<Child>,
 }
 
-/// A tunnel's ssh, shared by its thread (which waits for it) and whoever stops it.
 #[derive(Default)]
 struct Child {
     process: Mutex<Option<std::process::Child>>,
@@ -124,9 +102,7 @@ struct Child {
 }
 
 impl Tunnel {
-    /// Kill its ssh now, not on the thread's next look: the process may be about to exit.
-    /// Running or starting: not exited, and its thread still there to say when it does
-    /// (a thread that panicked never would).
+    // MUST KILL: extract: a thread_alive() for has_changed().is_ok(), which only says the tunnel thread has not died
     fn alive(&self) -> bool {
         !matches!(*self.state.borrow(), State::Exited(_)) && self.state.has_changed().is_ok()
     }
@@ -139,11 +115,8 @@ impl Tunnel {
     }
 }
 
-/// By normalized `ssh://` url.
 static TUNNELS: Mutex<BTreeMap<String, Tunnel>> = Mutex::new(BTreeMap::new());
 
-/// How long ssh may take to log in and forward before `open` gives up on it: a hung
-/// ssh-agent, `ProxyCommand` or DNS would otherwise leave every caller waiting.
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The local `ws://` url that reaches `url`'s service: through its running tunnel, or a
@@ -169,11 +142,9 @@ pub async fn open(url: &str) -> Result<String> {
             State::Exited(why) => bail!("{why}"),
             State::Starting => unreachable!(),
         },
-        // Its thread died without saying why.
         Ok(Err(_)) => bail!("ssh tunnel gone"),
         Err(_) => {
             let mut tunnels = TUNNELS.lock().unwrap();
-            // Unless another caller replaced it meanwhile.
             if tunnels.get(url).is_some_and(|t| Arc::ptr_eq(&t.ssh, &ssh)) {
                 tunnels.remove(url).unwrap().stop();
             }
@@ -194,7 +165,6 @@ pub fn retain<'a>(urls: impl IntoIterator<Item = &'a str>) {
     });
 }
 
-/// Stop every tunnel: the process is quitting.
 pub fn close_all() {
     retain([]);
 }
@@ -210,8 +180,6 @@ fn start(target: Ssh) -> Tunnel {
         .name("ssh tunnel".into())
         .spawn(move || {
             let why = run(&target, &tx, &shared).unwrap_or_else(|e| format!("{e:#}"));
-            // A start that fails is its caller's error to report (once, not every retry), and
-            // a stop isn't news.
             if shared.stopped.load(Ordering::Relaxed) {
                 debug!(host = %target, "ssh tunnel stopped");
             } else if matches!(*tx.borrow(), State::Up(_)) {
@@ -225,7 +193,6 @@ fn start(target: Ssh) -> Tunnel {
     Tunnel { state: rx, ssh }
 }
 
-/// One ssh lifetime; returns why it ended.
 fn run(ssh: &Ssh, state: &watch::Sender<State>, child: &Child) -> Result<String> {
     // Free now; `ExitOnForwardFailure` makes ssh fail rather than run without a forward if
     // something takes it meanwhile.
@@ -254,7 +221,6 @@ fn run(ssh: &Ssh, state: &watch::Sender<State>, child: &Child) -> Result<String>
     });
     {
         let mut slot = child.process.lock().unwrap();
-        // Stopped while it started.
         if child.stopped.load(Ordering::Relaxed) {
             let _ = process.kill();
         }
@@ -272,7 +238,6 @@ fn run(ssh: &Ssh, state: &watch::Sender<State>, child: &Child) -> Result<String>
             info!(host = %ssh, port = local, "ssh tunnel up");
             let _ = state.send(State::Up(local));
         }
-        // Quick while it logs in; once up only ssh exiting is left to notice.
         std::thread::sleep(Duration::from_millis(if up { 1000 } else { 200 }));
     };
     if child.stopped.load(Ordering::Relaxed) {

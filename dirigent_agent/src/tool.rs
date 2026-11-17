@@ -1,12 +1,7 @@
-//! What a tool is: to the model (`ToolSpec`), to the run that calls it (`Tool`), and to a
-//! codemode script (`ToolOutput::value`). The built-in ones are in `tools`, an MCP server's
-//! in `mcp`, and a host adds its own (`Host::tools`).
-
 use async_trait::async_trait;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-/// A tool as the model is told of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolSpec {
     /// What the model calls it by: `bash`, `mcp__<server>__<tool>`.
@@ -30,7 +25,6 @@ pub struct ToolSpec {
 }
 
 impl ToolSpec {
-    /// A tool declared to the model, with no more to say of it than its description.
     pub fn new(name: &str, description: &str, input: Value) -> Self {
         Self {
             name: name.into(),
@@ -45,7 +39,6 @@ impl ToolSpec {
     }
 }
 
-/// A piece of what a tool gives back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Content {
     Text(String),
@@ -56,10 +49,8 @@ pub enum Content {
     },
 }
 
-/// What a tool call came to.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ToolOutput {
-    /// What the model reads.
     pub content: Vec<Content>,
     pub is_error: bool,
     /// What a codemode script's call resolves to in place of the text (`ToolSpec::returns`).
@@ -85,7 +76,6 @@ impl ToolOutput {
     }
 }
 
-/// One call of a tool.
 #[derive(Debug, Clone)]
 pub struct Call {
     /// The model's id for the call (`Block::ToolCall::id`); a script's calls share their

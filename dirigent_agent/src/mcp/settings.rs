@@ -1,7 +1,3 @@
-//! What Settings › MCP servers does: the servers of `agent.toml` listed, saved, removed
-//! and checked, and a server's sign-in. Sessions read the file when they start, so a
-//! change reaches the ones started after it.
-
 use super::config::{self, Reach, Server, namespace};
 use super::oauth::{Auth, SignIn, Store};
 use super::servers::{Added, Connection, Status};
@@ -13,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// How long a check waits for a server: a command that is fetched first (`npx`) takes a while.
 const CHECK_LIMIT: Duration = Duration::from_secs(45);
 
 /// Every server in `agent.toml`, by name, with why a session skips it if it does, and the
@@ -37,7 +32,6 @@ pub fn save(dirs: &Dirs, name: &str, config: Value) -> Result<()> {
     let reach = server.reach(name).map_err(|why| anyhow!(why))?;
     let mut replaced = None;
     Config::update(dirs, |config| {
-        // A new name only: an entry of the file keeps its place, whatever is close to it.
         let close = config.mcp.keys().find(|other| namespace(other) == namespace(name));
         if let Some(other) = close.filter(|_| !config.mcp.contains_key(name)) {
             bail!("\"{name}\" is too close to \"{other}\": pick a name that differs in more than - and _");
@@ -62,7 +56,6 @@ pub fn remove(dirs: &Dirs, name: &str) -> Result<()> {
     server.reach(name).map_or(Ok(()), |was| forget(dirs, name, &was))
 }
 
-/// Forget the sign-in of the server `name` was, if it was one at an address.
 fn forget(dirs: &Dirs, name: &str, was: &Reach) -> Result<()> {
     match was {
         Reach::Http(url) => Auth::new(dirs, name, url, None).sign_out().map(drop),
@@ -70,7 +63,6 @@ fn forget(dirs: &Dirs, name: &str, was: &Reach) -> Result<()> {
     }
 }
 
-/// A connection to server `name` as a session makes it, from the home directory.
 fn connection(dirs: &Dirs, name: &str) -> Result<Arc<Connection>> {
     let servers = Config::load(dirs)?.mcp;
     let (_, server, reach) = config::checked(&servers)
@@ -110,7 +102,6 @@ pub async fn sign_in(dirs: &Dirs, name: &str, ui: &dyn SignIn, cancel: &Cancella
         bail!("{name} doesn't sign in with OAuth: only an HTTP server without an Authorization header does")
     };
     let signing_in = async {
-        // Connecting says whether a sign-in is needed, and what the server asks for.
         if let Err(e) = connection.client().await {
             match connection.status() {
                 Status::NeedsAuth => {}
@@ -131,7 +122,6 @@ pub async fn sign_in(dirs: &Dirs, name: &str, ui: &dyn SignIn, cancel: &Cancella
     done
 }
 
-/// Forget the sign-in stored for server `name`.
 pub fn sign_out(dirs: &Dirs, name: &str) -> Result<()> {
     match &connection(dirs, name)?.auth {
         Some(auth) => auth.sign_out().map(drop),

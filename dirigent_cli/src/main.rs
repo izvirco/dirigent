@@ -1,15 +1,3 @@
-//! `dirigent`, the command line (a console program; `dirigent_desktop` is the app):
-//!
-//!   dirigent [dir]        start the desktop (which hands `dir` to a running one)
-//!   dirigent key …        the public listener's API keys (`key add <name>`, `key list`,
-//!                         `key revoke <name>`), for the service the desktop embeds
-//!   dirigent login        sign this data dir in to the forge with a device code (`logout`,
-//!                         `whoami`): the account forge-auth hosts and the leaderboard use
-//!
-//! `--data-dir` / `--config-dir` (`dirigent_service::init_dirs`) go before the command and
-//! apply to both. The desktop is found next to this binary, as an install, a nix package and
-//! a cargo target dir all have it.
-
 use anyhow::{Context, Result};
 use std::process::Command;
 

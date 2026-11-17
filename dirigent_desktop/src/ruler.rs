@@ -1,22 +1,3 @@
-//! The ruler: a strip of tick marks down the left edge of the thread pane, one per
-//! message (user = blue, reply = gray, pinned = amber, compaction = dotted). Marks for
-//! the messages in view are shorter and brighter (pinned ones are bright all through the
-//! band); hovering a mark previews its message,
-//! pressing it scrolls the transcript to it, and dragging from there scrubs through the
-//! marks (previewing each).
-//!
-//! The marks sit at a fixed pitch, centered while they fit in the band: at most `BAND`
-//! marks in the strip's middle. A longer thread's marks scroll through the band along with
-//! the transcript, the marks of the messages in view in its middle (held still while the
-//! mouse is on the strip), fading out past its ends, and its first, last and pinned marks are
-//! sticky: when they'd scroll out they stack just outside the band, behind a gap. Hovering
-//! the gap shows how many messages are past it; dragging (or holding the button) past the
-//! band scrolls it.
-//!
-//! Everything animated (a mark growing in, the in-view state, the ruler's scroll) is a
-//! tween stepped in the canvas' paint, which asks for the next frame until all of them
-//! have settled — so the ruler costs nothing while it is still.
-
 use crate::app::{Dirigent, OpenThread, Pane};
 use crate::theme::{self, text, u};
 use crate::view::Item;
@@ -29,42 +10,21 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::Instant;
 
-// Lengths are design pixels, drawn `theme::zoom()` times as big (`theme::u`).
-
-/// Strip width; the reading column and composer are centered, so this sits in their left margin.
 pub const WIDTH: f32 = 28.;
-/// Marks start this far from the pane's left edge and are this long; only being in
-/// view changes their length.
 const INSET: f32 = 8.;
 const LENGTH: f32 = 14.;
-/// The ruler keeps this far from the strip's top and bottom.
 const PAD: f32 = 14.;
-/// Mark thickness (one more while hovered)...
 const THICK: f32 = 2.;
-/// ...and the distance between marks.
 const PITCH: f32 = 7.;
-/// The band shows at most this many scrolling marks in full (fewer if the strip is short).
 const BAND: usize = 32;
-/// Between a stack of stuck marks and the band: this much empty, then the scrolling marks
-/// fade in over this much.
 const GAP: f32 = 12.;
 const FADE: f32 = 21.;
-/// In a short strip the two stacks together take at most this share of it; more stuck
-/// marks squeeze.
 const STACKS: f32 = 1. / 3.;
-/// Dragging past the scrolling marks scrolls them this many marks a second per mark of
-/// distance past them.
 const SCRUB: f32 = 6.;
-/// A mark in view loses this much of its length...
 const SHRINK: f32 = 0.4;
-/// ...and the others keep this much of their colour (pinned ones only outside the band).
 const DIM: f32 = 0.4;
-/// Time constant of every tween, in seconds: ~95% of the way in three of these.
 const TAU: f32 = 0.09;
-/// Float noise, in pixels: a mark this close to the band's end, or to its slot in a
-/// stack, is there.
 const NOISE: f32 = 0.01;
-/// Longest preview text in the hover card.
 const PREVIEW_CHARS: usize = 180;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -91,7 +51,6 @@ impl Kind {
     }
 }
 
-/// A timeline item the ruler shows.
 #[derive(Clone, Copy)]
 struct Mark {
     item: usize,
@@ -99,29 +58,20 @@ struct Mark {
     pinned: bool,
 }
 
-/// The ruler's animated state: one tween per mark (`grow` from nothing on arrival, `on`
-/// while its message is in view), its scroll, the layout of the last paint (for hit
-/// testing and the hover cards), and the hovered mark. Shared with the paint closure,
-/// hence the `Rc`.
 #[derive(Default)]
 pub struct Ruler {
     tweens: Vec<Tween>,
-    /// How far the marks are scrolled (in marks), `None` until first painted...
     scroll: Option<f32>,
-    /// ...and where they are headed.
     target: f32,
     grid: Grid,
     layout: Layout,
     last_frame: Option<Instant>,
-    /// What's under the mouse; while dragging, the mark the transcript was scrolled to.
+    // MUST KILL: type: hover doubles as the scrubbed-to mark while dragging → a field of its own
     hover: Option<Hover>,
-    /// The button went down on a scrolling mark or a gap and is still down: the paint
-    /// scrubs to the mark under the mouse, scrolling the marks while it's past them.
     dragging: bool,
 }
 
 impl Ruler {
-    /// What's at window position `p`.
     fn hit(&self, p: Point<Pixels>) -> Option<Hover> {
         self.grid.bounds.contains(&p).then(|| self.layout.hit(f32::from(p.y - self.grid.bounds.top()))).flatten()
     }
@@ -130,13 +80,10 @@ impl Ruler {
 #[derive(Clone, Copy, PartialEq)]
 enum Hover {
     Mark(usize),
-    /// The gap above (0) or below (1) the scrolling marks: the index into `Layout::gaps`.
+    // MUST KILL: type: Gap(usize)'s 0 / 1 → an enum of the band's two sides
     Gap(usize),
 }
 
-/// The strip's window bounds and the display's scale factor. Every edge is snapped to
-/// the device pixel grid, so at fractional scales (1.25x) a 2px line doesn't come out
-/// 2 or 3 device px depending on where it lands.
 #[derive(Default, Clone, Copy)]
 struct Grid {
     bounds: Bounds<Pixels>,
@@ -149,7 +96,6 @@ impl Grid {
     }
 }
 
-/// The ruler's lengths in window pixels at the current zoom.
 #[derive(Default, Clone, Copy)]
 struct Metrics {
     pad: f32,
@@ -162,35 +108,25 @@ struct Metrics {
 impl Metrics {
     fn new(grid: &Grid) -> Self {
         let z = theme::zoom();
-        // The pitch is snapped so all marks land alike on the device pixel grid.
         Self { pad: PAD * z, pitch: grid.snap(PITCH * z), thick: THICK * z, gap: GAP * z, fade: FADE * z }
     }
 
-    /// From the top of a stack's innermost mark to the band: the mark, the gap, the fade.
     fn clear(&self) -> f32 {
         self.thick + self.gap + self.fade
     }
 }
 
-/// Where things go in a strip `h` tall holding `n` marks, `sticky` of them sticky. The band
-/// is centered in the strip, so pins never move it (except in a strip too short for a
-/// full band, which gives its stacks room).
 #[derive(Clone, Copy)]
 struct Frame {
     m: Metrics,
-    /// The band: where the scrolling marks' tops are while they're drawn in full.
     band: (f32, f32),
-    /// Where mark 0 is unscrolled: centered while the marks fit in the band, else at its top.
     origin: f32,
-    /// How far the marks scroll: until the last one is at the band's bottom.
     max_scroll: f32,
-    /// Distance between stuck marks: the pitch, squeezed if there are many.
     stack_pitch: f32,
 }
 
 impl Frame {
     fn new(m: Metrics, h: f32, n: usize, sticky: usize) -> Self {
-        // A stack holds at most every sticky mark but the first or last.
         let stacked = sticky.saturating_sub(2) as f32;
         let stack = (stacked * m.pitch).min(h * STACKS / 2.);
         let len = ((BAND - 1) as f32 * m.pitch).min(h - 2. * (m.pad + stack + m.clear())).max(0.);
@@ -205,23 +141,18 @@ impl Frame {
         }
     }
 
-    /// How far a mark at `y` is in the band: 1 in it, falling to 0 across the fade past its ends.
     fn inside(&self, y: f32) -> f32 {
         let ramp = |d: f32| ((d + NOISE) / self.m.fade).min(1.);
         ramp(y - (self.band.0 - self.m.fade)).min(ramp(self.band.1 + self.m.fade - y)).max(0.)
     }
 }
 
-/// Where the marks were drawn: y from the strip's top, in window pixels.
 #[derive(Default)]
 struct Layout {
     m: Metrics,
     marks: Vec<Placed>,
-    /// The scrolling marks' fully drawn part: drags pick marks in it and scroll past it.
     band: (f32, f32),
-    /// Between the top / bottom stack and the band, while marks are past it.
     gaps: [Option<(f32, f32)>; 2],
-    /// How many marks are above / below the band.
     beyond: [usize; 2],
 }
 
@@ -233,16 +164,11 @@ struct Placed {
     stuck: bool,
 }
 
-/// Lays out `n` marks scrolled `scroll` marks down. The `sticky` ones (ascending: first,
-/// pinned, last) stack just outside the band instead of scrolling out; the others fade
-/// out past the band's ends.
+// MUST KILL: extract: layout's two push-outward loops → a named fn stacking sticky marks against one band end
 fn layout(f: &Frame, n: usize, sticky: &[usize], scroll: f32) -> Layout {
     let (m, band) = (f.m, f.band);
     let natural = |i: usize| f.origin + (i as f32 - scroll) * m.pitch;
-    // Where each stack's innermost mark sits.
     let (inner0, inner1) = (band.0 - m.clear(), band.1 + m.clear());
-    // A sticky mark stops at its stack's inner end, or a stack pitch out from the sticky
-    // mark inside it: arriving, a mark pushes the stack outward. From the band out, both ways.
     let mut ys: Vec<f32> = sticky.iter().map(|&i| natural(i)).collect();
     let mut slot = inner0;
     for y in ys.iter_mut().rev() {
@@ -286,18 +212,15 @@ impl Layout {
         !p.stuck && p.y >= self.band.0 - NOISE && p.y <= self.band.1 + NOISE
     }
 
-    /// The drawn mark nearest height `y` among those `keep` keeps.
     fn nearest(&self, y: f32, keep: impl Fn(&Placed) -> bool) -> Option<&Placed> {
         let dist = |p: &Placed| (p.y + self.m.thick / 2. - y).abs();
         self.marks.iter().filter(|p| keep(p)).min_by(|a, b| dist(a).total_cmp(&dist(b)))
     }
 
-    /// The band's mark nearest height `y`: where a drag at `y` takes the transcript.
     fn scrub_target(&self, y: f32) -> Option<usize> {
         self.nearest(y.clamp(self.band.0, self.band.1.max(self.band.0)), |p| self.in_band(p)).map(|p| p.mark)
     }
 
-    /// What's at height `y`: a fully drawn mark within half a pitch, else a gap.
     fn hit(&self, y: f32) -> Option<Hover> {
         let mark = self.nearest(y, |p| p.alpha >= 1.).filter(|p| (p.y + self.m.thick / 2. - y).abs() <= self.m.pitch / 2.);
         if let Some(p) = mark {
@@ -308,9 +231,6 @@ impl Layout {
     }
 }
 
-/// The scroll that shows marks `a..=b` (the messages in view) in the middle of the band, or
-/// while `hold`, the one nearest `from` that shows them in it, so nothing slides from under
-/// the mouse. `a` wins when they don't all fit.
 fn keep_in_view(f: &Frame, from: f32, hold: bool, a: usize, b: usize) -> f32 {
     let most = a as f32 - (f.band.0 - f.origin) / f.m.pitch;
     let least = b as f32 - (f.band.1 - f.origin) / f.m.pitch;
@@ -327,7 +247,6 @@ struct Tween {
 }
 
 impl Tween {
-    /// Move `k` of the remaining way to the targets; true once there (snapped).
     fn step(&mut self, k: f32, on: f32) -> bool {
         let mut settled = true;
         for (v, target) in [(&mut self.grow, 1.), (&mut self.on, on)] {
@@ -342,7 +261,6 @@ impl Tween {
     }
 }
 
-/// The marks of a thread, in order.
 fn marks(t: &OpenThread) -> Vec<Mark> {
     t.timeline
         .items
@@ -360,8 +278,6 @@ fn marks(t: &OpenThread) -> Vec<Mark> {
         .collect()
 }
 
-/// Items of which enough is in the viewport to count as "what you're looking at": at
-/// least half of a short item, 40px of a tall one. From the list's last layout.
 fn visible_items(list: &ListState) -> Range<usize> {
     let vp = list.viewport_bounds();
     let first = list.logical_scroll_top().item_ix;
@@ -380,8 +296,6 @@ fn visible_items(list: &ListState) -> Range<usize> {
     start.unwrap_or(end)..end
 }
 
-/// The strip, to be laid over the thread column's left edge (transcript and composer,
-/// so the composer's height doesn't move it).
 pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
     let marks: Rc<[Mark]> = marks(t).into();
@@ -407,17 +321,13 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             let grid = s.grid;
             let f = Frame::new(Metrics::new(&grid), f32::from(bounds.size.height), n, sticky.len());
             let now = Instant::now();
-            // Capped: after an idle stretch the first frame is one normal step, not a snap.
             let dt = s.last_frame.map_or(0., |l| now.duration_since(l).as_secs_f32()).min(1. / 30.);
             s.last_frame = Some(now);
-            // Exponential approach, frame-rate independent; reduced motion snaps.
             let k = if cx.reduce_motion() { 1. } else { 1. - (-dt / TAU).exp() };
 
-            // The marks of the messages in view (between two messages: the next one).
             let visible = visible_items(&list);
             let first = paint_marks.partition_point(|m| m.item < visible.start).min(n.saturating_sub(1));
             let last = paint_marks.partition_point(|m| m.item < visible.end).saturating_sub(1).max(first);
-            // Where the ruler is headed: along with the transcript, or on while dragging past the band.
             let pointer = f32::from(window.mouse_position().y - bounds.top());
             let (top, bottom) = s.layout.band;
             let past = if !s.dragging {
@@ -427,7 +337,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             } else {
                 (pointer - bottom).max(0.)
             };
-            // Held while the mouse is on the strip; leaving it notifies, which centers it again.
             let hold = bounds.contains(&window.mouse_position());
             let target = if s.dragging { s.target + past / f.m.pitch * SCRUB * dt } else { keep_in_view(&f, s.target, hold, first, last) };
             s.target = target.clamp(0., f.max_scroll);
@@ -448,13 +357,11 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 let hovered = s.hover == Some(Hover::Mark(p.mark));
                 let w = LENGTH * z * (1. - SHRINK * tw.on) * tw.grow;
                 let color: Hsla = rgba(if mark.pinned { theme::t().warn } else { mark.kind.color() }).into();
-                // A pinned mark has its in-view colour all through the band, dimming as it leaves.
                 let lit = if mark.pinned { tw.on.max(f.inside(p.y)) } else { tw.on };
                 let color = if hovered { rgba(theme::t().fg).into() } else { color.opacity((DIM + (1. - DIM) * lit) * p.alpha) };
                 let y = px(grid.snap(f32::from(bounds.top()) + p.y));
                 let h = px(grid.snap(z * if hovered { THICK + 1. } else { THICK }));
                 if mark.kind == Kind::Compaction {
-                    // Dotted: 2px dots with 2px gaps (zoomed) across the (shrinking) width.
                     let mut dx = 0.;
                     while dx < w {
                         window.paint_quad(fill(Bounds::new(point(x + px(dx), y), size(px((w - dx).min(2. * z)), h)), color));
@@ -464,8 +371,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                     window.paint_quad(fill(Bounds::new(point(x, y), size(px(w), h)), color));
                 }
             }
-            // Dragging: the transcript goes to the band's mark nearest the mouse, after
-            // this paint (it scrolls the list, which has painted already).
             if s.dragging
                 && let Some(i) = lay.scrub_target(pointer)
                 && s.hover != Some(Hover::Mark(i))
@@ -481,16 +386,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 window.request_animation_frame();
             }
             drop(s);
-            // The drag, at window level so it carries on once the mouse leaves the narrow
-            // strip; the paint above does the rest. Registered every frame, not only while
-            // dragging, so a release that comes before the next frame (a touchpad tap)
-            // still ends it.
+            // MUST KILL: extract: the always-registered window-wide drag listener in render's paint into a named fn
             window.on_mouse_event({
                 let state = paint_state.clone();
                 move |ev: &MouseMoveEvent, phase, window, _| {
                     let mut s = state.borrow_mut();
                     if phase.bubble() && s.dragging {
-                        // A release we never saw (focus lost mid-press) ends it too.
                         s.dragging = ev.pressed_button == Some(MouseButton::Left);
                         window.refresh();
                     }
@@ -541,15 +442,11 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 window.prevent_default();
                 let mut s = down_state.borrow_mut();
                 match s.hit(ev.position) {
-                    // A mark in the band starts a drag; one outside it (stuck, or sticky and
-                    // still in the fade) only jumps, and the ruler scrolls to it.
                     Some(Hover::Mark(i)) => {
                         s.dragging = s.layout.marks.iter().any(|p| p.mark == i && s.layout.in_band(p));
                         drop(s);
                         this.jump_to(marks[i].item, cx);
                     }
-                    // Holding a gap scrolls that way (see the paint). Starting on the band's
-                    // edge mark, so a tap leaves the transcript where it is.
                     Some(Hover::Gap(_)) => {
                         s.hover = s.layout.scrub_target(f32::from(ev.position.y - s.grid.bounds.top())).map(Hover::Mark);
                         s.dragging = true;
@@ -564,7 +461,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .into_any()
 }
 
-/// The hover card for mark `m`, at height `y`: what kind of message, and its first line or two.
 fn mark_card(m: &Mark, t: &OpenThread, grid: &Grid, y: f32) -> AnyElement {
     let text = match &t.timeline.items[m.item] {
         Item::User { text, .. } => crate::view::split_image_refs(text).0,
@@ -580,7 +476,6 @@ fn mark_card(m: &Mark, t: &OpenThread, grid: &Grid, y: f32) -> AnyElement {
     card(grid, y, Some((label, color)), Some(preview).filter(|p| !p.is_empty()))
 }
 
-/// The hover card for gap `side` (see `Hover::Gap`): how many messages are past it.
 fn gap_card(s: &Ruler, side: usize) -> Option<AnyElement> {
     let (top, bottom) = s.layout.gaps[side]?;
     let count = s.layout.beyond[side];
@@ -588,8 +483,6 @@ fn gap_card(s: &Ruler, side: usize) -> Option<AnyElement> {
     (count > 0).then(|| card(&s.grid, (top + bottom) / 2., None, Some(text)))
 }
 
-/// A card floated right of the strip at height `y` (from the strip's top), over the
-/// transcript (or composer).
 fn card(grid: &Grid, y: f32, label: Option<(String, u32)>, body: Option<String>) -> AnyElement {
     let card = div()
         .flex()
@@ -607,8 +500,6 @@ fn card(grid: &Grid, y: f32, label: Option<(String, u32)>, body: Option<String>)
         .line_height(u(17.))
         .when_some(label, |d, (label, color)| d.child(div().text_size(text::xs()).text_color(rgba(color)).child(label)))
         .when_some(body, |d, body| d.child(div().text_color(rgba(theme::t().fg)).child(body)));
-    // Window-positioned; the zero-size absolute wrapper keeps the anchored element out of
-    // the flex flow (see AGENTS.md).
     div()
         .absolute()
         .top_0()
@@ -657,7 +548,6 @@ mod tests {
         let y = |scroll, i| layout(&f, n, &[0, 999], scroll).y(i).unwrap();
         let centered = keep_in_view(&f, 0., false, 498, 503);
         assert!((y(centered, 498) + y(centered, 503) - h).abs() < NOISE);
-        // Held, it moves only as far as it has to: coming from the start, 503 ends up last in the band.
         let held = keep_in_view(&f, 0., true, 498, 503);
         assert!((y(held, 503) - f.band.1).abs() < NOISE);
     }

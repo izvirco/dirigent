@@ -1,21 +1,15 @@
-//! Pasted images are shrunk before they are attached, so the thumbnail, the saved draft and
-//! the prompt all carry the same small image. A screenshot of a big screen is tens of MB
-//! as a PNG: more than a request can carry, and more than models take (Anthropic scales
-//! anything past ~1568 px on the long edge down and rejects images over 5 MB).
+//! A screenshot of a big screen is tens of MB as a PNG: more than a request can carry, and
+//! more than models take (Anthropic scales anything past ~1568 px on the long edge down and rejects images over 5 MB).
 
 use image::{DynamicImage, ImageDecoder, ImageReader, imageops::FilterType};
 use std::io::Cursor;
 
-/// Longest edge an attached image keeps.
 pub const MAX_EDGE: u32 = 1568;
 /// Size past which an image is re-encoded, whatever its pixel size; well under the 5 MB the
 /// API takes, base64 included.
 pub const MAX_BYTES: usize = 2 << 20;
-/// Quality of the JPEG a PNG too big for `MAX_BYTES` (a photo) falls back to.
 const JPEG_QUALITY: u8 = 85;
 
-/// `image` as it gets attached: as it is if it fits (`MAX_EDGE`, `MAX_BYTES`, a format the
-/// models take), else scaled to fit and re-encoded. Kept as is when it doesn't decode.
 pub fn fit(image: gpui::Image) -> gpui::Image {
     match shrink(&image.bytes) {
         Some((format, bytes)) => gpui::Image::from_bytes(format, bytes),
@@ -23,8 +17,6 @@ pub fn fit(image: gpui::Image) -> gpui::Image {
     }
 }
 
-/// `bytes` re-encoded to fit: a PNG, or a JPEG if the PNG is still over `MAX_BYTES`.
-/// `None` if they fit already or don't decode.
 fn shrink(bytes: &[u8]) -> Option<(gpui::ImageFormat, Vec<u8>)> {
     let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?;
     let taken =
@@ -80,7 +72,6 @@ mod tests {
 
     #[test]
     fn noisy_images_fall_back_to_jpeg() {
-        // Noise doesn't compress: as a PNG this is ~3 MB, over `MAX_BYTES`.
         let mut seed = 1u32;
         let noise = RgbImage::from_fn(1000, 1000, |_, _| {
             seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);

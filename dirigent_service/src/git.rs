@@ -1,9 +1,5 @@
-//! Git origin lookup for projects. Only used so the desktop can auto-link the same
-//! repo across hosts; no git management happens here.
-
 use std::path::Path;
 
-/// `git remote get-url origin`, normalized. `None` if not a git repo or no origin.
 pub fn origin(path: &Path) -> Option<String> {
     let out = crate::platform::command("git").args(["-C", &path.to_string_lossy(), "remote", "get-url", "origin"]).output().ok()?;
     if !out.status.success() {
@@ -13,7 +9,6 @@ pub fn origin(path: &Path) -> Option<String> {
     Some(normalize(url.trim()))
 }
 
-/// `git@github.com:a/b.git`, `ssh://git@github.com/a/b`, `https://github.com/a/b/` → `github.com/a/b`.
 pub fn normalize(url: &str) -> String {
     let rest = match url.split_once("://") {
         Some((_, rest)) => rest,

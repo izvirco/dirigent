@@ -3,7 +3,6 @@ name = "dirigent_cli"
 version.workspace = true
 edition.workspace = true
 
-# `dirigent`, the command line: `dirigent [dir]` (the desktop), `dirigent key …`, `dirigent login`.
 [[bin]]
 name = "dirigent"
 path = "src/main.rs"

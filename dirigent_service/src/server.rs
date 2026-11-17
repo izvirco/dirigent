@@ -1,7 +1,3 @@
-//! WebSocket endpoint: one task per connection, requests handled concurrently,
-//! pushes fanned out from a broadcast channel. The open listeners (loopback, tailscale)
-//! take anyone; the public one (`auth.rs`) only a known bearer token.
-
 use crate::Service;
 use crate::auth::Gate;
 use axum::Router;
@@ -20,8 +16,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
-/// Bind every address, all before serving, so a taken port fails fast. A gate marks the
-/// public listener.
 pub async fn bind(addrs: Vec<(SocketAddr, Option<Arc<Gate>>)>) -> anyhow::Result<Vec<(TcpListener, Option<Arc<Gate>>)>> {
     let mut listeners = Vec::new();
     for (addr, gate) in addrs {
@@ -32,17 +26,13 @@ pub async fn bind(addrs: Vec<(SocketAddr, Option<Arc<Gate>>)>) -> anyhow::Result
     Ok(listeners)
 }
 
-/// What a listener's requests are handled with.
 #[derive(Clone)]
 struct Listener {
     svc: Arc<Service>,
-    /// The public listener's: every upgrade needs a bearer token (`auth::admit`).
     gate: Option<Arc<Gate>>,
 }
 
-/// Serve on the bound listeners until one fails.
 pub async fn serve(svc: Arc<Service>, listeners: Vec<(TcpListener, Option<Arc<Gate>>)>) -> anyhow::Result<()> {
-    // With each connection's peer address, for the log.
     let serve = |(l, gate): (TcpListener, Option<Arc<Gate>>)| {
         let app = Router::new().route("/ws", get(upgrade)).with_state(Listener { svc: svc.clone(), gate });
         axum::serve(l.tap_io(tune), app.into_make_service_with_connect_info::<SocketAddr>()).into_future()
@@ -58,7 +48,6 @@ pub async fn serve(svc: Arc<Service>, listeners: Vec<(TcpListener, Option<Arc<Ga
 #[cfg(target_os = "linux")]
 const NOTSENT_LOWAT: u32 = 128 << 10;
 
-/// Set up an accepted connection's socket (`NOTSENT_LOWAT`; Windows has no such option).
 #[cfg(target_os = "linux")]
 fn tune(tcp: &mut TcpStream) {
     if let Err(e) = socket2::SockRef::from(&*tcp).set_tcp_notsent_lowat(NOTSENT_LOWAT) {
@@ -73,18 +62,13 @@ fn tune(_: &mut TcpStream) {}
 /// axum's 16 MiB frame default would cut off big requests far below its message limit.
 const MAX_MESSAGE: usize = 64 << 20;
 
-/// The connection a request came in on: what a login sends its steps to, and is cancelled
-/// with (`Service::disconnected`).
 #[derive(Clone)]
 pub struct Conn {
     pub id: u64,
     pub out: mpsc::UnboundedSender<ServerMessage>,
-    /// The screen picture it is in the middle of reading (`screen.rs`).
     pub reading: Arc<std::sync::Mutex<Option<crate::screen::Reading>>>,
 }
 
-/// Checked before the upgrade: a public listener's request without a known bearer gets a
-/// 401 and never reaches the service.
 async fn upgrade(
     ws: WebSocketUpgrade,
     State(Listener { svc, gate }): State<Listener>,
@@ -103,18 +87,12 @@ async fn upgrade(
 }
 
 async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
-    // Debug: scripts and tools come and go often.
     debug!(%peer, "client connected");
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let conn = Conn { id: NEXT.fetch_add(1, Ordering::Relaxed), out: out.clone(), reading: Default::default() };
-    // Images (`Blob` replies) have a queue of their own, sent from only when nothing else
-    // waits: opening a thread asks for all its images at once, possibly hundreds of MB,
-    // minutes over a slow link, and every reply and push would wait behind them.
     let (blobs, mut blobs_rx) = mpsc::unbounded_channel::<ServerMessage>();
-    // So do the pictures of a thread's computer use (`Screen` replies), ahead of the images:
-    // they show what happens now, and come a small piece at a time (`screen.rs`).
     let (screens, mut screens_rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut push_rx = svc.push.subscribe();
 
@@ -125,8 +103,7 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         protocol: dirigent_protocol::PROTOCOL,
     });
 
-    // Writer: this connection's replies, then global pushes, then screens, then images. One
-    // image already being written still goes first: a message can't be cut into.
+    // MUST KILL: extract: a prioritized outbox (replies, pushes, screens, blobs) instead of four channels and a biased select
     let writer = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {
@@ -151,9 +128,6 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         }
     });
 
-    // Why the connection ended, if a read failed: mostly a client that went without a close
-    // frame, but it may be a message over the limit, which the client only sees as the
-    // connection dropping.
     let mut error = None;
     while let Some(msg) = ws_rx.next().await {
         let msg = match msg {
@@ -165,7 +139,6 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         };
         let text = match msg {
             Message::Text(text) => text,
-            // Done: reading on would only race the client's socket going away.
             Message::Close(_) => break,
             _ => continue,
         };
@@ -183,8 +156,6 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
                 });
             }
             Err(e) => {
-                // Answer the request's id if it has one (a newer client asking for something
-                // this host doesn't know yet), so the client's request fails instead of hanging.
                 warn!(%peer, "bad request: {e}");
                 let reply_to = serde_json::from_str::<serde_json::Value>(&text).ok().and_then(|v| v.get("id")?.as_u64());
                 let _ = out.send(ServerMessage::Error { reply_to, message: format!("bad request: {e}") });

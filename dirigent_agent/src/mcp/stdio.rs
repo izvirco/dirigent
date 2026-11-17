@@ -1,9 +1,3 @@
-//! MCP over a command's stdio: a JSON-RPC message per line on its stdin and stdout, its
-//! stderr kept for when it fails. The command runs in a process group of its own, which
-//! goes with the connection: wrappers (`npx`, `uvx`) don't leave their server behind.
-//! Unless what the command started is to stay (`Added::leave_started`: the apps on the
-//! user's desktop): then the command alone is ended.
-
 use super::client::{Error, MAX_MESSAGE_BYTES, Transport};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -17,30 +11,21 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// How much of the command's stderr is kept, and how much of that a failure's message has.
 const STDERR_KEPT: usize = 64 * 1024;
 const STDERR_SAID: usize = 2000;
-/// How long the command gets to exit once its stdin closed, and then once it was told to.
 const EXIT_GRACE: Duration = Duration::from_millis(500);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) struct Stdio {
     stdin: tokio::sync::Mutex<Option<ChildStdin>>,
-    /// There until `close` has seen it exit.
     child: Mutex<Option<Child>>,
-    /// The command's process id, which is its process group's.
     pid: Option<u32>,
-    /// The whole group is ended with the command, not the command alone.
     group: bool,
     stderr: Arc<Mutex<Vec<u8>>>,
-    /// Cancelled once the command's stderr is read to its end.
     stderr_read: CancellationToken,
 }
 
 impl Stdio {
-    /// Run `command` in `cwd` with `env` added to this process's environment. What it
-    /// prints comes through the channel, which closes when the command's stdout does.
-    /// `group`: what the command starts is ended with it.
     pub(crate) fn spawn(
         command: &str,
         args: &[String],
@@ -90,14 +75,12 @@ impl Stdio {
         tokio::spawn(async move {
             let mut stdout = BufReader::new(stdout);
             while let Some(line) = read_line(&mut stdout).await {
-                // Anything else on stdout (a banner, a log line) is not ours to mind.
                 match serde_json::from_slice::<Value>(&line) {
                     Ok(message) if message.is_object() => drop(messages.send(message)),
                     _ => tracing::debug!("mcp: not a message: {}", String::from_utf8_lossy(&line[..line.len().min(200)])),
                 }
             }
-            // The command is gone or going: what it said of that is all there before the
-            // connection counts as closed and its failure is put into words.
+            // MUST KILL: extract: a named step that waits for stderr to drain before `messages` drops and the connection counts as closed
             let _ = tokio::time::timeout(EXIT_GRACE, read.cancelled()).await;
         });
         let pid = child.id();
@@ -105,8 +88,6 @@ impl Stdio {
     }
 }
 
-/// The next line that has something on it; `None` at the end. One longer than a message
-/// may be is skipped.
 async fn read_line(from: &mut (impl AsyncBufRead + Unpin)) -> Option<Vec<u8>> {
     loop {
         let mut line = Vec::new();
@@ -154,7 +135,6 @@ impl Transport for Stdio {
     /// to, then killed. Its process group gets the same, for what the command started
     /// (unless that is to stay: `group`).
     async fn close(&self) {
-        // Unless a message is stuck on its way in: then the command isn't reading, and is told.
         if let Ok(mut stdin) = self.stdin.try_lock() {
             stdin.take();
         }
@@ -168,21 +148,16 @@ impl Transport for Stdio {
                 let _ = child.wait().await;
             }
         }
-        // What the command started and left behind.
         if self.group {
             signal(self.pid, false, true);
         }
         closing.pid = None;
-        // Its last words are all there for whoever asks why it went.
         let _ = tokio::time::timeout(EXIT_GRACE, self.stderr_read.cancelled()).await;
     }
 }
 
-/// A `close` under way, which has the child: let go of before the command and what it
-/// started were ended (whoever closed the connection was dropped), they are ended as a
-/// connection let go without `close` ends them.
+// MUST KILL: rename: `Closing` → `KillIfCloseDropped` (kills the command if `close` is dropped midway)
 struct Closing {
-    /// `None` once they were.
     pid: Option<u32>,
     group: bool,
 }
@@ -194,7 +169,6 @@ impl Drop for Closing {
 }
 
 impl Drop for Stdio {
-    /// A connection let go without `close`: the command isn't asked.
     fn drop(&mut self) {
         // Before the child is let go: its pid is its own until then.
         if self.child.lock().unwrap().is_some() {
@@ -203,8 +177,6 @@ impl Drop for Stdio {
     }
 }
 
-/// Tell the command with `pid` to end (`kill`: end it), and with it its process group
-/// (`group`), which has what it started.
 #[cfg(unix)]
 fn signal(pid: Option<u32>, kill: bool, group: bool) {
     let Some(pid) = pid else { return };

@@ -1,7 +1,3 @@
-//! `read`, `write` and `edit`: the model's hands on files. Names, inputs and answers are
-//! what models trained on coding harnesses expect (and what pi's were), so a thread reads
-//! the same whichever harness wrote its history.
-
 use super::{Env, images, truncate};
 use crate::tool::{Call, Content, Tool, ToolOutput, ToolSpec};
 use anyhow::{Context, Result, anyhow, bail};
@@ -14,9 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use unicode_normalization::UnicodeNormalization;
 
-/// A path as the model wrote it, as a path on this machine: relative to the thread's
-/// directory, `~` as the home directory. A leading `@` (how some models quote paths) and
-/// the look-alike spaces they sometimes write are taken out.
 fn resolve(path: &str, cwd: &Path) -> PathBuf {
     let spaces = ['\u{00A0}', '\u{202F}', '\u{205F}', '\u{3000}'];
     let path: String = path.chars().map(|c| if spaces.contains(&c) || ('\u{2000}'..='\u{200A}').contains(&c) { ' ' } else { c }).collect();
@@ -63,13 +56,9 @@ fn resolve_existing(path: &str, cwd: &Path) -> PathBuf {
     variants.into_iter().map(PathBuf::from).find(|p| p.exists()).unwrap_or(resolved)
 }
 
-/// Wait for the turn to change the file at `path`. One at a time per file, whichever thread
-/// asks and whatever it calls the file (a relative path, a link to it): calls run side by
-/// side, and two changes of one file must not read the same original.
+// MUST KILL: rename: `turn` → `lock_canonical_file` (one change at a time per file, across threads and path spellings)
 async fn turn(path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
-    /// The files being changed, and waited for. One that no longer is goes with the next asked for.
     static TURNS: Mutex<BTreeMap<PathBuf, Weak<tokio::sync::Mutex<()>>>> = Mutex::new(BTreeMap::new());
-    // A file that isn't there yet is named by where it will be.
     let file = match tokio::fs::canonicalize(path).await {
         Ok(file) => file,
         Err(_) => match (path.parent(), path.file_name()) {
@@ -139,7 +128,6 @@ impl Tool for Read {
     async fn call(&self, input: Value, _call: &Call) -> Result<ToolOutput> {
         let input: ReadInput = serde_json::from_value(input)?;
         let cwd = self.env.cwd.clone();
-        // File reads and image scaling block: off the async workers.
         tokio::task::spawn_blocking(move || read(&input, &cwd)).await?
     }
 }
@@ -163,7 +151,6 @@ fn read(input: &ReadInput, cwd: &Path) -> Result<ToolOutput> {
         });
     }
     drop(file);
-    // 1-indexed for the model, 0-indexed here. Fractions and negatives read as the nearest sane value.
     let start = input.offset.map_or(0, |o| (o.max(1.) as usize) - 1);
     let limit = input.limit.map(|l| l.max(0.) as usize);
     let lines = Lines::select(&path, start, limit)?;
@@ -186,7 +173,6 @@ fn read(input: &ReadInput, cwd: &Path) -> Result<ToolOutput> {
         let limit = if by == truncate::By::Bytes { format!(" ({limit_bytes} limit)") } else { String::new() };
         format!("{}\n\n[Showing lines {}-{last} of {total}{limit}. Use offset={} to continue.]", cut.text, start + 1, last + 1)
     } else {
-        // The model's own limit stopped short of the end.
         match limit.map(|l| start + l).filter(|end| *end < lines.total) {
             Some(end) => format!("{}\n\n[{} more lines in file. Use offset={} to continue.]", cut.text, lines.total - end, end + 1),
             None => cut.text,
@@ -195,13 +181,10 @@ fn read(input: &ReadInput, cwd: &Path) -> Result<ToolOutput> {
     Ok(ToolOutput::text(text))
 }
 
-/// The lines of a file a `read` selected, read without holding the whole file: only what can
-/// be shown is kept (one line past the limits, so the cut still sees there is more).
 struct Lines {
-    /// Lines in the file, as an editor counts them: a trailing newline starts a last, empty one.
+    // MUST KILL: rename: `total` → `editor_line_count` (a trailing newline counts a last, empty line, unlike truncate::lines)
     total: usize,
     kept: Vec<String>,
-    /// The size of the first selected line, however much of it was kept.
     first_bytes: usize,
 }
 
@@ -235,7 +218,6 @@ impl Lines {
                     Some((b'\n', text)) => (text, true),
                     _ => (piece, false),
                 };
-                // A line over the byte limit is never shown: its size is all that is kept of it.
                 if line >= start && line < end && current.len() <= truncate::MAX_BYTES {
                     current.extend_from_slice(text);
                 }
@@ -378,7 +360,6 @@ impl Tool for Edit {
         let path = resolve(&input.path, &self.env.cwd);
         let _one_at_a_time = turn(&path).await;
         let raw = tokio::fs::read(&path).await.map_err(|e| anyhow!("Could not edit file: {}. {e}.", input.path))?;
-        // The file is written back whole: what isn't text would not come back as it was.
         let Ok(raw) = String::from_utf8(raw) else {
             bail!("Could not edit file: {}. It is not UTF-8 text: use bash to change it.", input.path);
         };
@@ -389,7 +370,6 @@ impl Tool for Edit {
         };
         let unix = to_lf(content);
         let (new, replacements) = apply(&unix, &input.edits, &input.path)?;
-        // Spliced into the original, so the lines an edit didn't touch keep their line endings.
         let new = if content == unix { new } else { splice(content, &replacements) };
         tokio::fs::write(&path, format!("{bom}{new}")).await.with_context(|| format!("{}", path.display()))?;
         Ok(ToolOutput::text(format!("Successfully replaced {} block(s) in {}.", input.edits.len(), input.path)))
@@ -423,7 +403,6 @@ fn to_lf(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
-/// A replacement of `len` bytes at `at` (in the text it was matched in) by `new`.
 #[derive(Debug, Clone, PartialEq)]
 struct Replacement {
     at: usize,
@@ -431,8 +410,6 @@ struct Replacement {
     new: String,
 }
 
-/// What matching forgives when the exact text isn't there: trailing whitespace, and the
-/// typographic quotes, dashes and spaces an editor (or the model) put in place of plain ones.
 fn loosen(text: &str) -> String {
     let text: String = text.nfkc().collect();
     let lines: Vec<&str> = text.split('\n').map(str::trim_end).collect();
@@ -449,10 +426,6 @@ fn loosen(text: &str) -> String {
         .collect()
 }
 
-/// Apply `edits` to `content` (LF line endings), each matched against the content as it
-/// is, not one after the other. Returns the new content and the replacements made in
-/// `content`, in order. When an edit only matches loosely (`loosen`), the lines the edits
-/// touch are rewritten from the loosened text; every other line stays as it is.
 fn apply(content: &str, edits: &[Replace], path: &str) -> Result<(String, Vec<Replacement>)> {
     let one = edits.len() == 1;
     let edits: Vec<(String, String)> = edits.iter().map(|e| (to_lf(&e.old_text), to_lf(&e.new_text))).collect();
@@ -465,7 +438,6 @@ fn apply(content: &str, edits: &[Replace], path: &str) -> Result<(String, Vec<Re
     let base = if loose { loosen(content) } else { content.to_owned() };
     let mut matched: Vec<(usize, Replacement)> = vec![];
     for (i, (old, new)) in edits.iter().enumerate() {
-        // In the loosened text an exact match of the text as written still wins.
         let (at, len) = match base.find(old.as_str()) {
             Some(at) => (at, old.len()),
             None => {
@@ -511,7 +483,6 @@ fn apply(content: &str, edits: &[Replace], path: &str) -> Result<(String, Vec<Re
     Ok((new, replacements))
 }
 
-/// `text` with `replacements` (in order, at offsets counted from `offset` before `text`) made.
 fn replace(text: &str, replacements: &[Replacement], offset: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut from = 0;
@@ -524,7 +495,6 @@ fn replace(text: &str, replacements: &[Replacement], offset: usize) -> String {
     out
 }
 
-/// `(start, end)` of each line of `text`, its newline included.
 fn line_spans(text: &str) -> Vec<(usize, usize)> {
     let mut at = 0;
     text.split_inclusive('\n')
@@ -535,15 +505,12 @@ fn line_spans(text: &str) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Replacements matched in `loose` (the loosened `original`), as replacements of `original`
-/// that rewrite only the lines they touch: each is widened to whole lines, which are taken
-/// from `loose` with the replacement made. The two texts have the same lines, loosened or not.
 fn widen(original: &str, loose: &str, replacements: &[Replacement]) -> Result<Vec<Replacement>> {
     let (original_lines, loose_lines) = (line_spans(original), line_spans(loose));
     if original_lines.len() != loose_lines.len() {
         bail!("Cannot preserve unchanged lines because the base content has a different line count.");
     }
-    // Groups of replacements that touch the same lines: (first line, line after the last, replacements).
+    // MUST KILL: type: a LineGroup struct (first line, end line, replacements) instead of this tuple
     let mut groups: Vec<(usize, usize, Vec<Replacement>)> = vec![];
     for r in replacements {
         let outside = || anyhow!("Replacement range is outside the base content.");
@@ -567,16 +534,12 @@ fn widen(original: &str, loose: &str, replacements: &[Replacement]) -> Result<Ve
         .collect())
 }
 
-/// Make `replacements`, matched in `to_lf(original)`, in `original` itself: what they don't
-/// cover keeps its bytes, line endings included, and a line break in new text gets the line
-/// ending of the line the replaced range starts in.
 fn splice(original: &str, replacements: &[Replacement]) -> String {
-    // Only a CRLF changes length when normalized: an offset there is this many bytes further here.
     let crlfs: Vec<usize> = original.match_indices("\r\n").map(|(i, _)| i).collect();
     let to_original = |offset: usize| offset + crlfs.iter().enumerate().take_while(|(n, at)| **at - n < offset).count();
     let mut out = String::with_capacity(original.len());
+    // MUST KILL: extract: a join fn named for keeping a CR before a seam and an LF after it two line breaks
     let mut push = |part: &str| {
-        // A CR before a seam and an LF after it would merge into one CRLF: keep them two breaks.
         if out.ends_with('\r') && part.starts_with('\n') {
             out.push('\n');
         }
@@ -596,8 +559,6 @@ fn splice(original: &str, replacements: &[Replacement]) -> String {
     out
 }
 
-/// The line ending of the line `offset` is in (of the one before, for a last line without).
-/// A lone CR only counts in a file with no LF at all (classic Mac).
 fn line_ending(text: &str, offset: usize) -> &'static str {
     let lf = text[offset..].find('\n').map(|i| offset + i).or_else(|| text[..offset].rfind('\n'));
     match lf {
@@ -648,7 +609,6 @@ mod tests {
         let path = dir.path().join("f.txt");
         std::fs::write(&path, "\u{FEFF}a = 1\r\nb = 2\r\nc = 3\r\n").unwrap();
         let tool = Edit::new(env(dir.path()));
-        // One edit not in an array, as some models send it; a new line gets the file's ending.
         let input = json!({"path": "f.txt", "edits": {"oldText": "b = 2", "newText": "b = 20\nbb = 21"}});
         tool.call(input, &call()).await.unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "\u{FEFF}a = 1\r\nb = 20\r\nbb = 21\r\nc = 3\r\n");
@@ -667,8 +627,6 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"caf\xe9 = 1\n");
     }
 
-    /// Edits of one file made side by side, by threads that each have an `Env` of their own
-    /// and under two names for the file: each is made on what the one before left.
     #[tokio::test]
     async fn edits_of_one_file_take_turns_whoever_makes_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -688,7 +646,6 @@ mod tests {
     #[test]
     fn edits_are_unique_disjoint_and_forgiving_of_typography() {
         let content = "let a = “x”;   \nlet b = 1;\nlet c = 1;\n";
-        // Curly quotes and trailing spaces in the file, plain ones from the model: only that line is rewritten.
         let (new, _) = apply(content, &[edit("let a = \"x\";\n", "let a = \"y\";\n")], "f").unwrap();
         assert_eq!(new, "let a = \"y\";\nlet b = 1;\nlet c = 1;\n");
         let (new, _) = apply(content, &[edit("b = 1", "b = 2"), edit("c = 1", "c = 3")], "f").unwrap();

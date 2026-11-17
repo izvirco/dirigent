@@ -1,20 +1,9 @@
-//! Build-time assets.
-//!
-//! - Lilex, the default font, is embedded in the binary (`config::LILEX`), so it needs no
-//!   install anywhere. Not vendored: the faces come from `DIRIGENT_LILEX_DIR` if set (the
-//!   nix dev shell points it at nixpkgs' `lilex`), else from the pinned release zip,
-//!   downloaded once per target dir (with curl, which every build machine has: a Rust
-//!   client would drag a TLS stack into the build script) and checked against its hash.
-//! - Windows: the exe's icon (resource 1, which gpui also loads as the window icon) and its
-//!   version info (Task Manager and Explorer show `FileDescription`).
-
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const LILEX_VERSION: &str = "2.700";
 const LILEX_SHA256: &str = "34310edb4ba749f772d42b88e3eec4a6318527e75ceeaa96cfc556ee35366fbc";
-/// The faces the UI uses: the weights it asks for (normal, medium, semibold) and their italics.
 const LILEX_FACES: &[&str] = &["Regular", "Italic", "Medium", "MediumItalic", "SemiBold", "SemiBoldItalic"];
 
 fn main() {
@@ -28,7 +17,6 @@ fn main() {
     }
 }
 
-/// Put the faces in `OUT_DIR/lilex/` and write `OUT_DIR/lilex.rs`, which embeds them.
 fn lilex(out: &Path) -> Result<(), String> {
     println!("cargo:rerun-if-env-changed=DIRIGENT_LILEX_DIR");
     let dir = out.join("lilex");
@@ -64,9 +52,6 @@ fn lilex(out: &Path) -> Result<(), String> {
     std::fs::write(out.join("lilex.rs"), format!("pub const LILEX: &[&[u8]] = &[\n{faces}];\n")).map_err(|e| e.to_string())
 }
 
-/// The icon and version info, as an .rc compiled into the exe. The version is the one the
-/// release workflow bakes in (`dirigent_protocol::release::VERSION`), and a nightly's makes
-/// it Dirigent Nightly, with its own icon.
 fn windows_resources(out: &Path) {
     println!("cargo:rerun-if-env-changed=DIRIGENT_BUILD_VERSION");
     let version = std::env::var("DIRIGENT_BUILD_VERSION").unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap());

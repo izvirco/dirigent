@@ -1,18 +1,3 @@
-//! OAuth for HTTP servers, as MCP has it: the server says where its authorization server
-//! is (RFC 9728), that one what its endpoints are (RFC 8414), this app registers itself
-//! there as a client (RFC 7591) unless the entry names one, and the user signs in in a
-//! browser (the code flow with PKCE), which comes back to a port on this machine: or, where
-//! the browser can't reach it (a remote host), the user pastes the address it ended up on.
-//!
-//! What a sign-in leaves is in `<data dir>/mcp-auth.json`, by server name and address: the
-//! client, the tokens, where they are refreshed. A connection sends the access token and
-//! refreshes it when it is about to lapse or the server turns it down; it never opens a
-//! browser. When only a new sign-in will do, the connection fails saying so (`Error::
-//! AuthRequired`), and the user signs in from Settings (`Auth::sign_in`).
-//!
-//! No client id metadata document: the app has none of its own to point at, and pi's
-//! (`https://pi.dev/oauth/client.json`) is pi's name on the consent page, not ours.
-
 use super::client::{Error, PROTOCOL_VERSION};
 use super::config::{self, OAuth, hex, is_secure, namespace};
 use super::http::{ERROR_BODY_BYTES, http, network};
@@ -34,23 +19,16 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use url::Url;
 
-/// How long the authorization server gets for an answer: one that hangs doesn't hold up
-/// a connection's refresh, nor a sign-in, for long.
 const REQUEST_LIMIT: Duration = Duration::from_secs(15);
-/// An access token this close to lapsing is refreshed before it is sent.
 const REFRESH_AHEAD: u64 = 30;
-/// How long a sign-in waits for the browser.
 const BROWSER_LIMIT: Duration = Duration::from_secs(300);
-/// Who the app says it is when it registers, unless the entry says (`oauth.clientName`).
 const CLIENT_NAME: &str = "Dirigent";
 
-/// How a sign-in talks to the user (the service: as a login's steps).
 #[async_trait]
 pub trait SignIn: Send + Sync {
     /// The user is to sign in at `url`, in a browser.
     fn open(&self, url: &str);
 
-    /// What the sign-in is doing now.
     fn progress(&self, message: &str);
 
     /// Ask for the address the browser ended up on (`http://127.0.0.1:…/callback?code=…`),
@@ -60,30 +38,24 @@ pub trait SignIn: Send + Sync {
     async fn redirect_url(&self) -> Option<String>;
 }
 
-/// What `mcp-auth.json` holds for one server.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Login {
-    /// The client this app registered as; none when the entry names one (`oauth.clientId`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client: Option<Registered>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens: Option<Tokens>,
-    /// The authorization server the tokens are from, and where they are refreshed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_server: Option<AuthServer>,
-    /// The `resource` the tokens are for (RFC 8707), if the server names itself one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
 }
 
-/// A client as an authorization server knows it (the fields of RFC 7591 this uses).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Registered {
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
-    /// Where it may be redirected to: it is only good for a sign-in that listens there.
     #[serde(default)]
     pub redirect_uris: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,15 +67,12 @@ pub(crate) struct Tokens {
     pub access_token: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
-    /// What was granted: a sign-in for more scope asks for this too.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// When the access token lapses, in seconds since 1970, if the server said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
 }
 
-/// An authorization server's metadata (RFC 8414, or OpenID Connect's), as far as it is used.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AuthServer {
     pub issuer: String,
@@ -117,12 +86,10 @@ pub(crate) struct AuthServer {
     pub code_challenge_methods_supported: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
-    /// The browser comes back saying who sent it (`iss`, RFC 9207).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization_response_iss_parameter_supported: Option<bool>,
 }
 
-/// `mcp-auth.json`. Readable by its owner only; changed under a lock, by this process alone.
 pub(crate) struct Store {
     path: PathBuf,
 }
@@ -134,8 +101,6 @@ impl Store {
         Self { path: dirs.data.join("mcp-auth.json") }
     }
 
-    /// What server `name` at `url` is stored under: by both, so two entries for one
-    /// address (an account each) sign in apart.
     pub(crate) fn key(name: &str, url: &Url) -> String {
         format!("{}|{url}", namespace(name))
     }
@@ -152,7 +117,6 @@ impl Store {
         self.read().remove(key).unwrap_or_default()
     }
 
-    /// Change what is stored under `key`. Nothing left of it: the key goes.
     pub(crate) fn update(&self, key: &str, change: impl FnOnce(&mut Login)) -> Result<()> {
         let _one_at_a_time = FILE.lock().unwrap();
         let mut all = self.read();
@@ -165,7 +129,6 @@ impl Store {
             if let Some(dir) = self.path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
-            // Whole or not at all: a half-written file is every sign-in lost.
             let partial = self.path.with_extension("json.part");
             write_private(&partial, &serde_json::to_string_pretty(&all)?)?;
             std::fs::rename(&partial, &self.path)
@@ -174,10 +137,8 @@ impl Store {
     }
 }
 
-/// What a server's `WWW-Authenticate` asks for when it turns a request down.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Challenge {
-    /// Where the server's own metadata is, if not at the usual place.
     resource_metadata: Option<Url>,
     scope: Option<String>,
     error: Option<String>,
@@ -210,22 +171,17 @@ impl Challenge {
     }
 }
 
-/// A server's sign-in: its tokens for a connection's requests, and how they are had.
 pub(crate) struct Auth {
     store: Store,
     key: String,
-    /// The server's name, for messages.
     name: String,
     url: Url,
     settings: OAuth,
-    /// What the server last asked for: what a sign-in goes by.
     challenge: Mutex<Challenge>,
 }
 
 /// One refresh at a time of a sign-in (by its key in the store): servers rotate refresh
-/// tokens, and two refreshes with the same one lose the sign-in. Whoever waited finds the
-/// new token stored and uses it. A lock each, as it is held while the authorization
-/// server is asked: one that doesn't answer holds up its own server's requests alone.
+/// tokens, and two refreshes with the same one lose the sign-in.
 static REFRESH: Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>> = Mutex::new(BTreeMap::new());
 
 impl Auth {
@@ -241,32 +197,26 @@ impl Auth {
         }
     }
 
-    /// The access token as it is stored: a sign-in shows as a change of it.
     pub(crate) fn stored_token(&self) -> Option<String> {
         self.store.load(&self.key).tokens.map(|tokens| tokens.access_token)
     }
 
-    /// Forget the sign-in, the client it registered included. `false`: there was none.
     pub(crate) fn sign_out(&self) -> Result<bool> {
         let had = self.store.load(&self.key) != Login::default();
         self.store.update(&self.key, |login| *login = Login::default())?;
         Ok(had)
     }
 
-    /// The token for the next request, refreshed first if it is about to lapse.
     pub(crate) async fn token(self: &Arc<Self>) -> Option<String> {
         let tokens = self.store.load(&self.key).tokens?;
         let lapses = tokens.expires_at.is_some_and(|at| at <= now() + REFRESH_AHEAD);
         if !lapses || tokens.refresh_token.is_none() {
             return Some(tokens.access_token);
         }
-        // If that fails the old one goes out, and the server's answer decides.
         let _ = self.refresh(Some(&tokens.access_token)).await;
         self.stored_token()
     }
 
-    /// The server turned down a request that went with token `sent`, saying
-    /// `www_authenticate`: get a token it takes, if that can be done without the user.
     pub(crate) async fn unauthorized(self: &Arc<Self>, www_authenticate: Option<&str>, sent: Option<&str>) -> Result<(), Error> {
         let challenge = Challenge::parse(www_authenticate);
         let more_scope = challenge.error.as_deref() == Some("insufficient_scope");
@@ -278,9 +228,6 @@ impl Auth {
         self.refresh(sent).await
     }
 
-    /// Replace the access token `stale` with a fresh one, unless that happened meanwhile.
-    /// On a task of its own: once the server answered, the new tokens are stored whatever
-    /// became of the request that wanted them (a refresh token may only be good once).
     async fn refresh(self: &Arc<Self>, stale: Option<&str>) -> Result<(), Error> {
         let (this, stale) = (self.clone(), stale.map(str::to_owned));
         let refreshing = tokio::spawn(async move { this.refresh_now(stale.as_deref()).await });
@@ -309,7 +256,6 @@ impl Auth {
         let grant = [("grant_type", "refresh_token"), ("refresh_token", refresh_token.as_str())];
         let fresh = match token_request(&server, &client, resource.as_deref(), &grant).await {
             Ok(fresh) => fresh,
-            // The sign-in is no longer good, or the client isn't: a new one is needed.
             Err(Refusal::Said { code, .. }) if matches!(code.as_str(), "invalid_grant" | "invalid_client" | "unauthorized_client") => {
                 let gone = |login: &mut Login| {
                     login.tokens = None;
@@ -317,7 +263,6 @@ impl Auth {
                         *login = Login::default();
                     }
                 };
-                // Unless the user signed in meanwhile: then there is a token to go on with.
                 return if self.settle(tokens, gone)? { Err(Error::AuthRequired) } else { Ok(()) };
             }
             Err(e) => return Err(failed(Error::Other(e.to_string()))),
@@ -331,9 +276,7 @@ impl Auth {
         self.settle(tokens, |login| login.tokens = Some(fresh)).map(drop)
     }
 
-    /// Store what came of refreshing `refreshed`, if those are still the tokens stored:
-    /// the user may have signed in again, or out, while the authorization server was
-    /// asked, and what they left stays. `false`: they did.
+    // MUST KILL: rename: `settle` → `store_if_still` returning a named outcome instead of a bare bool (false: the user signed in or out meanwhile)
     fn settle(&self, refreshed: &Tokens, change: impl FnOnce(&mut Login)) -> Result<bool, Error> {
         let mut still = false;
         let stored = self.store.update(&self.key, |login| {
@@ -345,8 +288,6 @@ impl Auth {
         stored.map(|()| still).map_err(|e| Error::Other(format!("{e:#}")))
     }
 
-    /// The client this app is to the authorization server: the entry's, else the one a
-    /// sign-in registered.
     async fn client(&self, login: &Login) -> Result<Option<Registered>, Error> {
         let Some(id) = &self.settings.client_id else { return Ok(login.client.clone()) };
         let client_secret = match &self.settings.client_secret {
@@ -358,14 +299,11 @@ impl Auth {
         Ok(Some(Registered { client_id: id.clone(), client_secret, ..Registered::default() }))
     }
 
-    /// Find the server's authorization server, by what it last asked for.
     async fn discover(&self) -> Result<Found, Error> {
         let hint = self.challenge.lock().unwrap().resource_metadata.clone();
         discover(&self.url, hint.as_ref(), self.settings.auth_server_metadata_url.as_deref()).await
     }
 
-    /// Sign in: the user in a browser, through `ui`. The tokens are stored when it returns
-    /// `Ok`. Dropped, it is given up.
     pub(crate) async fn sign_in(&self, ui: &dyn SignIn) -> Result<()> {
         ui.progress("Asking the server how to sign in…");
         let found = self.discover().await?;
@@ -384,9 +322,6 @@ impl Auth {
             }
         };
 
-        // What the entry asks for and what the server last did; on top of what was
-        // granted when it asked for more (it may name only what is missing). Else
-        // what the server says it has.
         let challenge = self.challenge.lock().unwrap().clone();
         let granted = login.tokens.as_ref().and_then(|tokens| tokens.scope.as_deref());
         let more = challenge.error.as_deref() == Some("insufficient_scope") && challenge.scope.is_some();
@@ -420,7 +355,6 @@ impl Auth {
         let tokens = match token_request(&found.server, &client, found.resource.as_deref(), &grant).await {
             Ok(tokens) => tokens,
             Err(e) => {
-                // A client the server no longer knows is no use to the next sign-in either.
                 if matches!(&e, Refusal::Said { code, .. } if code == "invalid_client" || code == "unauthorized_client") {
                     self.store.update(&self.key, |login| *login = Login::default())?;
                 }
@@ -449,7 +383,6 @@ fn random<const N: usize>() -> [u8; N] {
     bytes
 }
 
-/// The scopes of all of `lists` (each separated by spaces), once each; `None`: there are none.
 fn scopes<const N: usize>(lists: [Option<&str>; N]) -> Option<String> {
     let mut all: Vec<&str> = vec![];
     for scope in lists.into_iter().flatten().flat_map(str::split_whitespace) {
@@ -460,15 +393,12 @@ fn scopes<const N: usize>(lists: [Option<&str>; N]) -> Option<String> {
     (!all.is_empty()).then(|| all.join(" "))
 }
 
-/// What discovery found of a server's sign-in.
 struct Found {
     server: AuthServer,
     resource: Option<String>,
-    /// The scopes the server says it has, to ask for unless told otherwise.
     scopes: Option<String>,
 }
 
-/// Why a metadata document wasn't had.
 enum Miss {
     Status(u16),
     Network(Error),
@@ -476,7 +406,6 @@ enum Miss {
 }
 
 impl Miss {
-    /// "Not here", by the status: the next place it may be at is tried.
     fn elsewhere(&self) -> bool {
         matches!(self, Self::Status(status) if (400..500).contains(status) || *status == 502)
     }
@@ -492,16 +421,12 @@ async fn metadata(url: &Url) -> Result<Value, Miss> {
     serde_json::from_slice(&body).map_err(|_| Miss::Invalid)
 }
 
-/// `/.well-known/<kind>` at `base`'s origin, for `base`'s path.
 fn well_known(base: &Url, kind: &str) -> Url {
     let path = base.path().strip_suffix('/').unwrap_or(base.path());
     base.join(&format!("/.well-known/{kind}{path}")).expect("a path")
 }
 
-/// Find the authorization server of the MCP server at `url`: through the server's own
-/// metadata (at `hint` if its challenge said where), or as the entry says
-/// (`metadata_url`, trusted as written). A server without metadata is its own
-/// authorization server, at the endpoints MCP once fixed.
+/// A server without metadata is its own authorization server, at the endpoints MCP once fixed.
 async fn discover(url: &Url, hint: Option<&Url>, metadata_url: Option<&str>) -> Result<Found, Error> {
     let places = match hint {
         Some(hint) => vec![hint.clone()],
@@ -539,8 +464,6 @@ async fn discover(url: &Url, hint: Option<&Url>, metadata_url: Option<&str>) -> 
         return Ok(Found { server, resource: resource_id, scopes });
     }
     let issuer = strings("authorization_servers").first().map(|s| (*s).to_owned()).unwrap_or_else(|| url.join("/").expect("a path").into());
-    // The server's word, as the addresses below are (`AuthServer::parse`): http(s) or
-    // nothing. Only such an address takes the paths that are joined to it.
     let base = Url::parse(&issuer).ok().filter(is_http);
     let base =
         base.ok_or_else(|| Error::Other(format!("The server names an authorization server that is no http(s) address: {issuer}")))?;
@@ -561,7 +484,6 @@ async fn discover(url: &Url, hint: Option<&Url>, metadata_url: Option<&str>) -> 
             Err(miss) => return Err(load(miss, &place)),
         };
         let server = AuthServer::parse(found)?;
-        // A document that speaks for another server isn't this one's.
         if server.issuer.trim_end_matches('/') != issuer.trim_end_matches('/') {
             return Err(Error::Other(format!("The authorization server at {issuer} says it is {}", server.issuer)));
         }
@@ -578,14 +500,11 @@ async fn discover(url: &Url, hint: Option<&Url>, metadata_url: Option<&str>) -> 
     Ok(Found { server, resource: resource_id, scopes })
 }
 
-/// The strings `document` lists under `field`.
 fn strings<'a>(document: Option<&'a Value>, field: &str) -> Vec<&'a str> {
     let list = document.and_then(|document| document.get(field)?.as_array());
     list.into_iter().flatten().filter_map(Value::as_str).collect()
 }
 
-/// The `resource` a server's metadata names for it, which must be the server's address
-/// or above it: one that names another's would have its tokens asked for here.
 fn resource_for(server: &Url, named: &str) -> Result<String, Error> {
     let within = |named: &Url| {
         let dir = |url: &Url| format!("{}/", url.path().trim_end_matches('/'));
@@ -598,8 +517,6 @@ fn resource_for(server: &Url, named: &str) -> Result<String, Error> {
 }
 
 impl AuthServer {
-    /// A metadata document, if it has what a sign-in needs. Its addresses are a server's
-    /// word and one of them is opened in a browser: http(s) or nothing.
     fn parse(document: Value) -> Result<Self, Error> {
         let unusable = |why: String| Error::Other(format!("The authorization server's metadata is not usable: {why}"));
         let server: Self = serde_json::from_value(document).map_err(|e| unusable(e.to_string()))?;
@@ -616,14 +533,11 @@ fn is_http(url: &Url) -> bool {
     matches!(url.scheme(), "http" | "https")
 }
 
-/// What a message quotes of a body the authorization server answered an error with: its start.
 fn start_of(body: &str) -> &str {
     let body = body.trim();
     &body[..body.floor_char_boundary(ERROR_BODY_BYTES)]
 }
 
-/// Register this app with the authorization server as a client that is redirected to
-/// `redirect` (dynamic client registration).
 async fn register(server: &AuthServer, redirect: &str, name: &str) -> Result<Registered> {
     let Some(endpoint) = &server.registration_endpoint else {
         bail!(
@@ -661,7 +575,6 @@ async fn register(server: &AuthServer, redirect: &str, name: &str) -> Result<Reg
     Ok(Registered { client_secret: registered.client_secret.filter(|secret| !secret.is_empty()), redirect_uris, ..registered })
 }
 
-/// The address the user signs in at.
 fn authorization_url(found: &Found, client_id: &str, redirect: &str, state: &str, verifier: &str, scope: Option<&str>) -> Result<Url> {
     let server = &found.server;
     if server.response_types_supported.as_ref().is_some_and(|types| !types.iter().any(|t| t == "code")) {
@@ -693,13 +606,8 @@ fn authorization_url(found: &Found, client_id: &str, redirect: &str, state: &str
     Ok(url)
 }
 
-/// Why the token endpoint gave no tokens.
 enum Refusal {
-    /// An OAuth error, in the server's words: `invalid_grant`, ...
-    Said {
-        code: String,
-        description: String,
-    },
+    Said { code: String, description: String },
     Other(String),
 }
 
@@ -713,7 +621,6 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// Ask the token endpoint for tokens, for `grant` (a code, or a refresh token).
 async fn token_request(
     server: &AuthServer,
     client: &Registered,
@@ -723,7 +630,6 @@ async fn token_request(
     let endpoint = Url::parse(&server.token_endpoint).ok().filter(is_secure);
     let endpoint = endpoint
         .ok_or_else(|| Refusal::Other(format!("The token endpoint {} is not https: nothing is sent there", server.token_endpoint)))?;
-    // How the client says who it is: as it registered, else as the server takes it.
     let offered = server.token_endpoint_auth_methods_supported.as_deref().unwrap_or_default();
     let takes = |method: &str| offered.is_empty() || offered.iter().any(|m| m == method);
     let registered = client
@@ -766,8 +672,6 @@ async fn token_request(
     }
     let text_of = |field: &str| answer.get(field).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
     let Some(access_token) = text_of("access_token").filter(|_| status.is_success()) else {
-        // Only an error is quoted, and only its start: an answer that is none may have
-        // tokens in it, in a shape of its own, and this is logged and shown.
         let said = if status.is_success() { String::new() } else { format!(": {}", start_of(&text)) };
         return Err(Refusal::Other(format!("The authorization server gave no token (HTTP {status}){said}")));
     };
@@ -781,7 +685,6 @@ async fn token_request(
     })
 }
 
-/// What the browser came back with.
 #[derive(Debug, PartialEq)]
 struct Answer {
     code: String,
@@ -789,8 +692,6 @@ struct Answer {
 }
 
 impl Answer {
-    /// The answer in the query the browser was sent back with, if it is to the sign-in
-    /// with `state`.
     fn parse(query: &HashMap<String, String>, state: &str) -> Result<Self, String> {
         if let Some(error) = query.get("error") {
             return Err(format!("The sign-in was turned down: {}", query.get("error_description").unwrap_or(error)));
@@ -802,7 +703,6 @@ impl Answer {
         Ok(Self { code: code.clone(), iss: query.get("iss").cloned() })
     }
 
-    /// The answer in the address the user pasted from the browser.
     fn pasted(pasted: &str, redirect: &str, state: &str) -> Result<Self> {
         let expected = Url::parse(redirect)?;
         match Url::parse(pasted.trim()) {
@@ -814,17 +714,12 @@ impl Answer {
     }
 }
 
-/// The port on this machine the browser comes back to.
 struct Callback {
     listener: TcpListener,
-    /// The redirect URI, as the authorization server is told it.
     redirect: String,
 }
 
 impl Callback {
-    /// Listen where the entry says (`callbackUrl`, `callbackPort`); else on the port of
-    /// the `registered` client's redirect URI if it is free, so that client stays good;
-    /// else on any.
     async fn listen(settings: &OAuth, registered: Option<&str>) -> Result<Self> {
         let written = settings.callback_url.as_deref().unwrap_or("http://127.0.0.1/callback");
         let mut url = Url::parse(written).context("oauth.callbackUrl")?;
@@ -848,8 +743,6 @@ impl Callback {
         Ok(Self { listener, redirect })
     }
 
-    /// Serve the port until the browser comes back to the sign-in with `state`: what it
-    /// brings. Anything else that finds the port is told it is wrong there.
     async fn wait(&self, state: &str) -> Result<Answer> {
         let path = Url::parse(&self.redirect)?.path().to_owned();
         let (answers, mut came) = mpsc::channel::<Result<Answer, String>>(1);
@@ -883,7 +776,6 @@ impl Callback {
     }
 }
 
-/// What an HTTP request on `stream` asks for: its target, as an address.
 async fn requested(stream: &mut TcpStream) -> Option<Url> {
     let mut head = Vec::new();
     let read = async {
@@ -966,13 +858,9 @@ mod tests {
         assert_eq!(refused.to_string(), "The authorization server registers clients at what is no http(s) address");
     }
 
-    /// A token endpoint of a test's own: every request gets the answer it was made with,
-    /// once the test lets it.
     struct Endpoint {
         server: AuthServer,
-        /// A request came.
         asked: Arc<tokio::sync::Notify>,
-        /// Told once for each request that is to be answered.
         answer: Arc<tokio::sync::Notify>,
     }
 
@@ -994,7 +882,6 @@ mod tests {
         endpoint
     }
 
-    /// Server `name`'s sign-in, as one from `endpoint` left it: the tokens `a1` and `r1`.
     fn signed_in(dirs: &Dirs, name: &str, endpoint: &Endpoint) -> Arc<Auth> {
         let auth = Arc::new(Auth::new(dirs, name, &Url::parse("https://x.dev/mcp").unwrap(), None));
         let login = Login {
@@ -1011,8 +898,6 @@ mod tests {
         Dirs { config: tmp.path().join("config"), data: tmp.path().join("data") }
     }
 
-    /// The message goes into logs and threads: an answer in a shape of the server's own
-    /// may have the tokens in it.
     #[tokio::test]
     async fn an_answer_without_a_token_is_quoted_only_if_it_is_an_error() {
         let client = Registered { client_id: "c".into(), ..Registered::default() };
@@ -1027,12 +912,9 @@ mod tests {
         assert!(long.ends_with('é') && long.len() < ERROR_BODY_BYTES + 100, "{long}");
     }
 
-    /// What a refresh comes back with is for the tokens it went out with: a sign-in or a
-    /// sign-out that came while the authorization server was asked stays as the user left it.
     #[tokio::test]
     async fn a_refresh_leaves_what_the_user_did_meanwhile() {
         let tmp = tempfile::tempdir().unwrap();
-        // Turned down, when the user has signed in again: those tokens stay, to go on with.
         let refused = token_endpoint(400, json!({"error": "invalid_grant"})).await;
         let auth = signed_in(&dirs(&tmp), "refused", &refused);
         let again = Tokens { access_token: "a2".into(), refresh_token: Some("r2".into()), ..Tokens::default() };
@@ -1043,7 +925,6 @@ mod tests {
         });
         assert_eq!((refreshed, auth.store.load(&auth.key).tokens.as_ref()), (Ok(()), Some(&again)));
 
-        // Answered with new tokens, when the user has signed out: signed out it stays.
         let granted = token_endpoint(200, json!({"access_token": "a3", "refresh_token": "r3"})).await;
         let auth = signed_in(&dirs(&tmp), "granted", &granted);
         let (refreshed, ()) = tokio::join!(auth.refresh(Some("a1")), async {
@@ -1054,8 +935,6 @@ mod tests {
         assert_eq!((refreshed, auth.store.load(&auth.key)), (Ok(()), Login::default()));
     }
 
-    /// An authorization server that doesn't answer holds up the requests of its own server,
-    /// not those of every other server that signs in.
     #[tokio::test]
     async fn a_refresh_waits_for_no_other_servers() {
         let tmp = tempfile::tempdir().unwrap();

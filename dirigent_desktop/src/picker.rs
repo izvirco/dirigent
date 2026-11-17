@@ -1,13 +1,3 @@
-//! The model picker popup, two pages behind the composer's model chip:
-//!
-//! - `Menu::Model`: the current combo (if unsaved) and the saved presets, each a
-//!   `<name> <id> <effort>` row with a hover-revealed ✕, grouped by model
-//!   (`ordered`). The header saves the current combo or links to the second page.
-//! - `Menu::AllModels`: back button, search input, and every model the host offers.
-//!
-//! A host that offers no models has no proxy set up: both pages then lead to Settings ›
-//! Proxy, to point the host at its proxy there (`set_up`).
-
 use crate::app::{Dirigent, Menu, Preset};
 use crate::icons::icon;
 use crate::menu::{self, ROW_H, Side};
@@ -16,13 +6,9 @@ use crate::theme::{self, text, u};
 use dirigent_protocol::ModelInfo;
 use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, rgba};
 
-/// Both pages share one width so flipping between them doesn't resize the popup.
 const WIDTH: f32 = 430.;
-/// Height of the scrolling model list (~9 rows).
 const LIST_H: f32 = 240.;
 
-/// The popup, opening to `side` of the chip (above it in the composer, under it in an
-/// edit bubble).
 pub fn menu(this: &Dirigent, no_target: bool, side: Side, cx: &mut Context<Dirigent>) -> AnyElement {
     let page = match this.menu {
         Some(Menu::AllModels) => all_models(this, no_target, cx),
@@ -31,7 +17,6 @@ pub fn menu(this: &Dirigent, no_target: bool, side: Side, cx: &mut Context<Dirig
     menu::popup(side, vec![div().w(u(WIDTH)).flex().flex_col().children(page).into_any()], cx)
 }
 
-/// `{Saved presets | Save preset} … All models ›`, a hairline, then the preset rows.
 fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let current = this.current_preset();
     let saved = current.as_ref().is_some_and(|c| this.presets.contains(c));
@@ -47,7 +32,6 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let header = div().flex().flex_row().items_center().justify_between().h(u(ROW_H)).flex_shrink_0().px_0p5().child(left).child(all);
 
     let mut rows = vec![header.into_any(), menu::separator()];
-    // First: nothing here runs without it.
     rows.extend(set_up(this, cx));
     if let Some(c) = &current
         && !saved
@@ -64,9 +48,6 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     rows
 }
 
-/// The saved presets in the order they are listed, each with its index in `presets` (what
-/// its ✕ removes): by model name, then id, then effort in the model's own level
-/// order (by name for a model the host doesn't offer).
 fn ordered<'a>(presets: &'a [Preset], models: &[ModelInfo]) -> Vec<(usize, &'a Preset)> {
     let mut rows: Vec<_> = presets.iter().enumerate().collect();
     rows.sort_by_cached_key(|(_, p)| {
@@ -77,13 +58,10 @@ fn ordered<'a>(presets: &'a [Preset], models: &[ModelInfo]) -> Vec<(usize, &'a P
     rows
 }
 
-/// What a preset's model is called: the host's name for it, else its id.
 fn model_name(id: &str, models: &[ModelInfo]) -> String {
     models.iter().find(|m| m.id == id).map_or_else(|| id.to_owned(), |m| m.name.clone())
 }
 
-/// When the composer's host is up but offers no models: a row to Settings › Proxy, to
-/// point the host at its proxy there.
 fn set_up(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let host = this.composer_host()?.to_owned();
     let up = this.host(&host).is_some_and(|h| h.status == HostStatus::Connected);
@@ -93,9 +71,8 @@ fn set_up(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     })
 }
 
-/// `‹ [search]`, a hairline, then the matching models in a fixed-height scroll.
 fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
-    // Mouse only, not a `menu::header_stop`: Left / Right are the search's.
+    // MUST KILL: extract: back → a mouse-only header button, not menu::header_stop (Left / Right belong to the search)
     let back = div()
         .id("models-back")
         .size(u(ROW_H))
@@ -134,14 +111,12 @@ fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> V
     vec![header.into_any(), menu::separator(), list]
 }
 
-/// `<name> <id>`; picks the model, keeping the effort when the model supports it.
 fn model_row(m: &ModelInfo, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = m.id.clone();
     let selected = this.model.as_deref() == Some(&key);
     menu::item(format!("m/{key}"), m.name.clone(), key.clone(), selected, move |this, cx| this.set_model(key.clone(), cx), cx)
 }
 
-/// `<name> <id> <effort>` with a ✕ on hover when `index` names a saved preset.
 fn preset_row(
     id: impl Into<gpui::SharedString>,
     p: &Preset,
@@ -178,8 +153,6 @@ fn preset_row(
         .into_any()
 }
 
-/// A quiet text button for the presets header, optionally with a trailing icon. A
-/// `menu::header_stop` lights it.
 fn header_button(id: &'static str, label: &'static str, trailing: Option<&'static str>, color: u32) -> Stateful<Div> {
     div()
         .id(id)
@@ -212,7 +185,6 @@ mod tests {
             efforts: ["low", "high", "xhigh"].map(String::from).to_vec(),
         };
         let preset = |model: &str, effort: &str| Preset { model: model.into(), effort: Some(effort.into()) };
-        // The host's names order the models, not their keys; `gone` isn't offered any more.
         let models = [model("a", "Opus"), model("b", "Fable")];
         let presets = [
             preset("a", "xhigh"),
@@ -223,7 +195,6 @@ mod tests {
             preset("a", "high"),
         ];
         let order: Vec<usize> = ordered(&presets, &models).into_iter().map(|(i, _)| i).collect();
-        // Fable low, xhigh; gone high, low (by name); Opus high, xhigh.
         assert_eq!(order, [3, 2, 4, 1, 5, 0]);
     }
 }

@@ -1,14 +1,3 @@
-//! One desktop per data dir. A second launch (Explorer's "Open in Dirigent", a shortcut
-//! clicked while Dirigent runs) hands its folder to the running desktop, which comes to
-//! the front, and exits.
-//!
-//! The running desktop listens on a loopback port, written to `<data dir>/desktop.port`. A
-//! launch connects there and sends one JSON line, `{"data_dir": …, "open": …}`; the desktop
-//! answers `ok` if it runs on that data dir. Anything else (no file, nothing listening, a
-//! port reused by another program or another data dir's desktop) and the launch becomes
-//! the running desktop itself. Keyed by data dir, so test instances (`scripts/ui.sh`)
-//! never hand off to the real one.
-
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -16,8 +5,6 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-/// What a launch asks of the running desktop: come to the front, and open `open` (a folder)
-/// if given.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Launch {
     data_dir: PathBuf,
@@ -28,8 +15,6 @@ fn port_file() -> PathBuf {
     dirigent_service::data_dir().join("desktop.port")
 }
 
-/// Hand `open` to the desktop already running on this data dir. `true`: it took it, so this
-/// launch is done.
 pub fn hand_off(open: Option<&str>) -> bool {
     let Some(port) = std::fs::read_to_string(port_file()).ok().and_then(|p| p.trim().parse::<u16>().ok()) else {
         return false;
@@ -53,7 +38,6 @@ pub fn hand_off(open: Option<&str>) -> bool {
     }
 }
 
-/// Become the running desktop: later launches arrive on the returned channel.
 pub fn listen() -> Option<futures::channel::mpsc::UnboundedReceiver<Launch>> {
     let listener = match TcpListener::bind((Ipv4Addr::LOCALHOST, 0)) {
         Ok(l) => l,

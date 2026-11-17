@@ -1,6 +1,3 @@
-//! Stand-ins for the tests: a host that keeps what comes of a session in memory, and a
-//! model that says what a test scripted.
-
 use crate::proxy::{Chunk, Failure, Model, Price, Reply, Request};
 use crate::tool::{Call, Tool, ToolOutput, ToolSpec};
 use crate::{Host, Llm, Out};
@@ -13,7 +10,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// A host nothing reaches.
 pub struct Deaf;
 
 impl Host for Deaf {
@@ -32,16 +28,12 @@ impl Host for Deaf {
     }
 }
 
-/// A host that keeps everything, for a test to look at.
 #[derive(Default)]
 pub struct Memory {
     pub outs: Mutex<Vec<Out>>,
     blobs: Mutex<HashMap<String, (String, Vec<u8>)>>,
-    /// Told whenever something came.
     pub came: tokio::sync::Notify,
-    /// Its own tools for a session.
     tools: Vec<Arc<dyn Tool>>,
-    /// Set: it panics over the next thing that comes, once.
     pub trip: AtomicBool,
 }
 
@@ -67,7 +59,6 @@ impl Host for Memory {
     }
 }
 
-/// A tool for a test, as a host's own: called `.0`, a call of it does `.1`.
 pub struct Does<F>(pub &'static str, pub F);
 
 #[async_trait]
@@ -86,17 +77,14 @@ where
 }
 
 impl Memory {
-    /// The entries that came, in order.
     pub fn entries(&self) -> Vec<Entry> {
         self.outs.lock().unwrap().iter().filter_map(|o| if let Out::Entry(e) = o { Some(e.clone()) } else { None }).collect()
     }
 
-    /// Wait until the run in progress has ended (`n` runs have, in all).
     pub async fn settled(&self, n: usize) {
         self.until(|outs| outs.iter().filter(|o| matches!(o, Out::Event(Event::RunEnd))).count() >= n).await;
     }
 
-    /// Wait until what came is `enough`.
     pub async fn until(&self, enough: impl Fn(&[Out]) -> bool) {
         let wait = async {
             loop {
@@ -110,13 +98,11 @@ impl Memory {
         tokio::time::timeout(std::time::Duration::from_secs(20), wait).await.expect("it never came");
     }
 
-    /// The entries as a line each, for a test to compare: who said what.
     pub fn transcript(&self) -> Vec<String> {
         self.entries().iter().map(line).collect()
     }
 }
 
-/// An entry in a few words.
 pub fn line(entry: &Entry) -> String {
     let blocks = |content: &[Block]| -> String {
         let block = |b: &Block| match b {
@@ -143,32 +129,23 @@ pub fn line(entry: &Entry) -> String {
     }
 }
 
-/// What the scripted model does with one request.
 pub enum Step {
-    /// Reply with this content.
     Say(Vec<Block>),
-    /// Fail, as the proxy would report it.
     Fail(Failure, &'static str),
-    /// Say nothing until the request is cancelled.
     Hang,
-    /// Panic, saying this.
     Panic(&'static str),
 }
 
-/// A text block.
 pub fn text(text: &str) -> Block {
     Block::text(text)
 }
 
-/// A tool call block: the call's id is the tool's name and a number.
 pub fn call(id: &str, name: &str, input: Value) -> Block {
     Block::ToolCall { id: id.into(), name: name.into(), input }
 }
 
-/// A model that goes through `steps`, one per request, and keeps what it was asked.
 pub struct Script {
     steps: Mutex<VecDeque<Step>>,
-    /// Every request's messages, as text (`Debug`), and its system prompt.
     pub requests: Mutex<Vec<(String, String, Vec<String>)>>,
     pub context_window: u64,
 }
@@ -187,7 +164,6 @@ impl Script {
 impl Llm for Script {
     async fn model(&self, id: &str) -> anyhow::Result<Model> {
         anyhow::ensure!(id != "unserved", "{id} is not a model the proxy serves");
-        // As a proxy that takes its time to say what it serves.
         if id == "slow" {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
@@ -214,7 +190,6 @@ impl Llm for Script {
             provider: String::new(),
             api: Api::Anthropic,
             effort: None,
-            // As if the whole request were a hundred tokens: tests of compaction script their own sizes.
             usage: Usage { input: 100, output: 10, ..Usage::default() },
             stop,
             error: error.map(str::to_owned),
@@ -246,15 +221,12 @@ impl Llm for Script {
     }
 }
 
-/// An agent whose model is `script` and whose host has `tools` of its own, and that host.
-/// `dir` holds its config and data.
 pub fn agent(dir: &std::path::Path, script: Arc<Script>, tools: Vec<Arc<dyn Tool>>) -> (Arc<Memory>, Arc<crate::Agent>) {
     let host = Arc::new(Memory { tools, ..Memory::default() });
     let dirs = crate::config::Dirs { config: dir.join("config"), data: dir.join("data") };
     (host.clone(), crate::Agent::new(dirs, host, script))
 }
 
-/// A thread in `dir` with nothing in it yet.
 pub fn thread(dir: &std::path::Path) -> crate::session::Thread {
     crate::session::Thread {
         id: "thread".into(),
@@ -265,19 +237,15 @@ pub fn thread(dir: &std::path::Path) -> crate::session::Thread {
     }
 }
 
-/// A thread in `dir` with nothing in it yet, loaded into a session whose model is `script`:
-/// its host, and the session. The directory is the thread's, and holds its config and data.
 pub fn session(dir: &std::path::Path, script: Arc<Script>) -> (Arc<Memory>, Arc<crate::session::Session>) {
     session_with(dir, script, vec![])
 }
 
-/// `session`, with `tools` of the host's own.
 pub fn session_with(dir: &std::path::Path, script: Arc<Script>, tools: Vec<Arc<dyn Tool>>) -> (Arc<Memory>, Arc<crate::session::Session>) {
     let (host, agent) = agent(dir, script, tools);
     (host, agent.load(thread(dir)))
 }
 
-/// A prompt of just `text`.
 pub fn prompt(text: &str) -> crate::session::Prompt {
     crate::session::Prompt { text: text.into(), ..Default::default() }
 }

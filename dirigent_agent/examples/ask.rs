@@ -1,15 +1,3 @@
-//! Ask a model one thing and print its reply as it streams: the proxy client, end to end.
-//!
-//! ```sh
-//! cargo run -p dirigent_agent --example ask -- "Why is the sky blue?"
-//! cargo run -p dirigent_agent --example ask -- --model claude-haiku-5-5 --effort high --system "Be terse." "17 * 23?"
-//! cargo run -p dirigent_agent --example ask -- --codex "hi"      # over the `codex` wire, whatever the model
-//! cargo run -p dirigent_agent --example ask -- --models          # what the proxy serves
-//! ```
-//!
-//! The proxy is the one `DIRIGENT_PROXY_URL` and `DIRIGENT_PROXY_KEY` name, else the one of
-//! this machine's install (`[proxy]` in `~/.config/dirigent/agent.toml`).
-
 use anyhow::{Context, Result};
 use dirigent_agent::config::{self, Config, Dirs};
 use dirigent_agent::proxy::{Chunk, Message, Model, Part, Proxy, Request};
@@ -34,7 +22,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Directories of its own, with an `agent.toml` that names the proxy.
     let tmp = tempfile::tempdir()?;
     let dirs = Dirs { config: tmp.path().join("config"), data: tmp.path().join("data") };
     let proxy = match (std::env::var("DIRIGENT_PROXY_URL"), std::env::var("DIRIGENT_PROXY_KEY")) {
@@ -73,7 +60,6 @@ async fn main() -> Result<()> {
         max_output: None,
         cache_key: "",
     };
-    // Thinking is printed dim; a new block starts on a new line.
     let mut block = None;
     let mut on = |chunk: Chunk| {
         let (index, text) = match chunk {

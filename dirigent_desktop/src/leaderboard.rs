@@ -1,26 +1,3 @@
-//! The leaderboard's desktop side: joining with the forge account, uploading every connected
-//! service's usage, and fetching the board the Usage modal's Leaderboard tab shows
-//! (`usage.rs`). The api is `dirigent_api`'s `leaderboard.rs`.
-//!
-//! Joining (on the board; leaving is in Settings › Forge providers): signed in to the forge
-//! (`account.rs`; Join takes you to Settings › Forge providers first if need be), the
-//! desktop asks the api to `join` with a forge JWT made
-//! for the api's url, and keeps the `Account` it answers with in `kv`: the data dir, so a
-//! test instance (`--data-dir`) starts out of it. Uploads and leaving send a fresh JWT each
-//! time (`forge::token`, cached for its ten minutes). The account counts while the forge
-//! account it joined as is signed in (`active`): signed out, nothing is uploaded; signed in
-//! as someone else, it waits, and Join replaces it with that account.
-//!
-//! Desktops up to 0.0.6 joined through the api itself and saved an api token in the
-//! `Account`. The api takes no such token now and the field is ignored: a saved account
-//! counts like any other, while its forge user is signed in.
-//!
-//! Uploading: every `UPLOAD_EVERY` and whenever a service says hello, each connected
-//! service's usage since joining (at most `UPLOAD_DAYS` back) is asked for per hour, summed
-//! over its models and sent under the service's id. The api keeps the bigger of two
-//! snapshots of an hour, so sending the same hours again (or from another desktop that
-//! shares the service) counts nothing twice.
-
 use crate::app::{Dirigent, image_from};
 use crate::cache::Cache;
 use crate::net::HostStatus;
@@ -35,17 +12,11 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const ACCOUNT_KEY: &str = "leaderboard_account";
-/// How often (seconds, on `Dirigent::tick`) the services' usage is uploaded.
+// MUST KILL: rename: UPLOAD_EVERY -> UPLOAD_EVERY_TICKS, counted in Dirigent::tick seconds
 pub const UPLOAD_EVERY: u64 = 300;
-/// How far back an upload reaches: a desktop that was off longer misses what's older.
 const UPLOAD_DAYS: i64 = 30;
-/// What the api answers an upload or leave with a valid forge token of someone not on the
-/// board: the one status that means "left" (from another desktop). A token it refuses (401)
-/// or can't check (503) is no reason to forget the player.
 const NOT_ON_THE_BOARD: u16 = 403;
 
-/// The api: `DIRIGENT_API_URL`, for tests, or the real one. Also the `resource` of the
-/// forge JWTs it takes (their audience, which the api checks against its own url).
 fn api() -> String {
     std::env::var("DIRIGENT_API_URL")
         .ok()
@@ -64,28 +35,20 @@ fn agent() -> ureq::Agent {
     )
 }
 
-/// The leaderboard's state, on `Dirigent`.
 #[derive(Default)]
 pub struct State {
-    /// The player this desktop joined as; `active` says if it counts.
     account: Option<Account>,
-    /// A join waiting for the api.
     pub joining: bool,
     pub range: Range,
-    /// The board for `range`, as last fetched; `None` until one arrives.
     pub board: Option<Board>,
-    /// Why the last fetch failed.
     pub error: Option<String>,
-    /// Bumped by every fetch: only the latest one's answer is shown.
+    // MUST KILL: rename: fetch -> fetch_generation, only the latest fetch's answer is shown
     fetch: u64,
-    /// Each host's latest `ListUsage` for an upload: its request id and the service id it's
-    /// for. A newer one replaces it, so one that never got an answer doesn't linger.
+    // MUST KILL: type: uploads' (request id, service id) as a struct, not a tuple
     uploads: HashMap<String, (u64, String)>,
-    /// Services the api said are another player's: not uploaded again.
     not_ours: HashSet<String>,
-    /// The last upload failed: logged once until one works again.
     failing: bool,
-    /// Pictures by url: `None` while loading (or when it didn't load).
+    // MUST KILL: type: avatars' values as an enum (Loading / Failed / Loaded), not an Option for both
     pub avatars: HashMap<String, Option<Arc<gpui::Image>>>,
 }
 
@@ -95,20 +58,17 @@ impl State {
         Self { account, ..Self::default() }
     }
 
-    /// The account, if it counts now: while the forge account it joined as is signed in.
     pub fn active(&self, forge: &forge::Status) -> Option<&Account> {
         let sub = forge.signed_in()?.sub.as_str();
         self.account.as_ref().filter(|a| a.id == sub)
     }
 
-    /// `host` disconnected: its uploads' answers won't come.
     pub fn drop_uploads(&mut self, host: &str) {
         self.uploads.remove(host);
     }
 }
 
-/// Run `work` (blocking HTTP) on a thread of its own, then `done` with its result on the UI
-/// thread. Not on gpui's background pool: a few slow requests would stall its other work
+/// Not on gpui's background pool: a few slow requests would stall its other work
 /// (image decoding, the background pattern).
 pub fn http<T: Send + 'static>(
     cx: &mut Context<Dirigent>,
@@ -131,8 +91,6 @@ pub fn http<T: Send + 'static>(
 }
 
 impl Dirigent {
-    /// "Join": as the forge account. Not signed in to the forge, it takes you where you sign
-    /// in (Settings › Forge providers); you join from here once you are.
     pub fn join_board(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         if self.leaderboard.joining {
@@ -168,7 +126,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// "Leave": off the board, usage and all; out of it on every desktop.
     pub fn leave_board(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         if self.leaderboard.active(&self.forge.status).is_none() {
@@ -182,12 +139,10 @@ impl Dirigent {
                 Ok(())
             },
             move |this, left, cx| match left {
-                // A player the api no longer knows has left already.
                 Err(e) if status(&e) != Some(NOT_ON_THE_BOARD) => this.toast(format!("Couldn't leave the leaderboard: {e:#}"), cx),
                 _ => {
                     this.forget_player();
                     this.fetch_board(cx);
-                    // Said out loud: in Settings, its row just goes.
                     this.toast("You're off the leaderboard, and your usage there is deleted", cx);
                 }
             },
@@ -200,7 +155,6 @@ impl Dirigent {
         let _ = self.cache.lock().unwrap().remove(ACCOUNT_KEY);
     }
 
-    /// Upload every connected service's usage (`UPLOAD_EVERY`, and on joining).
     pub fn upload_all(&mut self) {
         let hosts: Vec<String> = self.hosts.iter().map(|h| h.name.clone()).collect();
         for host in hosts {
@@ -208,8 +162,6 @@ impl Dirigent {
         }
     }
 
-    /// Ask `host` for its usage per hour since joining; `on_upload_usage` sends it on.
-    /// Nothing while out of the leaderboard, or for a service that doesn't send its id.
     pub fn upload_usage(&mut self, host: &str) {
         let Some(account) = self.leaderboard.active(&self.forge.status) else { return };
         let joined_at = account.joined_at;
@@ -225,7 +177,7 @@ impl Dirigent {
         self.leaderboard.uploads.insert(host.to_owned(), (id, service));
     }
 
-    /// A `Usage` reply: if it's for an upload, send it to the api and return true.
+    // MUST KILL: rename: on_upload_usage -> take_upload_usage, true when the reply was an upload's
     pub fn on_upload_usage(&mut self, reply_to: u64, buckets: &[UsageBucket], cx: &mut Context<Self>) -> bool {
         let ours = self.leaderboard.uploads.iter().find(|(_, (id, _))| *id == reply_to).map(|(host, _)| host.clone());
         let Some((_, service)) = ours.and_then(|host| self.leaderboard.uploads.remove(&host)) else { return false };
@@ -246,8 +198,6 @@ impl Dirigent {
             },
             move |this, sent, cx| match sent {
                 Ok(()) => this.leaderboard.failing = false,
-                // The api doesn't know this player (left from another desktop): out here too,
-                // said once however many hosts' uploads find out.
                 Err(e) if status(&e) == Some(NOT_ON_THE_BOARD) => {
                     if this.leaderboard.account.is_some() {
                         warn!("leaderboard upload: {e:#}");
@@ -269,7 +219,6 @@ impl Dirigent {
         true
     }
 
-    /// Fetch the board for the range shown; the one shown stays up until it's in.
     pub fn fetch_board(&mut self, cx: &mut Context<Self>) {
         self.leaderboard.fetch += 1;
         let (fetch, range) = (self.leaderboard.fetch, self.leaderboard.range);
@@ -308,7 +257,6 @@ impl Dirigent {
         self.fetch_board(cx);
     }
 
-    /// Load the pictures of the board's players and of the account not loaded yet.
     fn fetch_avatars(&mut self, cx: &mut Context<Self>) {
         let lb = &self.leaderboard;
         let urls: Vec<String> = lb
@@ -320,8 +268,6 @@ impl Dirigent {
         self.fetch_pictures(urls, cx);
     }
 
-    /// Load the pictures at `urls` not loaded (or loading) yet into `avatars`, which the
-    /// forge account's (Settings › Forge providers) shares.
     pub fn fetch_pictures(&mut self, urls: impl IntoIterator<Item = String>, cx: &mut Context<Self>) {
         let lb = &self.leaderboard;
         let urls: HashSet<String> = urls.into_iter().filter(|u| u.starts_with("http") && !lb.avatars.contains_key(u)).collect();
@@ -343,7 +289,6 @@ impl Dirigent {
     }
 }
 
-/// The HTTP status of a failed request, if it got one.
 fn status(e: &anyhow::Error) -> Option<u16> {
     match e.downcast_ref::<ureq::Error>() {
         Some(ureq::Error::StatusCode(code)) => Some(*code),
@@ -351,7 +296,6 @@ fn status(e: &anyhow::Error) -> Option<u16> {
     }
 }
 
-/// A host's usage per hour and model, summed per hour: what an upload carries.
 fn hours(buckets: &[UsageBucket]) -> Vec<Slot> {
     let mut by_hour: BTreeMap<i64, Slot> = BTreeMap::new();
     for b in buckets {
@@ -400,7 +344,6 @@ mod tests {
     fn a_saved_account_counts_while_its_forge_account_is_signed_in() {
         let cache = Cache::in_memory().unwrap();
         let signed_in = |sub: &str| Status::SignedIn(ForgeAccount { sub: sub.into(), username: "seb".into(), picture: String::new() });
-        // As 0.0.6 saved it, with the api token it uploaded with: still read, the token ignored.
         cache.set(ACCOUNT_KEY, r#"{"token":"old-token","id":"u1","name":"seb","picture":"","joined_at":7}"#).unwrap();
         let s = State::new(&cache);
         assert_eq!(s.active(&signed_in("u1")).map(|a| a.joined_at), Some(7));

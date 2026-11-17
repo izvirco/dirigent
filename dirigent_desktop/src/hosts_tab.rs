@@ -1,18 +1,3 @@
-//! Settings › Hosts: every host (`local` and what `hosts.toml` lists), one line each, and
-//! the form that adds or edits one.
-//!
-//! A row is the host's name, address, auth and state; a failing host says `error` and
-//! shows why on hover, so every row keeps one line. A forge host that fails for want of
-//! the forge sign-in says `not signed in` instead, a link to Settings › Forge providers
-//! (`account.rs`), the only place that signs in; the form links there too while it has
-//! forge auth picked and nobody is signed in. Clicking a row (or its pencil) opens
-//! the form in its place, filled in; `Add host` asks for the auth first (its menu), then
-//! opens the same form empty under the rows. The form has the fields its auth needs and
-//! its auth chip changes that; Enter saves, Esc cancels, and what's wrong (a bad address,
-//! a name taken) shows on its bottom line. Saving rewrites `hosts.toml`, a rename
-//! replacing the old entry and taking what's cached for it along (`Dirigent::rename_host`),
-//! and `sync_hosts` reconnects whatever changed.
-
 use crate::app::{Dirigent, Menu, Modal};
 use crate::icons::icon;
 use crate::input::{self, Submitted, TextInput};
@@ -25,18 +10,12 @@ use dirigent_service::hosts::{self, Auth, Host};
 use gpui::{AnyElement, Context, Div, Entity, Focusable, FontWeight, SharedString, Stateful, div, prelude::*, rgba};
 use std::collections::BTreeMap;
 
-/// A host row's height, in design px.
 const ROW_H: f32 = 38.;
 
-/// How a host is authenticated to, as the form picks it: `hosts::Auth` before it has
-/// its key (from the key field).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum HostAuth {
-    /// Tailscale, ssh or a private network: nothing to send.
     None,
-    /// An API key of the host's public listener.
     Key,
-    /// A token from the forge account (Settings › Forge providers).
     Forge,
 }
 
@@ -59,7 +38,6 @@ impl HostAuth {
         }
     }
 
-    /// What it's for, in the menus.
     fn hint(self) -> &'static str {
         match self {
             HostAuth::None => "tailscale, ssh or plain ws",
@@ -68,7 +46,6 @@ impl HostAuth {
         }
     }
 
-    /// A row's word for it (none says nothing).
     fn tag(self) -> Option<&'static str> {
         match self {
             HostAuth::None => None,
@@ -77,7 +54,6 @@ impl HostAuth {
         }
     }
 
-    /// The address field's placeholder: the forms an address of this kind takes.
     fn placeholder(self) -> &'static str {
         match self {
             HostAuth::None => "host, ssh://user@host or ws://host:7777/ws",
@@ -86,16 +62,12 @@ impl HostAuth {
     }
 }
 
-/// The open form.
 pub struct Form {
-    /// The host it edits (its name in `hosts.toml`); `None`: a new one.
     pub editing: Option<String>,
     pub auth: HostAuth,
-    /// Why the last save didn't go through, until the next edit.
     pub error: Option<String>,
 }
 
-/// The tab's state, on `Dirigent`: the form's fields and the form, if open.
 pub struct State {
     pub name: Entity<TextInput>,
     pub url: Entity<TextInput>,
@@ -131,12 +103,10 @@ impl State {
 }
 
 impl Dirigent {
-    /// `Add host`'s menu: the form for a new host authenticated with `auth`.
     pub fn add_host_form(&mut self, auth: HostAuth, cx: &mut Context<Self>) {
         self.open_host_form(None, auth, ["", "", ""], cx);
     }
 
-    /// A row's click: the form for host `name`, filled in.
     pub fn edit_host_form(&mut self, name: &str, cx: &mut Context<Self>) {
         let Some(host) = self.host(name).map(|h| h.config.clone()) else { return };
         let key = match &host.auth {
@@ -158,7 +128,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The form's auth chip: the fields follow (an API key's takes the focus).
     pub fn set_host_auth(&mut self, auth: HostAuth, cx: &mut Context<Self>) {
         self.menu = None;
         let Some(form) = &mut self.hosts_tab.form else { return };
@@ -172,7 +141,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Enter or Save: write the form's host to `hosts.toml` and close it, or say what's wrong.
     pub fn save_host_form(&mut self, cx: &mut Context<Self>) {
         let Some(form) = &self.hosts_tab.form else { return };
         let text = |input: &Entity<TextInput>| input.read(cx).text().to_owned();
@@ -190,8 +158,7 @@ impl Dirigent {
                     Some(old) => self.rename_host(&old, &name, cx),
                     None => self.sync_hosts(cx),
                 }
-                // After: a thread reopened under the new name takes the focus, which goes back
-                // to the modal here.
+                // MUST KILL: rearchitect: rename_host should not take the focus, so close_host_form need not come after it
                 self.close_host_form(cx);
             }
             Err(e) => {
@@ -203,7 +170,6 @@ impl Dirigent {
         }
     }
 
-    /// Cancel, Esc or a save: the form goes, nothing else changes.
     pub fn close_host_form(&mut self, cx: &mut Context<Self>) {
         if self.hosts_tab.form.take().is_some() {
             self.menu = None;
@@ -212,7 +178,7 @@ impl Dirigent {
         }
     }
 
-    /// Esc: closes the form if the tab shows one (and says so; else the modal closes).
+    // MUST KILL: rename: host_form_escape -> close_host_form_on_escape, true when it handled the Esc
     pub fn host_form_escape(&mut self, cx: &mut Context<Self>) -> bool {
         let on_tab = self.modal == Some(Modal::Settings) && self.settings.tab == settings::Tab::Hosts;
         if !on_tab || self.hosts_tab.form.is_none() {
@@ -237,7 +203,6 @@ impl Dirigent {
     }
 }
 
-/// The form's fields as the host to save under its name, or what's wrong with them.
 fn host_from(name: &str, address: &str, auth: HostAuth, key: &str) -> Result<(String, Host), String> {
     let name = name.trim();
     if name.is_empty() {
@@ -259,8 +224,6 @@ fn host_from(name: &str, address: &str, auth: HostAuth, key: &str) -> Result<(St
     Ok((name.to_owned(), Host { url, auth }))
 }
 
-/// Put `host` in `list` as `name`, in place of `editing` (the name it had: a rename drops
-/// that entry). A name another host has is refused.
 fn put(list: &mut BTreeMap<String, Host>, editing: Option<&str>, name: String, host: Host) -> Result<(), String> {
     if editing != Some(name.as_str()) && list.contains_key(&name) {
         return Err(format!("There's already a host named {name}"));
@@ -272,8 +235,6 @@ fn put(list: &mut BTreeMap<String, Host>, editing: Option<&str>, name: String, h
     Ok(())
 }
 
-/// The tab: the rows (one of them the form while it's edited), then `Add host`, or the
-/// form adding one. One form at a time: `Add host` waits while one is open.
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
     let form = this.hosts_tab.form.as_ref();
     let editing = form.and_then(|f| f.editing.as_deref());
@@ -285,7 +246,6 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
             _ => row(this, h, cx).into_any_element(),
         })
         .collect();
-    // A new host's form, or one whose host left `hosts.toml` meanwhile (a hand edit), goes under the rows.
     let in_rows = editing.is_some_and(|e| this.hosts.iter().any(|h| h.name == e));
     let below = match form {
         Some(f) if !in_rows => Some(form_card(this, f, cx).mt_2()),
@@ -295,7 +255,6 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
     vec![section("Hosts", theme::stack().children(rows).children(below)), saved_to(&hosts::path())]
 }
 
-/// `● name   address   auth   state   ✎ ×`: one line, whatever its state.
 fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     let name = h.name.clone();
@@ -342,10 +301,7 @@ fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<D
         .child(actions(&name, local, cx))
 }
 
-/// The row's dot colour, its state word and what its cell shows on hover: `error` (red)
-/// while it can't connect, kept through its retries so the row doesn't flicker, with why.
-/// A forge host that can't connect for want of the forge sign-in says `not signed in`
-/// instead (amber): a link to where that's done.
+// MUST KILL: type: state returns a struct (dot, word, hover text), not a tuple
 fn state(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> (u32, AnyElement, Option<String>) {
     let t = theme::t();
     let word = |text: &'static str, color: u32| div().text_size(text::sm()).text_color(rgba(color)).child(text).into_any_element();
@@ -359,7 +315,6 @@ fn state(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> (u32, An
     }
 }
 
-/// Edit and remove, shown while the row is hovered; `local` has neither.
 fn actions(name: &str, local: bool, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let button = |id: String, icon_name: &'static str| {
@@ -391,7 +346,6 @@ fn actions(name: &str, local: bool, cx: &mut Context<Dirigent>) -> Div {
     })
 }
 
-/// `+ Add host ▾`: its menu picks the new host's auth, which opens the form.
 fn add_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.menu == Some(Menu::AddHost);
     let menu = open.then(|| {
@@ -408,8 +362,6 @@ fn add_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .children(menu)
 }
 
-/// The form: what it does and its auth chip, the fields that auth needs, then what's wrong
-/// (if anything) beside Cancel and Save.
 fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let tab = &this.hosts_tab;
@@ -433,7 +385,6 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
             .child(div().w(u(72.)).flex_shrink_0().text_color(rgba(t.fg_1)).child(label))
             .child(field(input.clone()).flex_1())
     };
-    // Forge auth needs the forge sign-in, which is done on its own tab.
     let signed_out = f.auth == HostAuth::Forge && this.forge.status.signed_in().is_none();
     let note = match &f.error {
         Some(e) => Some(div().truncate().text_color(rgba(t.error)).child(e.clone()).into_any_element()),
@@ -472,7 +423,6 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
         .child(footer)
 }
 
-/// A link to Settings › Forge providers (`id`: what it's on), where the forge sign-in is.
 fn forge_link(label: &'static str, id: String, color: u32, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     div()
         .id(SharedString::from(format!("forge-link/{id}")))
@@ -488,7 +438,6 @@ fn forge_link(label: &'static str, id: String, color: u32, cx: &mut Context<Diri
         .child(label)
 }
 
-/// `Auth  API key ▾`: the form's auth, changeable.
 fn auth_chip(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.menu == Some(Menu::HostAuth);
     let menu = open.then(|| {
@@ -542,11 +491,9 @@ mod tests {
     #[test]
     fn put_adds_edits_and_renames() {
         let mut hosts = list(&[("a", "ws://a:1/ws"), ("b", "ws://b:1/ws")]);
-        // A new host may not take a name in use; an edit keeping its name replaces it.
         assert!(put(&mut hosts, None, "a".into(), Host::new("ws://x:1/ws".into())).is_err());
         put(&mut hosts, Some("a"), "a".into(), Host::new("ws://a:2/ws".into())).unwrap();
         assert_eq!(hosts, list(&[("a", "ws://a:2/ws"), ("b", "ws://b:1/ws")]));
-        // A rename leaves no entry under the old name, and can't land on another host's.
         assert!(put(&mut hosts, Some("a"), "b".into(), Host::new("ws://a:2/ws".into())).is_err());
         put(&mut hosts, Some("a"), "c".into(), Host::new("ws://a:2/ws".into())).unwrap();
         assert_eq!(hosts, list(&[("b", "ws://b:1/ws"), ("c", "ws://a:2/ws")]));

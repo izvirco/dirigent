@@ -1,16 +1,3 @@
-//! The Settings modal, behind the sidebar's gear: tabs down the left, the open tab's
-//! sections on the right. General, Thread titles and Agent tools are the UI over
-//! `config.toml` (`config.rs`); Hosts over `hosts.toml`, Proxy over a host's CLIProxyAPI,
-//! MCP servers over the `[mcp.*]` entries of a host's `agent.toml` and Forge providers over
-//! the forge sign-in have their own flows (`hosts_tab.rs`, `proxy.rs`, `mcp.rs`,
-//! `account.rs`).
-//! Everything else saves as it is changed: the text fields (fonts, title prompt) 300ms
-//! after the last keystroke, with a warning mark on a font field whose family isn't
-//! installed; theme, text size, background, title model, reasoning, the agent tools and
-//! telemetry are chips, a stepper and switches that save at once. `Test` opens a sample
-//! first message, runs it through the title settings on the local host, and shows the title
-//! with what it cost.
-
 use crate::ambient::{Pattern, Reach};
 use crate::app::{Dirigent, Menu};
 use crate::hosts_tab;
@@ -27,22 +14,17 @@ use gpui::{AnyElement, Context, Div, Entity, FontWeight, SharedString, Stateful,
 use std::path::Path;
 use std::time::Instant;
 
-/// The tab list's width.
 const NAV_W: f32 = 180.;
 
-/// The modal's tabs, in nav order.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
     General,
-    /// A host's CLIProxyAPI (`proxy.rs`).
     Proxy,
     Titles,
     Tools,
-    /// A host's MCP servers (`mcp.rs`).
     Mcp,
     Hosts,
-    /// The forge sign-in (`account.rs`).
     Forge,
 }
 
@@ -62,13 +44,11 @@ impl Tab {
     }
 }
 
-/// The sample first message `Test` starts with.
 const SAMPLE: &str = "The websocket client in net.rs reconnects with a fixed 1s delay, which hammers the service when a host is \
 down for a while. Switch it to exponential backoff starting at 1s and capped at 30s, reset the delay once a connection \
 succeeds, and make sure the status shown in the sidebar still flips to connecting on every attempt. Add a unit test for \
 the backoff schedule.";
 
-/// A finished title test (see `ServerMessage::Title`).
 #[derive(Clone)]
 pub struct TitleResult {
     pub title: String,
@@ -79,7 +59,6 @@ pub struct TitleResult {
     pub duration_ms: i64,
 }
 
-/// The open tab (the gear reopens the last one), the inputs and the title test's state.
 #[derive(Clone)]
 pub struct State {
     pub tab: Tab,
@@ -88,12 +67,9 @@ pub struct State {
     pub font_code: Entity<TextInput>,
     pub prompt: Entity<TextInput>,
     pub sample: Entity<TextInput>,
-    /// The Test form (sample + result) is open.
     pub testing: bool,
-    /// Request id and start time of the test in flight.
     pub test_request: Option<(u64, Instant)>,
     pub test_result: Option<Result<TitleResult, String>>,
-    /// Font families in the config that fontconfig doesn't know (a warning on their field).
     pub missing_fonts: Vec<String>,
 }
 
@@ -114,7 +90,6 @@ impl State {
         }
     }
 
-    /// Put the config's values into the fields (on open, and when the file changes).
     pub fn fill(&self, config: &config::Config, window: &gpui::Window, cx: &mut gpui::App) {
         for (input, text) in [
             (&self.font_ui, &config.fonts.ui),
@@ -136,8 +111,6 @@ impl State {
     }
 }
 
-/// The modal: the tab list on the left (on the canvas, like the app's sidebar), the open
-/// tab's sections (scrolling) on the right.
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let t = theme::t();
     let open = this.settings.tab;
@@ -168,7 +141,6 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     modal::frame(modal::large(body), cx)
 }
 
-/// A tab in the list: the open one bright on the hover colour.
 fn nav_item(tab: Tab, on: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     div()
@@ -186,17 +158,14 @@ fn nav_item(tab: Tab, on: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .child(tab.label())
 }
 
-/// A section: title over its content.
 pub fn section(title: &'static str, body: impl IntoElement) -> Div {
     theme::stack().gap_2().child(div().font_weight(FontWeight::MEDIUM).text_color(rgba(theme::t().fg)).child(title)).child(body)
 }
 
-/// The file a tab's settings live in (also editable by hand), in small print at its bottom.
 pub fn saved_to(path: &Path) -> Div {
     div().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(format!("Saved to {}", path.display()))
 }
 
-/// `label        control` on one line.
 pub fn row(label: &'static str, control: impl IntoElement) -> Div {
     div()
         .flex()
@@ -209,7 +178,6 @@ pub fn row(label: &'static str, control: impl IntoElement) -> Div {
         .child(div().flex_1().min_w_0().flex().flex_row().items_center().justify_end().child(control))
 }
 
-/// An option of the row above it: indented, its label in small print.
 fn sub_row(label: &'static str, control: impl IntoElement) -> Div {
     div()
         .flex()
@@ -223,14 +191,11 @@ fn sub_row(label: &'static str, control: impl IntoElement) -> Div {
         .child(control)
 }
 
-/// A bordered text field.
 pub fn field(input: Entity<TextInput>) -> Div {
     let t = theme::t();
     div().w_full().px_3().py_1p5().rounded_md().bg(rgba(t.raised)).border_1().border_color(rgba(t.line)).text_size(text::sm()).child(input)
 }
 
-/// A font field: `field` with an amber warning at its right edge while the family the
-/// user typed (= what the config holds, once applied) isn't installed.
 fn font_field(s: &State, input: &Entity<TextInput>, family: &str) -> Div {
     let missing = s.missing_fonts.iter().any(|m| m == family);
     field(input.clone()).flex().flex_row().items_center().gap_2().when(missing, |d| d.child(icon("triangle-alert", theme::t().warn)))
@@ -271,8 +236,6 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     )
 }
 
-/// The background pattern behind the sidebar (`ambient.rs`): a chip with the pattern's
-/// name that opens the list of them.
 fn background_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.menu == Some(Menu::Background);
     let current = this.config.background.pattern;
@@ -288,8 +251,6 @@ fn background_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div>
         .children(menu)
 }
 
-/// `−  13  +`: the UI's text size, a px at a time (also ctrl - / ctrl =, ctrl 0 resets; cmd
-/// on macOS). Everything else scales with it. The setup's look step has it too.
 pub fn text_size(size: f32, cx: &mut Context<Dirigent>) -> Div {
     let step = |id: &'static str, icon: &'static str, delta: f32, tip: String, cx: &mut Context<Dirigent>| {
         theme::icon_button(id, icon, cx, move |this, cx| this.step_text_size(delta, cx)).tooltip(theme::tooltip(tip))
@@ -336,7 +297,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 
     let effort_open = this.menu == Some(Menu::TitleEffort);
     let effort_menu = effort_open.then(|| {
-        // A model the local host doesn't list (yet): the efforts every model that reasons takes.
+        // MUST KILL: extract: the fallback ["low", "medium", "high"] → a named const of the efforts every reasoning model takes
         let levels = models
             .iter()
             .find(|m| m.id == this.config.title.model)
@@ -393,7 +354,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     )
 }
 
-/// The outcome of the last test: `“Title”  model · 1.2k in · 9 out · $0.001 · 0.8s`, or the error.
+// MUST KILL: extract: test_result's own sub-cent cost format → theme::dollars (or a precision argument to it)
 fn test_result(s: &State) -> Option<Div> {
     let t = theme::t();
     let result = s.test_result.as_ref()?;
@@ -410,7 +371,6 @@ fn test_result(s: &State) -> Option<Div> {
                 theme::short_model(&r.model),
                 kilo(r.input),
                 kilo(r.output),
-                // Titles cost fractions of a cent; `dollars` would round them to nothing.
                 if r.cost < 0.01 { format!("${:.4}", r.cost) } else { dollars(r.cost) },
                 duration(r.duration_ms)
             ))),
@@ -418,7 +378,6 @@ fn test_result(s: &State) -> Option<Div> {
     })
 }
 
-/// A switch: a pill with a knob at one end or the other.
 pub(crate) fn switch(
     id: impl Into<gpui::ElementId>,
     on: bool,
@@ -440,9 +399,6 @@ pub(crate) fn switch(
         .child(div().size(u(14.)).rounded_full().bg(rgba(t.fg)))
 }
 
-/// The agent's tools that have a switch (`config::ToolsConfig`); the set goes out with every
-/// prompt, so a change reaches a thread with its next message. `async_bash` has an option
-/// under it, shown while it is on.
 fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let c = &this.config.tools;
     let bash_background = switch("tool-bash-background", c.bash_background, cx, |this, cx| this.toggle_tool("bash_background", cx));
@@ -454,7 +410,6 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
             .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx))))
             .child(row("computer", switch("tool-computer", c.computer, cx, |this, cx| this.toggle_tool("computer", cx))))
-            // What it is, whether on or off: the name alone doesn't say.
             .child(sub_row(
                 "Open a screen of its own, or your desktop, to run and operate apps; the thread shows what it does there",
                 div(),
@@ -463,20 +418,18 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     )
 }
 
-/// Nothing is sent yet; the switch only records the choice.
+// MUST KILL: rename: telemetry → telemetry_choice_unsent
 fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let on = this.config.telemetry;
     let switch = switch("telemetry", on, cx, |this, cx| this.toggle_telemetry(cx));
     section("Telemetry", row("Usage data", switch))
 }
 
-/// A small bordered button with a label only (a form's Cancel).
 pub fn text_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     let t = theme::t();
     label_button(id, label, t.raised, t.line, t.hover)
 }
 
-/// `text_button` on the accent fill (as send): the one action a form is for (Save).
 pub fn primary_button(id: impl Into<SharedString>, label: impl Into<SharedString>) -> Stateful<Div> {
     let t = theme::t();
     label_button(id, label, t.accent, t.accent, t.accent_active)

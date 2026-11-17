@@ -1,10 +1,3 @@
-//! Signing in to an MCP server (`ClientMessage::McpLogin`): the server's OAuth
-//! (`dirigent_agent::mcp::sign_in`) as a login's steps to the connection that asked, with
-//! its answer (`LoginAnswer`) and its cancel (`LoginCancel`, or the connection going).
-//!
-//! The rest of Settings › MCP servers is `dirigent_agent::mcp`'s own: the service only
-//! hands the requests over.
-
 use crate::Service;
 use crate::server::Conn;
 use anyhow::{Result, anyhow};
@@ -17,10 +10,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-/// The one question a sign-in asks (`SignIn::redirect_url`).
 const PASTE: u32 = 1;
 
-/// The sign-ins in progress, by the connection and the request that started them.
 #[derive(Default)]
 pub struct Logins {
     inner: Mutex<Inner>,
@@ -29,19 +20,16 @@ pub struct Logins {
 #[derive(Default)]
 struct Inner {
     running: HashMap<(u64, u64), Running>,
-    /// Cancelled before they started: requests are handled side by side, so a `LoginCancel`
-    /// sent right after its `McpLogin` may get here first.
+    // MUST KILL: rename: cancelled → cancelled_before_start; concurrent requests let LoginCancel beat its McpLogin
     cancelled: HashSet<(u64, u64)>,
 }
 
 struct Running {
     cancel: CancellationToken,
-    /// Where the pasted address goes, while the sign-in asks for one.
     paste: Option<oneshot::Sender<String>>,
 }
 
 impl Logins {
-    /// The user's answer to a question of login `login` on connection `conn`.
     pub fn answer(&self, conn: u64, login: u64, prompt: u32, value: String) -> Result<()> {
         let mut inner = self.inner.lock().unwrap();
         let running = inner.running.get_mut(&(conn, login)).ok_or_else(|| anyhow!("no such login"))?;
@@ -59,8 +47,6 @@ impl Logins {
         }
     }
 
-    /// A connection is gone: nobody is left to finish the sign-ins it started (and a
-    /// browser sign-in's callback listener would hold its port).
     pub fn disconnected(&self, conn: u64) {
         let mut inner = self.inner.lock().unwrap();
         inner.cancelled.retain(|(c, _)| *c != conn);
@@ -71,7 +57,6 @@ impl Logins {
     }
 }
 
-/// A sign-in as its connection sees it: the login's steps.
 struct Steps<'a> {
     logins: &'a Logins,
     key: (u64, u64),
@@ -102,7 +87,6 @@ impl SignIn for Steps<'_> {
             message: "If the browser can't reach this host, paste the address it ended up on:".into(),
             placeholder: Some("http://127.0.0.1:…/callback?code=…".into()),
         });
-        // Dropped once the browser got here: the question needs no answer any more.
         struct Closed<'a>(&'a Steps<'a>);
         impl Drop for Closed<'_> {
             fn drop(&mut self) {
@@ -115,9 +99,6 @@ impl SignIn for Steps<'_> {
 }
 
 impl Service {
-    /// Run login `id` of connection `conn` to its end, its steps going to that connection;
-    /// the reply ends it. Logged here, not as a failed request: a cancel is no failure of
-    /// the service.
     pub(crate) async fn mcp_login(&self, conn: &Conn, id: u64, name: &str) -> ServerMessage {
         let (key, cancel) = ((conn.id, id), CancellationToken::new());
         {
@@ -128,7 +109,6 @@ impl Service {
             inner.running.insert(key, Running { cancel: cancel.clone(), paste: None });
         }
         info!(server = %name, "MCP sign-in started");
-        // Straight into the connection, in order: the steps all come before the reply.
         let steps = Steps { logins: &self.logins, key, out: conn.out.clone() };
         let result = dirigent_agent::mcp::sign_in(&self.agent.dirs, name, &steps, &cancel).await;
         self.logins.inner.lock().unwrap().running.remove(&key);

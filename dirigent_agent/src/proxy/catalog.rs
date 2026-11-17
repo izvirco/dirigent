@@ -1,7 +1,3 @@
-//! The models the proxy serves: asked of it, priced (`pricing`), and remembered, in memory
-//! and in `<data dir>/models.json`, so that listing them costs no request and a start while
-//! the proxy is down still has them.
-
 use super::pricing::Prices;
 use super::{Connection, Error, Model, Price, Proxy, now_ms};
 use dirigent_protocol::transcript::Api;
@@ -11,12 +7,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 const FILE: &str = "models.json";
-/// The proxy is asked again once what it said is this old: accounts and models come and go.
 const REFRESH_AFTER_MS: i64 = 5 * 60 * 1000;
-/// When to ask again after it didn't answer.
 const RETRY_AFTER_MS: i64 = 30 * 1000;
 
-/// What a `Proxy` remembers of its models.
 #[derive(Default)]
 pub(super) struct Cache {
     state: Mutex<State>,
@@ -26,11 +19,9 @@ pub(super) struct Cache {
 struct State {
     catalog: Option<Arc<Catalog>>,
     prices: Option<Arc<Prices>>,
-    /// When the proxy was last asked, answered or not. Unix millis.
     asked_at: i64,
 }
 
-/// What the proxy at `url` served at `fetched_at` (unix millis): the file's content too.
 #[derive(Serialize, Deserialize)]
 struct Catalog {
     url: String,
@@ -76,14 +67,12 @@ impl Proxy {
         if let Some(model) = find(self.models().await?) {
             return Ok(model);
         }
-        // It may be new at the proxy: ask before saying no, unless that was just done.
         let connection = self.connection()?;
         let just_asked = self.remembered(&connection.url).is_some_and(|catalog| now_ms() - catalog.fetched_at < 10_000);
         let models = if just_asked { vec![] } else { self.fetch(&connection).await? };
         find(models).ok_or_else(|| Error::other(format!("The proxy does not serve the model {id}.")).into())
     }
 
-    /// What the proxy at `url` said last: from memory, else from the file of an earlier run.
     fn remembered(&self, url: &str) -> Option<Arc<Catalog>> {
         let mut state = self.inner.catalog.state.lock().unwrap();
         if state.catalog.as_ref().is_none_or(|catalog| catalog.url != url) {
@@ -94,8 +83,6 @@ impl Proxy {
         state.catalog.clone()
     }
 
-    /// Ask the proxy for its models, and remember them. What it serves now is returned,
-    /// also when that is nothing and the models it had are kept.
     async fn fetch(&self, connection: &Connection) -> Result<Vec<Model>, Error> {
         // With `client_version` the proxy answers as the Codex backend does, with what each
         // model can do; without, as OpenAI's API does, with who makes it.
@@ -103,8 +90,7 @@ impl Proxy {
             tokio::join!(self.get(connection, "/v1/models?client_version=dirigent"), self.get(connection, "/v1/models"), self.prices());
         self.inner.catalog.state.lock().unwrap().asked_at = now_ms();
         let mut models = models(&catalog?, &list?).ok_or_else(Error::not_a_proxy)?;
-        // A proxy that lists nothing (it just started, its accounts are signed out) doesn't
-        // make the models it had go away: they stay until it lists some again.
+        // MUST KILL: extract: fetch's "an empty listing keeps the cached models" rule into a fn of its own
         if models.is_empty() && self.remembered(&connection.url).is_some_and(|catalog| !catalog.models.is_empty()) {
             return Ok(models);
         }
@@ -122,7 +108,6 @@ impl Proxy {
         Ok(catalog.models.clone())
     }
 
-    /// The price list: the one in memory while it is fresh.
     async fn prices(&self) -> Arc<Prices> {
         let remembered = self.inner.catalog.state.lock().unwrap().prices.clone();
         if let Some(prices) = remembered.filter(|prices| prices.is_fresh()) {
@@ -134,9 +119,6 @@ impl Proxy {
     }
 }
 
-/// The proxy's two answers as models, unpriced: `catalog` is the Codex backend's (`models`,
-/// by `slug`), `list` OpenAI's (`data`, with `owned_by`). None: one of them is neither, so
-/// whatever answered is no proxy.
 fn models(catalog: &Value, list: &Value) -> Option<Vec<Model>> {
     let entries = |json: &Value| json["models"].as_array().or(json["data"].as_array()).cloned();
     let (catalog, list) = (entries(catalog)?, entries(list)?);
@@ -149,7 +131,6 @@ fn models(catalog: &Value, list: &Value) -> Option<Vec<Model>> {
             return None;
         }
         let owner = owners.get(id).copied().or(entry["owned_by"].as_str()).unwrap_or_default();
-        // The levels as they are listed, lowest first: `{effort}` objects, or plain names.
         let mut efforts: Vec<String> = vec![];
         for level in entry["supported_reasoning_levels"].as_array().into_iter().flatten() {
             let effort = level["effort"].as_str().or(level.as_str()).unwrap_or_default().trim().to_lowercase();
@@ -157,7 +138,6 @@ fn models(catalog: &Value, list: &Value) -> Option<Vec<Model>> {
                 efforts.push(effort);
             }
         }
-        // A model whose only level is none doesn't reason.
         if efforts == ["none"] {
             efforts.clear();
         }
@@ -186,7 +166,6 @@ mod tests {
     use crate::proxy::tests::{Answer, dirs, point_at, serve};
     use serde_json::json;
 
-    /// The proxy's two answers as recorded, cut down to a few models and the fields read.
     fn answers() -> (Value, Value) {
         let level = |effort: &str| json!({"description": "...", "effort": effort});
         let catalog = json!({"models": [
@@ -224,7 +203,6 @@ mod tests {
             images: true,
             price: Price::default(),
         };
-        // What the catalog doesn't say has a default; who isn't Anthropic's is on the other wire.
         let gpt = Model {
             id: "gpt-5.5".into(),
             name: "GPT-5.5".into(),
@@ -239,13 +217,11 @@ mod tests {
         assert_eq!(models.len(), 3, "the hidden model and the one without an id are left out");
         assert_eq!((&models[0], &models[2]), (&haiku, &gpt));
         assert_eq!((models[1].api, models[1].efforts.len(), models[1].max_output), (Api::Anthropic, 0, 64_000));
-        // A proxy that only has OpenAI's list still lists its models.
         let plain = super::models(&list, &list).unwrap();
         assert_eq!(
             (plain.len(), plain[0].id.as_str(), plain[0].api, plain[0].context_window),
             (3, "claude-haiku-5-5", Api::Anthropic, 128_000)
         );
-        // One that serves nothing is a proxy still; JSON of another make is none.
         assert_eq!(super::models(&json!({"models": []}), &json!({"object": "list", "data": []})), Some(vec![]));
         for other in [json!({}), json!([]), json!({"error": "not found"})] {
             assert_eq!(super::models(&other, &list), None, "{other}");
@@ -253,11 +229,8 @@ mod tests {
         }
     }
 
-    /// The models are remembered: in memory, and in the file for a start while the proxy is
-    /// down. An answer without models doesn't make them go.
     #[tokio::test]
     async fn models_outlive_the_proxy() {
-        // What the proxy answers with, for now.
         let says = Arc::new(Mutex::new(answers()));
         let said = says.clone();
         let url = serve(move |path, _| {
@@ -270,7 +243,6 @@ mod tests {
         })
         .await;
         let (_tmp, dirs) = dirs();
-        // A day-old price list, so nothing is asked of models.dev.
         std::fs::create_dir_all(&dirs.data).unwrap();
         let prices = json!({"fetched_at": now_ms(), "providers": {"anthropic": {"claude-haiku-5-5": {"input": 0.1, "output": 0.5, "cache_read": 0.01, "cache_write": 0.125}}}});
         std::fs::write(dirs.data.join("prices.json"), prices.to_string()).unwrap();
@@ -287,8 +259,6 @@ mod tests {
         let missing = proxy.model("gpt-9").await.unwrap_err();
         assert_eq!(missing.to_string(), "The proxy does not serve the model gpt-9.");
 
-        // The proxy lists nothing, then something else answers in its place: the first is said,
-        // the second is an error, and neither takes the models away, in memory or in the file.
         let file = std::fs::read(dirs.data.join(FILE)).unwrap();
         *says.lock().unwrap() = (json!({"models": []}), json!({"object": "list", "data": []}));
         assert_eq!(proxy.refresh().await.unwrap(), []);
@@ -297,7 +267,6 @@ mod tests {
         assert_eq!(proxy.models().await.unwrap(), models);
         assert_eq!(std::fs::read(dirs.data.join(FILE)).unwrap(), file);
 
-        // Another run, the proxy gone: the file answers, as long as it is that proxy's.
         let gone = "http://127.0.0.1:9";
         std::fs::write(dirs.data.join(FILE), std::fs::read_to_string(dirs.data.join(FILE)).unwrap().replace(&url, gone)).unwrap();
         point_at(&dirs, gone, "key");

@@ -1,26 +1,3 @@
-//! dirigent_api: the update api at `https://dirigent.sebba.dev/api/v0/` (run behind a TLS
-//! proxy), the leaderboard's, and the `publish` command the release workflow uploads a
-//! release with.
-//!
-//! Releases are files in a public S3 bucket (`bucket.rs`): `publish` is its only writer and
-//! needs the bucket's keys; `serve` only reads them, anonymously. The leaderboard
-//! (`leaderboard.rs`) is what makes the server hold data: a sqlite db (`store.rs`). It holds
-//! no secret: players are named by the forge's signed tokens.
-//!
-//! ```text
-//! dirigent_api serve
-//! dirigent_api publish --channel stable --platform windows-x86_64 --version 0.1.0 [--notes TEXT] FILE
-//! dirigent_api keygen FILE     a new signing key: the secret one to FILE, the public one printed
-//! ```
-//!
-//! Environment: `S3_ENDPOINT` (`https://fsn1.your-objectstorage.com`), `S3_REGION`,
-//! `S3_BUCKET`, `S3_PREFIX` (optional, e.g. `test/` to keep tests away from real releases);
-//! `publish` also `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `DIRIGENT_SIGNING_KEY` (the
-//! minisign secret key file's text); `serve` takes `DIRIGENT_API_BIND` (default
-//! `127.0.0.1:7790`) and, for the leaderboard, `DIRIGENT_API_DB`, `FORGE_URL`,
-//! `DIRIGENT_FORGE_CLIENT_ID` and `DIRIGENT_API_URL` (see `Leaderboard::from_env`; without a
-//! db it's off). `DIRIGENT_LOG` sets the log filter (default `info`).
-
 mod bucket;
 mod leaderboard;
 mod publish;

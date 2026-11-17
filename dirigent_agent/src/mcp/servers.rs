@@ -1,8 +1,3 @@
-//! A session's MCP servers: the enabled entries of `agent.toml`, each connected in the
-//! background, and their tools as the session's `Tool`s, named `mcp__<server>__<tool>`.
-//! A connection that drops (a command that exits, a session the server forgets) is made
-//! again by the next call. Servers can be added while the session runs: computer use's.
-
 use super::client::{Client, Error, ToolInfo, Transport};
 use super::config::{self, Exposure, Reach, Server, expand_home, hex, namespace, tool_name};
 use super::http::Http;
@@ -23,16 +18,10 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-/// The waits between attempts to connect to an HTTP server that is busy or unreachable.
 const CONNECT_RETRIES: [Duration; 2] = [Duration::from_millis(250), Duration::from_secs(1)];
-/// The most text of a result the model gets: of more, the start and the end.
 const MAX_TEXT_BYTES: usize = 20 * 1024;
-/// What a script's call of an MCP tool resolves to (`ToolSpec::returns`): the result as
-/// the server sent it.
 const RESULT_TYPE: &str = "{ content: { type: \"text\" | \"image\" | \"audio\" | \"resource_link\" | \"resource\"; text?: string; data?: string; mimeType?: string; [key: string]: unknown }[]; structuredContent?: unknown; isError?: boolean }";
 
-/// What whoever adds a server while the session runs hears of its connection: computer
-/// use, which records what its screen's driver does.
 #[async_trait]
 pub trait Watch: Send + Sync {
     /// A connection to the server was made (the first, or a new one after it dropped):
@@ -49,7 +38,6 @@ pub trait Watch: Send + Sync {
     fn call_ended(&self, _tool: &str, _result: Option<&Value>) {}
 }
 
-/// A watched call under way: `Watch::call_ended` is told when it is over, however it ends.
 struct Watched<'a> {
     watch: Option<&'a dyn Watch>,
     tool: &'a str,
@@ -64,7 +52,6 @@ impl Watched<'_> {
 }
 
 impl Drop for Watched<'_> {
-    /// The call was dropped before it had an answer.
     fn drop(&mut self) {
         if let Some(watch) = self.watch.take() {
             watch.call_ended(self.tool, None);
@@ -72,8 +59,7 @@ impl Drop for Watched<'_> {
     }
 }
 
-/// A server being added: forgotten again unless `Servers::add` gets to its end, so one
-/// whose caller is dropped half-way (a stopped run) doesn't keep its name taken.
+// MUST KILL: rename: `Adding` → `ForgetUnlessAdded` (drops the server again if `Servers::add` is dropped half-way)
 struct Adding<'a> {
     servers: &'a Mutex<BTreeMap<String, Entry>>,
     name: Option<&'a str>,
@@ -87,7 +73,6 @@ impl Drop for Adding<'_> {
     }
 }
 
-/// What whoever adds a server while the session runs makes of it.
 #[derive(Default, Clone)]
 pub struct Added {
     /// The server's tools that exist for the session; `None`: all it offers.
@@ -109,9 +94,7 @@ pub struct Servers {
 
 struct Inner {
     dirs: Dirs,
-    /// The thread's directory: where commands run.
     cwd: PathBuf,
-    /// The servers of `agent.toml` whose tools are scripts' (`scripted`).
     scripted: Vec<(String, Option<String>)>,
     warn: Box<dyn Fn(String) + Send + Sync>,
     servers: Mutex<BTreeMap<String, Entry>>,
@@ -120,7 +103,6 @@ struct Inner {
 
 struct Entry {
     connection: Arc<Connection>,
-    /// `true` once the attempt to connect is over, however it went.
     settled: watch::Receiver<bool>,
 }
 
@@ -155,7 +137,6 @@ impl Servers {
         servers
     }
 
-    /// Take a server in and start connecting to it.
     fn connect(&self, name: &str, server: Server, reach: Reach) {
         let connection = Connection::new(&self.inner.dirs, name, server, reach, &self.inner.cwd, Added::default());
         let settled = self.connect_in_background(connection.clone());
@@ -166,7 +147,6 @@ impl Servers {
         let (done, settled) = watch::channel(false);
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
-            // Why it failed is said once: a later call that fails to connect says it to the model.
             if let Err(e) = connection.client().await
                 && let Some(inner) =
                     inner.upgrade().filter(|_| !connection.warned.swap(true, Ordering::Relaxed) && !connection.shutdown.is_cancelled())
@@ -217,8 +197,7 @@ impl Servers {
         for connection in connections {
             let server = &connection.name;
             let offered = connection.tools();
-            // Names that come to the same one all end in their hash: which of them would
-            // keep the plain name doesn't hang on the order the server lists them in.
+            // MUST KILL: extract: a fn that hashes every colliding tool name, so the result visibly doesn't depend on the server's order
             let plain: Vec<String> = offered.iter().map(|tool| tool_name(server, &tool.name, |_| false)).collect();
             for tool in offered {
                 let name =
@@ -256,7 +235,6 @@ impl Servers {
         let reach = server.reach(name)?;
         let connection = {
             let mut servers = self.inner.servers.lock().unwrap();
-            // Looked at with the servers held, as `close` takes them: none slips in behind it.
             if self.inner.closed.load(Ordering::Relaxed) {
                 return Err("The session's MCP servers are closed".into());
             }
@@ -264,7 +242,6 @@ impl Servers {
                 return Err(format!("There is an MCP server named \"{other}\" already"));
             }
             let connection = Connection::new(&self.inner.dirs, name, server, reach, &self.inner.cwd, with);
-            // Settled from the start: this waits for it itself.
             let entry = Entry { connection: connection.clone(), settled: watch::channel(true).1 };
             servers.insert(name.to_owned(), entry);
             connection
@@ -302,10 +279,8 @@ impl Servers {
     }
 }
 
-/// A server's tool, as the session's.
 struct McpTool {
     spec: ToolSpec,
-    /// The server's name for it.
     tool: String,
     connection: Arc<Connection>,
 }
@@ -322,34 +297,26 @@ impl Tool for McpTool {
     }
 }
 
-/// How a server's connection is.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) enum Status {
     #[default]
     Connecting,
     Connected,
-    /// It wants a sign-in.
     NeedsAuth,
-    /// Why it didn't connect: the error, and a command's last stderr lines.
     Failed(String),
     Closed,
 }
 
-/// One server and the connection to it, made when first asked for and again when it dropped.
 pub(crate) struct Connection {
     pub name: String,
     pub server: Server,
     reach: Reach,
     cwd: PathBuf,
-    /// Its sign-in, if it is one that signs in with OAuth.
     pub auth: Option<Arc<Auth>>,
     with: Added,
     live: Mutex<Live>,
-    /// Held while connecting: one attempt at a time.
     opening: tokio::sync::Mutex<()>,
-    /// Cancelled by `close`, which ends an attempt under way.
     shutdown: CancellationToken,
-    /// The user was told that it didn't connect.
     warned: AtomicBool,
 }
 
@@ -359,8 +326,6 @@ struct Live {
     tools: Vec<ToolInfo>,
     instructions: Option<String>,
     status: Status,
-    /// The access token that was stored when the server wanted a sign-in: another one
-    /// since means the user signed in.
     token_then: Option<String>,
 }
 
@@ -389,7 +354,6 @@ impl Connection {
         self.live.lock().unwrap().status.clone()
     }
 
-    /// The server's tools as last listed: those the session is to have.
     pub(crate) fn tools(&self) -> Vec<ToolInfo> {
         let tools = self.live.lock().unwrap().tools.clone();
         match &self.with.only {
@@ -402,7 +366,6 @@ impl Connection {
         self.with.instructions.clone().or_else(|| self.live.lock().unwrap().instructions.clone())
     }
 
-    /// A sign-in was stored since the server wanted one.
     fn signed_in_since(&self) -> bool {
         let token_then = match &*self.live.lock().unwrap() {
             Live { status: Status::NeedsAuth, token_then, .. } => token_then.clone(),
@@ -415,8 +378,6 @@ impl Connection {
         self.live.lock().unwrap().client.clone().filter(|client| !client.is_closed())
     }
 
-    /// The connection, made now if there is none. The error says why there is none, for
-    /// the user or the model to read: its status has the same.
     pub(crate) async fn client(self: &Arc<Self>) -> Result<Arc<Client>, Error> {
         let shut_down = || Error::Other(format!("MCP server \"{}\" is shut down", self.name));
         if self.shutdown.is_cancelled() {
@@ -457,8 +418,6 @@ impl Connection {
         Err(Error::Other(format!("MCP server \"{}\" failed to connect: {why}", self.name)))
     }
 
-    /// The server wants a sign-in: said as the error, and remembered. The tools it had
-    /// stay, and say the same when called.
     fn needs_sign_in(&self) -> Error {
         let token_then = self.auth.as_ref().and_then(|auth| auth.stored_token());
         let mut live = self.live.lock().unwrap();
@@ -466,8 +425,6 @@ impl Connection {
         Error::Other(format!("MCP server \"{}\" needs a sign-in: Settings › MCP servers has it.", self.name))
     }
 
-    /// One attempt to connect: the transport, the handshake, the server's tools. What
-    /// went wrong comes with what the server last said (a command's stderr).
     async fn connect(self: &Arc<Self>) -> Result<Arc<Client>, (Error, Option<String>)> {
         self.live.lock().unwrap().status = Status::Connecting;
         let (transport, incoming) = self.transport().await.map_err(|e| (e, None))?;
@@ -505,7 +462,6 @@ impl Connection {
     }
 
     async fn transport(&self) -> Result<(Box<dyn Transport>, mpsc::UnboundedReceiver<Value>), Error> {
-        // The entry's values as they are used: `${NAME}` is the environment's.
         let resolved = async |values: &BTreeMap<String, String>, what: &str| {
             let mut resolved = BTreeMap::new();
             for (name, value) in values {
@@ -528,7 +484,6 @@ impl Connection {
         }
     }
 
-    /// The server said its tools changed: list them again.
     async fn refresh_tools(&self) {
         let Some(client) = self.current() else { return };
         match client.list_tools().await {
@@ -542,7 +497,6 @@ impl Connection {
         }
     }
 
-    /// Call the server's tool `tool`: its `CallToolResult`.
     async fn call(self: &Arc<Self>, tool: &str, input: Value, call: &Call) -> Result<Value, Error> {
         let mut again = false;
         loop {
@@ -556,18 +510,15 @@ impl Connection {
             watched.ended(result.as_ref().ok());
             match result {
                 // The server restarted and doesn't know the session: the call didn't run,
-                // and goes out again on a new one. The old connection is let go, not
-                // closed: other calls on it find out the same way.
+                // and goes out again on a new one.
                 Err(Error::SessionExpired) if !again => {
                     self.live.lock().unwrap().client.take_if(|current| Arc::ptr_eq(current, &client));
                     again = true;
                 }
-                // The sign-in ran out and can't be refreshed.
                 Err(Error::AuthRequired) => {
                     client.close().await;
                     return Err(self.needs_sign_in());
                 }
-                // The command went away under the call: with what it last said.
                 Err(Error::Closed) => {
                     let said = client.last_words().map(|said| format!("\n{said}")).unwrap_or_default();
                     return Err(Error::Other(format!("{}{said}", Error::Closed)));
@@ -577,7 +528,6 @@ impl Connection {
         }
     }
 
-    /// Connect anew, with the sign-in as it is now.
     pub(crate) async fn reconnect(self: &Arc<Self>) -> Result<(), Error> {
         let client = self.live.lock().unwrap().client.take();
         if let Some(client) = client {
@@ -586,10 +536,8 @@ impl Connection {
         self.client().await.map(drop)
     }
 
-    /// Disconnect for good: a command exits, an attempt to connect ends.
     pub(crate) async fn close(&self) {
         self.shutdown.cancel();
-        // An attempt under way sees the shutdown and ends first.
         let _opening = self.opening.lock().await;
         let client = {
             let mut live = self.live.lock().unwrap();
@@ -602,9 +550,6 @@ impl Connection {
     }
 }
 
-/// A tool's result for the model (its text and images, an error it reports) and for a
-/// script, which gets the result as the server sent it. The model's text is cut to
-/// `MAX_TEXT_BYTES`; a script (`script`) cuts down what it gets itself.
 fn output(server: &str, tool: &str, mut result: Value, script: bool) -> ToolOutput {
     let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
     let blocks = result.get("content").and_then(Value::as_array);
@@ -625,8 +570,6 @@ fn output(server: &str, tool: &str, mut result: Value, script: bool) -> ToolOutp
     ToolOutput { content, is_error, value: Some(result) }
 }
 
-/// A block of a result as the model can take it: text and images as they are, anything
-/// else as a line saying what it is.
 fn content_of(block: &Value) -> Content {
     let text = |at: &str| block.pointer(at).and_then(Value::as_str);
     let bytes = |at: &str| STANDARD.decode(text(at).unwrap_or_default().split_ascii_whitespace().collect::<String>());
@@ -658,7 +601,6 @@ fn content_of(block: &Value) -> Content {
                 if kind.starts_with("text/") || kind == "application/json" || kind.ends_with("+json") || kind.ends_with("+xml") {
                     return Content::Text(String::from_utf8_lossy(&blob).into_owned());
                 }
-                // A file the model can pass on, named as the resource is.
                 let extension = uri.rsplit('/').next().and_then(|file| file.rsplit_once('.')).map(|(_, extension)| extension);
                 let extension =
                     extension.filter(|e| (1..=8).contains(&e.len()) && e.chars().all(|c| c.is_ascii_alphanumeric())).unwrap_or("bin");
@@ -681,9 +623,6 @@ fn size(bytes: u64) -> String {
     }
 }
 
-/// `content` with no more text than the model is to get of a result. More is one text,
-/// its middle cut out (as Codex does it) and all of it in a file the model can read;
-/// images stay.
 fn limited(content: Vec<Content>) -> Vec<Content> {
     let texts: Vec<&str> = content.iter().filter_map(|c| if let Content::Text(text) = c { Some(text.as_str()) } else { None }).collect();
     let all = texts.join("\n");
@@ -713,8 +652,6 @@ fn limited(content: Vec<Content>) -> Vec<Content> {
     std::iter::once(Content::Text(text)).chain(images).collect()
 }
 
-/// Keep `bytes` as a file for the model to read: in a directory of this process's own
-/// under the system's temporary one, which only the user can look into.
 fn save(bytes: &[u8], extension: &str) -> std::io::Result<PathBuf> {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     let mut random = [0; 8];
@@ -761,7 +698,6 @@ mod tests {
             "hello\n[audio audio/wav omitted]\n[Resource file:///a.txt \"a\" (text/plain, 2.0KB)]\nembedded\n{}\n[unsupported MCP content hologram]"
         );
         assert_eq!(output.content[1], Content::Image { mime: "image/png".into(), data: b"png".to_vec() });
-        // A script gets what the server sent, without what is the protocol's own.
         let value = output.value.unwrap();
         assert_eq!((value["structuredContent"]["n"].as_i64(), value.get("_meta")), (Some(1), None));
         assert_eq!(value["content"].as_array().unwrap().len(), 7);
@@ -787,7 +723,6 @@ mod tests {
         )));
         assert!(text.contains("ä…10246 chars truncated…ä") && text.contains("é\nend\n\n[Full output: "));
         assert!(matches!(cut.content[1], Content::Image { .. }) && cut.content.len() == 2);
-        // The file has it all.
         let path = text.rsplit_once("[Full output: ").unwrap().1.split(' ').next().unwrap();
         assert_eq!(std::fs::read_to_string(path).unwrap(), long);
         std::fs::remove_file(path).unwrap();

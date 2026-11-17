@@ -1,14 +1,3 @@
-//! A live thread: its branch of the history in memory, the messages waiting for the model,
-//! its jobs and its tools. The host loads one when a thread has work (`Agent::load`) and
-//! drops it when it has been idle for a while; everything in it can be built again from the
-//! thread's entries, except what runs (jobs end with their session).
-//!
-//! What reaches the model comes in one of three ways: a prompt starts a run (`run.rs`); a
-//! steer is queued for the run in progress and goes in after its current tool calls; a
-//! follow-up is queued for when the run would stop. Notices (a job ended, a sub-agent
-//! ended, the user's answers to an ask) take the same ways, and start a run when there is
-//! none.
-
 use crate::codemode::{Namespace, ScriptHost};
 use crate::mcp::Servers;
 use crate::prompt::Prompt as SystemPrompt;
@@ -33,16 +22,11 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
-/// The tools a thread has only while their switch is on (`Prompt::tools`); `bash_background`
-/// is an option of `async_bash`, not a tool.
 const SWITCHED: [&str; 5] = ["async_bash", "ask_user", "dirigent", COMPUTER, CODEMODE];
 pub(crate) const CODEMODE: &str = "codemode";
-/// How long a request, or a script, waits for MCP servers that are still connecting.
 const SERVERS_WAIT: Duration = Duration::from_secs(10);
-/// Images a reply links to are shown up to this size.
 const MAX_LINKED_IMAGE: u64 = 16 * 1024 * 1024;
 
-/// A thread as its host hands it over to be loaded.
 #[derive(Debug, Clone, Default)]
 pub struct Thread {
     pub id: String,
@@ -57,7 +41,6 @@ pub struct Thread {
     pub tools: Vec<String>,
 }
 
-/// A message for the thread's model.
 #[derive(Debug, Clone, Default)]
 pub struct Prompt {
     pub text: String,
@@ -73,31 +56,22 @@ pub struct Prompt {
     pub edit: Option<String>,
 }
 
-/// Something waiting for the model.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Queued {
-    /// `text` is how the queue names it to clients (`Event::Queue`), and how one is cancelled.
-    User {
-        text: String,
-        content: Vec<Block>,
-    },
+    User { text: String, content: Vec<Block> },
     Notice(Notice),
 }
 
 pub(crate) struct State {
-    /// The thread's current branch: what the model sees and new entries extend.
     pub branch: Vec<Entry>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub switches: Vec<String>,
     pub steering: VecDeque<Queued>,
     pub follow_up: VecDeque<Queued>,
-    /// The run in progress: what stops it.
     pub run: Option<CancellationToken>,
 }
 
-/// One more in `count` for as long as it is held, however that ends: what counts may be
-/// dropped midway (a prompt whose sender went, a tool call a stopped run let go of).
 pub(crate) struct Counted<'a>(&'a watch::Sender<usize>);
 
 impl<'a> Counted<'a> {
@@ -113,7 +87,6 @@ impl Drop for Counted<'_> {
     }
 }
 
-/// A `wait` in progress, one of its session's `waiters` for as long as it is held.
 struct Waiting<'a> {
     session: &'a Session,
     waiter: mpsc::UnboundedSender<String>,
@@ -129,31 +102,18 @@ pub struct Session {
     pub env: Arc<Env>,
     pub(crate) llm: Arc<dyn Llm>,
     pub(crate) prompt: SystemPrompt,
-    /// `read`, `bash`, `edit`, `write`; then the switched ones, the host's among them. By name.
     tools: Vec<(String, Arc<dyn Tool>)>,
-    /// The MCP servers, whose tools come and go with their connections.
     pub mcp: Servers,
-    /// The `computer` tool, which is one of `tools`: the screens it opened close with the
-    /// session, and when its switch goes off.
     computer: Arc<Computer>,
-    /// The names of the host's tools among them.
     host_tools: Vec<String>,
     pub jobs: Jobs,
     pub(crate) state: Mutex<State>,
-    /// The `wait` calls in progress: each is told what reached the model's queue.
     waiters: Mutex<Vec<mpsc::UnboundedSender<String>>>,
-    /// Whether the session takes messages yet: not while it captures the nix dev shell.
     ready: watch::Sender<bool>,
-    /// Nothing comes of an unloaded session any more: its thread may be gone.
     unloaded: AtomicBool,
-    /// The images of the branch as requests send them, by blob id: mime type and base64.
-    /// Those of the part a compaction summarized are forgotten (`keep_images`).
     images: Mutex<HashMap<String, (String, String)>>,
-    /// How many calls of the host's tools are in flight (`wait` lets them end first).
     pub(crate) host_calls: watch::Sender<usize>,
-    /// How many prompts are on their way in (`prompt`): the session is busy with them.
     prompts: watch::Sender<usize>,
-    /// When something last came of the session.
     active: Mutex<std::time::Instant>,
 }
 
@@ -230,7 +190,6 @@ impl Session {
             }
         });
         if nix {
-            // Prompts wait for it (`ready`); clients show the thread activating it meanwhile.
             session.emit(Out::NixShell(true));
             let this = session.clone();
             tokio::spawn(async move {
@@ -245,7 +204,6 @@ impl Session {
         session
     }
 
-    /// Hand what came of the session to its host.
     pub(crate) fn emit(&self, out: Out) {
         if !self.unloaded.load(Ordering::Relaxed) {
             *self.active.lock().unwrap() = std::time::Instant::now();
@@ -253,7 +211,6 @@ impl Session {
         }
     }
 
-    /// How long nothing has come of the session.
     pub(crate) fn idle_for(&self) -> Duration {
         self.active.lock().unwrap().elapsed()
     }
@@ -266,22 +223,18 @@ impl Session {
         self.emit(Out::Event(Event::Warning { message }));
     }
 
-    /// Whether tool switch `name` is on.
     pub fn is_on(&self, name: &str) -> bool {
         self.state.lock().unwrap().switches.iter().any(|s| s == name)
     }
 
-    /// The tools the thread has now, but for `codemode` when `scripts` is off: as the
-    /// model is told of them, or as a script is (which doesn't call itself).
     fn specs(&self, scripts: bool) -> Vec<ToolSpec> {
-        // Not under the state's lock: codemode's spec lists the tools a script can call.
+        // MUST KILL: rearchitect: hand codemode's spec() the tool list, so specs needn't release state's lock before calling it
         let switches = self.state.lock().unwrap().switches.clone();
         let on = |name: &str| !SWITCHED.contains(&name) || switches.iter().any(|s| s == name);
         let own = self.tools.iter().filter(|(name, _)| on(name) && (scripts || name != CODEMODE)).map(|(_, tool)| tool.spec());
         own.chain(self.mcp.tools().iter().map(|tool| tool.spec())).collect()
     }
 
-    /// The tool called `name`, if the thread has it now.
     pub(crate) fn tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
         match self.tools.iter().find(|(n, _)| n == name) {
             Some((_, tool)) => (!SWITCHED.contains(&name) || self.is_on(name)).then(|| tool.clone()),
@@ -289,26 +242,20 @@ impl Session {
         }
     }
 
-    /// Wait, but not for long, for the MCP servers a request needs: all of them for a
-    /// script (`scripts`), or a thread that calls their tools itself; else those whose
-    /// tools the model is always told of.
+    // MUST KILL: type: servers_ready's bool `scripts` wants an enum of which servers a request must wait for
     pub(crate) async fn servers_ready(&self, scripts: bool) {
         self.mcp.ready(!scripts && self.is_on(CODEMODE), SERVERS_WAIT).await;
     }
 
-    /// The MCP servers whose tools only the thread's scripts call, for the system prompt.
     pub(crate) fn scripted_servers(&self) -> &[(String, Option<String>)] {
         if self.is_on(CODEMODE) { self.mcp.scripted() } else { &[] }
     }
 
-    /// The tools the model is told of: all the thread has, but for those only scripts call
-    /// (`ToolSpec::deferred`) while it has codemode to call them with.
     pub(crate) fn declared(&self) -> Vec<ToolSpec> {
         let scripts = self.is_on(CODEMODE);
         self.specs(true).into_iter().filter(|spec| !(scripts && spec.deferred)).collect()
     }
 
-    /// Wait until the session takes messages. An error once it is unloaded.
     async fn ready(&self) -> Result<()> {
         let mut ready = self.ready.subscribe();
         let _ = ready.wait_for(|ready| *ready).await;
@@ -316,11 +263,8 @@ impl Session {
         Ok(())
     }
 
-    /// Add an entry to the branch and hand it to the host. Under the state's lock, so entries
-    /// reach the host in the order they were said.
     pub(crate) fn append(&self, state: &mut State, body: Body) -> Entry {
         let parent_id = state.branch.last().map(|e| e.id.clone());
-        // Long enough that no two of a thread are ever the same: nothing checks that they aren't.
         let entry = Entry { seq: 0, id: crate::short_id(16), parent_id, at: crate::now(), body };
         state.branch.push(entry.clone());
         self.emit(Out::Entry(entry.clone()));
@@ -331,11 +275,9 @@ impl Session {
     /// queued behind the run in progress. An error means it has nothing of it (the model
     /// isn't served, the thread runs and can't be edited), and why.
     pub async fn prompt(self: &Arc<Self>, prompt: Prompt) -> Result<()> {
-        // Until the model has it, or it is refused: the session is not idle meanwhile (`busy`).
         let _on_its_way = Counted::new(&self.prompts);
         self.ready().await?;
         *self.active.lock().unwrap() = std::time::Instant::now();
-        // No model, no message: asked before anything of it is kept.
         let model = prompt.model.clone().or_else(|| self.state.lock().unwrap().model.clone()).ok_or_else(|| anyhow!("no model picked"))?;
         self.llm.model(&model).await?;
         let (text, content) = self.attach(&prompt.text, &prompt.images).await;
@@ -345,7 +287,6 @@ impl Session {
         state.model = Some(model);
         state.effort = prompt.effort.or(state.effort.take());
         if let Some(tools) = prompt.tools {
-            // `computer` going off also closes the screens the thread has open.
             if !tools.iter().any(|tool| tool == COMPUTER) {
                 let (computer, mcp) = (self.computer.clone(), self.mcp.clone());
                 tokio::spawn(async move { computer.close_all(&mcp).await });
@@ -358,7 +299,6 @@ impl Session {
             queue.push_back(Queued::User { text, content });
             self.emit_queue(&state);
             if steer {
-                // The model is meant to see it now, not after a `wait` times out.
                 self.wake("a message came in");
             }
             return Ok(());
@@ -372,8 +312,6 @@ impl Session {
         Ok(())
     }
 
-    /// Begin a run on the branch as it is. Not in a session that was unloaded: its thread
-    /// may be gone, and nobody would hear of the run.
     fn start(self: &Arc<Self>, state: &mut State) {
         if self.unloaded.load(Ordering::Relaxed) {
             return;
@@ -393,8 +331,6 @@ impl Session {
         Ok(())
     }
 
-    /// `notify` from inside the session, which is ready and has run. `false`: the session
-    /// was unloaded (a job of it may end only then), and nothing comes of the notice.
     pub(crate) fn deliver(self: &Arc<Self>, notice: Notice, when: Notify) -> bool {
         let mut state = self.state.lock().unwrap();
         if self.unloaded.load(Ordering::Relaxed) {
@@ -405,7 +341,7 @@ impl Session {
             self.start(&mut state);
             return true;
         }
-        // A model that waits has no work to interrupt: every notice reaches it now.
+        // MUST KILL: extract: deliver's "a model in async_bash wait gets every notice as a steer" rule into a named fn
         if when == Notify::Asap || !self.waiters.lock().unwrap().is_empty() {
             let line = first_line(notice.text());
             state.steering.push_back(Queued::Notice(notice));
@@ -420,7 +356,6 @@ impl Session {
     /// and / or typed text), or `None` when they dismissed it: tell the model.
     pub async fn answer(self: &Arc<Self>, ask: Ask, answers: Option<Vec<Vec<String>>>) -> Result<()> {
         let text = match &answers {
-            // Each answer on a line of its own: joined, a typed "Kiwi, sliced" would read as two picks.
             Some(answers) => {
                 let lines: Vec<String> = ask
                     .questions
@@ -452,7 +387,7 @@ impl Session {
     pub fn cancel_queued(&self, text: &str) {
         let mut state = self.state.lock().unwrap();
         let state = &mut *state;
-        // A client's echo of a message lacks the image links its text got here (`attach`).
+        // MUST KILL: type: cancel_queued matches a queued message by its text plus attach's "[image-" suffix; give Queued::User an id
         let is = |q: &Queued| matches!(q, Queued::User { text: t, .. } if t == text || t.starts_with(&format!("{text}\n\n[image-")));
         for queue in [&mut state.steering, &mut state.follow_up] {
             if let Some(at) = queue.iter().position(is) {
@@ -463,7 +398,6 @@ impl Session {
         self.emit_queue(state);
     }
 
-    /// Tell clients which of the user's messages wait.
     pub(crate) fn emit_queue(&self, state: &State) {
         let texts = |queue: &VecDeque<Queued>| -> Vec<String> {
             queue.iter().filter_map(|q| if let Queued::User { text, .. } = q { Some(text.clone()) } else { None }).collect()
@@ -471,20 +405,14 @@ impl Session {
         self.emit(Out::Event(Event::Queue { steering: texts(&state.steering), follow_up: texts(&state.follow_up) }));
     }
 
-    /// Drop the session: its run stops where it is, its jobs are killed, the ones left
-    /// running too, and its servers and screens close. Nothing more comes of it.
     pub(crate) fn unload(self: &Arc<Self>) {
         self.end(false);
         let this = self.clone();
         tokio::spawn(async move { this.close().await });
     }
 
-    /// What `unload` does at once: nothing more comes of the session, its run stops, its
-    /// jobs are killed. `now`: with no grace, and none starts any more (`Jobs::kill_now`),
-    /// for a host that is about to exit.
     pub(crate) fn end(&self, now: bool) {
         {
-            // Under the lock runs start under: one is either refused or stopped here.
             let state = self.state.lock().unwrap();
             self.unloaded.store(true, Ordering::Relaxed);
             if let Some(run) = &state.run {
@@ -496,13 +424,10 @@ impl Session {
         } else {
             self.jobs.kill(false)
         }
-        // Whoever waits for it to get ready finds it gone.
         self.ready.send_replace(true);
     }
 
-    /// Close what a session that ended holds: its MCP servers and its screens.
     pub(crate) async fn close(&self) {
-        // The servers first: none is added after that, so no screen opens once they are closed.
         self.mcp.close().await;
         self.computer.close_all(&self.mcp).await;
     }
@@ -515,34 +440,24 @@ impl Session {
         taking_in || self.state.lock().unwrap().run.is_some() || self.jobs.running() != (0, 0)
     }
 
-    /// Tell the host how many jobs run. Called wherever that changes.
     pub(crate) fn report_jobs(&self) {
         let (running, free) = self.jobs.running();
         self.emit(Out::Jobs { running, free });
     }
 
-    /// End every `wait` in progress: `why` reached the model's queue.
     fn wake(&self, why: &str) {
         for waiter in self.waiters.lock().unwrap().iter() {
             let _ = waiter.send(why.to_owned());
         }
     }
 
-    /// `async_bash wait`: block until something reaches the model's queue (a notice of a job,
-    /// a sub-agent or an ask, or a steer), `timeout` passes or the run is stopped, and say
-    /// which. The notice itself is queued and follows the tool's result. Returns at once
-    /// when something is queued already, or when nothing could ever come.
     pub(crate) async fn wait(&self, timeout: Duration, cancel: &CancellationToken) -> String {
-        // Registered before anything is looked at: what comes in meanwhile wakes it. Until
-        // the wait ends, or is let go of (a stopped run drops a call that takes too long):
-        // a waiter left behind would make a steer of every later notice (`deliver`).
         let (waiter, mut woken) = mpsc::unbounded_channel();
         self.waiters.lock().unwrap().push(waiter.clone());
         let _waiting = Waiting { session: self, waiter };
         let started = std::time::Instant::now();
         let waited = || crate::tools::shell::duration(started.elapsed().as_millis() as i64);
         let outcome = async {
-            // The model calls tools side by side: a sub-agent spawned in the same batch counts.
             let mut host_calls = self.host_calls.subscribe();
             let _ = host_calls.wait_for(|n| *n == 0).await;
             let busy = !self.jobs.awaited().is_empty() || self.env.host.children_busy(&self.env.thread_id);
@@ -574,9 +489,7 @@ impl Session {
             let why = woken.recv().await.unwrap_or_default();
             format!("Woke after {} on this (in full in the next message):\n{why}", waited())
         };
-        // The stop and the timeout end it wherever it is, also while the host's calls go on.
         tokio::select! {
-            // What is queued already is said even to a wait of no time at all.
             biased;
             text = outcome => text,
             _ = cancel.cancelled() => format!("wait stopped after {}", waited()),
@@ -588,16 +501,10 @@ impl Session {
         }
     }
 
-    /// A message's text and images as an entry's content. Each image is made fit to send
-    /// (`images::process`), kept as a blob, and saved as a file under
-    /// `<data dir>/attachments/` that the text then names: a markdown reference definition
-    /// per image, `[image-N]: /path`, in the images' order, so the model sees which file each
-    /// `[image-N]` is and can use it. Returns the text as the model reads it, and the content.
     async fn attach(&self, text: &str, attachments: &[ImageAttachment]) -> (String, Vec<Block>) {
         if attachments.is_empty() {
             return (text.to_owned(), vec![Block::text(text)]);
         }
-        // The `N`s the text names, for images that come without theirs.
         let mut tokens: Vec<u32> = text.split("[image-").skip(1).filter_map(|rest| rest.split_once(']')?.0.parse().ok()).collect();
         tokens.sort_unstable();
         tokens.dedup();
@@ -622,7 +529,6 @@ impl Session {
                 }
             };
             let blob = self.env.host.put_blob(&image.mime, &image.data);
-            // The file is the image as it was sent, whatever was made of it for the model.
             let ext = match attachment.mime_type.as_str() {
                 "image/jpeg" => "jpg",
                 "image/svg+xml" => "svg",
@@ -648,9 +554,7 @@ impl Session {
         (text, blocks)
     }
 
-    /// An image's bytes as a request sends them: its mime type and base64.
     pub(crate) fn image(&self, blob: &str) -> Option<(String, String)> {
-        // Not held while the host is asked: a host that panics there doesn't take the lock with it.
         if let Some(image) = self.images.lock().unwrap().get(blob) {
             return Some(image.clone());
         }
@@ -660,8 +564,6 @@ impl Session {
         Some(image)
     }
 
-    /// Forget the images that are in none of `entries`, the part of the branch the model
-    /// still sees: after a compaction, no request sends the others again.
     pub(crate) fn keep_images(&self, entries: &[Entry]) {
         let mut seen = HashSet::new();
         for entry in entries {
@@ -671,10 +573,6 @@ impl Session {
         self.images.lock().unwrap().retain(|blob, _| seen.contains(blob.as_str()));
     }
 
-    /// For every markdown image in a reply's text that links to an image file on this
-    /// machine (absolute, or relative to the thread's directory), keep the file as a blob
-    /// and record it on the text block (`Block::Text::blobs`): what lets a client anywhere
-    /// show it. The text stays as the model wrote it.
     pub(crate) fn link_images(&self, content: &mut [Block]) {
         for block in content {
             let Block::Text { text, blobs } = block else { continue };
@@ -690,7 +588,6 @@ impl Session {
         }
     }
 
-    /// The values codemode scripts kept (`Body::Store`), as of the branch.
     pub(crate) fn stored(&self) -> BTreeMap<String, serde_json::Value> {
         let mut values = BTreeMap::new();
         for entry in &self.state.lock().unwrap().branch {
@@ -706,7 +603,6 @@ impl Session {
     }
 }
 
-/// A session as its codemode scripts reach it.
 struct Scripts(Weak<Session>);
 
 #[async_trait]
@@ -738,7 +634,6 @@ impl ScriptHost for Scripts {
     }
 }
 
-/// The image file a reply links to as `target`, if it is one to show: its mime type and bytes.
 fn linked_image(cwd: &Path, target: &str) -> Option<(&'static str, Vec<u8>)> {
     if target.is_empty() || target.contains("://") || target.starts_with("blob:") || target.starts_with("data:") {
         return None;
@@ -758,7 +653,6 @@ fn linked_image(cwd: &Path, target: &str) -> Option<(&'static str, Vec<u8>)> {
     Some((mime, std::fs::read(&path).ok()?))
 }
 
-/// A notice's first line, for `wait` to say what woke it.
 fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or("");
     match line.char_indices().nth(200) {
@@ -767,7 +661,6 @@ fn first_line(text: &str) -> String {
     }
 }
 
-/// The environment of the project's nix dev shell: `nix develop <cwd> --command env -0`.
 async fn nix_env(cwd: &Path) -> Result<HashMap<String, String>> {
     let out = tokio::process::Command::new("nix").arg("develop").arg(cwd).args(["--command", "env", "-0"]).current_dir(cwd).output().await;
     let out = match out {
@@ -792,9 +685,6 @@ mod tests {
     use crate::testing::{Does, Script, Step, call, prompt, session, session_with, text};
     use serde_json::json;
 
-    /// `wait` ends at its timeout and at a stop also while a call of the host's goes on
-    /// (which it lets end before it looks for sub-agents); one let go of midway is told of
-    /// nothing any more; and a host's call that was let go of no longer holds one up.
     #[tokio::test]
     async fn a_wait_is_not_held_by_the_hosts_calls_and_leaves_nothing_behind() {
         let dir = tempfile::tempdir().unwrap();
@@ -817,7 +707,6 @@ mod tests {
         assert!(end(late, stopped).await.starts_with("wait stopped after "));
         assert!(tokio::time::timeout(soon, session.wait(late, &CancellationToken::new())).await.is_err());
         assert!(session.waiters.lock().unwrap().is_empty());
-        // The call goes with the script that made it, as when a stopped run drops that.
         calling.abort();
         let _ = calling.await;
         assert_eq!(end(late, CancellationToken::new()).await, "Nothing to wait for: no jobs or sub-agents running that would wake you.");
@@ -828,19 +717,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (host, session) = session(dir.path(), Script::new(vec![]));
         session.unload();
-        // As a job of it would, that ends only now.
         assert!(!session.deliver(Notice::Info { text: "late".into() }, Notify::Asap));
         assert_eq!(session.prompt(prompt("go")).await.unwrap_err().to_string(), "the thread was unloaded");
         assert!(!session.busy() && host.outs.lock().unwrap().is_empty());
     }
 
-    /// The images a compaction summarized away are no longer kept for requests to send.
     #[tokio::test]
     async fn a_compaction_forgets_the_images_it_summarized() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(dir.path().join("config/agent.toml"), "[compaction]\nreserve = 50\nkeep_recent = 1\n").unwrap();
-        // Every scripted reply says its request was 110 tokens: over the 100 this window leaves.
         let steps = vec![
             Step::Say(vec![call("c1", "bash", json!({ "command": "echo out" }))]),
             Step::Say(vec![text("a picture was shown")]),
@@ -853,7 +739,6 @@ mod tests {
         let image = ImageAttachment { mime_type: "image/png".into(), data: BASE64.encode(png.into_inner()), n: None };
         session.prompt(Prompt { images: vec![image], ..prompt("look") }).await.unwrap();
         host.settled(1).await;
-        // The first request sent the image; the compaction that followed summarized its message.
         let requests = script.requests.lock().unwrap();
         assert!(requests[0].0.contains("Image {") && !requests[2].0.contains("Image {"), "{requests:#?}");
         assert!(session.images.lock().unwrap().is_empty());

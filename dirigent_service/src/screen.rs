@@ -1,17 +1,3 @@
-//! A thread's screen: the latest picture of the window its agent is using the computer in
-//! (the agent's `computer` tool sends one whenever it changed), for clients to watch. Only
-//! the latest is kept, in memory, and only for the run it belongs to: a screen is something
-//! to look at while it happens, not history (what the model itself looked at is in the
-//! transcript).
-//!
-//! Clients are told of every step with a small `screen` event and ask for the picture
-//! (`GetScreen`) while they show the thread. Watching must never cost a client its
-//! connection's responsiveness, however slow that is, so a picture is made small (a JPEG
-//! scaled and compressed towards `MAX_BYTES`, made the first time someone asks: a screen
-//! nobody watches costs nothing) and handed out in pieces of `PIECE`, each asked for once
-//! the one before arrived: no more than one piece is ever on its way, ahead of whatever
-//! else the connection has to carry.
-
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
@@ -23,26 +9,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
-/// What a picture should weigh at most: what a slow connection takes a few seconds to carry.
 const MAX_BYTES: usize = 96 << 10;
-/// The longest edge and JPEG quality to try, in order, until the picture fits `MAX_BYTES`:
-/// a window of text does at the first, a photo may need the last (sent as it is then).
 const STEPS: [(u32, u8); 4] = [(1280, 70), (1280, 45), (960, 45), (640, 40)];
-/// How much of a picture's base64 text one `Screen` reply carries: the most a client's
-/// other messages ever wait behind.
 const PIECE: usize = 16 << 10;
 
 #[derive(Default)]
 pub struct Screens {
     threads: Mutex<HashMap<String, Screen>>,
-    /// The last picture's id. One count for all threads, so a thread's next run never
-    /// reuses an id a client still holds a picture for.
     frames: AtomicU64,
 }
 
-/// The picture a connection is in the middle of reading (`Screens::piece`): its thread, its
-/// id and its base64 text, kept whole while the thread's screen moves on. The connection
-/// holds it (`server::Conn`) and it goes with it.
 pub struct Reading {
     thread_id: String,
     frame: u64,
@@ -51,32 +27,24 @@ pub struct Reading {
 
 #[derive(Default)]
 struct Screen {
-    /// The picture's id, as `screen` events name it; 0 while there is none.
     frame: u64,
     picture: Option<Picture>,
 }
 
 enum Picture {
-    /// As the agent's `computer` tool sent it.
     Png(Arc<Vec<u8>>),
-    /// As clients get it (`encode`), base64: made once, in the PNG's place.
     Wire(Arc<str>),
 }
 
-/// A piece of a picture, as a `Screen` reply carries it. Empty (`total` 0) when there is
-/// no picture to give.
 #[derive(Debug, Default, PartialEq)]
 pub struct Piece {
     pub frame: u64,
-    /// The length of the picture's whole base64 text.
     pub total: usize,
     pub data: String,
 }
 
 impl Screens {
-    /// A step of the thread's computer use, with the window's picture if it changed.
-    /// Returns the id of the picture the screen shows now, and whether the thread just got
-    /// its screen.
+    // MUST KILL: type: the (u64, bool) return is (frame on show, screen just created); return a named struct
     pub fn update(&self, thread_id: &str, png: Option<Vec<u8>>) -> (u64, bool) {
         let mut threads = self.threads.lock().unwrap();
         let new = !threads.contains_key(thread_id);
@@ -92,17 +60,10 @@ impl Screens {
         self.threads.lock().unwrap().contains_key(thread_id)
     }
 
-    /// The thread's run is over, or its session is new or gone: it has no screen. A picture
-    /// a client is in the middle of reading stays until it has it.
     pub fn clear(&self, thread_id: &str) {
         self.threads.lock().unwrap().remove(thread_id);
     }
 
-    /// The piece at `offset` of a picture of the thread's, for the connection that holds
-    /// `reading` (`ClientMessage::GetScreen`): at 0 the thread's latest, which the
-    /// connection then reads to its end (`frame` names it from there on) whatever the screen
-    /// does meanwhile. An empty piece when there is none: the thread has no screen (its run
-    /// just ended), or the connection isn't reading that picture.
     pub async fn piece(&self, reading: &Mutex<Option<Reading>>, thread_id: &str, frame: u64, offset: usize) -> Piece {
         if offset == 0 {
             let picture = self.picture(thread_id).await;
@@ -122,7 +83,6 @@ impl Screens {
         piece
     }
 
-    /// The thread's picture for the wire, if it has one: its id and a JPEG as base64 text.
     async fn picture(&self, thread_id: &str) -> Option<(u64, Arc<str>)> {
         let (frame, png) = {
             let threads = self.threads.lock().unwrap();
@@ -132,7 +92,6 @@ impl Screens {
                 Picture::Png(png) => (screen.frame, png.clone()),
             }
         };
-        // Off the async workers: a big window takes some tens of milliseconds.
         let jpeg = match tokio::task::spawn_blocking(move || encode(&png)).await {
             Ok(Ok(jpeg)) => jpeg,
             Ok(Err(e)) => {
@@ -142,7 +101,6 @@ impl Screens {
             Err(_) => return None,
         };
         let text: Arc<str> = B64.encode(jpeg).into();
-        // Kept unless the screen moved on meanwhile.
         if let Some(screen) = self.threads.lock().unwrap().get_mut(thread_id).filter(|s| s.frame == frame) {
             screen.picture = Some(Picture::Wire(text.clone()));
         }
@@ -150,7 +108,6 @@ impl Screens {
     }
 }
 
-/// `png` as a JPEG that fits `MAX_BYTES`: scaled down and compressed as far as `STEPS` goes.
 fn encode(png: &[u8]) -> Result<Vec<u8>> {
     let picture = image::load_from_memory_with_format(png, ImageFormat::Png)?;
     let mut jpeg = Vec::new();
@@ -177,13 +134,10 @@ mod tests {
         png
     }
 
-    /// A cheap hash per pixel, no two neighbours alike: the worst a screen can be.
     fn noise(x: u32, y: u32) -> [u8; 3] {
         (x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)).to_le_bytes()[..3].try_into().unwrap()
     }
 
-    /// Whatever the window, the wire gets a JPEG within the budget: a plain one at its own
-    /// size, noise scaled down until it fits.
     #[test]
     fn pictures_fit_the_wire() {
         let size = |jpeg: &[u8]| image::load_from_memory_with_format(jpeg, ImageFormat::Jpeg).map(|p| (p.width(), p.height())).unwrap();
@@ -195,8 +149,6 @@ mod tests {
         assert!(size(&noisy).0 <= 1280);
     }
 
-    /// A step without a picture keeps the one on show, a new picture has a new id, and a
-    /// cleared thread has no screen: asking then gets an empty piece.
     #[tokio::test]
     async fn the_latest_picture_is_the_screen() {
         let (screens, reading) = (Screens::default(), Mutex::new(None));
@@ -215,8 +167,6 @@ mod tests {
         assert_eq!(screens.piece(&reading, "t", 0, 0).await, Piece::default());
     }
 
-    /// A picture is read a piece at a time, to its end even when the screen has moved on;
-    /// the pieces put together are the picture. Nobody else's pieces, and none after the last.
     #[tokio::test]
     async fn a_picture_comes_in_pieces() {
         let (screens, reading, other) = (Screens::default(), Mutex::new(None), Mutex::new(None));
@@ -224,7 +174,6 @@ mod tests {
         let first = screens.piece(&reading, "t", 0, 0).await;
         assert_eq!(first.data.len(), PIECE);
         assert!(first.total > 2 * PIECE);
-        // The screen moves on, and its run ends: the reader still gets the picture it began.
         screens.update("t", Some(png(4, 4, |_, _| [0, 0, 0])));
         screens.clear("t");
         assert_eq!(screens.piece(&other, "t", first.frame, PIECE).await, Piece::default());

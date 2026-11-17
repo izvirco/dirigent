@@ -1,27 +1,15 @@
-//! Where the window opens: as it was when last used (size, position, maximized /
-//! fullscreen), kept in `kv`, so every launch (an update relaunches too) reopens it there.
-//! Per data dir, like the rest of `desktop.db`. Wayland doesn't let a window place itself:
-//! there only the size and state come back. On macOS gpui keeps a position relative to the
-//! window's display and opens on the main one: there it comes back on the main display.
-
 use crate::app::Dirigent;
 use crate::cache::Cache;
 use gpui::{App, Bounds, Context, Pixels, Task, Window, WindowBounds, point, px, size};
 use std::time::Duration;
 
-/// `kv`: `<state> <x> <y> <width> <height>`, the state `windowed`, `maximized` or
-/// `fullscreen` and the bounds the windowed ones (what un-maximizing restores; X11 reports
-/// the maximized ones), in logical pixels.
+// MUST KILL: type: KEY's hand-rolled `<state> x y w h` string → a typed record of state and restore bounds
 const KEY: &str = "window";
-/// Nothing saved, or what was saved no longer fits: this size, centered.
 const DEFAULT_SIZE: (f32, f32) = (1100., 720.);
-/// How far below the window's top edge the middle of its title bar is, about.
 const TITLE_BAR_MIDDLE: Pixels = px(16.);
-/// A drag or a resize reports every frame: save once the window has held still this long.
-/// A quit within it keeps the state from before.
+// MUST KILL: rename: SETTLE → SAVE_DEBOUNCE (a quit inside it drops the last change)
 const SETTLE: Duration = Duration::from_millis(500);
 
-/// How the window opens: as `remember` saved it, if that still fits the displays.
 pub fn initial(cache: &Cache, cx: &App) -> WindowBounds {
     let saved = cache.get(KEY);
     // No primary display: Wayland, where the compositor places the window, and gpui's
@@ -34,11 +22,9 @@ pub fn initial(cache: &Cache, cx: &App) -> WindowBounds {
     bounds
 }
 
-/// Save the window's state whenever it changes, once it settles.
 pub fn remember(window: &mut Window, cx: &mut Context<Dirigent>) {
     let mut pending = Task::ready(());
     cx.observe_window_bounds(window, move |_, window, cx| {
-        // Read once settled: on X11 a maximize reports the new size before the new state.
         let save = cx.spawn_in(window, async move |this, cx| {
             cx.background_executor().timer(SETTLE).await;
             this.update_in(cx, |this, window, _| {
@@ -82,9 +68,6 @@ fn parse(s: &str) -> Option<WindowBounds> {
     (w > 0. && h > 0.).then(|| state(Bounds::new(point(px(x), px(y)), size(px(w), px(h)))))
 }
 
-/// The saved state if its bounds still fit `displays` (`None`: unknown, it does), else
-/// `default`. A window that was maximized or fullscreen stays so (on the default display)
-/// when its display is gone.
 fn restore(saved: Option<&str>, displays: Option<&[Bounds<Pixels>]>, default: Bounds<Pixels>) -> WindowBounds {
     match saved.and_then(parse) {
         Some(state) if displays.is_none_or(|d| fits(state.get_bounds(), d)) => state,
@@ -94,9 +77,7 @@ fn restore(saved: Option<&str>, displays: Option<&[Bounds<Pixels>]>, default: Bo
     }
 }
 
-/// Whether bounds saved earlier still fit the displays: the middle of the title bar on one
-/// of them, so the window can be grabbed and moved, and no bigger than one of them. Not
-/// necessarily the same one, so a window spanning two displays comes back too.
+// MUST KILL: extract: fits → title bar on some display && no bigger than some display, as two named checks
 fn fits(b: Bounds<Pixels>, displays: &[Bounds<Pixels>]) -> bool {
     let grip = point(b.center().x, b.origin.y + TITLE_BAR_MIDDLE);
     displays.iter().any(|d| d.contains(&grip)) && displays.iter().any(|d| b.size.width <= d.size.width && b.size.height <= d.size.height)
@@ -128,27 +109,21 @@ mod tests {
 
     #[test]
     fn falls_back_unless_the_saved_bounds_fit() {
-        // A laptop with a bigger monitor to its right.
         let displays = [bounds(0., 0., 1536., 864.), bounds(1536., 0., 2560., 1440.)];
         let default = bounds(218., 72., 1100., 720.);
         let restore = |saved| restore(Some(saved), Some(&displays), default);
 
         assert_eq!(restore("windowed 1800 100 2000 1200"), WindowBounds::Windowed(bounds(1800., 100., 2000., 1200.)));
-        // Half off the screen's left edge, the title bar's middle still on it.
         assert_eq!(restore("windowed -500 100 1100 720"), WindowBounds::Windowed(bounds(-500., 100., 1100., 720.)));
-        // Across both, its title bar's middle on the laptop.
         assert_eq!(restore("windowed 0 0 2000 1200"), WindowBounds::Windowed(bounds(0., 0., 2000., 1200.)));
         assert_eq!(restore("maximized 1536 0 1200 800"), WindowBounds::Maximized(bounds(1536., 0., 1200., 800.)));
 
-        // On a monitor that's gone, title bar off the bottom, bigger than any display, garbage.
         for saved in ["windowed 4200 100 800 600", "windowed 100 1430 800 600", "windowed 0 0 2600 1200", "whatever"] {
             assert_eq!(restore(saved), WindowBounds::Windowed(default), "{saved}");
         }
-        // Maximized on a monitor that's gone: still maximized.
         assert_eq!(restore("maximized 4200 0 1200 800"), WindowBounds::Maximized(default));
         assert_eq!(super::restore(None, Some(&displays), default), WindowBounds::Windowed(default));
 
-        // Displays unknown (Wayland): what was saved, if it parses.
         assert_eq!(super::restore(Some("windowed 0 0 5000 3000"), None, default), WindowBounds::Windowed(bounds(0., 0., 5000., 3000.)));
         assert_eq!(super::restore(Some("whatever"), None, default), WindowBounds::Windowed(default));
     }

@@ -1,21 +1,3 @@
-//! Hand-rolled multiline text input: gpui has no widget, so this implements
-//! `EntityInputHandler` (IME, keyboard) plus a custom `Element` that shapes the
-//! text with wrapping, grows with content up to a share of the window, then scrolls
-//! (wheel, and automatically to keep the cursor in view) and paints cursor/selection.
-//! Mouse selection (double click = word, triple = all) keeps following the mouse once it
-//! leaves the input, and every edit is undoable (typing a word is one step).
-//!
-//! Keys (`key_bindings`; "word" is ctrl, alt on macOS):
-//! - moves (`Move`): left / right a character, up / down a visual row (a single-line input
-//!   emits `Arrow` instead, for a list under it), word+left / right a word, home / end
-//!   (cmd+left / right on macOS) the line's start / end, ctrl+home / end (cmd+up / down on
-//!   macOS) the whole text's; with shift, each selects to there (shift+up / down too in a
-//!   single-line input: there they reach its start / end);
-//! - word+backspace / delete delete a word, stopping where word+left / right do
-//!   (`word_boundary`); secondary+a selects all.
-//!
-//! Adapted from zed's `gpui/examples/input.rs`, extended to multiple lines.
-
 use crate::select::{self, word_at};
 use crate::theme::u;
 use gpui::{
@@ -30,8 +12,6 @@ use unicode_segmentation::UnicodeSegmentation;
 
 actions!(input, [Backspace, Delete, BackspaceWord, DeleteWord, SelectAll, Paste, Cut, Copy, Undo, Redo, Newline, Submit, SubmitQueued]);
 
-/// A motion key: moves the cursor `to` somewhere, or with `select` (shift) extends the
-/// selection to there (`TextInput::move_cursor`).
 #[derive(Clone, PartialEq, gpui::Action)]
 #[action(namespace = input, no_json)]
 struct Move {
@@ -41,61 +21,44 @@ struct Move {
 
 #[derive(Clone, Copy, PartialEq)]
 enum To {
-    /// A character.
     Left,
     Right,
-    /// A visual row: -1 up, 1 down.
     Row(i32),
-    /// Where `prev_word` / `next_word` say.
     WordLeft,
     WordRight,
-    /// The `\n`-separated line's start / end (Home / End).
     LineStart,
     LineEnd,
-    /// The whole text's.
     Start,
     End,
 }
 
 pub const KEY_CONTEXT: &str = "Input";
-/// A multiline input grows with its text up to this share of the window height, then scrolls.
 const MAX_HEIGHT_FRACTION: f32 = 0.7;
-/// Room (design pixels, `theme::u`) kept for the composer's padding and chip row so the whole card stays within that share.
+// MUST KILL: rearchitect: CARD_CHROME couples the input to the composer card; let the composer cap its own height
 const CARD_CHROME: f32 = 90.;
-/// Right inset (design pixels) reserved for the scrollbar so text never runs under it.
 const BAR_GUTTER: f32 = 12.;
-/// What a secret input shows for each character.
 const MASK: char = '\u{2022}';
-/// Edits of one kind closer together than this join the same undo step.
 const UNDO_GROUP: Duration = Duration::from_secs(1);
 const UNDO_DEPTH: usize = 200;
 
-/// Emitted on ctrl+Enter (cmd on macOS), or shift+Enter with `queued` (Enter alone inserts a newline;
-/// single-line inputs submit on Enter too, with `ctrl` false). What `queued` means is up to
-/// the subscriber.
+// MUST KILL: type: Submitted as an enum (Ctrl / Queued / SingleLineEnter), not two bools
 pub struct Submitted {
     pub queued: bool,
     pub ctrl: bool,
 }
 
-/// Up / Down in a single-line input (a multiline one moves its cursor instead): for a list
-/// under the input to move its selection. `down` is +1, up -1.
+// MUST KILL: type: Arrow as an enum Up / Down, not +1 / -1
 pub struct Arrow(pub i32);
 
-/// Emitted when the clipboard held an image on paste (nothing is inserted; the
-/// subscriber decides what to do with it, if anything).
 pub struct ImagePasted(pub gpui::Image);
 
-/// Emitted after every edit the user makes (typing, paste, delete, undo, IME commit);
-/// not after `set_text`, so a subscriber filling the input doesn't hear its own write.
+// MUST KILL: rename: Changed -> UserEdited, set_text does not emit it
 pub struct Changed;
 
-/// Attachment token the composer colors: `[image-N]`.
 pub fn image_token(n: u32) -> String {
     format!("[image-{n}]")
 }
 
-/// The distinct `N`s of the `[image-N]` tokens in `text`, ascending.
 pub fn image_numbers(text: &str) -> Vec<u32> {
     let mut ns: Vec<u32> =
         image_tokens(text).into_iter().filter_map(|r| text[r].strip_prefix("[image-")?.strip_suffix(']')?.parse().ok()).collect();
@@ -104,17 +67,14 @@ pub fn image_numbers(text: &str) -> Vec<u32> {
     ns
 }
 
-/// Where byte `offset` of `text` falls in its mask (a `MASK` per char).
 fn mask_offset(text: &str, offset: usize) -> usize {
     text[..offset].chars().count() * MASK.len_utf8()
 }
 
-/// The byte offset of `text` at `offset` of its mask; inside a `MASK`, the char's start.
 fn unmask_offset(text: &str, offset: usize) -> usize {
     text.char_indices().nth(offset / MASK.len_utf8()).map_or(text.len(), |(i, _)| i)
 }
 
-/// Byte ranges of every `[image-N]` token in `text`.
 fn image_tokens(text: &str) -> Vec<Range<usize>> {
     let mut out = vec![];
     let mut from = 0;
@@ -136,32 +96,21 @@ pub struct TextInput {
     content: SharedString,
     placeholder: SharedString,
     single_line: bool,
-    /// Shows a `MASK` per character instead of the text (a key), and keeps it off the
-    /// clipboards (`set_secret`).
     secret: bool,
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    /// Layout from the last paint, used for mouse hit testing and IME bounds.
     last_layout: Option<Layout>,
     last_bounds: Option<Bounds<Pixels>>,
-    /// What the mouse press selected (a word after a double click) while the button is
-    /// down; dragging extends the selection from it.
     drag_anchor: Option<Range<usize>>,
-    /// Vertical scroll of the text inside its (clamped) bounds.
     scroll_y: Pixels,
-    /// Horizontal scroll: a single-line input doesn't wrap, it scrolls sideways instead.
     scroll_x: Pixels,
-    /// Set by every edit / cursor move: the next paint scrolls the cursor into view.
     follow_cursor: bool,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
-    /// The last edit, to join the next one of the same kind into its undo step.
     last_edit: Option<(Edit, Instant)>,
 }
 
-/// Text with its selection: what a draft keeps per thread (`Dirigent::save_draft`), and
-/// what `set_content` swaps into the input when the user moves between threads.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Content {
     pub text: String,
@@ -169,15 +118,12 @@ pub struct Content {
     pub reversed: bool,
 }
 
-/// Content and selection before an edit.
 struct Snapshot {
     content: SharedString,
     selected_range: Range<usize>,
     reversed: bool,
 }
 
-/// Kinds of edit for undo grouping: typing a word joins the spaces that end it, deleting
-/// joins deleting; anything else (paste, newline, IME) is a step of its own.
 #[derive(Clone, Copy, PartialEq)]
 enum Edit {
     Word,
@@ -202,7 +148,6 @@ impl Edit {
     }
 }
 
-/// Shaped text: one `WrappedLine` per `\n`-separated line, plus their byte offsets.
 struct Layout {
     lines: Vec<WrappedLine>,
     starts: Vec<usize>,
@@ -217,7 +162,6 @@ impl Layout {
         let (style, font_size) = (&font.style, font.size);
         let color = if placeholder { rgba(crate::theme::t().fg_2).into() } else { style.color };
         let run = |len, color| TextRun { len, font: style.font(), color, background_color: None, underline: None, strikethrough: None };
-        // Plain text, with every attachment token in the accent color.
         let mut runs = vec![];
         let mut at = 0;
         for range in if placeholder { vec![] } else { image_tokens(text) } {
@@ -240,7 +184,6 @@ impl Layout {
         self.lines.iter().map(|l| l.size(self.line_height).height).fold(px(0.), |a, b| a + b)
     }
 
-    /// Pixel position (relative to the text origin) of a byte index.
     fn position(&self, index: usize) -> Point<Pixels> {
         let mut y = px(0.);
         for (line, &start) in self.lines.iter().zip(&self.starts) {
@@ -254,7 +197,6 @@ impl Layout {
         point(px(0.), y - self.line_height)
     }
 
-    /// Byte index closest to a pixel position (relative to the text origin).
     fn index(&self, pos: Point<Pixels>) -> usize {
         if pos.y < px(0.) {
             return 0;
@@ -272,7 +214,6 @@ impl Layout {
     }
 }
 
-/// The text style in effect where the input is rendered, resolved to pixels.
 struct Font {
     style: TextStyle,
     size: Pixels,
@@ -319,8 +260,6 @@ impl TextInput {
         cx.notify();
     }
 
-    /// Mask the text (an API key) or show it again. Either way the undo history goes: it
-    /// may hold a secret.
     pub fn set_secret(&mut self, secret: bool, cx: &mut Context<Self>) {
         self.secret = secret;
         self.undo.clear();
@@ -329,17 +268,14 @@ impl TextInput {
         cx.notify();
     }
 
-    /// The text as painted: a secret's masked.
     fn shown(&self) -> SharedString {
         if self.secret { MASK.to_string().repeat(self.content.chars().count()).into() } else { self.content.clone() }
     }
 
-    /// Where a byte offset of the text falls in `shown`.
     fn shown_offset(&self, offset: usize) -> usize {
         if self.secret { mask_offset(&self.content, offset) } else { offset }
     }
 
-    /// The byte offset of the text at an offset of `shown`.
     fn text_offset(&self, offset: usize) -> usize {
         if self.secret { unmask_offset(&self.content, offset) } else { offset }
     }
@@ -359,8 +295,6 @@ impl TextInput {
         Content { text: self.content.to_string(), selection: self.selected_range.clone(), reversed: self.selection_reversed }
     }
 
-    /// Replace text and selection with another draft's. Not an edit: the undo history goes
-    /// with the old draft. A selection that doesn't fit the text falls back to its end.
     pub fn set_content(&mut self, c: Content, window: &Window, cx: &mut Context<Self>) {
         let fits =
             c.selection.start <= c.selection.end && c.text.is_char_boundary(c.selection.start) && c.text.is_char_boundary(c.selection.end);
@@ -376,10 +310,8 @@ impl TextInput {
         cx.notify();
     }
 
-    /// Before an edit: remember the state to undo to, unless the edit joins the last one.
     fn record(&mut self, kind: Edit) {
-        // A secret keeps no history: undo would bring it back after the input is cleared,
-        // and unmasked once the input shows text again.
+        // MUST KILL: extract: the secret check in record() into a keeps_history() that says secrets keep no undo
         if self.secret {
             return;
         }
@@ -425,14 +357,12 @@ impl TextInput {
         }
     }
 
-    /// Take the content, leaving the input empty.
     pub fn take(&mut self, window: &Window, cx: &mut Context<Self>) -> String {
         let text = self.content.to_string();
         self.set_text("", window, cx);
         text
     }
 
-    /// Remove every occurrence of `needle`, keeping the cursor where it was (clamped).
     pub fn remove_all(&mut self, needle: &str, window: &Window, cx: &mut Context<Self>) {
         let cursor = self.cursor_offset();
         let before = self.content[..cursor].matches(needle).count() * needle.len();
@@ -456,8 +386,6 @@ impl TextInput {
         }
     }
 
-    /// Every motion key. Without shift a selection collapses: left / right to the end they
-    /// head to, a word jump goes on from that end. Everything else moves from the cursor.
     fn move_cursor(&mut self, m: &Move, window: &mut Window, cx: &mut Context<Self>) {
         let c = self.cursor_offset();
         let collapse = !m.select && !self.selected_range.is_empty();
@@ -482,9 +410,6 @@ impl TextInput {
         if m.select { self.select_to(to, window, cx) } else { self.move_to(to, window, cx) }
     }
 
-    /// Where the cursor lands `rows` visual rows down (up if negative) in the last layout;
-    /// past the first / last row, at the text's start / end (all a single line has). None
-    /// while the layout is stale.
     fn vertical_target(&self, rows: i32) -> Option<usize> {
         let layout = self.last_layout.as_ref().filter(|l| l.text == self.shown())?;
         let pos = layout.position(self.shown_offset(self.cursor_offset()));
@@ -513,20 +438,18 @@ impl TextInput {
         self.delete_to(next_word(&self.content, self.cursor_offset()), window, cx)
     }
 
-    /// Delete the selection, or with none, from the cursor to `to` (either side of it).
     fn delete_to(&mut self, to: usize, window: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             let c = self.cursor_offset();
             if c == to {
                 return;
             }
-            // Not `select_to`: that would end the undo group of a run of deletes.
+            // MUST KILL: extract: the last_edit reset out of select_to so delete_to can select without ending the undo group
             self.selected_range = c.min(to)..c.max(to);
         }
         self.replace_text_in_range(None, "", window, cx)
     }
 
-    /// One click puts the cursor, two select the word, three everything; shift extends.
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let idx = self.index_for_mouse_position(event.position);
         let anchor = if event.modifiers.shift {
@@ -543,16 +466,12 @@ impl TextInput {
         self.drag(event.position, window, cx);
     }
 
-    /// Ends a drag; what it selected goes to the primary selection.
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.drag_anchor.take().is_some() && !self.selected_range.is_empty() && !self.secret {
             write_to_primary(self.content[self.selected_range.clone()].to_string(), cx);
         }
     }
 
-    /// Extend the selection from the drag anchor to the mouse. Registered on the window
-    /// while the button is down, so it keeps working once the mouse leaves the input:
-    /// above it selects to the start, below it to the end.
     fn drag(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
         let Some(anchor) = self.drag_anchor.clone() else { return };
         let idx = self.index_for_mouse_position(position);
@@ -586,7 +505,6 @@ impl TextInput {
         }
     }
 
-    /// With nothing selected the action goes on to the root, which copies the transcript selection.
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if self.selected_range.is_empty() {
             cx.propagate();
@@ -624,7 +542,6 @@ impl TextInput {
         }
     }
 
-    /// Where the (possibly scrolled-off) top of the text sits in window coordinates.
     fn text_origin(&self, bounds: &Bounds<Pixels>) -> Point<Pixels> {
         bounds.origin - point(self.scroll_x, self.scroll_y)
     }
@@ -688,31 +605,23 @@ impl TextInput {
     }
 }
 
-/// Where a word move (ctrl+left / right) lands and a word delete (ctrl+backspace / delete)
-/// reaches, before `from` in `text`.
 fn prev_word(text: &str, from: usize) -> usize {
     word_boundary(text[..from].grapheme_indices(true).rev(), from)
 }
 
-/// Like `prev_word`, but after `from`.
 fn next_word(text: &str, from: usize) -> usize {
     word_boundary(text[from..].grapheme_indices(true).map(|(i, g)| (from + i + g.len(), g)), from)
 }
 
-/// The start of the `\n`-separated line `at` is on (Home).
 fn line_start(text: &str, at: usize) -> usize {
     text[..at].rfind('\n').map_or(0, |i| i + 1)
 }
 
-/// The end of the `\n`-separated line `at` is on (End).
 fn line_end(text: &str, at: usize) -> usize {
     text[at..].find('\n').map_or(text.len(), |i| at + i)
 }
 
-/// How far a word move or delete reaches from `from`: over spaces, then over one run of word
-/// characters or of punctuation. A line break is a word of its own, and spaces before it
-/// stop there. `graphemes` walks away from `from` (backwards for ctrl+backspace), each with
-/// the offset the cursor reaches once it is included.
+// MUST KILL: type: word_boundary's graphemes items as a struct (reach, grapheme), not a tuple
 fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: usize) -> usize {
     #[derive(PartialEq, Clone, Copy)]
     enum Class {
@@ -874,8 +783,6 @@ struct Prepaint {
     scroll: Point<Pixels>,
 }
 
-/// Wrap width: single-line inputs don't wrap (they scroll sideways), multiline ones keep a
-/// gutter for the scrollbar.
 fn wrap_width(width: Pixels, single_line: bool) -> Option<Pixels> {
     (!single_line).then(|| (width - u(BAR_GUTTER)).max(px(1.)))
 }
@@ -899,7 +806,6 @@ impl Element for TextElement {
         None
     }
 
-    /// Height follows the wrapped content, from one line up to `MAX_HEIGHT_FRACTION` of the window.
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
@@ -942,9 +848,7 @@ impl Element for TextElement {
         let font = Font::capture(window);
         let layout = Layout::shape(&text, placeholder, wrap_width(bounds.size.width, self.input.read(cx).single_line), &font, window);
         let lh = layout.line_height;
-        // Scroll: clamp to the content, and bring the cursor into view after an edit or move.
-        // Only a single line (unwrapped) is ever wider than the input; the cursor's width
-        // counts at its end.
+        // MUST KILL: extract: the 2px cursor width as a named const
         let width = layout.lines.iter().map(|l| l.width()).fold(px(0.), Pixels::max) + px(2.);
         let scroll = self.input.update(cx, |input, _| {
             let max = point((width - bounds.size.width).max(px(0.)), (layout.height() - bounds.size.height).max(px(0.)));
@@ -993,8 +897,7 @@ impl Element for TextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        // A drag follows the mouse anywhere in the window, not just over the input. Always
-        // registered: the press and the first move can land in the same frame.
+        // MUST KILL: extract: the always-registered window-wide drag listener in paint() into a named fn
         let input = self.input.clone();
         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
             if phase.bubble() && input.read(cx).drag_anchor.is_some() {
@@ -1004,7 +907,6 @@ impl Element for TextElement {
         let lh = prepaint.layout.line_height;
         let content_h = prepaint.layout.height();
         let visible = bounds.size.height;
-        // Everything scrolled is clipped to the element; lines fully outside are skipped.
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             select::paint_selection(&prepaint.selection, lh, window);
             let mut y = -prepaint.scroll.y;
@@ -1051,7 +953,6 @@ pub fn write_to_primary(text: String, cx: &mut App) {
     let _ = (text, cx);
 }
 
-/// Text to shape, and whether it is the placeholder.
 fn display_text(input: &Entity<TextInput>, cx: &App) -> (SharedString, bool) {
     let input = input.read(cx);
     if input.content.is_empty() { (input.placeholder.clone(), true) } else { (input.shown(), false) }
@@ -1096,15 +997,12 @@ impl Focusable for TextInput {
 /// and ctrl elsewhere.
 pub const MOD: &str = if cfg!(target_os = "macos") { "cmd" } else { "ctrl" };
 
-/// Key bindings for the `Input` context. Registered once in `main`. `secondary-` is cmd on
-/// macOS, ctrl elsewhere.
 pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     use gpui::KeyBinding;
     let c = Some(KEY_CONTEXT);
     let mac = cfg!(target_os = "macos");
     // A word at a time: alt on macOS, where cmd+backspace deletes the whole line.
     let word = if mac { "alt" } else { "ctrl" };
-    // The motion keys; each with shift too, selecting.
     let mut motions: Vec<(String, To)> = vec![
         ("left".into(), To::Left),
         ("right".into(), To::Right),
@@ -1164,10 +1062,9 @@ mod tests {
         assert_eq!(image_token(7), "[image-7]");
     }
 
-    /// A secret's mask has a char per char of the text, whatever its byte length.
     #[test]
     fn mask_offsets() {
-        let text = "a\u{e9}\u{20ac}b"; // 1 + 2 + 3 + 1 bytes
+        let text = "a\u{e9}\u{20ac}b";
         let ends = [0, 1, 3, 6, 7];
         for (i, end) in ends.into_iter().enumerate() {
             assert_eq!(mask_offset(text, end), i * MASK.len_utf8());
@@ -1178,7 +1075,6 @@ mod tests {
 
     #[test]
     fn word_boundaries() {
-        // What ctrl+backspace leaves of `text` with the cursor at its end, and ctrl+delete at its start.
         let back = |text: &str| text[..prev_word(text, text.len())].to_string();
         let fwd = |text: &str| text[next_word(text, 0)..].to_string();
         assert_eq!(back("hello world"), "hello ");
@@ -1194,7 +1090,6 @@ mod tests {
         assert_eq!(fwd("\nline"), "line");
     }
 
-    /// Where ctrl+left / ctrl+right stop, pressed over and over from the end / start.
     #[test]
     fn word_jumps() {
         let stops = |text: &str, step: fn(&str, usize) -> usize, from: usize| {
@@ -1203,7 +1098,6 @@ mod tests {
         let text = "fix src/main.rs  now\n  then";
         assert_eq!(stops(text, next_word, 0), [0, 3, 7, 8, 12, 13, 15, 20, 21, 27]);
         assert_eq!(stops(text, prev_word, text.len()), [27, 23, 21, 20, 17, 13, 12, 8, 7, 4, 0]);
-        // Multi-byte graphemes count as one word character / one punctuation mark.
         assert_eq!(next_word("caf\u{e9} \u{2014} x", 0), 5);
         assert_eq!(prev_word("caf\u{e9} \u{2014}", 9), 6);
     }

@@ -1,6 +1,4 @@
-//! Lucide icons (ISC) and the lab logos from Simple Icons (CC0), see assets/icons/LICENSE,
-//! embedded in the binary and served to gpui's `svg()` through an `AssetSource`. Add an
-//! icon: drop the svg in assets/icons and list it here.
+//! Lucide icons (ISC) and the lab logos from Simple Icons (CC0), see assets/icons/LICENSE.
 
 use crate::theme::u;
 use gpui::{AssetSource, Result, SharedString, Svg, prelude::*, rgba, svg};

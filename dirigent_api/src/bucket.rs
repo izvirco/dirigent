@@ -1,24 +1,7 @@
-//! The release bucket, and where things live in it (all under `S3_PREFIX`):
-//!
-//! ```text
-//! releases/{channel}/{version}/{file}             an installer, never overwritten
-//! releases/{channel}/{version}/{file}.minisig     its signature
-//! channels/{channel}/{platform}.json              the channel's current `Release`, written last
-//! ```
-//!
-//! Channels are independent: each is its own build (the release workflow bakes the
-//! channel's update url in) with its own versions: stable's are the releases (`0.2.0`),
-//! nightly's the prereleases on the way to them (`0.2.0-nightly.202611151432`,
-//! `release::VERSION`).
-//!
-//! The bucket is public: objects are read with plain GETs and their urls go to clients as
-//! they are. Writes are signed with the S3 keys (`rusty-s3` signs, `ureq` sends).
-
 use anyhow::{Context, Result, anyhow, bail};
 use rusty_s3::{Credentials, S3Action, UrlStyle};
 use std::time::Duration;
 
-/// How long a signed request stays valid; it is sent right away.
 const SIGNED_FOR: Duration = Duration::from_secs(600);
 
 pub struct Bucket {
@@ -34,7 +17,6 @@ impl Bucket {
         Ok(Self { bucket, prefix: std::env::var("S3_PREFIX").unwrap_or_default() })
     }
 
-    /// The keys from the environment; only writes need them.
     pub fn credentials() -> Result<Credentials> {
         Ok(Credentials::new(env("S3_ACCESS_KEY_ID")?, env("S3_SECRET_ACCESS_KEY")?))
     }
@@ -43,7 +25,6 @@ impl Bucket {
         format!("{}{path}", self.prefix)
     }
 
-    /// The public url of `path`.
     pub fn url(&self, path: &str) -> String {
         self.bucket.object_url(&self.key(path)).to_string()
     }
@@ -72,12 +53,10 @@ impl Bucket {
     }
 }
 
-/// `releases/{channel}/{version}/{file}`.
 pub fn release_path(channel: &str, version: &str, file: &str) -> String {
     format!("releases/{channel}/{version}/{file}")
 }
 
-/// `channels/{channel}/{platform}.json`.
 pub fn channel_path(channel: &str, platform: &str) -> String {
     format!("channels/{channel}/{platform}.json")
 }

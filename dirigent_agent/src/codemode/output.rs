@@ -1,7 +1,3 @@
-//! A script's result as the model reads it: whether it completed, how long it took, and what
-//! it put out, laid out so the items can be told apart, cut to the script's budget, with the
-//! images and the uncut text in files the model can use.
-
 use crate::tool::{Content, ToolOutput};
 use base64::Engine;
 use std::collections::HashMap;
@@ -10,30 +6,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Characters a token, for `max_output_tokens`.
 const CHARS_PER_TOKEN: usize = 4;
 
-/// What a script put out, as it left the VM.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Item {
-    /// `text()`, or the returned value.
     Text(String),
-    /// A line of `console.*`.
     Console(String),
-    /// `image()`: base64 of a PNG, JPEG, GIF or WebP.
     Image { mime: String, data: String },
 }
 
-/// The script's result. `error` is the text after `Script error:` of one that failed. Output
-/// files (images, the text when it is cut to `max_tokens`) go to `dir`.
 pub fn render(wall: Duration, items: Vec<Item>, error: Option<String>, max_tokens: u64, dir: &Path) -> ToolOutput {
     let is_error = error.is_some();
     let status = if is_error { "Script failed" } else { "Script completed" };
     let pieces = truncate(layout(items, error), max_tokens, dir);
 
-    // Each image's file is named before it: the model sees the picture, but has no other way
-    // to its bytes. After the cut, which moves the images behind the text, so a path stays
-    // next to its image and is never cut.
     let mut out = Joined::default();
     out.text(&format!("{status}\nWall time {:.1} seconds\nOutput:\n", wall.as_secs_f64()));
     let mut saved: HashMap<&[u8], String> = HashMap::new();
@@ -49,8 +35,6 @@ pub fn render(wall: Duration, items: Vec<Item>, error: Option<String>, max_token
     ToolOutput { content: out.0, is_error, value: None }
 }
 
-/// Pieces in order, with adjacent texts as one, each starting on a line of its own: how a
-/// provider joins text blocks (a newline, nothing) is not ours to rely on.
 #[derive(Default)]
 struct Joined(Vec<Content>);
 
@@ -70,9 +54,6 @@ impl Joined {
     }
 }
 
-/// The items in order. With more than one text item (`text()`, the returned value) each
-/// starts with a `==> text N/M <==` line; the `console` lines follow everything else in one
-/// `<console_output>` block, and the error comes last.
 fn layout(items: Vec<Item>, error: Option<String>) -> Vec<Content> {
     let total = items.iter().filter(|item| matches!(item, Item::Text(_))).count();
     let mut out = Joined::default();
@@ -86,7 +67,6 @@ fn layout(items: Vec<Item>, error: Option<String>) -> Vec<Content> {
             }
             Item::Text(text) => out.text(&text),
             Item::Console(line) => console.push(line),
-            // The prelude checked the alphabet and the padding: what is left to fail is not worth more.
             Item::Image { mime, data } => match BASE64.decode(&data) {
                 Ok(data) => out.0.push(Content::Image { mime, data }),
                 Err(error) => out.text(&format!("[Image ({mime}) could not be decoded: {error}]")),
@@ -102,8 +82,6 @@ fn layout(items: Vec<Item>, error: Option<String>) -> Vec<Content> {
     out.0
 }
 
-/// Keep the text to `max_tokens`: one that is longer becomes one piece with its start and
-/// its end, the images after it, and the whole of it in a file.
 fn truncate(pieces: Vec<Content>, max_tokens: u64, dir: &Path) -> Vec<Content> {
     let texts: Vec<&str> =
         pieces.iter().filter_map(|piece| if let Content::Text(text) = piece { Some(text.as_str()) } else { None }).collect();
@@ -132,8 +110,6 @@ fn truncate(pieces: Vec<Content>, max_tokens: u64, dir: &Path) -> Vec<Content> {
     std::iter::once(Content::Text(text)).chain(images).collect()
 }
 
-/// Write the image to a file and say where it is. A failed write (a full disk) must not lose
-/// the result of a script whose tool calls already ran: it is said in the file's place.
 fn save_image(mime: &str, data: &[u8], dir: &Path) -> String {
     let kind = format!("{mime}, {}", size(data.len()));
     let extension = match mime {
@@ -156,9 +132,6 @@ fn size(bytes: usize) -> String {
     }
 }
 
-/// A new file in `dir` that only the user can read (output can be private):
-/// `dirigent-codemode-<random><extension>`. Never an existing path: no link someone else put
-/// there is followed.
 fn write_file(dir: &Path, extension: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
     // std's source of randomness: a `RandomState`'s keys.
     let random = std::hash::RandomState::new().build_hasher().finish();
@@ -171,8 +144,6 @@ fn write_file(dir: &Path, extension: &str, bytes: &[u8]) -> std::io::Result<Path
     Ok(path)
 }
 
-/// Standard base64, forgiving of what a script may hand over: padding or none, stray bits
-/// after the last byte.
 const BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
     &base64::alphabet::STANDARD,
     base64::engine::GeneralPurposeConfig::new()
@@ -216,7 +187,6 @@ mod tests {
         let long: String = (0..100).map(|i| format!("line {i:02} ✓\n")).collect();
         let out = text(vec![Item::Text(long.clone())], None, 10, dir.path());
         let body = out.strip_prefix("Script completed\nWall time 1.2 seconds\nOutput:\n").unwrap();
-        // 1000 characters, 40 of them kept: 20 from the start, 20 from the end.
         let (shown, saved) = body.rsplit_once("\n\n").unwrap();
         assert_eq!(
             shown,
@@ -230,7 +200,6 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
         }
-        // Text within the budget is left as it is.
         assert!(text(vec![Item::Text(long.clone())], None, 250, dir.path()).ends_with(&long));
     }
 
@@ -255,14 +224,12 @@ mod tests {
         assert_eq!(after, "==> text 2/2 <==\nafter");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 
-        // A cut moves the images behind the text; a directory that can't be written to is said.
         let missing = dir.path().join("missing");
         let out = render(Duration::ZERO, vec![image(), Item::Text("x".repeat(100))], None, 5, &missing);
         let [Content::Text(cut), Content::Image { .. }] = out.content.as_slice() else { panic!("{:?}", out.content) };
         assert!(cut.contains("xxxxxxxxxx…20 tokens truncated…xxxxxxxxxx\n\n[Could not save the full output: "), "{cut}");
         assert!(cut.contains("]\n[Image (image/png, 25B) could not be saved: "), "{cut}");
 
-        // Empty text after an image is no piece of its own.
         let out = render(Duration::ZERO, vec![image(), Item::Text(String::new())], None, 100, dir.path());
         assert!(matches!(out.content.as_slice(), [Content::Text(_), Content::Image { .. }]), "{:?}", out.content);
     }

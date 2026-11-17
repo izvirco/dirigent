@@ -151,16 +151,30 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 ## Non-UI crates
 
 - `dirigent_agent`: `cargo run -p dirigent_agent --example run -- --cwd /tmp/x "…"` gives the agent one prompt
-  and prints what comes of it (a session without a service; `--model`, `--effort`, `--tools codemode,async_bash`);
-  `--example ask` is one request to the proxy. Both take the proxy from `DIRIGENT_PROXY_URL` /
-  `DIRIGENT_PROXY_KEY`. Tests against the real thing are `#[ignore]`d and run with `-- --ignored`:
-  `cargo test -p dirigent_agent proxy::live` (the proxy), `cua_driver` and `public_http` (`mcp`: the real driver,
-  real servers), `a_private_screen` (computer use, on an Xvfb of its own).
+  and prints what comes of it (a session without a service, in temp dirs, working in `--cwd` for real, default: here;
+  `--model`, `--effort`, `--tools codemode,async_bash`). `--example ask -- "…"` is one request to the proxy,
+  streamed (`--model`, `--effort`, `--system "…"`, `--codex`: over the `codex` wire whatever the model,
+  `--models`: what the proxy serves). Both default to `claude-haiku-5-5`; their proxy: [below](#tests-against-the-real-thing).
 - `dirigent_service`: the standalone binary is for remote hosts; the desktop embeds the lib. `cargo run -p dirigent_service`, poke it with `websocat ws://localhost:7778/ws` (`nix run nixpkgs#websocat`):
   `{"type":"list_threads","id":1}`, `{"type":"add_project","id":2,"path":"/tmp/x"}`, `{"type":"create_thread","id":3,"project_id":"..."}`, `{"type":"prompt","id":4,"thread_id":"...","text":"hi","mode":"prompt","model":"claude-haiku-5-5"}`.
   Use `DIRIGENT_PORT=7778 cargo run -p dirigent_service -- --data-dir /tmp/somewhere --config-dir /tmp/somewhere-config`
   to keep a test instance away from the real one.
-- The migration from pi, against a copy of a real `service.db`:
-  `DIRIGENT_MIGRATE=/tmp/copy/service.db cargo test -p dirigent_service --release a_real_service_db -- --ignored --nocapture`.
-- `dirigent_api`: see `packaging/README.md` and the top of `dirigent_api/src/main.rs`.
+- `dirigent_api`: see `packaging/README.md` ("The update api").
 - Unit tests: `cargo test --workspace` (protocol round-trips, storage, view parsing, the agent with a scripted model).
+
+## Tests against the real thing
+
+`cargo test` leaves them out (`#[ignore]`); run them with `-- --ignored`:
+
+- `cargo test -p dirigent_agent proxy::live -- --ignored`: the proxy. They spend tokens, asking `claude-haiku-5-5`
+  for little. The proxy, theirs and the examples': the one `DIRIGENT_PROXY_URL` and `DIRIGENT_PROXY_KEY` name, else
+  this machine's install's (`[proxy]` in `~/.config/dirigent/agent.toml`).
+- `cua_driver` and `public_http` (`mcp`: the real driver, real servers), `a_private_screen` (computer use, on an
+  Xvfb of its own).
+- `a_real_service_db`: the migration from pi, against a snapshot of a real `service.db` (never the live one; the
+  test migrates a copy of it):
+
+  ```sh
+  sqlite3 "file:$HOME/.local/share/dirigent/service.db?mode=ro" "VACUUM INTO '/tmp/snapshot/service.db'"
+  DIRIGENT_MIGRATE=/tmp/snapshot/service.db cargo test -p dirigent_service --release a_real_service_db -- --ignored --nocapture
+  ```

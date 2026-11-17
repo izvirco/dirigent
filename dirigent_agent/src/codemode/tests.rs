@@ -1,16 +1,12 @@
-//! The tool end to end: real scripts in real VMs, with a fake session behind them.
-
 use super::*;
 use std::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-/// As much of a PNG as `image()` looks at: its signature.
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n and the rest";
 
 #[derive(Default)]
 struct FakeHost {
     stored: Mutex<BTreeMap<String, Value>>,
-    /// What the tools were up to.
     log: Mutex<Vec<String>>,
 }
 
@@ -29,7 +25,6 @@ impl ScriptHost for FakeHost {
     fn tools(&self) -> Vec<ToolSpec> {
         let mut bash = spec("bash", "Run a shell command.", json!({ "command": { "type": "string" } }));
         bash.returns = Some("{ output: string; exit_code: number }".into());
-        // An MCP server's tools: only scripts call them.
         let mut search = spec(
             "mcp__docs__search-pages",
             "Search the documentation.",
@@ -63,7 +58,6 @@ impl ScriptHost for FakeHost {
                 content: vec![Content::Text("a picture".into()), Content::Image { mime: "image/png".into(), data: PNG.to_vec() }],
                 ..ToolOutput::default()
             },
-            // A value of its own, also when the command failed.
             "bash" => ToolOutput { value: Some(json!({ "output": "nope\n", "exit_code": 1 })), ..ToolOutput::error("nope") },
             _ => ToolOutput::error(format!("no tool {name}")),
         }
@@ -97,14 +91,11 @@ impl ScriptHost for FakeHost {
 struct Fixture {
     host: Arc<FakeHost>,
     tool: Codemode,
-    /// The user's stop.
     cancel: CancellationToken,
     _files: tempfile::TempDir,
 }
 
 impl Fixture {
-    /// With one VM at a time: a script only starts once the one before has given its place
-    /// back, so the tests also see that a VM's thread ends, whichever way its script did.
     fn new() -> Self {
         let (host, files) = (Arc::new(FakeHost::default()), tempfile::tempdir().unwrap());
         let tool = Codemode { host: host.clone(), files: files.path().into(), slots: Box::leak(Box::new(Semaphore::new(1))) };
@@ -116,14 +107,12 @@ impl Fixture {
         self.tool.call(json!({ "code": code }), &call).await.unwrap()
     }
 
-    /// What a script that completes puts out.
     async fn output(&self, code: &str) -> String {
         let out = self.run(code).await;
         assert!(!out.is_error, "{}", out.as_text());
         body(&out)
     }
 
-    /// What a script that fails leaves: its output, then its error.
     async fn failure(&self, code: &str) -> String {
         let out = self.run(code).await;
         assert!(out.is_error, "{}", out.as_text());
@@ -134,7 +123,6 @@ impl Fixture {
         self.host.log.lock().unwrap().clone()
     }
 
-    /// Wait until the script got as far as calling `tool`.
     async fn called(&self, tool: &str) {
         while !self.log().contains(&format!("{tool} called")) {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -142,7 +130,6 @@ impl Fixture {
     }
 }
 
-/// What follows a result's header.
 fn body(out: &ToolOutput) -> String {
     let text = out.as_text();
     let mut lines = text.splitn(4, '\n');
@@ -165,9 +152,7 @@ async fn a_script_puts_out_text_its_return_and_console_lines() {
     assert_eq!(fixture.output(code).await, laid_out);
 
     assert_eq!(fixture.output("text('kept'); exit(); text('never')").await, "kept");
-    // Text leaves the VM as UTF-8.
     assert_eq!(fixture.output(r#"return "a\ud800b""#).await, "a\u{fffd}b");
-    // No Node, no timers, no network.
     assert_eq!(
         fixture.output("return [typeof setTimeout, typeof require, typeof process, typeof fetch].join()").await,
         "undefined,undefined,undefined,undefined"
@@ -194,7 +179,6 @@ async fn tool_calls_run_side_by_side() {
     let code =
         "const all = await Promise.all(Array.from({ length: 30 }, () => tools.sleep({ ms: 200 })));\nreturn all.length + ' ' + all[29]";
     assert_eq!(fixture.output(code).await, "30 slept");
-    // One after the other they take 6 seconds.
     assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }
 
@@ -259,7 +243,6 @@ async fn a_script_that_cannot_go_on_fails() {
     assert!(stalled.starts_with("partial\nScript error:\nError: The script is waiting on a promise that can never settle"), "{stalled}");
     let syntax = fixture.failure("const x = 1;\nconst = 2;").await;
     assert!(syntax.starts_with("Script error:\nSyntaxError: ") && syntax.contains("codemode.js:2"), "{syntax}");
-    // The options line is not cut off: the script's lines keep their numbers.
     let thrown = fixture.failure("// @options: {}\n\nthrow new TypeError('bad')").await;
     assert!(thrown.starts_with("Script error:\nTypeError: bad\n    at ") && thrown.contains("codemode.js:3"), "{thrown}");
     assert!(fixture.failure("throw { code: 7 }").await.starts_with("Script error:\nError: {\"code\":7}\n\n"));
@@ -275,7 +258,6 @@ async fn what_a_script_stores_is_kept_only_when_it_succeeds() {
     fixture.failure(r#"store("a", "lost"); throw new Error("no")"#).await;
     assert_eq!(stored()["a"], json!({ "n": 1 }));
 
-    // A later script reads what was kept, and forgets a key with undefined or null.
     let code = r#"store("b", undefined); store("c", null); return [load("a"), load("b") === undefined, load("c") === undefined]"#;
     assert_eq!(fixture.output(code).await, r#"[{"n":1},true,true]"#);
     assert_eq!(stored(), BTreeMap::from([("a".into(), json!({ "n": 1 }))]));
@@ -287,12 +269,9 @@ async fn what_a_script_stores_is_kept_only_when_it_succeeds() {
     );
 }
 
-/// JavaScript's JSON is not all serde_json reads.
 #[tokio::test]
 async fn what_crosses_to_the_host_is_json_it_reads() {
     let fixture = Fixture::new();
-    // Half an emoji, as a string cut in the middle of one ends, in keys and in values. The
-    // letters of its escape are text like any other.
     let code = r#"
         const cut = "cut \ud83d";
         store(cut, [cut]);
@@ -303,8 +282,6 @@ async fn what_crosses_to_the_host_is_json_it_reads() {
     assert_eq!(returned, json!([json!({ cut: cut, "text": "\\ud83d" }).to_string(), [cut]]));
     assert_eq!(fixture.host.stored(), BTreeMap::from([(cut.into(), json!([cut]))]));
 
-    // A value nested deeper than serde_json reads costs its own key, not the script or its
-    // other keys; as a call's arguments, the call.
     let code = r#"
         let deep = [];
         for (let i = 0; i < 200; i++) deep = [deep];
@@ -325,8 +302,6 @@ async fn what_crosses_to_the_host_is_json_it_reads() {
 #[test]
 fn a_failed_scripts_calls_are_summed_up() {
     assert_eq!(summary(&[]), "No tool calls were made.");
-    // Thousands of calls are a line still: the tools are named for those that did not go
-    // well, and not more than a few of them.
     let mut calls: Vec<(String, &str)> = (0..5000).map(|_| ("echo".to_string(), "ok")).collect();
     calls.extend((0..10).map(|i| (format!("tool_{i}"), "failed")));
     calls.extend([("hang".to_string(), "cancelled"), ("tool_0".to_string(), "failed"), ("hang".to_string(), "cancelled")]);
@@ -347,7 +322,6 @@ async fn output_is_cut_to_its_budget_and_ends_at_its_limits() {
     let path = saved.strip_prefix("[Full output: ").unwrap().strip_suffix(" (read with offset/limit)]").unwrap();
     assert_eq!(std::fs::read_to_string(path).unwrap(), "a".repeat(500) + &"b".repeat(500));
 
-    // Past the hard limits the script fails, also when it catches the error.
     for code in
         ["for (let i = 0; i <= 100000; i++) { try { text('') } catch {} }", "try { text('x'.repeat(16777217)) } catch {}\ntext('more')"]
     {
@@ -361,7 +335,6 @@ async fn output_is_cut_to_its_budget_and_ends_at_its_limits() {
     }
 }
 
-/// On the one thread of the test's runtime: a script that spins must not hold it.
 #[tokio::test]
 async fn a_deadline_ends_a_script_that_spins_or_waits() {
     let fixture = Fixture::new();
@@ -380,13 +353,11 @@ async fn a_deadline_ends_a_script_that_spins_or_waits() {
         assert_eq!(failed, format!("partial\nScript error:\nScript timed out: Execution timed out after 300 ms\n\n{calls}"));
         assert!(beat < Duration::from_millis(300) && started.elapsed() < Duration::from_secs(3), "{beat:?} {:?}", started.elapsed());
     }
-    // The call the script waited on was told to end.
     assert_eq!(fixture.log(), ["hang called", "hang cancelled"]);
 }
 
 #[tokio::test]
 async fn stopping_the_run_ends_the_script_and_its_calls() {
-    // While it waits on a tool.
     let fixture = Fixture::new();
     let stop = async {
         fixture.called("hang").await;
@@ -398,10 +369,8 @@ async fn stopping_the_run_ends_the_script_and_its_calls() {
         "partial\nScript error:\nScript aborted: Execution aborted\n\nTool calls made before the failure (they are not undone): 1 cancelled (hang)"
     );
     assert_eq!(fixture.log(), ["hang called", "hang cancelled"]);
-    // Once stopped, a script does not start.
     assert_eq!(fixture.failure("return 1").await, "Script error:\nScript aborted: Execution aborted\n\nThe script did not start.");
 
-    // While it spins.
     let mut fixture = Fixture::new();
     let started = Instant::now();
     let stop = async {
@@ -415,7 +384,6 @@ async fn stopping_the_run_ends_the_script_and_its_calls() {
         "partial\nScript error:\nScript aborted: Execution aborted\n\nTool calls made before the failure (they are not undone): 1 ok"
     );
     assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
-    // The VM stopped spinning: the next script gets its place.
     fixture.cancel = CancellationToken::new();
     assert_eq!(fixture.output("return 1").await, "1");
 }
@@ -437,7 +405,6 @@ async fn a_vm_has_limited_memory_and_stack() {
     }
     let stack = fixture.failure("const down = () => down();\ndown();").await;
     assert!(stack.starts_with("Script error:\nRangeError: Maximum call stack size exceeded"), "{stack}");
-    // Both are the script's to catch, and the next script finds nothing changed.
     assert_eq!(fixture.output("const down = () => down();\ntry { down() } catch (error) { return error.name }").await, "RangeError");
 }
 
@@ -455,7 +422,6 @@ async fn a_script_waits_for_a_free_vm_within_its_deadline() {
         failed,
         "Script error:\nScript timed out: Execution timed out after 50 ms while waiting for a free codemode VM\n\nThe script did not start."
     );
-    // The stopped script's VM gives its place back.
     fixture.cancel = CancellationToken::new();
     assert_eq!(fixture.output("return 1").await, "1");
 }
@@ -500,7 +466,6 @@ fn the_spec_lists_the_tools_declared_to_the_model() {
         "{}",
         spec.description
     );
-    // An MCP server's tools are for scripts to find: connecting one leaves the text as it was.
     assert!(!spec.description.contains("mcp__docs"));
     assert_eq!(spec, fixture.tool.spec());
 }

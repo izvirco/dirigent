@@ -18,7 +18,6 @@ pub fn image_targets(text: &str) -> Vec<Range<usize>> {
     let mut from = 0;
     while let Some(i) = text[from..].find("![") {
         let start = from + i;
-        // Alt text up to `](`, not across a line; target up to `)`.
         let link = text[start..].find("](").map(|j| start + j + 2).filter(|&j| !text[start..j].contains('\n'));
         let Some((target_start, target_end)) = link.and_then(|j| text[j..].find(')').map(|k| (j, j + k))) else {
             from = start + 2;

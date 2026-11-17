@@ -1,11 +1,3 @@
-//! Local sqlite cache so the UI renders instantly before any host answers.
-//! Same shape as the service db plus a `host` column. Hosts are the source of truth;
-//! everything here is overwritten whenever fresh data arrives. The only desktop-owned
-//! data is `links` (manual project links), `drafts` / `draft_images` (what the composer
-//! holds per thread; the new-thread draft is the row with an empty host and thread id)
-//! and `kv` (last used cwd/model/...). `seen`, `snoozed` and `pinned` are legacy: per-thread
-//! state from before the hosts kept it, handed over once on connect (`take_legacy_*`).
-
 use crate::input::Content;
 use anyhow::Result;
 use dirigent_protocol::transcript::Entry;
@@ -27,8 +19,6 @@ CREATE TABLE IF NOT EXISTS threads (
     archived INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (host, id)
 );
--- A thread's entries (`transcript::Entry`, as JSON). (`entries` was this table while hosts
--- ran pi and its entries were pi's: `init` drops it.)
 CREATE TABLE IF NOT EXISTS transcript (
     host TEXT NOT NULL, thread_id TEXT NOT NULL, seq INTEGER NOT NULL, json TEXT NOT NULL,
     PRIMARY KEY (host, thread_id, seq)
@@ -50,17 +40,14 @@ CREATE TABLE IF NOT EXISTS draft_images (
 );
 ";
 
-/// A draft's pasted image as stored: its `[image-N]` number, mime type and bytes.
+// MUST KILL: type: DraftImage as a struct with n, mime and bytes fields, not a tuple
 pub type DraftImage = (u32, String, Vec<u8>);
 
-/// Tables keyed by thread that go with it when it is deleted.
 const PER_THREAD: [&str; 3] = ["transcript", "drafts", "draft_images"];
 
-/// Tables keyed by host: what goes with a host removed, or moves with one renamed.
 const HOST_TABLES: [&str; 10] =
     ["projects", "links", "threads", "transcript", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"];
 
-/// Columns added after the table first shipped: `(table, column, declaration)`.
 const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "workspace", "TEXT"),
     ("threads", "parent_id", "TEXT"),
@@ -68,15 +55,11 @@ const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "prompted_at", "INTEGER"),
     ("threads", "pinned", "INTEGER NOT NULL DEFAULT 0"),
     ("threads", "seen_at", "INTEGER"),
-    // JSON list of entry ids.
     ("threads", "pinned_entries", "TEXT"),
-    // `ThreadSummary::spend` as JSON.
     ("threads", "spend", "TEXT"),
-    // `ThreadSummary::forked_from` as JSON.
     ("threads", "forked_from", "TEXT"),
 ];
 
-/// `ALTER TABLE ... ADD COLUMN` unless the column is already there.
 fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let exists = stmt.query_map([], |r| r.get::<_, String>(1))?.any(|c| c.is_ok_and(|c| c == column));
@@ -106,18 +89,15 @@ impl Cache {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        // Schema changes are additive: new tables here, new columns in `COLUMNS`.
         conn.execute_batch(SCHEMA)?;
         for (table, column, decl) in COLUMNS {
             ensure_column(&conn, table, column, decl)?;
         }
-        // What a build from before `dirigent_agent` cached of pi's entries: hosts have them
-        // in the format that took their place.
+        // MUST KILL: extract: the DROP TABLE entries in init into a named step that drops the pi-era cache
         conn.execute_batch("DROP TABLE IF EXISTS entries")?;
         Ok(Self { conn })
     }
 
-    /// Forget everything cached for a host that was removed from `hosts.toml`.
     pub fn remove_host(&self, host: &str) -> Result<()> {
         for table in HOST_TABLES {
             self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
@@ -125,8 +105,7 @@ impl Cache {
         Ok(())
     }
 
-    /// File everything cached for host `old` under `new`, its name from now on. Whatever
-    /// `new` still had (a host of that name removed by hand while we weren't running) goes.
+    // MUST KILL: rename: rename_host -> rename_host_replacing, it drops what new already had
     pub fn rename_host(&mut self, old: &str, new: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         for table in HOST_TABLES {
@@ -156,7 +135,7 @@ impl Cache {
         Ok(())
     }
 
-    /// Manual links: (host, project id) → group key.
+    // MUST KILL: type: links() returns a Link struct, not a (host, project id, group key) tuple
     pub fn links(&self) -> Result<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare("SELECT host, project_id, group_key FROM links")?;
         Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
@@ -172,7 +151,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Names the user gave project groups (UI only; the directory keeps its name): group key → name.
     pub fn project_names(&self) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare("SELECT group_key, name FROM project_names")?;
         Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?)
@@ -224,15 +202,13 @@ impl Cache {
                 setup: None,
                 compacting_since: None,
                 screen: false,
-                // The host says so again when it is reached.
                 locked: false,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Replace the host's thread list with what it reported; entries and drafts of
-    /// threads that no longer exist (deleted on the host) go with them.
+    // MUST KILL: extract: the PER_THREAD prune in set_threads into a named prune_deleted_threads step
     pub fn set_threads(&mut self, host: &str, threads: &[ThreadSummary]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
@@ -253,9 +229,6 @@ impl Cache {
         Ok(())
     }
 
-    /// The cached threads' models as ids, from `provider/id`: how hosts named them while
-    /// they ran pi (asked once: `name_models_by_id` in `app.rs`). The id is everything
-    /// after the first `/`.
     pub fn thread_models_as_ids(&self) -> Result<()> {
         self.conn.execute("UPDATE threads SET model = substr(model, instr(model, '/') + 1) WHERE instr(model, '/') > 0", [])?;
         Ok(())
@@ -267,8 +240,7 @@ impl Cache {
         Ok(rows.filter_map(|r| r.ok()).filter_map(|s| serde_json::from_str(&s).ok()).collect())
     }
 
-    /// A thread's entries as of a snapshot (`Thread`). Those past its end stay: pushed after
-    /// the host read it, they may have arrived first.
+    // MUST KILL: rename: set_entries -> set_entries_up_to, entries past the snapshot's end stay
     pub fn set_entries(&mut self, host: &str, thread_id: &str, entries: &[Entry]) -> Result<()> {
         let end = entries.last().map_or(-1, |e| e.seq as i64);
         let tx = self.conn.transaction()?;
@@ -283,8 +255,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Drop a thread's entries past `after` up to `to`: what a cache ahead of its host held
-    /// past the host's snapshot (see `Dirigent::fetch_open`).
     pub fn remove_entries(&self, host: &str, thread_id: &str, after: Option<u64>, to: u64) -> Result<()> {
         let after = after.map_or(-1, |s| s as i64);
         self.conn.execute(
@@ -302,7 +272,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Image bytes by content hash (host-independent: the same picture is one row).
     pub fn blob(&self, id: &str) -> Option<(String, Vec<u8>)> {
         self.conn.query_row("SELECT mime, bytes FROM blobs WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?))).optional().ok().flatten()
     }
@@ -327,9 +296,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Seen marks from before the hosts kept them: `(thread_id, updated_at)` of the host's
-    /// unarchived threads the user had looked at, handed over once and then forgotten.
-    /// Archived ones are left out to keep the handover short (each mark is a request).
     pub fn take_legacy_seen(&self, host: &str) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.thread_id, s.updated_at FROM seen s JOIN threads t ON t.host = s.host AND t.id = s.thread_id
@@ -340,8 +306,6 @@ impl Cache {
         Ok(marks)
     }
 
-    /// Snoozes from before snooze moved to the hosts: the threads of `host` still snoozed by
-    /// the old rule (not updated since), handed over to the host once and then forgotten.
     pub fn take_legacy_snoozes(&self, host: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.thread_id FROM snoozed s JOIN threads t ON t.host = s.host AND t.id = s.thread_id
@@ -352,8 +316,6 @@ impl Cache {
         Ok(ids)
     }
 
-    /// Thread pins from before the hosts kept them: the host's threads still listed,
-    /// handed over once and then forgotten.
     pub fn take_legacy_pins(&self, host: &str) -> Result<Vec<String>> {
         let mut stmt = self
             .conn
@@ -363,7 +325,7 @@ impl Cache {
         Ok(ids)
     }
 
-    /// The composer's saved state for a thread: text with selection, and the pasted images.
+    // MUST KILL: type: the draft key as an enum (NewThread / Thread), not ("", "") strings
     pub fn draft(&self, host: &str, thread_id: &str) -> Option<(Content, Vec<DraftImage>)> {
         let content = self
             .conn
@@ -389,9 +351,6 @@ impl Cache {
         Some((content, images))
     }
 
-    /// Save a draft. An image's bytes are written once per `n` (`INSERT OR IGNORE`), so
-    /// saving on every keystroke costs a row update, not the pictures again; images no
-    /// longer in `images` are dropped.
     pub fn set_draft(&mut self, host: &str, thread_id: &str, content: &Content, images: &[(u32, &str, &[u8])]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute(
@@ -413,7 +372,6 @@ impl Cache {
         Ok(())
     }
 
-    /// Sent, emptied, or the thread is gone: nothing left to restore.
     pub fn remove_draft(&self, host: &str, thread_id: &str) -> Result<()> {
         for table in ["drafts", "draft_images"] {
             self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1 AND thread_id = ?2"), params![host, thread_id])?;
@@ -435,8 +393,7 @@ impl Cache {
         Ok(())
     }
 
-    /// Nothing in `kv` yet: a new data dir. Using the app keeps things there (the pane, the
-    /// last project, ...).
+    // MUST KILL: rename: kv_empty -> is_new_data_dir
     pub fn kv_empty(&self) -> bool {
         self.conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM kv)", [], |r| r.get(0)).unwrap_or(true)
     }
@@ -451,7 +408,6 @@ mod tests {
         let mut c = Cache::in_memory().unwrap();
         c.set_threads("old", &[thread("t1")]).unwrap();
         c.set_link("old", "p1", Some("g")).unwrap();
-        // Left over from an earlier host called `new`: replaced, not merged.
         c.set_threads("new", &[thread("stale")]).unwrap();
         c.rename_host("old", "new").unwrap();
         assert!(c.threads("old").unwrap().is_empty());
@@ -502,7 +458,6 @@ mod tests {
         u.updated_at = 9;
         cache.set_threads("h", &[t, u]).unwrap();
         cache.conn.execute("INSERT INTO snoozed VALUES ('h', 't', 5), ('h', 'u', 7), ('h', 'gone', 1)", []).unwrap();
-        // `u` ran since it was snoozed, `gone` is no longer listed: only `t` is still snoozed.
         assert_eq!(cache.take_legacy_snoozes("h").unwrap(), vec!["t".to_owned()]);
         assert!(cache.take_legacy_snoozes("h").unwrap().is_empty());
     }
@@ -517,12 +472,10 @@ mod tests {
         cache.conn.execute("INSERT INTO seen VALUES ('h', 't', 5), ('h', 'old', 7), ('h', 'gone', 1)", []).unwrap();
         assert_eq!(cache.take_legacy_pins("h").unwrap(), vec!["t".to_owned()]);
         assert!(cache.take_legacy_pins("h").unwrap().is_empty());
-        // Archived and deleted threads are left out.
         assert_eq!(cache.take_legacy_seen("h").unwrap(), vec![("t".to_owned(), 5)]);
         assert!(cache.take_legacy_seen("h").unwrap().is_empty());
     }
 
-    /// What the host reports about pins, seen marks, spend and forks survives the cache round trip.
     #[test]
     fn thread_state_round_trips() {
         let mut cache = Cache::in_memory().unwrap();
@@ -550,10 +503,8 @@ mod tests {
             cache.add_entry("h", "t", &entry(seq)).unwrap();
         }
         let seqs = |cache: &Cache| cache.entries("h", "t").unwrap().iter().map(|e| e.seq).collect::<Vec<_>>();
-        // Read before 3 was pushed, it fills the gap at 1 and leaves 3.
         cache.set_entries("h", "t", &[entry(0), entry(1), entry(2)]).unwrap();
         assert_eq!(seqs(&cache), [0, 1, 2, 3]);
-        // Unless 3 is what a cache ahead of its host held.
         cache.remove_entries("h", "t", Some(2), 3).unwrap();
         assert_eq!(seqs(&cache), [0, 1, 2]);
     }
@@ -570,11 +521,9 @@ mod tests {
         assert_eq!(got, content);
         assert_eq!(got_images, vec![(1, "image/png".to_owned(), b"one".to_vec()), (2, "image/png".to_owned(), b"two".to_vec())]);
 
-        // Saving again keeps only the images still listed.
         cache.set_draft("h", "t", &content, &images[1..]).unwrap();
         assert_eq!(cache.draft("h", "t").unwrap().1.len(), 1);
 
-        // The host's thread list no longer has `t`: its draft goes, the new-thread draft stays.
         cache.set_threads("h", &[thread("other")]).unwrap();
         assert!(cache.draft("h", "t").is_none());
         assert_eq!(cache.draft("", "").unwrap().0.text, "new");

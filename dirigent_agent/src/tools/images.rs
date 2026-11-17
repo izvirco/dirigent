@@ -1,29 +1,18 @@
-//! An image on its way to the model: one the user attached, or a file `read`. It has to
-//! be of a type every model takes (png, jpeg, gif, webp) and small enough to send inline,
-//! so it is converted and scaled down where it isn't (`process`).
-
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use std::io::Cursor;
 
-/// The longest side an image is sent with.
 const MAX_SIDE: u32 = 2000;
 /// 4.5 MB of base64: headroom below Anthropic's 5 MB.
 const MAX_BASE64: usize = 4_718_592;
-/// The JPEG qualities tried, best first; the first is the one preferred.
 const QUALITIES: [u8; 4] = [80, 70, 55, 40];
 
-/// An image as it is sent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Image {
     pub mime: String,
     pub data: Vec<u8>,
-    /// What the model is told with it: that it was converted or scaled down, and by how much
-    /// (so it can map coordinates back). One line each.
     pub notes: Vec<String>,
 }
 
-/// The image type of a file's first bytes, if it is one the `read` tool shows: png (not
-/// animated), jpeg, gif, webp, bmp.
 pub fn sniff(head: &[u8]) -> Option<&'static str> {
     const PNG: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
     if head.starts_with(&[0xff, 0xd8, 0xff]) {
@@ -79,10 +68,6 @@ fn bmp(head: &[u8]) -> bool {
         && [1, 4, 8, 16, 24, 32].contains(&bits)
 }
 
-/// Make `bytes` (of type `mime`) fit to send: as it is when it already does, else decoded,
-/// turned the way its EXIF says, scaled to `MAX_SIDE` and encoded as PNG or JPEG, whichever
-/// is smaller, and smaller still until it is under `MAX_BASE64`. An `Err` says why it can't
-/// be sent, in words for the model.
 pub fn process(bytes: &[u8], mime: &str) -> Result<Image, String> {
     let mime = match mime.split(';').next().unwrap_or(mime).trim().to_ascii_lowercase().as_str() {
         "image/jpg" => "image/jpeg".to_owned(),
@@ -92,7 +77,6 @@ pub fn process(bytes: &[u8], mime: &str) -> Result<Image, String> {
     let base64_len = bytes.len().div_ceil(3) * 4;
     let omitted = |why: &str| format!("[Image omitted: {why}.]");
     let decoded = decode(bytes).ok_or_else(|| omitted("could not be converted to a supported inline image format"));
-    // Without a decoder for it there are no dimensions to check: sent as it is if it is small.
     let image = match decoded {
         Ok(image) => image,
         Err(_) if supported && base64_len < MAX_BASE64 => return Ok(Image { mime, data: bytes.to_vec(), notes: vec![] }),
@@ -127,7 +111,6 @@ pub fn process(bytes: &[u8], mime: &str) -> Result<Image, String> {
     }
 }
 
-/// The image, upright.
 fn decode(bytes: &[u8]) -> Option<DynamicImage> {
     let mut decoder = ImageReader::new(Cursor::new(bytes)).with_guessed_format().ok()?.into_decoder().ok()?;
     let orientation = decoder.orientation().ok()?;
@@ -136,8 +119,6 @@ fn decode(bytes: &[u8]) -> Option<DynamicImage> {
     Some(image)
 }
 
-/// `image` as the smallest of PNG and JPEG that is under the limit, JPEG of lower quality
-/// only when neither is.
 fn encode(image: &DynamicImage) -> Option<(&'static str, Vec<u8>)> {
     let fits = |data: &Vec<u8>| data.len().div_ceil(3) * 4 < MAX_BASE64;
     let png = {
@@ -187,7 +168,6 @@ mod tests {
         );
         let scaled = image::load_from_memory(&big.data).unwrap();
         assert_eq!((scaled.width(), scaled.height()), (2000, 500));
-        // A type models don't take is converted; what isn't an image is said to be none.
         let mut bmp = Cursor::new(vec![]);
         DynamicImage::new_rgb8(4, 4).write_to(&mut bmp, ImageFormat::Bmp).unwrap();
         let bmp = bmp.into_inner();

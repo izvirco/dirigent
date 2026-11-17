@@ -1,10 +1,3 @@
-//! Version control on the host: which system a directory is under (jj wins over git, so a
-//! colocated repo is driven by jj), whether its working copy is dirty, and per-thread
-//! isolated workspaces (a git worktree or a jj workspace) under
-//! `<data dir>/workspaces/<name>`, where the name is also the git branch /
-//! jj workspace name (`dirigent_protocol::workspace_name`). Everything shells out to `git` / `jj`;
-//! nothing else about the repo is managed. Branches are never deleted.
-
 use anyhow::{Context, Result, anyhow};
 use dirigent_protocol::{Vcs, workspace_name};
 use std::path::Path;
@@ -33,13 +26,11 @@ fn run_once(program: &str, dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Bring a jj workspace up to date with its rewritten commit before an agent works in it
-/// (its own `jj` calls would fail otherwise). A no-op when it isn't stale, or not jj at all.
+// MUST KILL: rearchitect: update_stale runs a throwaway jj log to trigger run's stale retry; call workspace update-stale directly
 pub fn update_stale(path: &Path) {
     let _ = run("jj", path, &["log", "-r", "@", "--no-graph", "-T", "''"]);
 }
 
-/// Which system owns `path`: jj if it is inside a jj repo, else git, else none.
 pub fn detect(path: &Path) -> Option<Vcs> {
     if !path.is_dir() {
         return None;
@@ -74,7 +65,6 @@ pub fn dirty(vcs: Vcs, path: &Path) -> Result<bool> {
     })
 }
 
-/// What the working copy sits on: the git branch, or the jj change id of `@`.
 pub fn branch(vcs: Vcs, path: &Path) -> Option<String> {
     let s = match vcs {
         Vcs::Git => run("git", path, &["branch", "--show-current"]).ok()?,
@@ -84,8 +74,6 @@ pub fn branch(vcs: Vcs, path: &Path) -> Option<String> {
     (!s.is_empty()).then(|| s.to_owned())
 }
 
-/// Names a workspace can start from: git local branches and tags, jj bookmarks. Free text
-/// is accepted as a base too; this is what the picker lists.
 pub fn refs(vcs: Vcs, path: &Path) -> Vec<String> {
     let out = match vcs {
         Vcs::Git => run("git", path, &["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/tags"]),
@@ -94,7 +82,6 @@ pub fn refs(vcs: Vcs, path: &Path) -> Vec<String> {
     out.map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default()
 }
 
-/// What a workspace starts from when nothing is asked for.
 pub fn default_base(vcs: Vcs) -> &'static str {
     match vcs {
         Vcs::Git => "HEAD",
@@ -102,10 +89,6 @@ pub fn default_base(vcs: Vcs) -> &'static str {
     }
 }
 
-/// Create the thread's workspace at `dest`, checked out at `base` (see `default_base`;
-/// anything the vcs resolves, a bad one fails with its message and nothing is created).
-/// Recreates it when the directory went missing but the branch / workspace name is still
-/// known to the repo, resuming that branch instead of `base`.
 pub fn add_workspace(vcs: Vcs, repo: &Path, dest: &Path, thread_id: &str, base: Option<&str>) -> Result<()> {
     anyhow::ensure!(!dest.exists(), "{} already exists (a workspace kept on disk?); remove it first", dest.display());
     if let Some(parent) = dest.parent() {
@@ -138,10 +121,6 @@ pub fn add_workspace(vcs: Vcs, repo: &Path, dest: &Path, thread_id: &str, base: 
     Ok(())
 }
 
-/// Remove the thread's workspace: unregister it from the repo and delete the directory
-/// (uncommitted changes in it are lost; the caller confirms that with the user). The git
-/// branch stays. Tolerates a workspace the repo already forgot and a directory already gone:
-/// deleting the directory and pruning is all a worktree removal is.
 pub fn remove_workspace(vcs: Vcs, repo: &Path, dest: &Path, thread_id: &str) -> Result<()> {
     let name = workspace_name(thread_id);
     match vcs {
@@ -185,7 +164,6 @@ mod tests {
 
         let ws = tempfile::tempdir().unwrap();
         let dest = ws.path().join("t");
-        // A bad base creates nothing.
         assert!(add_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12", Some("nope")).is_err());
         assert!(!dest.exists());
         add_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12", None).unwrap();
@@ -193,18 +171,14 @@ mod tests {
         assert!(!dirty(Vcs::Git, &dest).unwrap());
         assert!(is_workspace(&dest));
         assert_eq!(refs(Vcs::Git, repo.path()), ["dirigent-abcdef12", "main"]);
-        // Deleted behind our back: recreating finds the branch again.
         std::fs::remove_dir_all(&dest).unwrap();
         add_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12", None).unwrap();
         assert!(dest.join(".git").exists());
         remove_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12").unwrap();
         assert!(!dest.exists());
-        // The branch outlives the workspace.
         assert!(run("git", repo.path(), &["rev-parse", "--verify", "refs/heads/dirigent-abcdef12"]).is_ok());
-        // Removing again is fine.
         remove_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12").unwrap();
         assert!(!is_workspace(&dest));
-        // A directory git no longer knows as a worktree is not one, and removes cleanly.
         add_workspace(Vcs::Git, repo.path(), &dest, "0198-abcdef12", None).unwrap();
         std::fs::remove_file(dest.join(".git")).unwrap();
         assert!(!is_workspace(&dest));
@@ -212,7 +186,6 @@ mod tests {
         assert!(!dest.exists());
     }
 
-    /// jj drives a colocated repo; its workspace is a change on top of `@`'s parents.
     #[test]
     fn jj_workspace_lifecycle() {
         if Command::new("jj").arg("--version").output().is_err() {
@@ -228,14 +201,11 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let dest = ws.path().join("t");
         assert!(add_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12", Some("nope")).is_err());
-        // A base of our own: the imported `main` bookmark.
         add_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12", Some("main")).unwrap();
         assert!(dest.join(".jj").exists());
         assert!(!dirty(Vcs::Jj, &dest).unwrap());
         assert!(branch(Vcs::Jj, &dest).is_some());
         assert_eq!(refs(Vcs::Jj, repo.path()), ["main"]);
-        // Rebasing the workspace's commit from the main checkout makes it stale; our queries
-        // update it and go on, and its files follow.
         std::fs::write(repo.path().join("README.md"), "moved").unwrap();
         run_once("jj", repo.path(), &["describe", "-m", "base"]).unwrap();
         run_once("jj", repo.path(), &["new"]).unwrap();
@@ -246,7 +216,6 @@ mod tests {
         std::fs::remove_dir_all(&dest).unwrap();
         add_workspace(Vcs::Jj, repo.path(), &dest, "0198-abcdef12", None).unwrap();
         assert!(is_workspace(&dest));
-        // Forgotten from the main checkout: the files stay, the workspace is gone.
         run_once("jj", repo.path(), &["workspace", "forget", "dirigent-abcdef12"]).unwrap();
         assert!(dest.is_dir());
         assert!(!is_workspace(&dest));

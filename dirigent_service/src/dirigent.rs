@@ -1,11 +1,3 @@
-//! The `dirigent` tool: a thread's agent acting on dirigent itself. It spawns sub-agent
-//! threads, starts top-level ones, and finds, reads, messages and manages threads, on this
-//! host and on the hosts this one reaches (its `hosts.toml`).
-//!
-//! Every action is a few protocol requests (`ClientMessage`), the ones a desktop makes: to
-//! this service directly (`Service::handle`), to another host over its WebSocket, each as
-//! `ListHosts` says it is reached now (an ssh host's tunnel end, a public host's key).
-
 use crate::Service;
 use crate::server::Conn;
 use anyhow::{Result, anyhow, bail};
@@ -25,22 +17,14 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
-/// This host's own service, as its agents (and its desktop) call it.
 const LOCAL: &str = "local";
 /// A host that doesn't answer a connect this fast is reported unreachable (an offline
 /// tailscale peer never refuses).
 const CONNECT: Duration = Duration::from_secs(3);
-/// Every reply is quick, so past this the host is dead or the reply lost. But for a
-/// `Prompt` or `CreateThread`, which wait until the model has the message (a workspace to
-/// make, a nix dev shell to capture): one of those taking longer times out a request that
-/// still goes through, and its error says so.
 const REQUEST: Duration = Duration::from_secs(30);
 const LINK: &str = "dirigent://thread/";
-/// Largest message read from another host (as the desktop reads: `net.rs`).
 const MAX_MESSAGE: usize = 64 << 20;
 
-/// Which host (by name) each thread lives on, as learned; threads never move. By name: how
-/// a host is reached (an ssh tunnel's port) can change between calls.
 static OWNERS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 fn owner(thread_id: &str) -> Option<String> {
@@ -170,7 +154,7 @@ impl Tool for Dirigent {
                 let id = d.spawn(&p, &name, &need(&p.task, "task")?).await?;
                 let what = if p.report == Some(Report::Done) { "that it finished" } else { "its reply" };
                 let when = if p.notify == Some(Notify::WhenIdle) { " (once your turn has ended)" } else { "" };
-                // The desktop finds the id by this prefix (`view::spawned_id`): keep it.
+                // MUST KILL: type: the desktop parses this reply's "Spawned sub-agent thread " prefix; return the id as structured output
                 format!(
                     "Spawned sub-agent thread {id}. You will get a message with {what} when it finishes{when}; use status / read to \
                      look in on it, send to steer it. Put {} in your reply so the user can open it.",
@@ -205,7 +189,6 @@ impl Tool for Dirigent {
                 Some(id) => d.locate(id).await?.describe(),
                 None => {
                     let local = d.this.clone();
-                    // In the desktop panel's order: by when each was last given a task.
                     let mut kids: Vec<ThreadSummary> =
                         d.threads(&local).await?.into_iter().filter(|t| t.parent_id.as_deref() == Some(&self.thread_id)).collect();
                     kids.sort_by(|a, b| {
@@ -290,7 +273,6 @@ impl Tool for Dirigent {
     }
 }
 
-/// Found threads, one per line, then the hosts that didn't answer.
 fn listing((found, failed): (Vec<Found>, Vec<String>), none: &str) -> String {
     let mut out = if found.is_empty() { none.to_owned() } else { found.iter().map(Found::describe).collect::<Vec<_>>().join("\n") };
     if !failed.is_empty() {
@@ -299,8 +281,6 @@ fn listing((found, failed): (Vec<Found>, Vec<String>), none: &str) -> String {
     out
 }
 
-/// A thread found on some host, with its project (when it still has one) and, from a
-/// search, the passage that matched.
 struct Found {
     host: HostInfo,
     thread: ThreadSummary,
@@ -313,7 +293,6 @@ impl Found {
         link(&self.thread.id, self.thread.name.as_deref())
     }
 
-    /// One line for the model: link (name and id), status, host, project, model, age.
     fn describe(&self) -> String {
         let (t, now) = (&self.thread, crate::now());
         let status = match t.running_since {
@@ -327,7 +306,6 @@ impl Found {
         let jobs = count(t.jobs, "running") + &count(t.free_jobs, "left running");
         let parent = t.parent_id.as_ref().map(|p| format!(" parent={p}")).unwrap_or_default();
         let project = self.project.as_ref().map_or(" project=(removed)".to_owned(), |p| format!(" project={}", p.path));
-        // A thread in its own workspace works somewhere else than its project.
         let cwd = if self.project.as_ref().is_some_and(|p| p.path == t.cwd) { String::new() } else { format!(" cwd={}", t.cwd) };
         let snippet = self.snippet.as_ref().map(|s| format!("\n    …{s}…")).unwrap_or_default();
         format!(
@@ -340,7 +318,6 @@ impl Found {
     }
 }
 
-/// The markdown link the desktop opens a thread from.
 fn link(id: &str, name: Option<&str>) -> String {
     format!("[{}]({LINK}{id})", name.unwrap_or("untitled").replace(['[', ']'], ""))
 }
@@ -354,8 +331,6 @@ fn ago(ms: i64) -> String {
     }
 }
 
-/// A connection to another host: numbered requests, their replies picked out of what it
-/// sends (its pushes are passed over).
 struct Remote {
     ws: tokio::sync::Mutex<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>>,
 }
@@ -372,7 +347,6 @@ impl Remote {
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
             .max_message_size(Some(MAX_MESSAGE))
             .max_frame_size(Some(MAX_MESSAGE));
-        // Connected once it said hello: a host that speaks another protocol is not talked to.
         let connect = async {
             let (mut ws, _) = tokio_tungstenite::connect_async_with_config(request, Some(config), false).await?;
             while let Some(message) = ws.next().await {
@@ -400,7 +374,6 @@ impl Remote {
         let reply = async {
             while let Some(message) = ws.next().await {
                 let Message::Text(text) = message? else { continue };
-                // What this build doesn't know (a newer host's push) is not the reply.
                 let Ok(message) = serde_json::from_str::<ServerMessage>(&text) else { continue };
                 if reply_to(&message) == Some(id) {
                     return Ok(message);
@@ -412,18 +385,14 @@ impl Remote {
     }
 }
 
-/// The request a message answers, if it is a reply.
 fn reply_to(message: &ServerMessage) -> Option<u64> {
     serde_json::to_value(message).ok()?.get("reply_to")?.as_u64()
 }
 
-/// The hosts one call of the tool talks to, as the calling thread.
 struct Hosts {
     svc: Arc<Service>,
     me: String,
-    /// This host, as the others are named.
     this: HostInfo,
-    /// `local` first, then the others; and why the others couldn't be listed.
     hosts: Option<(Vec<HostInfo>, Option<String>)>,
     remotes: HashMap<String, Arc<Remote>>,
     next: u64,
@@ -435,7 +404,6 @@ impl Hosts {
         Self { svc, me: me.to_owned(), this, hosts: None, remotes: HashMap::new(), next: 0 }
     }
 
-    /// One request to `host`; an `Error` reply is an error.
     async fn request(&mut self, host: &HostInfo, request: impl FnOnce(u64) -> ClientMessage) -> Result<ServerMessage> {
         self.next += 1;
         let id = self.next;
@@ -450,12 +418,7 @@ impl Hosts {
         }
     }
 
-    /// A request to this host's own service, without a connection: nothing one would be
-    /// told (a login's steps, a screen's pieces) is asked for here.
-    ///
-    /// On a task of its own, as a connection's requests are: the tool's call can be dropped
-    /// (a stopped run, a script that ended first), and a `CreateThread` cut short half-way
-    /// would leave a thread starting for ever.
+    // MUST KILL: rearchitect: make Service::handle's CreateThread cancel-safe, so local awaits it inline
     async fn local(&self, request: ClientMessage) -> ServerMessage {
         let svc = self.svc.clone();
         let handled = tokio::spawn(async move {
@@ -465,9 +428,6 @@ impl Hosts {
         handled.await.unwrap_or_else(|e| ServerMessage::Error { reply_to: None, message: format!("the request was not finished: {e}") })
     }
 
-    /// The connection to `host`, made once per call. One that can't be made asks for the
-    /// hosts again, once: it may be reached differently since (an ssh tunnel restarted on
-    /// another port).
     async fn remote(&mut self, host: &HostInfo) -> Result<Arc<Remote>> {
         if let Some(remote) = self.remotes.get(&host.name) {
             return Ok(remote.clone());
@@ -488,8 +448,6 @@ impl Hosts {
         Ok(remote)
     }
 
-    /// `local` first, then the hosts its `hosts.toml` lists. A broken file leaves just
-    /// `local` (and is reported by `each`), so it never blocks work here.
     async fn hosts(&mut self) -> Vec<HostInfo> {
         if self.hosts.is_none() {
             let listed = match self.local(ClientMessage::ListHosts { id: 0 }).await {
@@ -508,7 +466,6 @@ impl Hosts {
         hosts.into_iter().find(|h| h.name == name).ok_or_else(|| anyhow!("no host \"{name}\"; hosts: {names}"))
     }
 
-    /// Why the hosts besides `local` couldn't be listed, if they couldn't (a broken `hosts.toml`).
     fn unlisted(&self) -> Option<String> {
         self.hosts.as_ref()?.1.clone()
     }
@@ -537,15 +494,12 @@ impl Hosts {
         }
     }
 
-    /// `thread` with its host and project.
     async fn found(&mut self, host: &HostInfo, thread: ThreadSummary, snippet: Option<String>) -> Found {
         let projects = self.projects(host).await.unwrap_or_default();
         let project = projects.into_iter().find(|p| Some(&p.id) == thread.project_id.as_ref());
         Found { host: host.clone(), thread, project, snippet }
     }
 
-    /// The thread with `id` (or its `dirigent://thread/` link) and the host it lives on:
-    /// the one it was last seen on first, then every host.
     async fn locate(&mut self, id: &str) -> Result<Found> {
         let id = id.trim().strip_prefix(LINK).unwrap_or(id.trim()).to_owned();
         let mut hosts = self.hosts().await;
@@ -576,7 +530,6 @@ impl Hosts {
         self.threads(&local).await?.into_iter().find(|t| t.id == me).ok_or_else(|| anyhow!("no thread {me} here"))
     }
 
-    /// Refuse a model `host` doesn't serve, naming the ones it does.
     async fn check_model(&mut self, host: &HostInfo, model: &str) -> Result<()> {
         let ServerMessage::Models { models, .. } = self.request(host, |id| ClientMessage::ListModels { id }).await? else {
             bail!("{} didn't list its models", host.name)
@@ -587,7 +540,6 @@ impl Hosts {
         Ok(())
     }
 
-    /// Create a sub-agent thread called `name` here and send it `task`. Returns its id.
     async fn spawn(&mut self, p: &Input, name: &str, task: &str) -> Result<String> {
         let me = self.me().await?;
         let project_id = me.project_id.clone().ok_or_else(|| anyhow!("no project to spawn in"))?;
@@ -599,7 +551,6 @@ impl Hosts {
             Some(Report::Done) => "When you finish, it is told that you did and may read your final reply",
             _ => "When you finish, your final reply is reported to it",
         };
-        // Picked here so the prompt, which goes with the create, can tell the child its id.
         let thread_id = uuid::Uuid::now_v7().to_string();
         let text = format!(
             "{}\n\n---\nYou are a sub-agent (thread {thread_id}) spawned by thread {}. {tail}, so make that reply a complete, \
@@ -607,7 +558,6 @@ impl Hosts {
             task.trim(),
             self.me
         );
-        // The parent's tools reach the child through the service (`CreateThread::parent`).
         let prompt = FirstPrompt {
             text,
             model: p.model.clone().or(me.model),
@@ -636,15 +586,12 @@ impl Hosts {
         }
     }
 
-    /// Start a top-level thread on any reachable host: a thread in the user's sidebar,
-    /// prompted with `task` as it is. Nobody is told how it goes.
     async fn create(&mut self, p: &Input, name: &str, task: &str) -> Result<Found> {
         let me = self.me().await?;
         let host = self.host(p.host.as_deref().unwrap_or(LOCAL)).await?;
         let project = self.pick_project(&host, p.project.as_deref(), &me).await?;
         let model = p.model.clone().or(me.model.clone()).ok_or_else(|| anyhow!("no model: pass `model`"))?;
         self.check_model(&host, &model).await?;
-        // No parent to inherit tools from: it gets the ones the caller has.
         let tools = self.svc.thread_tools(&self.me)?;
         let prompt = FirstPrompt {
             text: task.trim().to_owned(),
@@ -676,8 +623,6 @@ impl Hosts {
         Ok(Found { host, thread: *thread, project: Some(project), snippet: None })
     }
 
-    /// `want` (an id or a path) on `host`; by default the caller's project, which on another
-    /// host is the one with the same origin.
     async fn pick_project(&mut self, host: &HostInfo, want: Option<&str>, me: &ThreadSummary) -> Result<Project> {
         let projects = self.projects(host).await?;
         let listing = || match projects.is_empty() {
@@ -704,7 +649,6 @@ impl Hosts {
         }
     }
 
-    /// Message a thread: a new turn if it is idle, a steer or follow-up if it runs.
     async fn send(&mut self, id: &str, text: &str, mode: PromptMode) -> Result<Found> {
         let f = self.locate(id).await?;
         let mode = if f.thread.running_since.is_some() { mode } else { PromptMode::Prompt };
@@ -716,8 +660,6 @@ impl Hosts {
         Ok(f)
     }
 
-    /// A thread, its final reply (its last message that ended a turn) and its whole
-    /// conversation as text.
     async fn read(&mut self, id: &str) -> Result<(Found, Option<String>, String)> {
         let f = self.locate(id).await?;
         let thread_id = f.thread.id.clone();
@@ -738,9 +680,6 @@ impl Hosts {
         Ok((f, reply, transcript))
     }
 
-    /// Threads on every host whose name contains every word of `query` (first) or whose
-    /// messages do (the host's full-text search), and the hosts that didn't answer. Hosts'
-    /// ranks don't compare, so their lists are interleaved, local first, up to `limit`.
     async fn search(&mut self, query: &str, limit: usize) -> Result<(Vec<Found>, Vec<String>)> {
         let words: Vec<String> = query.to_lowercase().split_whitespace().map(str::to_owned).collect();
         if words.is_empty() {
@@ -786,8 +725,6 @@ impl Hosts {
         Ok(found)
     }
 
-    /// The most recently active top-level threads (what the sidebar shows) on every host,
-    /// and the hosts that didn't answer.
     async fn list(&mut self, limit: usize) -> Result<(Vec<Found>, Vec<String>)> {
         let (mut found, mut failed) = (vec![], vec![]);
         for host in self.hosts().await {
@@ -807,8 +744,7 @@ impl Hosts {
     }
 }
 
-/// A request that hands a model a message and got no reply in time may still have gone
-/// through: its error says so (`maybe`), so the caller looks before it sends again.
+// MUST KILL: type: may_have string-matches "no reply in"; make the request timeout a typed error
 fn may_have(e: anyhow::Error, maybe: &str) -> anyhow::Error {
     if format!("{e:#}").contains("no reply in") { anyhow!("{e:#}; {maybe}") } else { e }
 }

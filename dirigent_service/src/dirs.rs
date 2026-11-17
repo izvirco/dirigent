@@ -1,13 +1,7 @@
-//! Paths the desktop's add-project browser sends: `~/…` expands to this host's home, and
-//! a directory's subdirectories are listed for it to filter as the user types.
-
 use anyhow::{Context, Result, ensure};
 use dirigent_protocol::Dir;
 use std::path::{Path, PathBuf};
 
-/// `~` or `~/…` under the home directory; anything else must be absolute (`C:/…` on
-/// Windows, which also takes `\`). Trailing slashes and `.` segments are dropped
-/// (`/a/b/` → `/a/b`), and Windows gets its own separators (`C:/a/` → `C:\a`).
 pub fn expand(path: &str) -> Result<PathBuf> {
     let path = path.trim();
     let path = match path.strip_prefix('~').filter(|rest| rest.is_empty() || rest.starts_with(std::path::is_separator)) {
@@ -18,7 +12,6 @@ pub fn expand(path: &str) -> Result<PathBuf> {
     Ok(path.components().collect())
 }
 
-/// The subdirectories of `dir` (symlinks to directories included), sorted by name.
 pub fn list(dir: &Path) -> Result<Vec<Dir>> {
     let mut dirs: Vec<Dir> = std::fs::read_dir(dir)
         .with_context(|| format!("can't read {}", dir.display()))?

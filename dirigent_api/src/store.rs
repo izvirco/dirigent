@@ -1,21 +1,3 @@
-//! The leaderboard's sqlite db (`DIRIGENT_API_DB`): who joined, the services they upload and
-//! each service's usage per UTC hour.
-//!
-//! Dbs made before 0.0.7 also have a `tokens` table: the api's own sign-in tokens (hashed),
-//! which desktops up to 0.0.6 uploaded with. Nothing reads or writes it now and it's left as
-//! is (tables aren't dropped in code); `DROP TABLE tokens` by hand is safe.
-//!
-//! Counting each service once, however many desktops upload it:
-//! - A service belongs to the first player who uploads it; anyone else's uploads of it are
-//!   refused. One service's usage never counts for two players.
-//! - Usage is kept per service and hour, and an hour is only replaced by a snapshot with more
-//!   messages. A service's usage only grows (its rows outlive its threads), so desktops
-//!   uploading the same hour at different moments, in any order, leave its latest state.
-//!
-//! Numbers are taken on trust (it's a larp), but within bounds no real hour gets near: a
-//! board sums them, and one absurd hour mustn't overflow that for everyone.
-//! - Hours before the player joined are ignored: the board counts from joining on.
-
 use anyhow::Result;
 use dirigent_protocol::leaderboard::{Account, Board, DAY, HOUR, Player, Range, Slot, Upload};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -47,15 +29,10 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE INDEX IF NOT EXISTS usage_start ON usage (start);
 ";
 
-/// Slot widths the `All` board picks from, smallest first.
 const SLOTS: [i64; 8] = [HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 30 * DAY];
-/// A board has at most this many slots.
 const MAX_SLOTS: i64 = 60;
-/// How many hours an upload may carry: the desktop sends at most 30 days.
 pub const MAX_HOURS: usize = 40 * 24;
-/// How many services a player may upload.
 const MAX_SERVICES: i64 = 32;
-/// Bounds of an hour's numbers: each token count, messages, dollars.
 const MAX_TOKENS: u64 = 1 << 36;
 const MAX_MESSAGES: u64 = 1 << 20;
 const MAX_COST: f64 = 1e5;
@@ -65,9 +42,7 @@ pub struct Store {
 }
 
 pub enum Uploaded {
-    /// How many hours were new or bigger.
     Saved(usize),
-    /// The service is another player's, or a new one past `MAX_SERVICES`.
     Refused,
 }
 
@@ -89,8 +64,6 @@ impl Store {
         Self { conn }
     }
 
-    /// A forge user joins if they're new, else takes their current name and picture (and
-    /// keeps their join time).
     pub fn join(&self, id: &str, name: &str, picture: &str, now: i64) -> Result<Account> {
         self.conn.execute(
             "INSERT INTO users (id, name, picture, joined_at) VALUES (?1, ?2, ?3, ?4)
@@ -101,13 +74,11 @@ impl Store {
         Ok(Account { id: id.to_owned(), name: name.to_owned(), picture: picture.to_owned(), joined_at })
     }
 
-    /// Whether `id` is on the board.
     pub fn joined(&self, id: &str) -> Result<bool> {
         Ok(self.conn.query_row("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
     }
 
-    /// Save `user`'s upload of a service: its hours that are on the hour, from the hour they
-    /// joined to `now`, within bounds, and bigger than what's kept (see the module doc).
+    // MUST KILL: extract: split into claim_service, a sane_hour filter and the keep-the-bigger upsert
     pub fn upload(&mut self, user: &str, up: &Upload, now: i64) -> Result<Uploaded> {
         let owner: Option<String> =
             self.conn.query_row("SELECT user FROM services WHERE id = ?1", [&up.service], |r| r.get(0)).optional()?;
@@ -157,7 +128,6 @@ impl Store {
         Ok(Uploaded::Saved(saved))
     }
 
-    /// `user` leaves: gone from the board with all their usage.
     pub fn leave(&mut self, user: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM usage WHERE service IN (SELECT id FROM services WHERE user = ?1)", [user])?;
@@ -167,7 +137,6 @@ impl Store {
         Ok(())
     }
 
-    /// Everyone who joined, with their usage in `range`'s window.
     pub fn board(&self, range: Range, now: i64) -> Result<Board> {
         let first: Option<i64> = self.conn.query_row("SELECT MIN(joined_at) FROM users", [], |r| r.get(0))?;
         let (since, until, slot) = window(range, now, first);
@@ -207,8 +176,7 @@ impl Store {
     }
 }
 
-/// `range`'s window: (since, until, slot width), UTC-aligned, `until` past `now`. `All`
-/// starts at the first join (`first`), showing a day at least.
+// MUST KILL: type: return a Window { since, until, slot } instead of a bare tuple
 fn window(range: Range, now: i64, first: Option<i64>) -> (i64, i64, i64) {
     let (span, slot) = match range {
         Range::Day => (DAY, HOUR),
@@ -250,11 +218,8 @@ mod tests {
         s.join("u2", "ana", "", T0).unwrap();
         let up = |hours: Vec<Slot>| Upload { service: "svc".into(), hours };
         let now = T0 + 5 * HOUR;
-        // The laptop's later snapshot of hour 1 lands first, the desktop's older one after:
-        // the bigger stays. Hour 2 is uploaded by both: counted once.
         assert!(matches!(s.upload("u1", &up(vec![hour(T0 + HOUR, 3, 3.), hour(T0 + 2 * HOUR, 1, 1.)]), now), Ok(Uploaded::Saved(2))));
         assert!(matches!(s.upload("u1", &up(vec![hour(T0 + HOUR, 2, 2.), hour(T0 + 2 * HOUR, 1, 1.)]), now), Ok(Uploaded::Saved(0))));
-        // Another player can't count the same service.
         assert!(matches!(s.upload("u2", &up(vec![hour(T0 + 3 * HOUR, 9, 9.)]), now), Ok(Uploaded::Refused)));
         assert_eq!(costs(&s, now), [("ana".to_owned(), 0.), ("seb".to_owned(), 4.)]);
     }
@@ -264,13 +229,11 @@ mod tests {
         let mut s = Store::in_memory();
         s.join("u1", "seb", "", T0).unwrap();
         let now = T0 + 5 * HOUR;
-        // Numbers past any real hour would overflow (or turn to inf in) every board's sums.
         let huge = Slot { start: T0 + HOUR, input: u64::MAX, messages: 1, ..Slot::default() };
         let costly = Slot { start: T0 + 2 * HOUR, cost: 1e308, messages: 1, ..Slot::default() };
         let up = |service: &str, hours: Vec<Slot>| Upload { service: service.into(), hours };
         assert!(matches!(s.upload("u1", &up("a", vec![huge, costly, hour(T0 + 3 * HOUR, 1, 1.)]), now), Ok(Uploaded::Saved(1))));
         assert_eq!(costs(&s, now), [("seb".to_owned(), 1.)]);
-        // And a player has only so many services.
         for i in 1..MAX_SERVICES {
             assert!(matches!(s.upload("u1", &up(&format!("s{i}"), vec![]), now), Ok(Uploaded::Saved(0))));
         }
@@ -283,9 +246,7 @@ mod tests {
         s.join("u1", "seb", "", T0 + 2 * HOUR + 5).unwrap();
         let now = T0 + 5 * HOUR;
         let hours = vec![hour(T0 + HOUR, 1, 1.), hour(T0 + 2 * HOUR, 1, 2.), hour(T0 + 3 * HOUR + 1, 1, 4.), hour(T0 + 9 * HOUR, 1, 8.)];
-        // Before joining, off the hour, and in the future: dropped.
         assert!(matches!(s.upload("u1", &Upload { service: "a".into(), hours }, now), Ok(Uploaded::Saved(1))));
-        // Joining again keeps the join time.
         assert_eq!(s.join("u1", "seb2", "", now).unwrap().joined_at, T0 + 2 * HOUR + 5);
         assert_eq!(costs(&s, now), [("seb2".to_owned(), 2.)]);
         s.leave("u1").unwrap();
@@ -297,7 +258,6 @@ mod tests {
         let mut s = Store::in_memory();
         s.join("u1", "seb", "", T0 - 10 * DAY).unwrap();
         let now = T0 + 5 * HOUR;
-        // Usage on three days before today, and two hours of today in one 3h slot.
         let mut hours: Vec<Slot> = (1..=3).map(|d| hour(T0 - d * DAY, 1, 1.)).collect();
         hours.extend([hour(T0 + 3 * HOUR, 1, 1.), hour(T0 + 4 * HOUR, 2, 2.)]);
         s.upload("u1", &Upload { service: "a".into(), hours }, now).unwrap();
@@ -305,7 +265,6 @@ mod tests {
         assert_eq!((b.until, b.slot, b.until - b.since), (T0 + 6 * HOUR, 3 * HOUR, 7 * DAY));
         let p = &b.players[0];
         assert_eq!(p.slots.last().map(|s| (s.start, s.messages, s.cost)), Some((T0 + 3 * HOUR, 3, 3.)));
-        // `All` starts at the first join, in slots that keep it under 60.
         let b = s.board(Range::All, now).unwrap();
         assert_eq!((b.slot, b.since), (6 * HOUR, T0 - 10 * DAY));
     }

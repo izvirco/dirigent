@@ -1,17 +1,3 @@
-//! Markdown → gpui elements, hand-rolled on top of pulldown-cmark. Blocks become `div`s,
-//! inline styling becomes highlight runs on a `StyledText`, and every paragraph / code
-//! block is a selectable `select::Block`. Text size / colour / font are inherited from the
-//! caller, so the same renderer serves replies, user bubbles, and the mono work log.
-//! Links are clickable: markdown links with a scheme (`https:`, `mailto:`, ...) and bare
-//! `http(s)://` / `dirigent://` URLs in the text. `dirigent://` links stay in the app
-//! (`dirigent://thread/<id>` opens that thread), the rest go to the OS (see `select::Block`).
-//! An image whose target is `blob:<id>` (a reply showing a local file, its link made a
-//! `blob:` one, see `view::step_of`) is drawn by the caller's `ImageFn` after its paragraph's
-//! text; any other image shows its alt text. The caller can also make literal tokens in
-//! the text links (`Tokens`: a user bubble's `[image-N]`), drawn in the accent color
-//! without the underline. Given a `CopyFn`, every code block gets a copy button in its
-//! top-right corner.
-
 use crate::select::{Block, Key, Keys};
 use crate::theme::{self, text, u};
 use dirigent_protocol::images::image_targets;
@@ -24,25 +10,17 @@ use std::collections::BTreeMap;
 use std::iter::Peekable;
 use std::ops::Range;
 
-/// How a document shows a `blob:` image, given the id. `None` leaves such links as alt text.
 pub type ImageFn<'a> = Option<&'a mut (dyn FnMut(&str) -> AnyElement + 'a)>;
 
-/// How a document makes a code block's copy button, given an id unique to the block and
-/// the code it shows. `None` leaves code blocks without one. The button is always drawn:
-/// it hides itself, `group_hover(CODE_GROUP, ..)` reveals it while the block is hovered.
+// MUST KILL: type: CopyFn's button hides itself under CODE_GROUP; let code_block apply the hover reveal
 pub type CopyFn<'a> = Option<&'a dyn Fn(ElementId, SharedString) -> AnyElement>;
 
-/// The hover group of a code block, for its copy button.
 pub const CODE_GROUP: &str = "code";
 
-/// Literal tokens of plain text (not code) that link somewhere, with their URLs.
 pub type Tokens<'a> = &'a [(String, SharedString)];
 
-/// The markdown extensions we render.
 const OPTS: Options = Options::ENABLE_TABLES.union(Options::ENABLE_STRIKETHROUGH).union(Options::ENABLE_TASKLISTS);
 
-/// Render `text` as a column of blocks. `mono` is the font for code; `keys` places the
-/// text blocks in their document for selection.
 pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, copy: CopyFn, tokens: Tokens) -> Div {
     // Merged so a bare URL (or a token) the parser split into several text events is found whole.
     let mut events = TextMergeStream::new(Parser::new_ext(text, OPTS)).peekable();
@@ -50,9 +28,6 @@ pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, 
     div().flex().flex_col().gap_2().children(r.blocks(&mut events))
 }
 
-/// `text` with the target of each image whose target `blobs` knows (a reply's text block's
-/// map, see `dirigent_protocol::images`) made `blob:<id>`, for `render` to draw. Images
-/// only: a link quoted in code stays as written.
 pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut done = 0;
@@ -61,11 +36,11 @@ pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
         // The image's source is its `![alt](target)`.
         let Some(target) = image_targets(&text[source.clone()]).into_iter().next() else { continue };
         let target = source.start + target.start..source.start + target.end;
-        // Skips an image nested in another's alt text that was already replaced.
+        // MUST KILL: extract: the target.start >= done guard in link_blobs into a named already_replaced check
         if let Some(id) = blobs.get(&text[target.clone()])
             && target.start >= done
         {
-            // Without the space before the target: `view::blob_links` looks for `](blob:`.
+            // MUST KILL: rearchitect: link_blobs' trim_end serves view::blob_links matching "](blob:"; share one blob link format
             out.push_str(text[done..target.start].trim_end());
             out.push_str("blob:");
             out.push_str(id);
@@ -76,15 +51,11 @@ pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// Whether `text` opens with a code block (possibly in a list or quote): its copy button
-/// then sits where a message's corner buttons go.
 pub fn starts_with_code(text: &str) -> bool {
     let container = |e: &Event| matches!(e, Event::Start(Tag::List(_) | Tag::Item | Tag::BlockQuote(_)));
     matches!(Parser::new_ext(text, OPTS).find(|e| !container(e)), Some(Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock)))
 }
 
-/// The prefix of `text` that ends at its last newline — what streams get rendered as, so
-/// blocks appear whole rather than word by word.
 pub fn committed(text: &str) -> &str {
     text.rfind('\n').map_or("", |i| &text[..=i])
 }
@@ -100,8 +71,6 @@ struct Renderer<'m, 'i> {
 }
 
 impl<'m> Renderer<'m, '_> {
-    /// Blocks until the `End` that closes the enclosing container (or the input ends).
-    /// Inline events found here (tight list items, table cells) form an implicit paragraph.
     fn blocks(&mut self, ev: &mut Events) -> Vec<AnyElement> {
         let mut out = vec![];
         while let Some(e) = ev.next() {
@@ -111,8 +80,6 @@ impl<'m> Renderer<'m, '_> {
                 Event::Rule => out.push(div().h(px(1.)).w_full().my_1().bg(rgba(theme::t().line)).into_any()),
                 inline => {
                     let mut p = Inline::new(self.image.is_some(), self.tokens);
-                    // The run may open with an inline tag (`- **Label:** text`), still open
-                    // when `inline_until_block` takes over.
                     let depth = matches!(inline, Event::Start(_)) as usize;
                     p.event(inline, self.mono);
                     self.inline_until_block(&mut p, ev, depth);
@@ -123,7 +90,6 @@ impl<'m> Renderer<'m, '_> {
         out
     }
 
-    /// One block from its `Start` tag through its `End`.
     fn block(&mut self, tag: Tag, ev: &mut Events) -> AnyElement {
         match tag {
             Tag::Paragraph => self.paragraph(ev),
@@ -169,12 +135,10 @@ impl<'m> Renderer<'m, '_> {
                 .into_any(),
             Tag::List(start) => self.list(start, ev),
             Tag::Table(_) => self.table(ev),
-            // Anything else (footnotes, definition lists, metadata blocks): just its content.
             _ => div().flex().flex_col().gap_2().children(self.blocks(ev)).into_any(),
         }
     }
 
-    /// Items of a list; nested lists come through `blocks` recursively.
     fn list(&mut self, start: Option<u64>, ev: &mut Events) -> AnyElement {
         let mut items = vec![];
         let mut n = start.unwrap_or(1);
@@ -199,7 +163,6 @@ impl<'m> Renderer<'m, '_> {
         div().flex().flex_col().gap_1().children(items).into_any()
     }
 
-    /// A simple grid: rows of equal-width cells, the header row bold with a rule under it.
     fn table(&mut self, ev: &mut Events) -> AnyElement {
         let mut rows = vec![];
         while let Some(e) = ev.next() {
@@ -223,7 +186,6 @@ impl<'m> Renderer<'m, '_> {
         div().flex().flex_col().w_full().my_1().children(rows).into_any()
     }
 
-    /// Inline content up to the `End` of the enclosing paragraph / heading / cell.
     fn paragraph(&mut self, ev: &mut Events) -> AnyElement {
         let mut p = Inline::new(self.image.is_some(), self.tokens);
         let mut depth = 0usize;
@@ -239,7 +201,6 @@ impl<'m> Renderer<'m, '_> {
         self.finish(p)
     }
 
-    /// The paragraph's text block, followed by the images it linked (each on its own row).
     fn finish(&mut self, mut p: Inline<'m>) -> AnyElement {
         let images = std::mem::take(&mut p.images);
         if images.is_empty() {
@@ -250,8 +211,6 @@ impl<'m> Renderer<'m, '_> {
         div().flex().flex_col().gap_2().children(text).children(images.iter().map(|id| draw(id))).into_any()
     }
 
-    /// Inline content of a tight list item: stops before the next block-level event.
-    /// `depth` counts the inline tags already open.
     fn inline_until_block(&mut self, p: &mut Inline<'m>, ev: &mut Events, mut depth: usize) {
         while let Some(e) = ev.peek() {
             match e {
@@ -266,8 +225,6 @@ impl<'m> Renderer<'m, '_> {
         }
     }
 
-    /// `code` in a box, with the `CopyFn`'s button in its top-right corner (over the end of
-    /// the first line).
     fn code_block(&mut self, code: String) -> Div {
         let code = SharedString::from(code);
         let block = self.keys.plain(code.clone());
@@ -298,29 +255,22 @@ fn is_inline(t: &Tag) -> bool {
     matches!(t, Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. } | Tag::Superscript | Tag::Subscript)
 }
 
-/// Accumulates one paragraph's text plus the style of each span, as nesting counters for
-/// the inline tags currently open. `blob:` images are collected in `images` (their alt
-/// text dropped) when `show_images` is set, else kept as alt text like any other image.
 #[derive(Default)]
 struct Inline<'t> {
     tokens: Tokens<'t>,
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     code_ranges: Vec<(Range<usize>, SharedString)>,
-    /// Clickable spans and their URLs.
     links: Vec<(Range<usize>, SharedString)>,
-    /// Markdown links / images currently open: where their text starts, and their URL if
-    /// it's one we can open.
     open_links: Vec<(usize, Option<SharedString>)>,
     bold: u32,
     italic: u32,
     strike: u32,
     link: u32,
-    /// The link being pushed is a token: no underline.
     token: bool,
     show_images: bool,
     images: Vec<String>,
-    /// Inside a collected image's alt text.
+    // MUST KILL: rename: hidden -> in_collected_image_alt
     hidden: u32,
 }
 
@@ -363,7 +313,6 @@ impl<'t> Inline<'t> {
         }
     }
 
-    /// Plain text, with any bare URLs and tokens in it styled and clickable as links.
     fn text_with_links(&mut self, t: &str) {
         let mut spans: Vec<_> = bare_urls(t).into_iter().map(|r| (r.clone(), SharedString::from(t[r].to_owned()), false)).collect();
         for (token, url) in self.tokens {
@@ -428,27 +377,19 @@ impl<'t> Inline<'t> {
     }
 }
 
-/// A link target we can hand to the OS: it starts with a URL scheme (`https:`, `mailto:`).
-/// Relative paths and `#anchors` have nothing to open against.
 fn has_scheme(url: &str) -> bool {
     url.split_once(':').is_some_and(|(s, _)| {
         s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
     })
 }
 
-/// Schemes whose bare URLs in text are links: the web's, and links to threads
-/// (`dirigent://thread/<id>`, which agents write).
 const BARE_SCHEMES: [&str; 3] = ["http", "https", "dirigent"];
 
-/// Byte ranges of the bare `BARE_SCHEMES` URLs in `text`. A URL runs to the next space or
-/// one of `<>"`; trailing punctuation is the sentence's, not the URL's, and so is a
-/// closing bracket without an opening one in the URL (`(see https://x.dev/a)`).
 fn bare_urls(text: &str) -> Vec<Range<usize>> {
     let mut out = vec![];
     let mut i = 0;
     while let Some(sep) = text[i..].find("://").map(|a| a + i) {
         i = sep + 3;
-        // The scheme is the whole word before `://`, so `xhttp://` is none of ours.
         let at = text[..sep].trim_end_matches(char::is_alphanumeric).len();
         if !BARE_SCHEMES.contains(&&text[at..sep]) {
             continue;
@@ -509,7 +450,6 @@ mod tests {
         }
         assert_eq!(p.text, "see  and alt");
         assert_eq!(p.images, vec![id]);
-        // Without an ImageFn the alt text stays, like any other image.
         let mut p = Inline::new(false, &[]);
         for e in Parser::new(&src) {
             p.event(e, &mono);
@@ -564,7 +504,6 @@ mod tests {
         assert!(!starts_with_code("`ls` inline"));
     }
 
-    /// The links of `md`'s first paragraph, as (link text, url).
     fn links(md: &str) -> Vec<(String, String)> {
         token_links(md, &[])
     }
@@ -591,12 +530,9 @@ mod tests {
     fn links_in_text() {
         let issue = "https://forge.sebba.dev/izvir/dirigent/issues/11";
         assert_eq!(links(&format!("I created issue #11: {issue}.")), [(issue.to_owned(), issue.to_owned())]);
-        // Markdown links open their target; ones without a scheme (file paths) don't.
         assert_eq!(links("[docs](https://x.dev/a) and [main](src/main.rs)"), [("docs".into(), "https://x.dev/a".into())]);
         assert_eq!(links("<https://x.dev>"), [("https://x.dev".into(), "https://x.dev".into())]);
-        // A URL the parser splits at `_` or `[` is still one link.
         assert_eq!(links("see https://x.dev/a_b[1]"), [("https://x.dev/a_b[1]".into(), "https://x.dev/a_b[1]".into())]);
-        // Thread links, as agents write them: a markdown link, and a bare URL whose uuid stays whole.
         let thread = "dirigent://thread/01a168ea-f693-737d-b2a3-60cefe482df3";
         assert_eq!(links(&format!("[fix the ruler]({thread})")), [("fix the ruler".into(), thread.into())]);
         assert_eq!(links(&format!("Spawned ({thread}).")), [(thread.into(), thread.into())]);

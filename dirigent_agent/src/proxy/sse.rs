@@ -1,19 +1,12 @@
-//! Server-sent events: a streamed reply's bytes as the events they carry. Both wires
-//! stream this way.
-
-/// One event: its name, when the stream gives one, and its data.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct Event {
     pub name: Option<String>,
     pub data: String,
 }
 
-/// Takes a stream's bytes as they arrive, cut anywhere, and gives the events they complete.
 #[derive(Default)]
 pub(super) struct Decoder {
-    /// The bytes of a line that hasn't ended yet.
     line: Vec<u8>,
-    /// The event the lines so far belong to.
     name: Option<String>,
     data: Option<String>,
 }
@@ -34,14 +27,12 @@ impl Decoder {
         events
     }
 
-    /// The stream is over: the event it ended in the middle of, if any.
     pub fn finish(&mut self) -> Option<Event> {
         let line = std::mem::take(&mut self.line);
         let event = if line.is_empty() { None } else { self.line(&line) };
         event.or_else(|| self.line(b""))
     }
 
-    /// Take one line; an empty one ends the event before it.
     fn line(&mut self, line: &[u8]) -> Option<Event> {
         let line = String::from_utf8_lossy(line);
         let line = line.strip_suffix('\r').unwrap_or(&line);
@@ -80,7 +71,6 @@ mod tests {
     fn events_come_out_whole_however_the_bytes_are_cut() {
         let stream = "event: a\ndata: {\"x\":\"é\"}\n\n: a comment\ndata: one\r\ndata: two\r\n\r\nevent: ping\n\ndata:tight\n\n";
         let expected = [event(Some("a"), "{\"x\":\"é\"}"), event(None, "one\ntwo"), event(Some("ping"), ""), event(None, "tight")];
-        // In one piece, byte by byte (which cuts the two-byte é), and in threes.
         for size in [stream.len(), 1, 3] {
             let mut decoder = Decoder::default();
             let events: Vec<Event> = stream.as_bytes().chunks(size).flat_map(|chunk| decoder.push(chunk)).collect();

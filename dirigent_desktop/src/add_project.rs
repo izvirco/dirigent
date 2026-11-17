@@ -1,15 +1,3 @@
-//! The Add project modal, behind the Projects page's top-bar button. Two pages:
-//!
-//! - Browse: `<host ▾> <path>`, the path starting at `~/`, over the subdirectories of the
-//!   path's directory part (everything up to its last `/` or `\`, listed by the host:
-//!   `ListDirs`) whose names start with the part after it. Up / Down move the selection,
-//!   Enter (or a click) goes into the selected directory, ctrl+Enter or `Add` adds the
-//!   path as typed.
-//! - Link, only when the added project joined no other one (no shared git origin) and a
-//!   project of the same directory name (not renamed) lives on another host: link them, or don't.
-//!
-//! The state is here; the methods that send requests and change pages are on `Dirigent`.
-
 use crate::app::{Dirigent, Menu};
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -25,33 +13,28 @@ use std::ops::Range;
 
 const WIDTH: f32 = 560.;
 const ROW_H: f32 = 28.;
-/// The directory list's fixed height (8 rows), so the card doesn't jump as it filters.
-const LIST_H: f32 = ROW_H * 8. + 8.; // + its padding
+// MUST KILL: extract: the list's p_1 padding (the + 8.) as a named const
+const LIST_H: f32 = ROW_H * 8. + 8.;
 
 #[derive(Default)]
 pub struct State {
-    /// The listing under the field: of `dir` (a directory part, ending in `/`) on `host`.
+    // MUST KILL: extract: host, dir, dirs and list_request into a Listing struct
     pub host: String,
     pub dir: String,
-    /// `None` while the host hasn't answered.
     pub dirs: Option<Result<Vec<Dir>, String>>,
     pub list_request: Option<u64>,
-    /// The `AddProject` in flight, and its failure.
     pub add_request: Option<u64>,
     pub error: Option<String>,
-    /// Index into `visible`.
+    // MUST KILL: rename: selected -> selected_visible, an index into visible()
     pub selected: usize,
     pub scroll: UniformListScrollHandle,
-    /// The link page, once the project is added and has a same-named group to join.
     pub link: Option<Offer>,
 }
 
-/// The project just added and the groups it could be linked into.
 pub struct Offer {
-    /// Its group key as added (it's alone in it).
     pub key: String,
     pub name: String,
-    /// (group key, its members as `host path`).
+    // MUST KILL: type: candidates as a struct with group key and members fields, not a tuple
     pub candidates: Vec<(String, String)>,
 }
 
@@ -64,16 +47,11 @@ pub fn split(path: &str) -> (&str, &str) {
     }
 }
 
-/// The directories whose name starts with `prefix` (ignoring case); dot-directories only
-/// once the prefix starts with a dot.
 pub fn matches<'a>(dirs: &'a [Dir], prefix: &str) -> Vec<&'a Dir> {
     let prefix = prefix.to_lowercase();
     dirs.iter().filter(|d| (prefix.starts_with('.') || !d.name.starts_with('.')) && d.name.to_lowercase().starts_with(&prefix)).collect()
 }
 
-/// Where a project just added on `host` could be linked: nowhere if it already shares a
-/// group (a git origin match), else the unrenamed groups of the same directory name with
-/// no member on `host`.
 pub fn offer(groups: &[Group], host: &str, project_id: &str) -> Option<Offer> {
     let own = groups.iter().find(|g| g.has(host, project_id))?;
     if own.members.len() > 1 {
@@ -81,10 +59,9 @@ pub fn offer(groups: &[Group], host: &str, project_id: &str) -> Option<Offer> {
     }
     let others: Vec<(String, String)> = groups
         .iter()
-        // By directory name: a rename is how the user says two same-named dirs are unrelated.
+        // MUST KILL: extract: the unrenamed same-dir-name test in offer() as a named predicate
         .filter(|g| g.key != own.key && g.dir_name == own.dir_name && g.name == g.dir_name && g.members.iter().all(|m| m.host != host))
         .map(|g| {
-            // Paths too: same-named candidates on one host would look alike otherwise.
             let members: Vec<String> = g.members.iter().map(|m| format!("{} {}", m.host, m.project.path)).collect();
             (g.key.clone(), members.join(", "))
         })
@@ -93,7 +70,6 @@ pub fn offer(groups: &[Group], host: &str, project_id: &str) -> Option<Offer> {
 }
 
 impl State {
-    /// The listing filtered by the field's text, if it is the listing of the field's directory.
     pub fn visible(&self, text: &str) -> Vec<&Dir> {
         let (dir, prefix) = split(text);
         match &self.dirs {
@@ -103,12 +79,10 @@ impl State {
     }
 }
 
-/// The modal (see `modal.rs`).
 pub fn render(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> AnyElement {
     modal::frame(div().w(u(WIDTH)).child(page(this, state, cx)), cx)
 }
 
-/// The page showing: in the modal, or in the setup's project step (`onboarding.rs`).
 pub fn page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Div {
     match &state.link {
         Some(offer) => link_page(offer, cx),
@@ -116,8 +90,6 @@ pub fn page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Div {
     }
 }
 
-/// `<host ▾> <path> [Add]`, a hairline, then the directory list (or a note in its place:
-/// loading, an error, nothing matches).
 fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Div {
     let host = this.new_project_host().unwrap_or_default();
     let host_open = this.menu == Some(Menu::NewProjectHost);
@@ -160,7 +132,7 @@ fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Di
     let (dir, _) = split(&text);
     let visible: Vec<(SharedString, bool)> = state.visible(&text).into_iter().map(|d| (d.name.clone().into(), d.repo)).collect();
     let connected = this.hosts.iter().any(|h| h.name == host && h.status == HostStatus::Connected);
-    // (text, is an error)
+    // MUST KILL: type: note as an enum (Error / Info) instead of a (String, bool)
     let note = match &state.dirs {
         _ if state.error.is_some() => state.error.clone().map(|e| (e, true)),
         _ if !connected => Some((format!("{host} is not connected"), true)),
@@ -182,7 +154,6 @@ fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Di
     div().flex().flex_col().child(top).child(div().h(px(1.)).bg(rgba(theme::t().line))).child(list)
 }
 
-/// The (filtered) subdirectories; a click goes into one. Repos get a branch icon.
 fn dir_list(
     rows: Vec<(SharedString, bool)>,
     selected: usize,
@@ -226,13 +197,10 @@ fn dir_list(
     .flex_1()
 }
 
-/// Scroll the selected row into view after the selection moved.
 pub fn reveal(state: &State) {
     state.scroll.scroll_to_item(state.selected, ScrollStrategy::Nearest);
 }
 
-/// `<name> is also a project on another host`: a row per candidate with `Link`, and
-/// `Don't link`.
 fn link_page(offer: &Offer, cx: &mut Context<Dirigent>) -> Div {
     let text = div().text_color(rgba(theme::t().fg_1)).child(format!(
         "{} is also a project on another host. Link them to show them as one project, with the threads of both.",
@@ -315,13 +283,11 @@ mod tests {
             group("aurora/a", "forge", &[("aurora", "a")]),
             group("local/b", "forge", &[("local", "b")]),
             group("aurora/c", "other", &[("aurora", "c")]),
-            // A `forge` dir the user renamed: unrelated, not offered.
             Group { name: "forge app".into(), ..group("aurora/e", "forge", &[("aurora", "e")]) },
         ];
         let o = offer(&groups, "local", "new").unwrap();
         assert_eq!((o.key.as_str(), o.name.as_str()), ("local/new", "forge"));
         assert_eq!(o.candidates, [("aurora/a".to_owned(), "aurora /p/forge".to_owned())]);
-        // Already grouped with another (a git origin match): nothing to offer.
         let joined =
             [group("github.com/x/forge", "forge", &[("aurora", "a"), ("local", "new")]), group("aurora/d", "forge", &[("aurora", "d")])];
         assert!(offer(&joined, "local", "new").is_none());

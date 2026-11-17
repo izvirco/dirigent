@@ -1,12 +1,9 @@
-//! A server's entry in `agent.toml`, what makes one usable, and the names its tools get.
-
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 use url::Url;
 
-/// How long a request to a server may take unless its entry says (`timeout`).
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// The longest name a model's API takes for a tool.
 const MAX_TOOL_NAME: usize = 64;
@@ -96,7 +93,6 @@ fn is_default(exposure: &Exposure) -> bool {
     *exposure == Exposure::default()
 }
 
-/// How a server's tools reach the model.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Exposure {
@@ -138,17 +134,13 @@ pub struct OAuth {
     pub auth_server_metadata_url: Option<String>,
 }
 
-/// How a usable entry's server is reached.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Reach {
-    /// The command to run.
     Stdio(String),
     Http(Url),
 }
 
 impl Server {
-    /// How the server is reached, or why the entry can't be used, said for the user to
-    /// fix it. `name` is the entry's.
     pub(crate) fn reach(&self, name: &str) -> Result<Reach, String> {
         if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
             return Err(format!("invalid server name \"{name}\" (use letters, digits, \"_\" and \"-\")"));
@@ -177,7 +169,6 @@ impl Server {
         }
     }
 
-    /// It signs in with OAuth: an HTTP server whose entry has no `Authorization` header.
     pub(crate) fn uses_oauth(&self) -> bool {
         self.url.is_some() && !self.headers.keys().any(|h| h.eq_ignore_ascii_case("authorization"))
     }
@@ -218,14 +209,10 @@ pub(crate) fn is_loopback(url: &Url) -> bool {
     matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
 }
 
-/// Credentials may go there: https, or this machine.
 pub(crate) fn is_secure(url: &Url) -> bool {
     url.scheme() == "https" || (url.scheme() == "http" && is_loopback(url))
 }
 
-/// Every entry of `servers` with how it is reached, or why a session skips it: an entry
-/// that can't be used, or one whose name differs from an earlier one's only in `-` and `_`
-/// (their tools would share their names).
 pub(crate) fn checked(servers: &BTreeMap<String, Server>) -> Vec<(&str, &Server, Result<Reach, String>)> {
     let mut taken: HashMap<String, &str> = HashMap::new();
     let mut checked = vec![];
@@ -242,16 +229,10 @@ pub(crate) fn checked(servers: &BTreeMap<String, Server>) -> Vec<(&str, &Server,
     checked
 }
 
-/// The group a server's tools are in (`ToolSpec::namespace`): `mcp__<server>`, with `_`
-/// for `-` as in the tools' names.
 pub fn namespace(server: &str) -> String {
     format!("mcp__{}", server.replace('-', "_"))
 }
 
-/// What the model and scripts call `server`'s `tool` by: `mcp__<server>__<tool>`, with `_`
-/// for everything but letters, digits and `_` (a script calls it by that name). One too
-/// long for a model's API, or `taken` by another tool (`a-b` and `a_b` come to the same),
-/// ends in a hash of what it stands for instead.
 pub(crate) fn tool_name(server: &str, tool: &str, taken: impl Fn(&str) -> bool) -> String {
     let plain = format!("mcp__{server}__{tool}");
     let name: String = plain.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
@@ -266,9 +247,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A value of an entry as it is used. One that starts with `!` is a shell command, and
-/// its output the value (`!gh auth token`). In any other, `${NAME}` and `$NAME` are
-/// environment variables, and `$$` is a `$`. `what` names the value where it can't be had.
 pub(crate) async fn resolve(value: &str, what: &str) -> Result<String, String> {
     if let Some(command) = value.strip_prefix('!') {
         return output_of(command).await.ok_or_else(|| format!("{what}: the command `{command}` gave no value"));
@@ -306,7 +284,6 @@ pub(crate) async fn resolve(value: &str, what: &str) -> Result<String, String> {
     }
 }
 
-/// How much of the start of `s` is a variable's name.
 fn name_len(s: &str) -> usize {
     if !s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
         return 0;
@@ -314,7 +291,6 @@ fn name_len(s: &str) -> usize {
     s.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count()
 }
 
-/// What a shell command prints, trimmed; `None` if it fails, takes over 10 s or prints nothing.
 async fn output_of(command: &str) -> Option<String> {
     let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
     let mut shell = tokio::process::Command::new(shell);
@@ -324,7 +300,6 @@ async fn output_of(command: &str) -> Option<String> {
     (output.status.success() && !said.is_empty()).then_some(said)
 }
 
-/// `~` and `~/…` as the home directory, as a shell would have it.
 pub(crate) fn expand_home(value: &str) -> String {
     let below = match value.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with(std::path::is_separator) => rest.trim_start_matches(std::path::is_separator),
@@ -369,7 +344,6 @@ mod tests {
             json!({"clientName": "Claude Code", "callbackPort": 8765})
         );
 
-        // In the file: tables after values, whatever the fields' order.
         let config = crate::config::Config { mcp: [("docs".to_owned(), http), ("files".to_owned(), stdio)].into(), ..Default::default() };
         let text = toml::to_string(&config).unwrap();
         assert!(
@@ -408,7 +382,6 @@ mod tests {
             server(json!({"url": "http://localhost:1/mcp", "command": "ignored"})).reach("a-b_1"),
             Ok(Reach::Http(Url::parse("http://localhost:1/mcp").unwrap()))
         );
-        // An exposure pi had and this hasn't is said by the file's reader.
         assert!(
             serde_json::from_value::<Server>(json!({"command": "srv", "exposure": "deferred"}))
                 .unwrap_err()
@@ -416,7 +389,6 @@ mod tests {
                 .contains("expected `codemode` or `direct`")
         );
 
-        // Names that differ in `-` and `_` only: the second is skipped, as is an entry that is no use.
         let servers = [("a-b", json!({"command": "x"})), ("a_b", json!({"command": "y"})), ("a.b", json!({"command": "z"}))]
             .map(|(name, entry)| (name.to_owned(), server(entry)));
         let servers = BTreeMap::from(servers);
@@ -434,7 +406,6 @@ mod tests {
     fn tools_are_named_for_models_and_scripts() {
         assert_eq!(namespace("dev-tools"), "mcp__dev_tools");
         assert_eq!(tool_name("dev-tools", "get.item/v2", |_| false), "mcp__dev_tools__get_item_v2");
-        // Taken by another tool, or too long for a model's API: a hash of what it is tells it apart.
         let taken = tool_name("a", "b-c", |name| name == "mcp__a__b_c");
         assert_eq!(taken, format!("mcp__a__b_c_{}", &hex(&Sha256::digest("a\0b-c"))[..8]));
         let long = tool_name("server", &"t".repeat(80), |_| false);

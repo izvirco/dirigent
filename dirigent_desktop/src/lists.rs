@@ -1,6 +1,3 @@
-//! Main-pane pages that list threads: Inbox, Workpool, one project. Plus the shared
-//! 40px header bar and the Projects page (every project, pins).
-
 use crate::app::{ArchiveAt, Dirigent, DragProject, Menu, Pane, Renaming, Target};
 use crate::icons::icon;
 use crate::menu::{self, Side};
@@ -39,18 +36,10 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     }
 }
 
-/// The Projects page (the sidebar's folder): every project group as a row (pin toggle,
-/// name, its hosts, `⋯` menu; expanded, a line per directory under it), "Removed projects"
-/// last; `Add project` in the top bar opens the modal (`add_project.rs`). A row opens the
-/// project's page; a pinned one is also listed in the
-/// sidebar. Rows reorder by drag, as the sidebar's pinned ones do (one order for both,
-/// `move_project`), and the draft's `Create thread in` popup lists them in that order.
 fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
     let (groups, orphans) = this.groups();
     let dragging = this.dragging.clone().filter(|d| !d.sidebar && cx.has_active_drag()).map(|d| d.key);
     let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, dragging.as_deref() == Some(&g.key), this, cx)).collect();
-    // The dragged row is a gap that follows the cursor row by row, the others shuffling
-    // around it.
     let rows = div().flex().flex_col().gap(u(ENTRY_GAP)).children(rows).on_drag_move(cx.listener(
         |this, ev: &DragMoveEvent<DragProject>, _, cx| {
             let drag = ev.drag(cx);
@@ -98,16 +87,14 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
     pane.child(scroll("projects", div().flex().flex_col().items_center().child(column)))
 }
 
-/// A Projects page row's height, the gap between rows (their pitch is what a dragged row
-/// snaps to), and the widest the list gets (`px_6` inside).
 const ENTRY_H: f32 = 36.;
 const ENTRY_GAP: f32 = 4.;
 const ENTRY_MAX_W: f32 = 760.;
 const MEMBER_H: f32 = 28.;
 const MEMBERS_PAD: f32 = 6.;
-/// The expand chevron after a row's hosts, with its gap and padding.
+// MUST KILL: extract: CHEVRON_W's summands (gap, icon, padding) as named consts
 const CHEVRON_W: f32 = 6. + 12. + 4.;
-/// Where a row's name starts: past its padding, the pin and the gap.
+// MUST KILL: extract: NAME_X's summands (padding, pin, gap) as named consts
 const NAME_X: f32 = 8. + 24. + 12.;
 const LINK_W: f32 = 440.;
 const LINK_LIST_H: f32 = 216.;
@@ -116,7 +103,6 @@ fn details_height(g: &Group, this: &Dirigent) -> f32 {
     if this.expanded_projects.contains(&g.key) { g.members.len() as f32 * MEMBER_H + MEMBERS_PAD } else { 0. }
 }
 
-/// A Projects page row: opens the project's page (`key`) when clicked.
 fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let key = key.to_owned();
     div()
@@ -139,11 +125,6 @@ fn thread_count(n: usize) -> Div {
     div().flex_shrink_0().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text)
 }
 
-/// One project group on the Projects page: the pin toggle (amber while pinned, faint
-/// otherwise), its name, its hosts on one line with a chevron that expands the row
-/// (`member_lines`), and the `⋯` menu: rename it (UI only), link another group into it,
-/// unlink, remove it from a host (its threads are kept, under Removed projects). Grab it
-/// to reorder: a `Ghost` follows the cursor and the row itself is a gap (`dragged`).
 fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let pinned = this.is_pinned_project(&key);
@@ -166,7 +147,6 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
         for m in &g.members {
             let (h, pid) = (m.host.clone(), m.project.id.clone());
             let label = if g.members.len() > 1 { format!("Remove from {h}") } else { "Remove project".to_owned() };
-            // Two of its directories on one host: the path tells them apart.
             let twice = g.members.iter().filter(|o| o.host == m.host).count() > 1;
             let detail = if twice { m.project.path.clone() } else { "threads are kept".to_owned() };
             let row = menu::stop(menu::row(format!("rm/{h}/{pid}")), false, move |this, _, cx| this.remove_project(&h, &pid, cx), cx)
@@ -221,7 +201,8 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
         .child(icon("ellipsis", theme::t().fg_1))
         .children(open.then(|| menu::popup(Side::BelowRight(24.), actions, cx)));
     let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
-    hosts.dedup(); // members come sorted by host
+    // MUST KILL: rearchitect: hosts.dedup() relies on Group::members coming sorted by host; collect into a BTreeSet
+    hosts.dedup();
     let hosts = hosts.join(", ");
     let k = key.clone();
     let places = div()
@@ -245,9 +226,8 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
         .child(div().min_w_0().truncate().child(hosts))
         .child(icon(if expanded { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(u(12.)));
     let members = (expanded && !dragged).then(|| member_lines(g, this, cx));
-    // While renaming, the name is a field; presses in it don't open the project.
     let name = if this.renaming == Some(Renaming::Project(key.clone())) {
-        // Pulled left by its padding + border so the text stays where the name was.
+        // MUST KILL: extract: the -7 / 7 margins as a const from the rename field's padding and border
         div()
             .ml(u(-7.))
             .mr(u(7.))
@@ -261,9 +241,7 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
     } else {
         div().truncate().child(g.name.clone())
     };
-    // The ghost is as wide as the row: the pane (the window right of the docked sidebar) up
-    // to the list's widest, minus its padding. Its name sits where the row's does: past the
-    // row's padding, the pin and the gap.
+    // MUST KILL: extract: the ghost width in project_entry from a shared pane_width() and the list padding const
     let sidebar_w = if this.sidebar_hidden { 0. } else { this.sidebar_width };
     let (ghost_name, font) = (g.name.clone(), this.fonts.ui.clone());
     let entity = cx.weak_entity();
@@ -293,9 +271,6 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
     div().flex().flex_col().child(row).children(members).into_any_element()
 }
 
-/// What an expanded row shows under it: a line per directory of the group. The hosts are
-/// a column as wide as the longest (not the row's columns), so the paths line up and
-/// have the rest.
 fn member_lines(g: &Group, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let hosts = g.members.iter().map(|m| {
         let label = div().min_w_0().truncate().child(this.host_label(&m.host));
@@ -314,8 +289,6 @@ fn member_lines(g: &Group, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .child(div().flex_1().min_w_0().flex().flex_col().children(lines))
 }
 
-/// A line of `member_lines`, past its host. The path is cut at its start when it doesn't
-/// fit, so the directory's name stays.
 fn member_line(g: &Group, m: &projects::Member, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let (host, pid, path) = (m.host.clone(), m.project.id.clone(), m.project.path.clone());
     let id = format!("{host}/{pid}");
@@ -386,7 +359,6 @@ fn member_line(g: &Group, m: &projects::Member, this: &Dirigent, cx: &mut Contex
         .into_any_element()
 }
 
-/// The `Link into <name>` popup, in the `⋯` menu's place: a search over the other groups.
 fn link_picker(g: &Group, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let list = menu::results("link-list", LINK_LIST_H, cx, |cx| {
@@ -414,9 +386,6 @@ fn link_picker(g: &Group, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyEle
         .into_any()
 }
 
-/// The main pane's top bar: a title on the left, optional actions on the right. With our
-/// own title bar it lies over the grab strip, so the actions occlude it and the right end
-/// is left to the caption buttons (`titlebar.rs`).
 pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
     div()
         .flex()
@@ -431,7 +400,6 @@ pub fn header(title: impl IntoElement, actions: Option<AnyElement>) -> Div {
         .children(actions.map(|a| div().flex_shrink_0().occlude().child(a)))
 }
 
-/// A sub-agent's parent, a segment of its breadcrumb.
 pub struct Via {
     pub host: String,
     pub id: String,
@@ -439,12 +407,6 @@ pub struct Via {
     pub status: Status,
 }
 
-/// `project > via > title`, with the project clickable, `via` (a sub-agent's parent, its
-/// glyph and name opening it) an optional segment of its own, and before the title the
-/// thread's `status` glyph and an amber pin while `pinned`. The title breathes while
-/// `titling` (its name is being generated).
-/// Nothing truncates while it all fits. When space runs out the parent's name gives way
-/// first, down to nothing, then the title; the project, chevrons and glyphs keep their width.
 pub fn breadcrumb(
     project: Option<(String, String)>,
     via: Option<Via>,
@@ -457,10 +419,6 @@ pub fn breadcrumb(
     let has_project = project.is_some();
     let chevron = || icon("chevron-right", theme::t().fg_2).size(u(12.)).flex_shrink_0();
     let row = || div().flex().flex_row().items_center().gap_1().min_w_0();
-    // The title has priority: the parent's name and the title's part (`tail`) share a row,
-    // and `tail` doesn't shrink but is capped at that row's width (its `min_w_0` matters:
-    // taffy lets min override max), so the parent's name takes the squeeze until it's
-    // gone, and only then does the title truncate.
     let (via_glyph, via_name) = via
         .map(|v| {
             let open = |id: &'static str| {
@@ -536,9 +494,6 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
     pane.child(header(title, new_thread)).child(body)
 }
 
-/// A band between list sections (`Archived`): the canvas colour at 40% over the panel, a
-/// shade darker than the rows without going solid on a see-through theme. As tall as a
-/// row: the virtualized list needs uniform items.
 fn section_label(text: String) -> Div {
     div()
         .w_full()
@@ -552,16 +507,12 @@ fn section_label(text: String) -> Div {
         .child(text)
 }
 
-/// `content`, scrolling, in what is left of the column it is put in.
 pub fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     theme::stack().id(id).flex_1().overflow_y_scroll().child(content)
 }
 
-/// Every item of a thread list is this tall (rows and section labels alike).
 const ROW_H: f32 = 38.;
 
-/// One item of a thread list: a thread (by key, looked up when it's on screen) or a
-/// section label.
 enum Item {
     Row { host: String, id: String },
     Label(String),
@@ -573,8 +524,6 @@ impl Item {
     }
 }
 
-/// A scrolling, virtualized thread list filling the rest of the pane: only the rows on
-/// screen are built, so a project with thousands of archived threads stays cheap.
 fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, cx: &mut Context<Dirigent>) -> UniformList {
     let count = items.len();
     uniform_list(
@@ -582,7 +531,7 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
         count,
         cx.processor(move |this, range: Range<usize>, window, cx| {
             let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
-            // The list fills the pane: the window right of the docked sidebar, in design px.
+            // MUST KILL: extract: the pane width (viewport over zoom minus the docked sidebar) into a Dirigent::pane_width()
             let width = f32::from(window.viewport_size().width) / theme::zoom() - if this.sidebar_hidden { 0. } else { this.sidebar_width };
             let cols = Columns::fit(width, this.hosts.len() > 1, show_project);
             items[range]
@@ -591,8 +540,7 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
                     Item::Label(text) => section_label(text.clone()).into_any_element(),
                     Item::Row { host, id } => match this.summary(host, id) {
                         Some(t) => thread_row(host, t, cols, now, this, cx).into_any_element(),
-                        // Unreachable (items come from this frame's `this`); one element per
-                        // index keeps the vec aligned with `range`.
+                        // MUST KILL: type: Item::Row resolved to its summary up front so this None arm goes
                         None => div().h(u(ROW_H)).into_any_element(),
                     },
                 })
@@ -602,9 +550,6 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
     .flex_1()
 }
 
-/// A thread row: status glyph, title (amber while asking, accent while unread, an amber pin before it while pinned),
-/// project, model, age. Hover reveals snooze (finished threads; snoozed ones carry the
-/// moon glyph) and archive (threads at rest) or restore.
 fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let title = t.name.clone().unwrap_or_else(|| "Untitled".into());
@@ -648,7 +593,6 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
         .when(cols.project, |d| d.child(column(PROJECT_W).text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child(project)))
         .when(cols.model, |d| d.child(column(MODEL_W).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(model)))
         .child(column(32.).text_right().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
-        // Rows that can't be snoozed keep an empty slot, so the columns stay aligned.
         .child(if this.snoozable(host, t) {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| this.set_snoozed(&h3, &id3, !snoozed, cx))
@@ -668,21 +612,15 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
         })
 }
 
-// A thread row's optional columns, design px wide.
 const HOST_W: f32 = 90.;
 const PROJECT_W: f32 = 140.;
 const MODEL_W: f32 = 150.;
-/// The gap between a row's cells (`gap_3`).
+// MUST KILL: extract: GAP and the row's gap_3 from one const
 const GAP: f32 = 12.;
-/// Everything else a row spends: its padding, the status glyph (16, its widest; the icons
-/// are 14), the time, both actions, and the gaps after the glyph and before each of the
-/// last three.
+// MUST KILL: extract: ROW_FIXED's summands as named consts
 const ROW_FIXED: f32 = 2. * 16. + 16. + GAP + 3. * GAP + 32. + 2. * 24.;
-/// The title keeps at least this much; the optional columns give way first.
 const TITLE_MIN: f32 = 200.;
 
-/// Which optional columns the rows of a list show. Every row of a list shows the same
-/// ones, so they line up.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Columns {
     host: bool,
@@ -691,13 +629,8 @@ struct Columns {
 }
 
 impl Columns {
-    /// The columns that fit a list `width` design px wide while the title keeps `TITLE_MIN`.
-    /// `host` and `project` say whether they're wanted at all (several hosts; a list across
-    /// projects). They're kept in order of use, the project first, then the host, then the
-    /// model; the first that doesn't fit drops, and every one after it.
     fn fit(width: f32, host: bool, project: bool) -> Self {
         let mut room = width - ROW_FIXED - TITLE_MIN;
-        // Once a wanted column overdraws the room, it stays overdrawn for the rest.
         let mut keep = |wanted: bool, w: f32| {
             if wanted {
                 room -= w + GAP;
@@ -711,14 +644,10 @@ impl Columns {
     }
 }
 
-/// A fixed-width cell of a thread row: every row lays its columns out the same way, so
-/// they line up like a table.
 fn column(width: f32) -> Div {
     div().w(u(width)).flex_shrink_0().truncate()
 }
 
-/// A thread row's trailing action: hidden until the row is hovered (or always shown while
-/// `on`); its click doesn't open the row.
 fn row_action(
     id: String,
     name: &'static str,
@@ -756,7 +685,6 @@ mod tests {
         assert_eq!(Columns::fit(700., true, true), c(true, true, false));
         assert_eq!(Columns::fit(600., true, true), c(false, true, false));
         assert_eq!(Columns::fit(500., true, true), c(false, false, false));
-        // A column that isn't wanted leaves its room to the next.
         assert_eq!(Columns::fit(700., false, true), c(false, true, true));
     }
 }

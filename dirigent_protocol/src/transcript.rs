@@ -1,6 +1,3 @@
-//! A thread's history and what streams while it grows: written by the agent
-//! (`dirigent_agent`), stored by its host (`dirigent_service`), drawn by clients.
-//!
 //! One format all the way: what the model said is an `Entry`, in memory, in sqlite and on
 //! the wire. Images are never inline: an entry names them by blob id (`Block::Image`), and
 //! the host keeps the bytes (`ClientMessage::GetBlob`).
@@ -63,7 +60,6 @@ pub enum Body {
     Unknown,
 }
 
-/// A piece of a message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
@@ -122,7 +118,6 @@ pub enum Api {
     Codex,
 }
 
-/// One reply of the model: a turn of a run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Assistant {
     /// Thinking, text and tool calls, in the model's order.
@@ -146,7 +141,6 @@ pub struct Assistant {
     pub duration_ms: i64,
 }
 
-/// Why a reply ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Stop {
@@ -161,7 +155,6 @@ pub enum Stop {
     Aborted,
 }
 
-/// What a request used: tokens, and what they cost.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Usage {
@@ -197,7 +190,6 @@ impl Cost {
     }
 }
 
-/// What a tool call came to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     /// The `Block::ToolCall::id` it answers.
@@ -331,9 +323,7 @@ pub enum Event {
 /// `leaf`, the thread's current branch: all of it, unless an edit branched it.
 pub fn branch<'a>(entries: &'a [Entry], leaf: &str) -> Vec<&'a Entry> {
     let Some(end) = entries.iter().rposition(|e| e.id == leaf) else { return vec![] };
-    // A parent is appended before its children, so nothing past `leaf` is on its branch.
     let entries = &entries[..=end];
-    // No edit up to there: each entry is the child of the one before.
     if entries.windows(2).all(|w| w[1].parent_id.as_deref() == Some(w[0].id.as_str())) {
         return entries.iter().collect();
     }
@@ -357,8 +347,6 @@ mod tests {
         Entry { seq: 0, id: id.into(), parent_id: parent.map(str::to_owned), at: 1, body }
     }
 
-    /// The JSON is the stored format: what a body looks like in it is a promise to every
-    /// db in the field.
     #[test]
     fn bodies_keep_their_shape() {
         let user = Body::User { content: vec![Block::text("hi"), Block::Image { mime: "image/png".into(), blob: "ab".into() }] };
@@ -393,7 +381,6 @@ mod tests {
             let e = entry("a", None, body);
             assert_eq!(serde_json::from_str::<Entry>(&serde_json::to_string(&e).unwrap()).unwrap(), e);
         }
-        // What a newer host writes is an entry still, of no kind this one knows.
         let newer = json!({"id":"a","parent_id":null,"at":1,"body":{"type":"hologram","x":1}});
         assert_eq!(serde_json::from_value::<Entry>(newer).unwrap().body, Body::Unknown);
         assert_eq!(serde_json::from_value::<Event>(json!({"type":"hologram"})).unwrap(), Event::Unknown);
@@ -402,7 +389,6 @@ mod tests {
     #[test]
     fn branches_follow_parent_links() {
         let e = |id: &str, parent: Option<&str>| entry(id, parent, Body::User { content: vec![] });
-        // a - b - c, then an edit of c: d (child of b) - e.
         let entries = [e("a", None), e("b", Some("a")), e("c", Some("b")), e("d", Some("b")), e("e", Some("d"))];
         let ids = |b: Vec<&Entry>| b.iter().map(|e| e.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(branch(&entries, "e")), ["a", "b", "d", "e"]);

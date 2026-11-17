@@ -11,29 +11,20 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Clock skew a token's `exp` is given.
 const LEEWAY_SECS: i64 = 30;
-/// An unknown `kid` refetches the JWKS, but not more often than this: a stream of made-up
-/// kids mustn't become a stream of requests to the forge.
 const REFETCH_EVERY: Duration = Duration::from_secs(60);
-/// A JWKS fetch that failed is tried again after this; meanwhile tokens with keys we don't
-/// have are `Keys` (503 for the api), not `UnknownKey`.
 const RETRY_FAILED: Duration = Duration::from_secs(10);
 
-/// What a token must say.
 #[derive(Debug, Clone, Copy)]
 pub struct Expect<'a> {
-    /// The forge's url (`iss`).
     pub issuer: &'a str,
     /// This server, exactly as clients name it (`aud`).
     pub audience: &'a str,
-    /// Dirigent's app (`client_id`).
     pub client_id: &'a str,
     /// The one account it must be (`sub`); any if `None`.
     pub subject: Option<&'a str>,
 }
 
-/// A checked token's claims.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Claims {
     pub iss: String,
@@ -80,7 +71,6 @@ pub enum Rejected {
         expected: String,
     },
     Client,
-    /// A valid token, of a forge account other than the one this server takes.
     Subject,
 }
 
@@ -104,20 +94,18 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// The forge's signing keys, by `kid`: RSA modulus and exponent.
 pub struct Keys {
     fetch: Box<dyn Fn() -> anyhow::Result<String> + Send + Sync>,
     state: Mutex<KeyState>,
 }
 
-/// An RSA public key: modulus and exponent, big-endian.
+// MUST KILL: type: keep ring's RsaPublicKeyComponents<Vec<u8>> instead of a bare (n, e) tuple
 type RsaKey = (Vec<u8>, Vec<u8>);
 
 #[derive(Default)]
 struct KeyState {
     keys: HashMap<String, RsaKey>,
     fetched: Option<Instant>,
-    /// The last fetch failed: when, and why.
     failed: Option<(Instant, String)>,
 }
 
@@ -184,8 +172,6 @@ impl Keys {
         Ok(claims)
     }
 
-    /// The key `kid` names, fetching the JWKS if it's new to us (rate-limited). A fetch that
-    /// failed is `Keys` (the forge's trouble, not the token's) until it may be tried again.
     fn key(&self, kid: &str) -> Result<RsaKey, Rejected> {
         let mut state = self.state.lock().unwrap();
         if let Some(key) = state.keys.get(kid) {
@@ -199,7 +185,7 @@ impl Keys {
         if state.fetched.is_some_and(|at| at.elapsed() < REFETCH_EVERY) {
             return Err(Rejected::UnknownKey);
         }
-        // Held while fetching: one fetch at a time, the others then find its keys.
+        // MUST KILL: extract: a fetch_locked(&mut KeyState), so fetching while holding the lock is explicit
         let fetched = (self.fetch)().and_then(|jwks| parse_jwks(&jwks));
         match fetched {
             Ok(keys) => {
@@ -223,7 +209,7 @@ pub fn looks_like_jwt(token: &str) -> bool {
     token.split('.').count() == 3
 }
 
-/// The JWS signing input's length: up to the second dot.
+// MUST KILL: rename: header_len to signing_input_len, the JWS part it measures
 fn header_len(token: &str) -> usize {
     token.rfind('.').unwrap_or(0)
 }
@@ -233,7 +219,6 @@ fn decode_json<T: serde::de::DeserializeOwned>(part: &str) -> Result<T, Rejected
     serde_json::from_slice(&bytes).map_err(|_| Rejected::Malformed)
 }
 
-/// A JWKS's RSA signing keys by kid.
 fn parse_jwks(text: &str) -> anyhow::Result<HashMap<String, RsaKey>> {
     #[derive(Deserialize)]
     struct Jwks {
@@ -272,7 +257,6 @@ mod tests {
     const EXPECT: Expect =
         Expect { issuer: "https://forge.example", audience: "wss://d.example/ws", client_id: "app", subject: Some("u1") };
 
-    /// Keys whose fetch counts its calls and answers with `jwks()`.
     fn keys(jwks: impl Fn() -> String + Send + Sync + 'static) -> (Keys, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let counted = calls.clone();
@@ -295,7 +279,6 @@ mod tests {
         let verify = |c: serde_json::Value| keys.verify(&signer.sign(&c), &EXPECT, NOW);
         let ok = verify(good()).unwrap();
         assert_eq!((ok.sub.as_str(), ok.preferred_username.as_str()), ("u1", "seb"));
-        // Another subject is fine when none is asked for.
         let any = Expect { subject: None, ..EXPECT };
         let mut c = good();
         c["sub"] = "u2".into();
@@ -311,9 +294,7 @@ mod tests {
         assert_eq!(wrong("client_id", "other-app".into()), Rejected::Client);
         assert_eq!(wrong("sub", "u2".into()), Rejected::Subject);
         assert_eq!(wrong("exp", (NOW - LEEWAY_SECS - 1).into()), Rejected::Expired);
-        // Within the leeway.
         assert!(verify(claims("https://forge.example", "u1", "wss://d.example/ws", "app", NOW - 5)).is_ok());
-        // An audience list naming us.
         assert!(
             verify({
                 let mut c = good();
@@ -322,7 +303,6 @@ mod tests {
             })
             .is_ok()
         );
-        // One JWKS fetch for all of that.
         assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
@@ -340,9 +320,7 @@ mod tests {
         let v = |t: &str| keys.verify(t, &EXPECT, NOW).unwrap_err();
         assert_eq!(v(&with_header(serde_json::json!({ "alg": "none", "typ": "at+jwt", "kid": kid }))), Rejected::Algorithm);
         assert_eq!(v(&with_header(serde_json::json!({ "alg": "HS256", "typ": "at+jwt", "kid": kid }))), Rejected::Algorithm);
-        // An id_token (typ JWT) isn't an access token.
         assert_eq!(v(&with_header(serde_json::json!({ "alg": "RS256", "typ": "JWT", "kid": kid }))), Rejected::Type);
-        // Claims swapped under the signature.
         let mut forged = good();
         forged["sub"] = "u2".into();
         let parts: Vec<&str> = token.split('.').collect();
@@ -356,8 +334,6 @@ mod tests {
     #[test]
     fn unknown_kid_refetches_at_most_once_a_minute() {
         let signer = Signer::new();
-        // The forge rotated its key after our first fetch: the JWKS has it only from the
-        // second fetch on.
         let rotated = signer.jwks();
         let old = serde_json::json!({ "keys": [] }).to_string();
         let served = Arc::new(Mutex::new(old));
@@ -368,13 +344,11 @@ mod tests {
         let token = signer.sign(&good());
         assert_eq!(keys.verify(&token, &EXPECT, NOW).unwrap_err(), Rejected::UnknownKey);
         *served.lock().unwrap() = rotated;
-        // Within the minute: no second fetch.
         assert_eq!(keys.verify(&token, &EXPECT, NOW).unwrap_err(), Rejected::UnknownKey);
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         keys.state.lock().unwrap().fetched = Some(Instant::now() - REFETCH_EVERY);
         assert!(keys.verify(&token, &EXPECT, NOW).is_ok());
         assert_eq!(calls.load(Ordering::Relaxed), 2);
-        // A forge that can't be reached says so.
         let down = Keys::with_fetch(|| anyhow::bail!("connection refused"));
         assert!(matches!(down.verify(&token, &EXPECT, NOW), Err(Rejected::Keys(_))));
     }
@@ -389,7 +363,6 @@ mod tests {
             keys(move || if *up.lock().unwrap() { jwks.clone() } else { "forge down".into() })
         };
         let token = signer.sign(&good());
-        // Not `UnknownKey` (a 401: "your token is bad") while the forge can't be asked.
         assert!(matches!(keys.verify(&token, &EXPECT, NOW), Err(Rejected::Keys(_))));
         *up.lock().unwrap() = true;
         assert!(matches!(keys.verify(&token, &EXPECT, NOW), Err(Rejected::Keys(_))), "backs off");

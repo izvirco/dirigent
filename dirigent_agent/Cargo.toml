@@ -10,31 +10,20 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-# `Tool` is a trait object with an async method.
 async-trait = "0.1"
-# `CancellationToken`: the user stopping a run reaches the request and every tool call.
 tokio-util = "0.7"
 toml = "0.8"
-# HTTP, to the proxy (streamed replies) and to MCP servers (streamable HTTP, OAuth): rustls
-# with ring and bundled roots, as the rest of the tree has them (no system TLS, no second
-# crypto library: 0.13's rustls is aws-lc). `gzip`: models.dev's price list is 12 times
-# smaller with it.
 reqwest = { version = "0.12", default-features = false, features = [
   "rustls-tls-webpki-roots",
   "gzip",
 ] }
-# `mcp`: the addresses of servers and of their OAuth, and form bodies.
 url = "2"
-# `mcp`: PKCE's SHA-256 and randomness, a long tool name's hash.
 sha2 = "0.10"
 getrandom = "0.4"
-# Images cross between tools, scripts, servers and requests as base64.
 base64 = "0.22"
-# QuickJS (QuickJS-NG), the VM codemode scripts run in. Its C sources are built by `cc`.
 rquickjs = "0.14"
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
-# `tools/images.rs`: an image made fit to send.
 image = { version = "0.25", default-features = false, features = [
   "png",
   "jpeg",
@@ -42,14 +31,11 @@ image = { version = "0.25", default-features = false, features = [
   "webp",
   "bmp",
 ] }
-# `tools/files.rs`: file names and edits the model typed in another Unicode form.
 unicode-normalization = "0.1"
 
-# `mcp/stdio.rs`, `tools/shell.rs`: signals to a process group.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-# `mcp/tests.rs`: an HTTP MCP server with OAuth to connect to.
 axum = "0.8"

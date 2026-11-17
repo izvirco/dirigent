@@ -357,6 +357,15 @@ S3_ENDPOINT=https://fsn1.your-objectstorage.com S3_REGION=fsn1 S3_BUCKET=dirigen
 DIRIGENT_API_BIND=127.0.0.1:7790 dirigent_api serve
 ```
 
+```text
+dirigent_api serve
+dirigent_api publish --channel stable --platform windows-x86_64 --version 0.1.0 [--notes TEXT] FILE
+dirigent_api keygen FILE     a new signing key: the secret one to FILE, the public one printed
+```
+
+`publish` also takes `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and `DIRIGENT_SIGNING_KEY` (the minisign secret
+key file's text). `DIRIGENT_LOG` sets the log filter (default `info`).
+
 It logs every update check with the client's version (`Dirigent/<version> (<platform>)`), which is the only
 usage signal there is.
 

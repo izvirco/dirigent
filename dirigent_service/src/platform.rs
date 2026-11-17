@@ -1,24 +1,14 @@
-//! What differs between OSes: where config and data live by default, this machine's name,
-//! and how helper programs start. Everything else is the same code on every OS (Windows takes
-//! `/` in paths too, and `std::env::home_dir` is `%USERPROFILE%` there). macOS uses the same
-//! dirs as Linux, as developer tools there mostly do. A nightly build's dirs are
-//! `dirigent-nightly` wherever a stable one's are `dirigent` (`release::app`).
-
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-/// `$XDG_CONFIG_HOME/dirigent` (else `~/.config/dirigent`); `%APPDATA%\dirigent` on Windows.
 pub fn config_dir() -> PathBuf {
     if cfg!(windows) { app_dir("APPDATA", r"AppData\Roaming") } else { app_dir("XDG_CONFIG_HOME", ".config") }
 }
 
-/// `$XDG_DATA_HOME/dirigent` (else `~/.local/share/dirigent`); `%LOCALAPPDATA%\dirigent` on
-/// Windows.
 pub fn data_dir() -> PathBuf {
     if cfg!(windows) { app_dir("LOCALAPPDATA", r"AppData\Local") } else { app_dir("XDG_DATA_HOME", ".local/share") }
 }
 
-/// `$var/<app>`, else `<home>/<fallback>/<app>`: `dirigent`, or a nightly's `dirigent-nightly`.
 fn app_dir(var: &str, fallback: &str) -> PathBuf {
     std::env::var_os(var)
         .map(PathBuf::from)
@@ -27,9 +17,6 @@ fn app_dir(var: &str, fallback: &str) -> PathBuf {
         .join(dirigent_protocol::release::app())
 }
 
-/// This machine's name, which the service introduces itself with (`Hello`): `/etc/hostname`,
-/// `%COMPUTERNAME%` on Windows, on macOS (no `/etc/hostname` there) the local host name from
-/// Sharing settings (`Sebs-MacBook-Pro`), else `local`.
 pub fn host_name() -> String {
     let name = if cfg!(windows) {
         std::env::var("COMPUTERNAME").ok()

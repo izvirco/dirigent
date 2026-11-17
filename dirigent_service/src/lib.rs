@@ -1,10 +1,3 @@
-//! dirigent_service: owns this host's threads (sqlite), runs their agents (`dirigent_agent`)
-//! and serves them to desktops over WebSocket.
-//!
-//! A library so the desktop can run the local service in-process (`run`) and the `dirigent`
-//! command line (`dirigent_cli`) shares its dirs; the `dirigent_service` binary is a thin
-//! wrapper for remote hosts.
-
 mod agent;
 mod auth;
 mod dirigent;
@@ -49,12 +42,9 @@ pub use auth::{KEY_USAGE, key_command};
 pub use logging::init_logging;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(30 * 60);
-/// How long `shutdown` waits for the agent's MCP servers and screens to close.
 const SHUTDOWN_WAIT: Duration = Duration::from_secs(3);
 pub const DEFAULT_PORT: u16 = 7777;
-/// Sub-agents can't nest deeper than this (a root thread is depth 0).
 const MAX_DEPTH: usize = 3;
-/// How much of a sub-agent's reply a parent's notice carries.
 const NOTICE_CHARS: usize = 6000;
 
 /// The local service's port: `DIRIGENT_PORT`, else 7777, or 7776 in a nightly build. The
@@ -68,28 +58,17 @@ pub fn port() -> u16 {
 
 pub struct Service {
     storage: Mutex<Storage>,
-    /// This host's agent: the live sessions of its threads.
     agent: Arc<Agent>,
-    /// The way to the models: the agent's, and what lists them and names threads.
     models: Arc<Proxy>,
-    /// What the threads' sessions are up to (`live.rs`).
     live: Live,
-    /// Threads whose workspace was gone (or no longer known to the vcs) at the last
-    /// `sweep_workspaces`: what `workspace_missing` reports between sweeps.
     missing: Mutex<std::collections::HashSet<String>>,
-    /// Threads being created with their first prompt, until it is delivered: they take no
-    /// other prompt meanwhile. `Some(Workspace)` while their workspace is being made.
+    // MUST KILL: type: Option<Setup> means workspace-being-made vs prompt-in-flight; give starting threads an enum
     starting: Mutex<HashMap<String, Option<Setup>>>,
-    /// The MCP sign-ins in progress (`mcp.rs`).
     logins: mcp::Logins,
-    /// This host's CLIProxyAPI as last seen (`proxy.rs`).
     proxy: proxy::Poller,
-    /// The pictures of the threads using the computer (`screen.rs`).
     screens: screen::Screens,
-    /// Pushes to every connected client.
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
-    /// `Storage::service_id`, sent in every `Hello`.
     pub service_id: String,
 }
 
@@ -103,24 +82,17 @@ impl Service {
         let missing = self.missing.lock().unwrap();
         let starting = self.starting.lock().unwrap();
         for t in &mut threads {
-            // A thread still starting works, whatever its session is up to: `abandon` drops
-            // the session, and the run in it, before the thread is gone.
+            // MUST KILL: extract: a running_since(id) that also counts a starting thread from its prompted_at
             t.running_since = self.live.running_since(&t.id).or(t.prompted_at.filter(|_| starting.contains_key(&t.id)));
             (t.jobs, t.free_jobs) = self.live.jobs(&t.id);
-            // A workspace removed outside dirigent: the thread can't run until it is dealt with.
             t.workspace_missing = missing.contains(&t.id);
             t.setup = starting.get(&t.id).copied().flatten().or(self.live.nix_shell(&t.id).then_some(Setup::NixShell));
             t.compacting_since = self.live.compacting_since(&t.id);
-            // A screen is its run's: one left by a run that never settled doesn't count.
             t.screen = t.running_since.is_some() && self.screens.has(&t.id);
         }
         Ok(threads)
     }
 
-    /// Drop the thread's session, and with it the run it may have been in (no `RunEnd` comes
-    /// for that one), its jobs and its screen. A run begun for a session still to load (its
-    /// prompt on the way) isn't the session's to end: a new thread goes on running while it
-    /// moves into its workspace, and whoever waited on a load that failed settles the run.
     fn unload(&self, thread_id: &str) {
         self.screens.clear(thread_id);
         let loaded = self.agent.session(thread_id).is_some();
@@ -128,7 +100,6 @@ impl Service {
         self.live.unloaded(thread_id, loaded);
     }
 
-    /// The tool switches the thread's last prompt had on.
     pub(crate) fn thread_tools(&self, thread_id: &str) -> Result<Vec<String>> {
         self.storage.lock().unwrap().thread_tools(thread_id)
     }
@@ -140,10 +111,6 @@ impl Service {
         }
     }
 
-    /// Notice workspaces removed outside dirigent (the directory deleted, or the vcs made to
-    /// forget it: `jj workspace forget`, a pruned worktree): push the thread list when the
-    /// set of missing ones changed since the last look. Runs periodically and on `GetThread`;
-    /// the vcs probe is too slow for every `threads()`.
     fn sweep_workspaces(&self) {
         let threads = match self.storage.lock().unwrap().list_threads() {
             Ok(threads) => threads,
@@ -156,8 +123,6 @@ impl Service {
             .collect();
         let changed = {
             let mut missing = self.missing.lock().unwrap();
-            // Explains a `Recreate` / `Back to project` banner after the fact. Debug: removing
-            // workspaces by hand is normal, and the banner already tells the user.
             for id in now.difference(&missing) {
                 debug!(thread = %id, "workspace missing");
             }
@@ -177,7 +142,6 @@ impl Service {
         }
     }
 
-    /// Handle one client request; the reply is sent back on the requesting connection.
     pub async fn handle(self: &Arc<Self>, req: ClientMessage, conn: &Conn) -> ServerMessage {
         let id = match &req {
             ClientMessage::ListProjects { id }
@@ -242,7 +206,6 @@ impl Service {
                 anyhow::ensure!(path.is_dir(), "not a directory on this host: {}", path.display());
                 let origin = git::origin(&path);
                 let project_id = uuid::Uuid::now_v7().to_string();
-                // The one it already is, if that path is a project.
                 let project = self.storage.lock().unwrap().add_project(&project_id, &path.to_string_lossy(), origin.as_deref(), now())?;
                 if project.id == project_id {
                     info!(project = %project_id, path = %path.display(), "project added");
@@ -251,7 +214,6 @@ impl Service {
                 ServerMessage::ProjectAdded { reply_to: id, project }
             }
             ClientMessage::ListDirs { id, path } => {
-                // A big directory is many stats: off the async workers.
                 let dir = dirs::expand(&path)?;
                 ServerMessage::Dirs { reply_to: id, dirs: tokio::task::spawn_blocking(move || dirs::list(&dir)).await?? }
             }
@@ -273,7 +235,6 @@ impl Service {
                 let thread = {
                     let storage = self.storage.lock().unwrap();
                     let mut cwd = storage.project_path(&project_id)?.ok_or_else(|| anyhow!("no such project"))?;
-                    // A sub-agent works where its parent works, unless it gets its own workspace.
                     if let Some(p) = &parent {
                         let parent_cwd = storage.thread_cwd(p)?.ok_or_else(|| anyhow!("no such parent thread"))?;
                         anyhow::ensure!(storage.depth(p)? + 1 < MAX_DEPTH, "sub-agents can't nest deeper than {MAX_DEPTH} levels");
@@ -282,16 +243,11 @@ impl Service {
                         }
                     }
                     let thread = storage.create_thread(&thread_id, &project_id, &cwd, parent.as_deref(), name.as_deref(), now())?;
-                    // A sub-agent's prompts come from the `dirigent` tool, which knows nothing of
-                    // the user's tool settings: it gets its parent's tools.
                     if let Some(p) = &parent {
                         storage.set_tools(&thread_id, &storage.thread_tools(p)?)?;
                         storage.set_report(&thread_id, report, notify)?;
                     }
-                    // With its first prompt along, the thread works from the start: its run begins
-                    // under the lock that creates it, so any `Threads` push that lists it (other
-                    // threads' activity) lists it running, never idle in the inbox while its
-                    // workspace is made or its prompt is on the way.
+                    // MUST KILL: rearchitect: creating a thread and beginning its run must be one step, not hinge on holding the storage lock
                     if let Some(p) = &prompt {
                         storage.set_prompted(&thread_id, &p.text, p.model.as_deref(), p.effort.as_deref(), now())?;
                         self.live.begin_run(&thread_id);
@@ -307,13 +263,9 @@ impl Service {
                     "thread created"
                 );
                 if workspace {
-                    // Clients see it making its workspace. Without a prompt there is no push:
-                    // the creator's `Prompt` right after pushes it running.
                     if prompt.is_some() {
                         self.push_threads();
                     }
-                    // Off the async workers: `git worktree add` / `jj workspace add` can take a
-                    // while, and the push above would wait behind it on this one.
                     let (this, id) = (self.clone(), thread_id.clone());
                     let made = tokio::task::spawn_blocking(move || this.move_to_workspace(&id, true, base.as_deref()))
                         .await
@@ -332,7 +284,6 @@ impl Service {
                     }
                     self.starting.lock().unwrap().remove(&thread_id);
                 }
-                // As it is listed now: in its workspace, prompted, running.
                 let thread = self.threads()?.into_iter().find(|t| t.id == thread_id).unwrap_or(thread);
                 ServerMessage::ThreadCreated { reply_to: id, thread: Box::new(thread) }
             }
@@ -349,8 +300,6 @@ impl Service {
             }
             ClientMessage::VcsStatus { id, path } => {
                 let dir = Path::new(&path);
-                // A background probe, so a working copy the vcs can't answer for (a forgotten
-                // workspace) reads as no repo rather than an error.
                 let (vcs, dirty) = match vcs::detect(dir).map(|v| (v, vcs::dirty(v, dir))) {
                     Some((v, Ok(dirty))) => (Some(v), dirty),
                     _ => (None, false),
@@ -360,15 +309,12 @@ impl Service {
                 ServerMessage::VcsStatus { reply_to: id, path, vcs, dirty, branch, refs }
             }
             ClientMessage::Prompt { id, thread_id, text, mode, model, effort, images, title, tools } => {
-                // Its first prompt goes first: a second one now would load its session ahead
-                // of it (in the project, while its workspace is being made).
                 anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
                 self.prompt(&thread_id, mode, &FirstPrompt { text, model, effort, images, title, tools }, None).await?;
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::EditMessage { id, thread_id, entry_id, text, model, effort, images, tools } => {
                 anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
-                // A thread can't go back under a run; its session refuses it too.
                 anyhow::ensure!(self.live.running_since(&thread_id).is_none(), "the thread is running; stop it first");
                 anyhow::ensure!(
                     self.storage.lock().unwrap().is_user_message(&thread_id, &entry_id)?,
@@ -387,16 +333,13 @@ impl Service {
             }
             ClientMessage::Answer { id, thread_id, ask_id, answers, silent } => {
                 self.takes_messages(&thread_id)?;
-                // Taken before anything else so a second client answering the same ask is refused.
                 let ask = self.storage.lock().unwrap().take_ask(&thread_id, &ask_id)?.ok_or_else(|| anyhow!("already answered"))?;
                 info!(thread = %thread_id, dismissed = answers.is_none(), silent, "ask answered");
                 if silent {
                     self.push_threads();
                     return Ok(ServerMessage::Ok { reply_to: id });
                 }
-                // An answer is a message: an archived thread comes back for it.
                 self.storage.lock().unwrap().unarchive(&thread_id)?;
-                // The answer starts a turn if the model is idle (and is queued if it isn't).
                 self.live.begin_run(&thread_id);
                 self.push_threads();
                 let sent = match self.ensure_loaded(&thread_id) {
@@ -410,8 +353,6 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListModels { id } => {
-                // A host without a proxy has no models: that is no error, it is how clients
-                // see that it has to be set up.
                 let set_up = !dirigent_agent::config::Config::load(&self.agent.dirs)?.proxy.url.is_empty();
                 let models = if set_up { self.models.models().await? } else { vec![] };
                 let info = |m: dirigent_agent::proxy::Model| ModelInfo {
@@ -456,9 +397,6 @@ impl Service {
                 info!(server = %name, "signed out of MCP server");
                 ServerMessage::Ok { reply_to: id }
             }
-            // Read on every request, so edits to the file apply at once. Each host as its
-            // agents connect to it: an `ssh://` one through its tunnel, started now if need
-            // be (all at once: one slow ssh doesn't hold up the others), with its bearer.
             ClientMessage::ListHosts { id } => {
                 let hosts = hosts::load()?;
                 tunnel::retain(hosts.values().map(|h| h.url.as_str()));
@@ -519,7 +457,6 @@ impl Service {
                 info!(thread = %thread_id, "abort");
                 match self.agent.session(&thread_id) {
                     Some(session) => session.abort(),
-                    // Nothing runs it: if it still counts as running, it doesn't any more.
                     None if self.live.settle(&thread_id).is_some() => self.push_threads(),
                     None => {}
                 }
@@ -534,10 +471,6 @@ impl Service {
             ClientMessage::ArchiveThread { id, thread_id, archived } => {
                 {
                     let storage = self.storage.lock().unwrap();
-                    // Archive holds threads at rest: nothing runs or has jobs going it waits
-                    // on, the thread itself nor its sub-agents. Jobs they left running
-                    // (servers, watchers) go with it: unloading a session kills its jobs. A
-                    // message or run brings it back (`unarchive`); it doesn't go back by itself.
                     let family = if archived { storage.family(&thread_id)? } else { vec![] };
                     let busy = family.iter().any(|t| self.live.running_since(t).is_some() || self.live.jobs(t).0 > 0);
                     anyhow::ensure!(!busy, "the thread or one of its sub-agents is still working; archive it once they are done");
@@ -574,8 +507,6 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::MarkSeen { id, thread_id, updated_at } => {
-                // No push when nothing moved: the desktop re-marks on every `Threads` push
-                // while a thread is open, which would otherwise ping-pong.
                 if self.storage.lock().unwrap().set_seen(&thread_id, updated_at)? {
                     self.push_threads();
                 }
@@ -590,7 +521,6 @@ impl Service {
                 ServerMessage::Search { reply_to: id, hits: self.storage.lock().unwrap().search(&query, limit.clamp(1, 100))? }
             }
             ClientMessage::DeleteThread { id, thread_id } => {
-                // Its `CreateThread` deletes it if it doesn't start.
                 anyhow::ensure!(!self.starting(&thread_id), "the thread is still starting; try again in a moment");
                 self.delete_thread(&thread_id)?;
                 ServerMessage::Ok { reply_to: id }
@@ -598,16 +528,12 @@ impl Service {
         })
     }
 
-    /// The MCP servers changed. Sessions read them when they start, so the idle ones go:
-    /// their next prompt loads them with the change. Running ones (and those with jobs,
-    /// which unloading would kill) keep the servers they have until they are unloaded idle.
     fn unload_idle_sessions(&self) {
         for id in self.unload_idle(Duration::ZERO) {
             info!(thread = %id, "unloaded idle session: the MCP servers changed");
         }
     }
 
-    /// Unload the sessions that have done nothing for `max_idle` (`Agent::unload_idle`).
     fn unload_idle(&self, max_idle: Duration) -> Vec<String> {
         let idle = self.agent.unload_idle(max_idle);
         for id in &idle {
@@ -617,14 +543,10 @@ impl Service {
         idle
     }
 
-    /// A connection is gone: the sign-ins it started are cancelled, as nobody is left to
-    /// finish them (and a browser sign-in's callback server would hold its port).
     fn disconnected(&self, conn: u64) {
         self.logins.disconnected(conn);
     }
 
-    /// An error for a thread that takes no message (`ThreadSummary::locked`), before
-    /// anything is done for one.
     fn takes_messages(&self, thread_id: &str) -> Result<()> {
         anyhow::ensure!(
             !self.storage.lock().unwrap().thread_locked(thread_id)?,
@@ -633,22 +555,12 @@ impl Service {
         Ok(())
     }
 
-    /// Hand a prompt to the thread's model, loading its session if needed. `p` holds a
-    /// `Prompt`'s fields; `edit`, the user message it replaces (`EditMessage`).
     async fn prompt(self: &Arc<Self>, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
         self.takes_messages(thread_id)?;
-        // A steer or follow-up into a run that is over (the sender's view was stale: it
-        // ended, or this service restarted under it) is a new turn. The session does the
-        // same when the run ends while the message is on its way.
         let idle = self.live.running_since(thread_id).is_none();
         let mode = if idle { PromptMode::Prompt } else { mode };
-        // A message brings an archived thread back.
         let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
-        // The run starts now, not at the session's `RunStart`: a nix dev shell can take
-        // seconds to capture, and clients should see the thread working with
-        // the model it will use for all of it. A new turn is a new task, too
-        // (`prompted_at`: steers, follow-ups and answers don't count). `CreateThread` does
-        // the same for its first prompt, earlier.
+        // MUST KILL: rearchitect: commit the prompt's model once the session took it, so no rollback through set_model
         let before = self.storage.lock().unwrap().thread_model(thread_id)?;
         if mode == PromptMode::Prompt {
             self.storage.lock().unwrap().set_prompted(thread_id, &p.text, p.model.as_deref(), p.effort.as_deref(), now())?;
@@ -658,11 +570,7 @@ impl Service {
             self.push_threads();
         }
         let sent = self.deliver(thread_id, mode, p, edit).await;
-        // The run begun above never started. A message refused under a run in progress (a
-        // steer, a prompt from a client that didn't know of the run) leaves that run alone.
         if sent.is_err() && idle && self.live.settle(thread_id).is_some() {
-            // Nor does the thread keep the model of a message it refused (one the proxy
-            // doesn't serve): the next message would be refused for it again.
             let (model, effort) = before;
             self.storage.lock().unwrap().set_model(thread_id, model.as_deref(), effort.as_deref())?;
             self.push_threads();
@@ -670,11 +578,6 @@ impl Service {
         sent
     }
 
-    /// `prompt` after the run's start: load the session and hand it the prompt. Returns once
-    /// the model has the message, or with why it has not (the session didn't load, it
-    /// refused the message: `Session::prompt`); the caller settles the run then, and the
-    /// sender still has the message to give back to its user. `p.title` (a thread's first
-    /// prompt) names the thread from the text alongside the run.
     async fn deliver(self: &Arc<Self>, thread_id: &str, mode: PromptMode, p: &FirstPrompt, edit: Option<&str>) -> Result<()> {
         info!(thread = %thread_id, ?mode, model = p.model.as_deref().map(tracing::field::display), "prompt");
         if let Some(tools) = &p.tools {
@@ -698,11 +601,10 @@ impl Service {
         Ok(())
     }
 
-    /// Name a thread from its first prompt. A name given by hand meanwhile stays.
     async fn name_thread(&self, thread_id: &str, settings: &TitleGen, text: &str) {
         let own = self.storage.lock().unwrap().thread_model(thread_id).ok().and_then(|(model, _)| model);
         let title = title::generate(&*self.models, settings, text, own.as_deref()).await;
-        // On its own line: the storage's lock is let go before the push takes it.
+        // MUST KILL: extract: a set_title step in name_thread that returns with storage's lock released
         let named = title.and_then(|title| self.storage.lock().unwrap().set_title(thread_id, &title.title));
         match named {
             Ok(()) => {
@@ -717,15 +619,10 @@ impl Service {
         }
     }
 
-    /// A `CreateThread` with a prompt is still setting the thread up (`starting`).
     fn starting(&self, thread_id: &str) -> bool {
         self.starting.lock().unwrap().contains_key(thread_id)
     }
 
-    /// A thread being created couldn't be set up or prompted: it goes again, so the creator
-    /// keeps its draft instead of a thread that never started. It stays `starting` until it
-    /// is gone, so no push lists it idle (`threads`): the deletion's push drops it. Returns
-    /// `e` for the request's error.
     fn abandon(&self, thread_id: &str, e: anyhow::Error) -> anyhow::Error {
         if let Err(e) = self.delete_thread(thread_id) {
             error!(thread = %thread_id, "delete unstarted thread: {e:#}");
@@ -735,11 +632,8 @@ impl Service {
         e
     }
 
-    /// Delete a thread and what is its alone: its loaded session, workspace and job logs.
     fn delete_thread(&self, thread_id: &str) -> Result<()> {
-        // Also when it is still loading, or its session would go live in a deleted thread.
         self.unload(thread_id);
-        // Its workspace has no owner without the thread.
         if self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some()
             && let Err(e) = self.remove_workspace(thread_id, false)
         {
@@ -747,18 +641,11 @@ impl Service {
         }
         self.storage.lock().unwrap().delete_thread(thread_id)?;
         info!(thread = %thread_id, "thread deleted");
-        // Its `async_bash` logs go with it.
         let _ = std::fs::remove_dir_all(data_dir().join("jobs").join(thread_id));
         self.push_threads();
         Ok(())
     }
 
-    // ---- sub-agents ----
-
-    /// Hand a notice to a thread's model (loading the session if needed), as the user's
-    /// answers to an ask are: it starts a turn when the model is idle. The caller has
-    /// already counted the thread as running (`begin_run`) and pushed that; a notice that
-    /// can't be delivered settles it again.
     async fn notify_thread(&self, thread_id: &str, notice: Notice, when: Notify) -> Result<()> {
         let sent = match self.ensure_loaded(thread_id) {
             Ok(session) => session.notify(notice, when).await,
@@ -770,11 +657,6 @@ impl Service {
         sent
     }
 
-    /// A sub-agent's run ended: tell its parent, with the child's final reply (or, if it was
-    /// spawned with `Report::Done`, only that it finished), as it was spawned to (`Notify`).
-    /// A child that stopped to ask the user is reported as waiting, not finished. The
-    /// parent already counts as running (see `on_out`); `notify_thread` settles it
-    /// again if the notice can't be delivered.
     async fn on_child_settled(&self, thread_id: &str, parent: &str) {
         let (name, asks, reply, (report, notify)) = {
             let storage = self.storage.lock().unwrap();
@@ -792,7 +674,6 @@ impl Service {
             match &reply {
                 Some(_) if report == Report::Done => format!("{who} finished. Use `read` for its reply."),
                 Some(r) => format!("{who} finished. Its reply:\n\n{}", truncate(r, NOTICE_CHARS)),
-                // No final reply after a run: it was aborted or failed.
                 None => format!("{who} stopped without a reply (aborted or failed)."),
             }
         };
@@ -809,12 +690,10 @@ impl Service {
         }
     }
 
-    /// `<data dir>/workspaces/<name>`: the directory is named like its branch.
     fn workspace_dir(&self, thread_id: &str) -> PathBuf {
         data_dir().join("workspaces").join(dirigent_protocol::workspace_name(thread_id))
     }
 
-    /// The repo a thread's project lives in and which system drives it.
     fn thread_repo(&self, thread_id: &str) -> Result<(PathBuf, Vcs)> {
         let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
         let repo = PathBuf::from(repo);
@@ -822,20 +701,13 @@ impl Service {
         Ok((repo, vcs))
     }
 
-    /// Give the thread its own workspace (or recreate one whose directory went missing) and
-    /// point it there. The session is unloaded so the next prompt starts in the new cwd; a
-    /// thread with history also gets a notice entry so the model knows where it is now.
-    /// A thread that already worked is refused while it runs, and when it would leave its
-    /// uncommitted edits behind in the main checkout. A `new` one (being created) starts
-    /// from HEAD on purpose and may already count as running: its first prompt waits on this.
+    // MUST KILL: type: move_to_workspace's bare new bool switches off the running and dirty checks; use an enum
     fn move_to_workspace(&self, thread_id: &str, new: bool, base: Option<&str>) -> Result<()> {
         anyhow::ensure!(new || self.live.running_since(thread_id).is_none(), "the thread is running");
         let (repo, vcs) = self.thread_repo(thread_id)?;
         let recreating = self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some();
         anyhow::ensure!(recreating || new || !vcs::dirty(vcs, &repo)?, "the working copy has uncommitted changes; commit them first");
         let dest = self.workspace_dir(thread_id);
-        // Recreating one the vcs forgot (`jj workspace forget` keeps the files): its leftover
-        // directory makes way. The user picked `Recreate` over `Back to project`.
         if recreating && dest.exists() && !vcs::is_workspace(&dest) {
             std::fs::remove_dir_all(&dest)?;
         }
@@ -854,16 +726,12 @@ impl Service {
         )
     }
 
-    /// Take the thread back to its project directory, removing the workspace unless `detach`.
-    /// Not under a running agent: `RemoveWorkspace` refuses that; `delete_thread` may, as
-    /// the thread goes anyway.
     fn remove_workspace(&self, thread_id: &str, detach: bool) -> Result<()> {
         let ws = self.storage.lock().unwrap().thread_workspace(thread_id)?.ok_or_else(|| anyhow!("the thread has no workspace"))?;
         let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
         if !detach {
             match vcs::detect(Path::new(&repo)) {
                 Some(vcs) => vcs::remove_workspace(vcs, Path::new(&repo), Path::new(&ws), thread_id)?,
-                // The repo itself is gone; all that is left to clean is the directory.
                 None if Path::new(&ws).exists() => std::fs::remove_dir_all(&ws)?,
                 None => {}
             }
@@ -873,8 +741,6 @@ impl Service {
         Ok(())
     }
 
-    /// Point the thread at `cwd`, drop its live session, and leave `notice` for the model
-    /// if it has history (a fresh thread learns its cwd from the system prompt).
     fn relocate(&self, thread_id: &str, cwd: &str, workspace: Option<&str>, notice: &str) -> Result<()> {
         let storage = self.storage.lock().unwrap();
         storage.set_cwd(thread_id, cwd, workspace)?;
@@ -890,15 +756,11 @@ impl Service {
             self.push(ServerMessage::Entry { thread_id: thread_id.to_owned(), entry });
         }
         drop(storage);
-        // Its workspace is fresh, or it has none: nothing is missing until a sweep says so.
         self.missing.lock().unwrap().remove(thread_id);
-        // Its session works at the old cwd. The run begun for a new thread's first prompt goes
-        // on: it has no session yet (`unload`).
         self.unload(thread_id);
         Ok(())
     }
 
-    /// The thread's live session, loaded from its stored entries if it has none.
     fn ensure_loaded(&self, thread_id: &str) -> Result<Arc<Session>> {
         if let Some(session) = self.agent.session(thread_id) {
             return Ok(session);
@@ -906,8 +768,6 @@ impl Service {
         let thread = {
             let storage = self.storage.lock().unwrap();
             let cwd = storage.thread_cwd(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
-            // A jj workspace the user rebased from elsewhere is made current before the
-            // agent runs in it.
             if storage.thread_workspace(thread_id)?.is_some() {
                 vcs::update_stale(Path::new(&cwd));
             }
@@ -921,13 +781,11 @@ impl Service {
                 tools: storage.thread_tools(thread_id)?,
             }
         };
-        // A new session has done nothing on the computer yet.
         self.screens.clear(thread_id);
         info!(thread = %thread_id, "session loaded");
         Ok(self.agent.load(thread))
     }
 
-    /// Keep and fan out what comes of a thread's session.
     fn on_out(self: &Arc<Self>, thread_id: &str, out: Out) {
         let thread_id = thread_id.to_owned();
         match out {
@@ -939,15 +797,12 @@ impl Service {
                 self.push_threads();
             }
             Out::Event(event) => {
-                // Changes the thread list shows (`running_since`, `compacting_since`).
                 let lifecycle = matches!(event, Event::RunStart | Event::RunEnd | Event::CompactionStart | Event::CompactionEnd);
                 let mut parent = None;
                 match &event {
                     Event::RunStart => {
                         info!(thread = %thread_id, "run started");
                         self.live.begin_run(&thread_id);
-                        // Whatever woke it (a message does that earlier, a job's notice only
-                        // here), a working thread isn't archived. The lifecycle push below shows it.
                         if let Err(e) = self.storage.lock().unwrap().unarchive(&thread_id) {
                             error!(thread = %thread_id, "unarchive: {e:#}");
                         }
@@ -961,10 +816,6 @@ impl Service {
                         {
                             error!(thread = %thread_id, "set last run: {e:#}");
                         }
-                        // A sub-agent's run ended: its parent is about to be woken
-                        // (`on_child_settled`), so it counts as running from now, in the same
-                        // `Threads` push that settles the child; otherwise clients would see it
-                        // finished for a moment and move it to the inbox and back.
                         parent = self.storage.lock().unwrap().thread_parent(&thread_id).ok().flatten();
                     }
                     Event::CompactionStart => self.live.set_compacting(&thread_id, true),
@@ -973,7 +824,6 @@ impl Service {
                     _ => {}
                 }
                 if let Some(parent) = parent {
-                    // The notice is a message: an archived parent comes back for it.
                     if let Err(e) = self.storage.lock().unwrap().unarchive(&parent) {
                         error!(thread = %parent, "unarchive: {e:#}");
                     }
@@ -1005,7 +855,6 @@ impl Service {
                 let (frame, new) = self.screens.update(&thread_id, screen.image);
                 let event = Event::Screen { frame, action: screen.action, cursor: screen.cursor, desktop: screen.desktop };
                 self.push(ServerMessage::Event { thread_id, event });
-                // The thread list says which threads have a screen to show.
                 if new {
                     self.push_threads();
                 }
@@ -1014,7 +863,6 @@ impl Service {
     }
 }
 
-/// The service as its agent sees it (`dirigent_agent::Host`).
 struct AgentHost(std::sync::Weak<Service>);
 
 impl dirigent_agent::Host for AgentHost {
@@ -1039,7 +887,6 @@ impl dirigent_agent::Host for AgentHost {
 
     fn children_busy(&self, thread_id: &str) -> bool {
         let Some(svc) = self.0.upgrade() else { return false };
-        // Not known: wait then.
         svc.threads()
             .map_or(true, |threads| threads.iter().any(|t| t.parent_id.as_deref() == Some(thread_id) && (t.running() || t.jobs > 0)))
     }
@@ -1049,13 +896,10 @@ impl dirigent_agent::Host for AgentHost {
     }
 }
 
-/// Unix millis.
 pub(crate) fn now() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// A new thread's id: the client's pick (a lowercase, hyphenated uuid), so it can open the
-/// thread before the reply, else a fresh one.
 fn new_thread_id(pick: Option<String>) -> Result<String> {
     match pick {
         Some(t) => {
@@ -1074,7 +918,6 @@ fn truncate(s: &str, max: usize) -> String {
     format!("{}…", &s[..cut])
 }
 
-/// Directories given on the command line (`--data-dir`, `--config-dir`); see `init_dirs`.
 #[derive(Debug, Default, PartialEq)]
 struct Dirs {
     data: Option<PathBuf>,
@@ -1088,7 +931,6 @@ pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; d
                          default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows); a nightly build's \
                          are dirigent-nightly";
 
-/// The running service's agent and the runtime it lives on, for `shutdown`.
 static RUNNING: Mutex<Option<(Arc<Agent>, tokio::runtime::Handle)>> = Mutex::new(None);
 
 /// The process is about to exit (the desktop quits, the service was told to stop): what the
@@ -1108,8 +950,6 @@ pub fn shutdown() {
     }
 }
 
-/// This instance's storage, `<data dir>/service.db`. Not one that is pi's still: the
-/// migration (`migration.rs`) comes first, and is the service's or the desktop's to make.
 pub(crate) fn open_storage(data: &Path) -> Result<Storage> {
     let db = data.join("service.db");
     anyhow::ensure!(
@@ -1144,7 +984,6 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)>
     let mut operands = vec![];
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
-        // Options end at the first operand: what follows a command (`key add …`) is its own.
         if !arg.starts_with("--") {
             operands.push(arg);
             operands.extend(args);
@@ -1160,14 +999,11 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)>
             _ => return Err(anyhow!("unknown argument {flag}\n{USAGE}")),
         };
         let value = value.or_else(|| args.next()).ok_or_else(|| anyhow!("{flag} needs a directory\n{USAGE}"))?;
-        // Absolute, so it means the same whatever the cwd of who is told it.
         *slot = Some(std::path::absolute(&value)?);
     }
     Ok((dirs, operands))
 }
 
-/// Only one of `--data-dir` and `--config-dir` was given: the other dir is the real
-/// install's.
 pub(crate) fn half_elsewhere() -> bool {
     DIRS.get().is_some_and(|dirs| dirs.data.is_some() != dirs.config.is_some())
 }
@@ -1184,10 +1020,6 @@ pub fn data_dir() -> PathBuf {
     DIRS.get().and_then(|d| d.data.clone()).unwrap_or_else(platform::data_dir)
 }
 
-/// Where the service listens openly: `DIRIGENT_BIND` (comma-separated IPs) if set, else
-/// loopback plus this machine's tailscale addresses, so a host is reachable from the
-/// tailnet (and over ssh, `tunnel.rs`) and nowhere else. Never a wildcard: these take
-/// anyone. Reaching it from elsewhere is the public listener's job (`auth.rs`).
 fn bind_addrs(port: u16) -> Vec<SocketAddr> {
     let ips: Vec<IpAddr> = match std::env::var("DIRIGENT_BIND") {
         Ok(list) => list.split(',').filter_map(|s| s.trim().parse().ok()).collect(),
@@ -1196,7 +1028,6 @@ fn bind_addrs(port: u16) -> Vec<SocketAddr> {
     ips.into_iter().map(|ip| SocketAddr::new(ip, port)).collect()
 }
 
-/// The tailnet addresses `tailscale ip` reports; none when tailscale isn't installed or up.
 fn tailscale_ips() -> Vec<IpAddr> {
     platform::command("tailscale")
         .arg("ip")
@@ -1211,8 +1042,6 @@ fn tailscale_ips() -> Vec<IpAddr> {
 /// already owns this host.
 pub async fn run(port: u16) -> Result<()> {
     let dirs = AgentDirs { config: config_dir(), data: data_dir() };
-    // Bound before anything is set up: a service that can't listen (another one owns this
-    // host; the desktop retries its embedded one) touches no file and logs nothing more.
     let mut addrs: Vec<(SocketAddr, Option<Arc<auth::Gate>>)> = bind_addrs(port).into_iter().map(|a| (a, None)).collect();
     if let Some(public) = auth::load()?.public {
         info!(url = public.url.as_deref().unwrap_or("?"), "public listener on {}", public.listen);
@@ -1223,8 +1052,6 @@ pub async fn run(port: u16) -> Result<()> {
         addrs.push((public.listen, Some(Arc::new(gate))));
     }
     let listeners = server::bind(addrs).await?;
-    // The first start after pi, where no desktop has made it in its window. Off the async
-    // workers: it copies and converts a whole db.
     tokio::task::spawn_blocking(migration::headless).await??;
     agent::prepare(&dirs);
     let storage = open_storage(&dirs.data)?;
@@ -1252,7 +1079,6 @@ pub async fn run(port: u16) -> Result<()> {
         let svc = svc.clone();
         async move {
             let mut n = 0u64;
-            // The first sweep at once: `workspace_missing` knows nothing before it.
             loop {
                 svc.sweep_workspaces();
                 n += 1;
@@ -1265,7 +1091,6 @@ pub async fn run(port: u16) -> Result<()> {
             }
         }
     });
-    // The proxy's limits, sampled for their history (a host without a proxy has nothing to ask).
     tokio::spawn({
         let svc = svc.clone();
         async move {
@@ -1299,7 +1124,6 @@ mod tests {
         assert_eq!(d.config, Some(cwd.join("rel/c")));
         assert!(parse(&["--data-dir"]).is_err());
         assert!(parse(&["--port", "1"]).is_err());
-        // The desktop's folder to open; a command's own options are left to it.
         let (_, operands) = parse_dirs(["--data-dir=d", "/some/dir"].map(String::from).into_iter()).unwrap();
         assert_eq!(operands, ["/some/dir"]);
         let (_, operands) = parse_dirs(["key", "add", "--data-dir"].map(String::from).into_iter()).unwrap();

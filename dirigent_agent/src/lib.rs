@@ -1,11 +1,3 @@
-//! dirigent's agent: what turns a thread's history and a prompt into a model's work. It
-//! talks to the model (`proxy`), runs the loop of replies and tool calls (`session`, `run`),
-//! and has the tools (`tools`, `codemode`, `mcp`). A library: the host (`dirigent_service`)
-//! owns the threads and their storage, loads one into a session here when it has work
-//! (`Agent::load`), and hears what comes of it through `Host`.
-//!
-//! `DESIGN.md` has the whole picture.
-
 pub mod codemode;
 pub mod config;
 mod context;
@@ -35,7 +27,6 @@ use tool::Tool;
 
 pub use context::complete;
 
-/// What comes of a session, for its host to keep and pass on.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Out {
     /// The thread's next entry (`seq` is the host's to give).
@@ -51,7 +42,6 @@ pub enum Out {
     },
     /// The session started (`true`) or finished capturing the project's nix dev shell.
     NixShell(bool),
-    /// A step of the thread's computer use.
     Screen(Screen),
 }
 
@@ -67,7 +57,6 @@ pub struct Screen {
     pub desktop: bool,
 }
 
-/// What the agent needs of its host.
 pub trait Host: Send + Sync + 'static {
     /// Take what came of the thread's session. One at a time and in the order it came
     /// about, across all threads: an entry is only said once the host has it.
@@ -77,18 +66,15 @@ pub trait Host: Send + Sync + 'static {
     /// name images by.
     fn put_blob(&self, mime: &str, bytes: &[u8]) -> String;
 
-    /// A blob's mime type and bytes.
     fn blob(&self, id: &str) -> Option<(String, Vec<u8>)>;
 
     /// Whether one of the thread's sub-agents runs or has jobs: what `async_bash wait` may
     /// still hear from. `true` when the host can't say.
     fn children_busy(&self, thread_id: &str) -> bool;
 
-    /// The host's own tools for a session of the thread (`dirigent`).
     fn tools(&self, thread_id: &str) -> Vec<Arc<dyn Tool>>;
 }
 
-/// The way to a model: `proxy::Proxy`, or a stand-in under test.
 #[async_trait]
 pub trait Llm: Send + Sync + 'static {
     /// The model `id`, as it is served now. An error says why it can't be used, in words
@@ -111,14 +97,11 @@ impl Llm for proxy::Proxy {
     }
 }
 
-/// A host's agent: its live threads.
 pub struct Agent {
     pub dirs: Dirs,
     host: Arc<dyn Host>,
     pub llm: Arc<dyn Llm>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
-    /// Where sessions put what comes of them: handed to the host by one task, in order,
-    /// so no session calls into the host with a lock of its own held.
     out: mpsc::UnboundedSender<(String, Out)>,
 }
 
@@ -132,8 +115,7 @@ impl Agent {
             let host = host.clone();
             async move {
                 while let Some((thread_id, out)) = outs.recv().await {
-                    // A host that panics over one thing still gets the next: this task is
-                    // the only way out of every session.
+                    // MUST KILL: extract: an emit_catching_panics(host, thread_id, out) fn out of Agent::new's delivery task
                     let taken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.emit(&thread_id, out)));
                     if let Err(panic) = taken {
                         tracing::error!(thread = %thread_id, "the host panicked over what came of a session: {}", panic_message(&*panic));
@@ -157,7 +139,6 @@ impl Agent {
         session
     }
 
-    /// The thread's live session, if it has one.
     pub fn session(&self, thread_id: &str) -> Option<Arc<Session>> {
         self.sessions.lock().unwrap().get(thread_id).cloned()
     }
@@ -199,17 +180,15 @@ impl Agent {
     }
 }
 
-/// What a caught panic said.
 pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("no message")
 }
 
-/// Unix millis.
+// MUST KILL: rename: now -> unix_ms
 pub(crate) fn now() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// A random id of `len` hex characters: an entry's, a job's, an ask's.
 pub(crate) fn short_id(len: usize) -> String {
     uuid::Uuid::new_v4().simple().to_string()[..len].to_owned()
 }
@@ -220,8 +199,6 @@ mod tests {
     use crate::session::Prompt;
     use crate::testing::{Script, Step, agent, prompt, session, text, thread};
 
-    /// What a job would not end for when asked is gone when `shutdown` returns: no grace,
-    /// which the process would not live to see through.
     #[cfg(unix)]
     #[tokio::test]
     async fn shutdown_kills_the_jobs_at_once() {
@@ -236,8 +213,6 @@ mod tests {
         assert!(session.jobs.spawn(&session.env, "true", dir.path()).is_err());
     }
 
-    /// A session whose prompt is on its way in (its model is being looked up, nothing runs
-    /// yet) is not idle: what unloads the idle ones doesn't take it from under the prompt.
     #[tokio::test]
     async fn a_session_taking_a_prompt_in_is_not_unloaded_as_idle() {
         let dir = tempfile::tempdir().unwrap();

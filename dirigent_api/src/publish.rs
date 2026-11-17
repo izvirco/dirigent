@@ -1,15 +1,9 @@
-//! `dirigent_api publish`: sign an installer, upload it with its signature, then point the
-//! channel at it. The channel file goes last, so no client ever sees a release whose files
-//! aren't there yet. A version is published once per channel: its files are never overwritten
-//! (a nightly is a version of its own each time: `release::VERSION`).
-
 use crate::bucket::{self, Bucket};
 use anyhow::{Context, Result, bail};
 use dirigent_protocol::release::{self, Release, valid_name};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Installers and signatures never change once uploaded.
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
 pub struct Args {
@@ -45,6 +39,7 @@ impl Args {
     }
 }
 
+// MUST KILL: extract: separate upload-files and point-channel steps, so the channel-last order is structural
 pub fn run(bucket: &Bucket, args: Args) -> Result<()> {
     let creds = Bucket::credentials()?;
     let data = std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
@@ -63,8 +58,6 @@ pub fn run(bucket: &Bucket, args: Args) -> Result<()> {
     Ok(())
 }
 
-/// A new signing key pair: the secret key (unencrypted: it lives in a CI secret) to `path`,
-/// which must not exist yet, and the public key, for `release::KEYS`, printed.
 pub fn keygen(path: &Path) -> Result<()> {
     let pair = minisign::KeyPair::generate_unencrypted_keypair()?;
     let mut options = std::fs::OpenOptions::new();
@@ -77,9 +70,7 @@ pub fn keygen(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Sign `data` with `DIRIGENT_SIGNING_KEY` for `version` on `platform` (the trusted comment
-/// the desktop checks), and check a key the desktop trusts verifies it: a release signed
-/// with any other key would be refused by every install.
+// MUST KILL: extract: move the release::KEYS trust check out of sign into its own verify_trusted
 fn sign(data: &[u8], version: &str, platform: &str) -> Result<String> {
     let key = std::env::var("DIRIGENT_SIGNING_KEY").context("DIRIGENT_SIGNING_KEY is not set")?;
     let key = minisign::SecretKeyBox::from_string(&key)
