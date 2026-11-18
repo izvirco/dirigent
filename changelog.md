@@ -10,6 +10,7 @@
 - The Projects list says which hosts are offline ([#203])
 - Fixed: editing a host's address or key dropped its drafts ([#203])
 - A new thread starts with the project, model and reasoning you last picked for one, not those of the thread or project page you came from ([#207])
+- Esc takes the focus off the composer where it used to close the right panel, and `i` focuses the composer again; its ring shows while it has focus ([#208])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
@@ -18,6 +19,7 @@
 [#204]: https://forge.sebba.dev/izvir/dirigent/changes/204
 [#205]: https://forge.sebba.dev/izvir/dirigent/changes/205
 [#207]: https://forge.sebba.dev/izvir/dirigent/changes/207
+[#208]: https://forge.sebba.dev/izvir/dirigent/changes/208
 
 ## 0.0.10
 

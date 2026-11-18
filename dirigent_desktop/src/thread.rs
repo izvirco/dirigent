@@ -26,7 +26,7 @@ const MAX_RESULT_CHARS: usize = 20_000;
 const ROW_H: f32 = 22.;
 pub const LOG_WIDTH: f32 = 400.;
 
-pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
+pub fn render(this: &mut Dirigent, window: &Window, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
     if let Pane::Thread(t) = &mut this.pane
         && t.list.is_following_tail()
@@ -35,7 +35,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     }
     let Pane::Thread(t) = &this.pane else {
         return match &this.pane {
-            Pane::Draft { target } => draft_page(pane, target.clone(), this, cx),
+            Pane::Draft { target } => draft_page(pane, target.clone(), this, window, cx),
             _ => pane,
         };
     };
@@ -179,7 +179,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 )
                 .children(jump)
                 .children(banner)
-                .child(composer(this, cx)),
+                .child(composer(this, window, cx)),
         )
         .child(ruler::render(this, cx));
     let titling = this.titling(&host, &id);
@@ -413,7 +413,7 @@ const TARGET_LIST_H: f32 = 270.;
 
 const TARGET_ROW_CHARS: usize = 44;
 
-fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, window: &Window, cx: &mut Context<Dirigent>) -> Div {
     let (groups, _) = this.groups();
     let group = target.as_ref().and_then(|t| groups.iter().find(|g| g.has(&t.host, &t.project_id)));
     let project = group.map(|g| g.name.clone());
@@ -512,10 +512,16 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
         )
         .children(host_chip);
 
-    let card =
-        div().relative().w_full().max_w(u(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx)).child(
-            div().absolute().bottom_0().left_0().right_0().h_0().flex().flex_col().items_center().children(draft_warnings(this, cx)),
-        );
+    let card = div()
+        .relative()
+        .w_full()
+        .max_w(u(theme::COMPOSER))
+        .flex()
+        .flex_col()
+        .gap_3()
+        .child(where_row)
+        .child(composer(this, window, cx))
+        .child(div().absolute().bottom_0().left_0().right_0().h_0().flex().flex_col().items_center().children(draft_warnings(this, cx)));
     pane.child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(u(40.)).child(card))
 }
 
@@ -781,7 +787,7 @@ fn editing_note() -> Div {
         .child("Editing a message above \u{b7} Esc to cancel")
 }
 
-fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+fn composer(this: &Dirigent, window: &Window, cx: &mut Context<Dirigent>) -> Div {
     if this.open().is_some_and(|t| t.editing.is_some()) {
         return editing_note();
     }
@@ -843,8 +849,17 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .border_1()
         .border_color(gpui::transparent_black())
         .shadow_md()
-        .children(glow())
-        .child(div().px_4().pt_4().pb_3().text_size(text::lg()).line_height(u(22.)).child(this.composer.clone()))
+        .when(this.composer.focus_handle(cx).is_focused(window), |d| d.children(glow()))
+        .child(
+            div()
+                .px_4()
+                .pt_4()
+                .pb_3()
+                .text_size(text::lg())
+                .line_height(u(22.))
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.focus_composer(cx)))
+                .child(this.composer.clone()),
+        )
         .children(attachment_strip(this, cx))
         .child(
             div()
