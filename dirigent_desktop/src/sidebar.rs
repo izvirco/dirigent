@@ -8,6 +8,7 @@ use crate::proxy;
 use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
 use crate::titlebar;
+use crate::toasts;
 use dirigent_protocol::{ThreadSummary, release};
 use gpui::{
     AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Render, SharedString,
@@ -81,7 +82,8 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 }
 
 pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
-    let held = matches!(this.menu, Some(Menu::ThreadActions { .. })) || matches!(this.renaming, Some(Renaming::Thread { .. }));
+    let held =
+        matches!(this.menu, Some(Menu::ThreadActions { .. } | Menu::Toasts)) || matches!(this.renaming, Some(Renaming::Thread { .. }));
     let open = this.sidebar_peek || held;
     div()
         .id("sidebar-peek")
@@ -224,6 +226,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
                 .flex_row()
                 .children(proxy_update_button(this, cx))
                 .children(update_button(this, cx))
+                .children(toasts::button(this, cx))
                 .child(theme::icon_button("usage", "chart-no-axes-combined", cx, |this, cx| this.open_usage(cx)))
                 .child(theme::icon_button("settings", "settings", cx, |this, cx| this.open_settings(cx))),
         );

@@ -13,7 +13,7 @@ use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{account, leaderboard, lists, menu, onboarding, ruler, sidebar, thread, titlebar, usage};
-use crate::{changelog, config, hosts, images, instance, settings, update};
+use crate::{changelog, config, hosts, images, instance, settings, toasts, update};
 use base64::Engine;
 use dirigent_protocol::transcript::{Body, Entry, Event, Notice, text_of};
 use dirigent_protocol::{
@@ -34,7 +34,6 @@ use std::time::{Duration, Instant};
 actions!(dirigent, [NewThread, Dismiss, FocusComposer, ToggleSidebar, ToggleLog, Quit, TextBigger, TextSmaller, TextReset]);
 
 pub const KEY_CONTEXT: &str = "Dirigent";
-const TOAST_TTL: Duration = Duration::from_secs(8);
 const VCS_REFRESH_SECS: u64 = 2;
 const LAST_MODEL_KEY: &str = "last_model";
 const LAST_EFFORT_KEY: &str = "last_effort";
@@ -371,6 +370,7 @@ pub enum Menu {
     HostAuth,
     McpExposure,
     Update,
+    Toasts,
     ThreadActions { host: String, id: String, at: Point<Pixels> },
 }
 
@@ -450,7 +450,7 @@ pub struct Dirigent {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub presets: Vec<Preset>,
-    pub toasts: Vec<(String, Instant)>,
+    pub toasts: toasts::Toasts,
     pub copied: Option<ElementId>,
     pub config: config::Config,
     pub fonts: theme::Fonts,
@@ -623,7 +623,7 @@ impl Dirigent {
             model,
             effort,
             presets,
-            toasts: vec![],
+            toasts: toasts::Toasts::default(),
             copied: None,
             config,
             fonts,
@@ -950,22 +950,6 @@ impl Dirigent {
         self.models().iter().find(|m| m.id == key)
     }
 
-    pub fn toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
-        let message = message.into();
-        tracing::info!("toast: {message}");
-        self.toasts.push((message, Instant::now()));
-        cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_TTL).await;
-            this.update(cx, |this, cx| {
-                this.toasts.retain(|(_, t)| t.elapsed() < TOAST_TTL);
-                cx.notify();
-            })
-            .ok();
-        })
-        .detach();
-        cx.notify();
-    }
-
     fn on_incoming(&mut self, msg: Incoming, cx: &mut Context<Self>) {
         match msg {
             Incoming::Status { host, status, error } => {
@@ -1235,12 +1219,7 @@ impl Dirigent {
             ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
                 self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
             }
-            ServerMessage::Focus { thread_id } => {
-                if self.summary(&host, &thread_id).is_some() {
-                    self.modal = None;
-                    self.select_thread(&host, &thread_id, cx);
-                }
-            }
+            ServerMessage::Focus { thread_id } => self.show_thread(&host, &thread_id, cx),
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, thread } => {
                 let pending = self.take_pending(&host, reply_to);
@@ -1387,8 +1366,7 @@ impl Dirigent {
                 match &event {
                     Event::Warning { message } => {
                         self.titling.remove(&(host.clone(), thread_id.clone()));
-                        let thread = self.summary(&host, &thread_id).and_then(|t| t.name.as_deref()).unwrap_or("new thread");
-                        self.toast(format!("{host}: {thread}: {message}"), cx);
+                        self.thread_toast(&host, &thread_id, message, cx);
                     }
                     Event::Titled if !self.retitling(&host, &thread_id) => {
                         self.titling.remove(&(host.clone(), thread_id.clone()));
@@ -1497,6 +1475,13 @@ impl Dirigent {
                 self.select_thread(&host, id, cx);
             }
             None => self.toast("Thread not found: it was deleted, or lives on a host this desktop doesn't connect to", cx),
+        }
+    }
+
+    pub fn show_thread(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
+        if self.summary(host, id).is_some() {
+            self.modal = None;
+            self.select_thread(host, id, cx);
         }
     }
 
@@ -3596,16 +3581,28 @@ impl Dirigent {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(COPIED_TTL).await;
             this.update(cx, |this, cx| {
-                let copied = this.copied_mut();
-                if *copied == Some(id) {
-                    *copied = None;
-                    cx.notify();
+                let open = match &mut this.pane {
+                    Pane::Thread(t) => Some(&mut t.copied),
+                    _ => None,
+                };
+                for copied in std::iter::once(&mut this.copied).chain(open) {
+                    if copied.as_ref() == Some(&id) {
+                        *copied = None;
+                        cx.notify();
+                    }
                 }
             })
             .ok();
         })
         .detach();
         cx.notify();
+    }
+
+    pub fn copied(&self) -> Option<&ElementId> {
+        match &self.pane {
+            Pane::Thread(t) => t.copied.as_ref(),
+            _ => self.copied.as_ref(),
+        }
     }
 
     fn copied_mut(&mut self) -> &mut Option<ElementId> {
@@ -3934,7 +3931,7 @@ impl Focusable for Dirigent {
     }
 }
 
-fn now_ms() -> i64 {
+pub fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
@@ -4127,7 +4124,6 @@ impl Render for Dirigent {
         self.sync_screen(cx);
         self.field.want = self.field_spec(window);
         self.redraw_field(false, cx);
-        let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
         let docked = !self.sidebar_hidden;
         let bg = self.config.background;
         let mut fill = theme::t().panel;
@@ -4216,25 +4212,7 @@ impl Render for Dirigent {
             }))
             .children(self.preview.clone().map(|image| thread::preview(image, cx)))
             .children(crate::screen::preview(self, window.viewport_size(), cx))
-            .children((!toasts.is_empty()).then(|| {
-                div().absolute().bottom_4().right_4().flex().flex_col().gap_1().children(toasts.into_iter().map(|m| {
-                    div()
-                        .max_w(u(420.))
-                        .px_3()
-                        .py_2()
-                        .rounded_md()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap_2()
-                        .bg(rgba(theme::t().popup))
-                        .border_1()
-                        .border_color(rgba(theme::t().line))
-                        .shadow_md()
-                        .child(div().size(u(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
-                        .child(div().flex_1().min_w_0().child(m))
-                }))
-            }))
+            .children(toasts::corner(self, cx))
             .when(titlebar::CUSTOM, |d| d.child(titlebar::controls(window)))
     }
 }

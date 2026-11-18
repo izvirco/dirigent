@@ -1,4 +1,5 @@
 use crate::app::{Dirigent, Menu};
+use crate::icons::icon;
 use crate::input::{self, TextInput};
 use crate::theme::{self, text, u};
 use gpui::{
@@ -356,6 +357,24 @@ pub fn header(text: impl Into<SharedString>) -> AnyElement {
         .text_color(rgba(theme::t().fg_2))
         .child(text.into())
         .into_any()
+}
+
+pub fn header_button(id: &'static str, label: &'static str, trailing: Option<&'static str>, color: u32) -> Stateful<Div> {
+    div()
+        .id(id)
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_0p5()
+        .h(u(22.))
+        .px_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .text_size(text::sm())
+        .text_color(rgba(color))
+        .hover(|d| d.text_color(rgba(theme::t().fg)))
+        .child(label)
+        .children(trailing.map(|name| icon(name, color).size(u(12.))))
 }
 
 pub fn separator() -> AnyElement {

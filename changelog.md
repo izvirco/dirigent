@@ -12,6 +12,7 @@
 - A new thread starts with the project, model and reasoning you last picked for one, not those of the thread or project page you came from ([#207])
 - Esc takes the focus off the composer where it used to close the right panel, and `i` focuses the composer again; its ring shows while it has focus ([#208])
 - Fixed: while you edited a message and scrolled it out of view, Esc and every shortcut did nothing ([#212])
+- Toasts: a repeat counts up instead of stacking, a click dismisses one, and the sidebar keeps the session's history ([#211])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
@@ -21,6 +22,7 @@
 [#205]: https://forge.sebba.dev/izvir/dirigent/changes/205
 [#207]: https://forge.sebba.dev/izvir/dirigent/changes/207
 [#208]: https://forge.sebba.dev/izvir/dirigent/changes/208
+[#211]: https://forge.sebba.dev/izvir/dirigent/changes/211
 [#212]: https://forge.sebba.dev/izvir/dirigent/changes/212
 
 ## 0.0.10
