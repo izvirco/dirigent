@@ -8,6 +8,7 @@
 - Running timers all change at the same moment, once a second ([#205])
 - Remove a project, or archive, delete, rename, pin and snooze a thread, while its host is offline: the host gets the change when it is back ([#203])
 - The Projects list says which hosts are offline ([#203])
+- Visuals: an agent draws a chart, a diagram or a layout into its reply, in your theme's colours ([#210])
 - Fixed: editing a host's address or key dropped its drafts ([#203])
 - A new thread starts with the project, model and reasoning you last picked for one, not those of the thread or project page you came from ([#207])
 - Esc takes the focus off the composer where it used to close the right panel, and `i` focuses the composer again; its ring shows while it has focus ([#208])
@@ -22,6 +23,7 @@
 [#205]: https://forge.sebba.dev/izvir/dirigent/changes/205
 [#207]: https://forge.sebba.dev/izvir/dirigent/changes/207
 [#208]: https://forge.sebba.dev/izvir/dirigent/changes/208
+[#210]: https://forge.sebba.dev/izvir/dirigent/changes/210
 [#211]: https://forge.sebba.dev/izvir/dirigent/changes/211
 [#212]: https://forge.sebba.dev/izvir/dirigent/changes/212
 

@@ -82,6 +82,9 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 - **A host on another protocol** (`update that host` in Settings › Hosts, on the status word's tooltip): a
   websocket server that answers `{"type":"hello","host_name":"old","version":"0.0.9"}` and nothing else, as a
   `ws://127.0.0.1:<port>/ws` entry of `<session>/config/hosts.toml`.
+- **A visual** (a reply's `visual` block drawn as a picture): prompt "No tools. Show me … as a visual". A debug build
+  draws one in a few hundred ms, so the block shows as code first; a release build has the picture in the reply's
+  first frame.
 - **MCP servers**: `[mcp.<name>]` in that `agent.toml`, or Settings › MCP servers. A stdio server to try:
   `command = "npx"`, `args = ["-y", "@modelcontextprotocol/server-everything"]`.
 - **Computer use in the app under test** (`"computer"` in a prompt's `tools`): its `desktop` is your private screen.

@@ -12,6 +12,7 @@ pub mod images;
 pub mod leaderboard;
 pub mod release;
 pub mod transcript;
+pub mod visuals;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

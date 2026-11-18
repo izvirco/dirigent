@@ -9,8 +9,10 @@ use crate::select::{Doc, Keys};
 use crate::theme::{self, Fonts, Status, dollars, kilo, text, u};
 use crate::titlebar;
 use crate::view::{Item, Stats, Step, ToolCall, Work, split_image_refs};
+use crate::visual::{Picture, Visuals};
 use crate::working;
 use dirigent_protocol::transcript::{Body, Stop};
+use dirigent_protocol::visuals::WIDTH;
 use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, Bounds, ClipboardItem, Context, Div, ElementId, Focusable, FontWeight, MouseButton,
@@ -145,7 +147,7 @@ pub fn render(this: &mut Dirigent, window: &Window, cx: &mut Context<Dirigent>) 
         .h_full()
         .flex()
         .flex_col()
-        .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().min_h_0().w_full())
+        .child(list(list_state, cx.processor(|this, ix, _window, cx| this.render_with_visuals(ix, cx))).flex_1().min_h_0().w_full())
         .child(
             // MUST KILL: extract: an ask_layer() for the zero-height stack that grows upward and pads the tail via set_ask_height
             div()
@@ -1155,6 +1157,14 @@ fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context
     }
 }
 
+fn inline_visual(visuals: &Visuals) -> impl FnMut(&str) -> Option<AnyElement> + '_ {
+    move |html| {
+        let Picture { image, aspect } = visuals.want(html)?;
+        let picture = div().w_full().max_w(u(WIDTH as f32)).aspect_ratio(aspect).child(img(image).size_full());
+        Some(div().child(picture).into_any())
+    }
+}
+
 fn copy_code<'a>(copied: Option<&'a ElementId>, cx: &'a Context<Dirigent>) -> impl Fn(ElementId, SharedString) -> AnyElement + 'a {
     move |id, code| {
         let done = copied == Some(&id);
@@ -1423,6 +1433,7 @@ fn reply_block(
         &fonts.mono,
         keys,
         Some(&mut inline_image(blobs, ix as u64, cx)),
+        Some(&mut inline_visual(&t.visuals)),
         Some(&copy_code(t.copied.as_ref(), cx)),
         &[],
     );
@@ -1543,7 +1554,7 @@ fn user_bubble(
         .font_family(fonts.prose.clone())
         .text_size(text::lg())
         .line_height(u(22.))
-        .child(markdown::render(body, &fonts.mono, keys, None, None, &image_links(body, &refs, images)))
+        .child(markdown::render(body, &fonts.mono, keys, None, None, None, &image_links(body, &refs, images)))
         .children(thumbs)
         .children(pin_bar(ix, t, PIN_GAP))
         .children(corner_buttons(ix, body, t, fork, edit, cx).map(|b| b.top_2().right_2()))
@@ -1696,7 +1707,7 @@ fn steer_bubble(
         .text_size(text::lg())
         .line_height(u(22.))
         .child(label)
-        .child(markdown::render(body, &fonts.mono, keys, None, None, &image_links(body, &refs, images)))
+        .child(markdown::render(body, &fonts.mono, keys, None, None, None, &image_links(body, &refs, images)))
         .children(thumbs(images, blobs, |i| ElementId::NamedInteger("steer-img".into(), step_id_n(key) << 8 | i as u64), cx))
 }
 
@@ -1812,7 +1823,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
         Step::Thinking(text) => div()
             .py_0p5()
             .text_color(rgba(theme::t().fg_1))
-            .child(markdown::render(text, mono, keys, None, Some(&copy_code(t.copied.as_ref(), cx)), &[]))
+            .child(markdown::render(text, mono, keys, None, None, Some(&copy_code(t.copied.as_ref(), cx)), &[]))
             .into_any(),
         Step::Text(text) => {
             let body = markdown::render(
@@ -1820,6 +1831,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
                 mono,
                 keys,
                 Some(&mut inline_image(blobs, step_id_n((key, six)), cx)),
+                None,
                 Some(&copy_code(t.copied.as_ref(), cx)),
                 &[],
             );

@@ -13,7 +13,7 @@ use crate::select::{Doc, OpenAppLink, Selection};
 use crate::theme::{self, Status, text, u};
 use crate::view::{self, Item, Streaming, Timeline};
 use crate::{account, leaderboard, lists, menu, onboarding, ruler, sidebar, thread, titlebar, usage};
-use crate::{changelog, config, hosts, images, instance, settings, toasts, update};
+use crate::{changelog, config, hosts, images, instance, settings, toasts, update, visual};
 use base64::Engine;
 use dirigent_protocol::transcript::{Body, Entry, Event, Notice, text_of};
 use dirigent_protocol::{
@@ -23,9 +23,9 @@ use dirigent_protocol::{
 use futures::StreamExt;
 use gpui::EntityInputHandler;
 use gpui::{
-    AnyWindowHandle, App, ClipboardItem, Context, ElementId, Entity, FocusHandle, Focusable, FollowMode, FontFeatures, ListAlignment,
-    ListOffset, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Window, actions, div, prelude::*, px,
-    rgba,
+    AnyElement, AnyWindowHandle, App, ClipboardItem, Context, ElementId, Entity, FocusHandle, Focusable, FollowMode, FontFeatures,
+    ListAlignment, ListOffset, ListState, MouseButton, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollHandle, Window, actions, div,
+    prelude::*, px, rgba,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -54,6 +54,7 @@ const COPIED_TTL: Duration = Duration::from_millis(1200);
 const USAGE_REFRESH_SECS: u64 = 30;
 const PROXY_UPDATE_CHECK_SECS: u64 = 60 * 60;
 const TITLING_TTL: Duration = Duration::from_secs(60);
+const VISUAL_WAIT: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Resize {
@@ -93,6 +94,7 @@ pub struct OpenThread {
     pub rewound: Option<Rewound>,
     jump_entry: Option<String>,
     pub screen: Option<crate::screen::Screen>,
+    pub visuals: visual::Visuals,
 }
 
 pub struct Editing {
@@ -148,6 +150,7 @@ impl OpenThread {
             rewound: None,
             jump_entry: None,
             screen: None,
+            visuals: Default::default(),
         }
     }
 
@@ -1414,6 +1417,10 @@ impl Dirigent {
         }
         self.stash_log();
         self.drop_screen(cx);
+        if let Pane::Thread(t) = &mut self.pane {
+            let stale = t.visuals.clear();
+            self.drop_images(stale, cx);
+        }
         self.pane = pane;
         self.hold_effort();
         if entering {
@@ -2211,6 +2218,60 @@ impl Dirigent {
             .ok();
         })
         .detach();
+    }
+
+    pub fn render_with_visuals(&mut self, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let rendered = thread::render_item(self, ix, cx);
+        let Pane::Thread(t) = &mut self.pane else { return rendered };
+        let draw = |(html, spec): (gpui::SharedString, visual::Spec)| {
+            let drawing = cx.background_spawn({
+                let (html, spec) = (html.clone(), spec.clone());
+                async move { visual::draw(&html, &spec) }
+            });
+            (html, spec, drawing)
+        };
+        let drawings: Vec<_> = t.visuals.due().into_iter().map(draw).collect();
+        let deadline = Instant::now() + VISUAL_WAIT;
+        let mut drawn_in_time = false;
+        for (html, spec, drawing) in drawings {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match cx.foreground_executor().block_with_timeout(left, drawing) {
+                Ok(picture) => {
+                    drawn_in_time |= picture.is_some();
+                    self.show_visual(html, &spec, picture, cx);
+                }
+                Err(drawing) => cx
+                    .spawn(async move |this, cx| {
+                        let picture = drawing.await;
+                        this.update(cx, |this, cx| {
+                            this.show_visual(html, &spec, picture, cx);
+                            cx.notify();
+                        })
+                        .ok();
+                    })
+                    .detach(),
+            }
+        }
+        if drawn_in_time { thread::render_item(self, ix, cx) } else { rendered }
+    }
+
+    fn show_visual(&mut self, html: gpui::SharedString, spec: &visual::Spec, picture: Option<visual::Picture>, cx: &mut Context<Self>) {
+        let Pane::Thread(t) = &mut self.pane else { return };
+        let stale = t.visuals.show(html, spec, picture);
+        self.drop_images(stale.into_iter().collect(), cx);
+    }
+
+    /// Takes `images` out of gpui's atlas as the next frame starts: until then the frame on
+    /// screen may show them.
+    fn drop_images(&self, images: Vec<visual::StaleImage>, cx: &mut Context<Self>) {
+        if images.is_empty() {
+            return;
+        }
+        let handle = self.window;
+        cx.defer(move |cx| {
+            let drop = |window: &mut Window, cx: &mut App| images.into_iter().for_each(|image| cx.drop_image(image.0, Some(&mut *window)));
+            handle.update(cx, |_, window, _| window.on_next_frame(drop)).ok();
+        });
     }
 
     pub fn toggle_tool(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -4124,6 +4185,9 @@ impl Render for Dirigent {
         self.sync_screen(cx);
         self.field.want = self.field_spec(window);
         self.redraw_field(false, cx);
+        if let Pane::Thread(t) = &mut self.pane {
+            t.visuals.spec = Some(visual::Spec::new(window.scale_factor(), &self.fonts));
+        }
         let docked = !self.sidebar_hidden;
         let bg = self.config.background;
         let mut fill = theme::t().panel;

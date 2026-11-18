@@ -1,16 +1,19 @@
 use crate::select::{Block, Key, Keys};
 use crate::theme::{self, text, u};
 use dirigent_protocol::images::image_targets;
+use dirigent_protocol::visuals::FENCE;
 use gpui::{
     AnyElement, Div, ElementId, FontStyle, FontWeight, HighlightStyle, SharedString, StrikethroughStyle, StyledText, UnderlineStyle, div,
     prelude::*, px, rgba,
 };
-use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd, TextMergeStream};
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd, TextMergeStream};
 use std::collections::BTreeMap;
 use std::iter::Peekable;
 use std::ops::Range;
 
 pub type ImageFn<'a> = Option<&'a mut (dyn FnMut(&str) -> AnyElement + 'a)>;
+
+pub type VisualFn<'a> = Option<&'a mut (dyn FnMut(&str) -> Option<AnyElement> + 'a)>;
 
 // MUST KILL: type: CopyFn's button hides itself under CODE_GROUP; let code_block apply the hover reveal
 pub type CopyFn<'a> = Option<&'a dyn Fn(ElementId, SharedString) -> AnyElement>;
@@ -21,10 +24,19 @@ pub type Tokens<'a> = &'a [(String, SharedString)];
 
 const OPTS: Options = Options::ENABLE_TABLES.union(Options::ENABLE_STRIKETHROUGH).union(Options::ENABLE_TASKLISTS);
 
-pub fn render(text: &str, mono: &SharedString, keys: &mut Keys, image: ImageFn, copy: CopyFn, tokens: Tokens) -> Div {
+pub fn render<'a>(
+    text: &str,
+    mono: &SharedString,
+    keys: &mut Keys,
+    image: ImageFn<'a>,
+    visual: VisualFn<'a>,
+    copy: CopyFn,
+    tokens: Tokens,
+) -> Div {
     // Merged so a bare URL (or a token) the parser split into several text events is found whole.
     let mut events = TextMergeStream::new(Parser::new_ext(text, OPTS)).peekable();
-    let mut r = Renderer { mono, keys, image, copy, tokens };
+    let open_fence = visual.as_ref().and_then(|_| open_fence(text));
+    let mut r = Renderer { mono, keys, image, visual, open_fence, fences: 0, copy, tokens };
     div().flex().flex_col().gap_2().children(r.blocks(&mut events))
 }
 
@@ -51,6 +63,17 @@ pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
     out
 }
 
+fn open_fence(text: &str) -> Option<usize> {
+    let fenced = |(event, source)| matches!(event, Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_)))).then_some(source);
+    let (ix, last) = Parser::new_ext(text, OPTS).into_offset_iter().filter_map(fenced).enumerate().last()?;
+    let block: &str = text[last].trim_end();
+    let mark = block.chars().next()?;
+    let opening = block.len() - block.trim_start_matches(mark).len();
+    let closing = block.rsplit_once('\n').map_or("", |(_, line)| line.trim_start_matches([' ', '\t', '>']));
+    let closed = closing.len() >= opening && closing.chars().all(|c| c == mark);
+    (!closed).then_some(ix)
+}
+
 pub fn starts_with_code(text: &str) -> bool {
     let container = |e: &Event| matches!(e, Event::Start(Tag::List(_) | Tag::Item | Tag::BlockQuote(_)));
     matches!(Parser::new_ext(text, OPTS).find(|e| !container(e)), Some(Event::Start(Tag::CodeBlock(_) | Tag::HtmlBlock)))
@@ -66,6 +89,9 @@ struct Renderer<'m, 'i> {
     mono: &'m SharedString,
     keys: &'m mut Keys,
     image: ImageFn<'i>,
+    visual: VisualFn<'i>,
+    open_fence: Option<usize>,
+    fences: usize,
     copy: CopyFn<'m>,
     tokens: Tokens<'m>,
 }
@@ -101,7 +127,7 @@ impl<'m> Renderer<'m, '_> {
                 };
                 div().mt_1().text_size(u(size)).font_weight(FontWeight::SEMIBOLD).child(self.paragraph(ev)).into_any()
             }
-            Tag::CodeBlock(_) => {
+            Tag::CodeBlock(kind) => {
                 let mut code = String::new();
                 for e in ev.by_ref() {
                     match e {
@@ -110,7 +136,17 @@ impl<'m> Renderer<'m, '_> {
                         _ => {}
                     }
                 }
-                self.code_block(code.trim_end().to_owned()).into_any()
+                let code = code.trim_end();
+                let visual = match &kind {
+                    CodeBlockKind::Fenced(info) => {
+                        let being_written = self.open_fence == Some(self.fences);
+                        self.fences += 1;
+                        !being_written && info.as_ref() == FENCE
+                    }
+                    CodeBlockKind::Indented => false,
+                };
+                let draw = self.visual.as_deref_mut().filter(|_| visual);
+                draw.and_then(|draw| draw(code)).unwrap_or_else(|| self.code_block(code.to_owned()).into_any())
             }
             Tag::HtmlBlock => {
                 let mut html = String::new();
@@ -476,7 +512,7 @@ mod tests {
     fn list_item_opening_with_inline_tag_is_one_paragraph() {
         let sel = crate::select::Selection::default();
         let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
-        render("- **Label:** text\n- [a](https://x.dev) *b* c\n", &"Mono".into(), &mut keys, None, None, &[]);
+        render("- **Label:** text\n- [a](https://x.dev) *b* c\n", &"Mono".into(), &mut keys, None, None, None, &[]);
         assert_eq!(sel.texts(), ["Label: text", "a b c"]);
     }
 
@@ -489,11 +525,53 @@ mod tests {
             made.borrow_mut().push((id, code));
             div().into_any()
         };
-        render("```sh\nls -la  \n```\n\ntext\n\n```\nexit 0\n```\n", &"Mono".into(), &mut keys, None, Some(&copy), &[]);
+        render("```sh\nls -la  \n```\n\ntext\n\n```\nexit 0\n```\n", &"Mono".into(), &mut keys, None, None, Some(&copy), &[]);
         let made = made.into_inner();
         assert_eq!(made.iter().map(|(_, code)| code.to_string()).collect::<Vec<_>>(), ["ls -la", "exit 0"]);
         assert_ne!(made[0].0, made[1].0);
         assert_eq!(sel.texts(), ["ls -la", "text", "exit 0"]);
+    }
+
+    #[test]
+    fn visual_blocks_are_drawn_or_stay_code() {
+        let md = "```visual\n<b>a</b>\n```\n\n```visual\n<i>b</i>\n```\n\n```html\n<u>c</u>\n```\n";
+        let sel = crate::select::Selection::default();
+        let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
+        let mut asked = vec![];
+        let mut draw = |html: &str| {
+            asked.push(html.to_owned());
+            (html == "<b>a</b>").then(|| div().into_any())
+        };
+        render(md, &"Mono".into(), &mut keys, None, Some(&mut draw), None, &[]);
+        assert_eq!(asked, ["<b>a</b>", "<i>b</i>"]);
+        assert_eq!(sel.texts(), ["<i>b</i>", "<u>c</u>"]);
+
+        let sel = crate::select::Selection::default();
+        let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
+        render(md, &"Mono".into(), &mut keys, None, None, None, &[]);
+        assert_eq!(sel.texts(), ["<b>a</b>", "<i>b</i>", "<u>c</u>"]);
+    }
+
+    #[test]
+    fn a_visual_is_drawn_once_its_fence_closes() {
+        let drawn = |md: &str| {
+            let sel = crate::select::Selection::default();
+            let mut keys = Keys::new(&sel, crate::select::Doc::Thread, 0);
+            let mut asked = vec![];
+            let mut draw = |html: &str| {
+                asked.push(html.to_owned());
+                Some(div().into_any())
+            };
+            render(md, &"Mono".into(), &mut keys, None, Some(&mut draw), None, &[]);
+            asked
+        };
+        assert!(drawn("```visual\n<b>a</b>\n").is_empty());
+        assert_eq!(drawn("```visual\n<b>a</b>\n```\n"), ["<b>a</b>"]);
+        assert_eq!(drawn("```visual\n<b>a</b>\n```\n\ntext\n\n~~~visual\n<i>b"), ["<b>a</b>"]);
+        assert_eq!(drawn("- one\n  ```visual\n  <b>a</b>\n  ```\n- two\n\n> ~~~visual\n> <i>b</i>\n> ~~~\n"), ["<b>a</b>", "<i>b</i>"]);
+        assert_eq!(drawn("- one\n  ```visual\n  <b>a</b>\n  ```\n- two\n\n```visual\n<i>b"), ["<b>a</b>"]);
+        assert!(drawn("````visual\n<b>a</b>\n```\n").is_empty());
+        assert!(drawn("~~~visual\n<b>a</b>\n```\n").is_empty());
     }
 
     #[test]
