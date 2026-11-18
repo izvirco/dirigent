@@ -186,7 +186,6 @@ fn sub_row(label: &'static str, control: impl IntoElement) -> Div {
         .gap_3()
         .min_h(u(28.))
         .pb_2()
-        .pl(u(16.))
         .child(div().flex_1().min_w_0().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(label))
         .child(control)
 }
@@ -410,10 +409,6 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
             .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx))))
             .child(row("computer", switch("tool-computer", c.computer, cx, |this, cx| this.toggle_tool("computer", cx))))
-            .child(sub_row(
-                "Open a screen of its own, or your desktop, to run and operate apps; the thread shows what it does there",
-                div(),
-            ))
             .child(row("codemode", switch("tool-codemode", c.codemode, cx, |this, cx| this.toggle_tool("codemode", cx)))),
     )
 }
