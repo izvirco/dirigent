@@ -50,6 +50,11 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 
 ## States that take setting up
 
+- **A remote host, and one that is offline**: a `dirigent_service` of your own (`--data-dir`, `--config-dir`,
+  `DIRIGENT_PORT`, without `DIRIGENT_THREAD_ID`, `DIRIGENT_URL` and `DIRIGENT_DATA_DIR`), named in
+  `<session>/config/hosts.toml` under `[hosts]` (`remote = "ws://127.0.0.1:<port>/ws"`), then `start`. Fill it over
+  `node scripts/ui-rpc.mjs <port> JSON`. Kill it and the host is offline; `data/desktop.db`'s `outbox` has what the
+  app changed meanwhile.
 - **`ssh://` hosts**: a fake `ssh` in a `UI_PATH` directory (put before `PATH`) that forwards
   `-L 127.0.0.1:L:127.0.0.1:R` to a test service. Always name the port (`ssh://…/<port>`): 7777 is Seb's.
 - **Workspaces**: to see `Creating a workspace…` / `Activating nix dev shell…`, `sleep` in the test repo's

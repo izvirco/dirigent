@@ -4,8 +4,9 @@ use crate::cache::Cache;
 use crate::hosts_tab;
 use crate::input::{self, Arrow, ImagePasted, Submitted, TextInput, image_token};
 use crate::mcp;
-use crate::net::{HostStatus, Incoming, Net};
+use crate::net::{CONNECT_LIST_ID, HostStatus, Incoming, Net};
 use crate::orchestra::{self, LineageNode};
+use crate::outbox::{Change, Outbox};
 use crate::projects::{self, HostState, Links};
 use crate::proxy;
 use crate::select::{Doc, OpenAppLink, Selection};
@@ -684,6 +685,37 @@ impl Dirigent {
         id
     }
 
+    fn change(&mut self, host: &str, change: Change) {
+        let Some(h) = self.host_mut(host) else { return };
+        change.apply(&mut h.projects, &mut h.threads);
+        h.outbox.push(change);
+        self.save_outbox(host);
+        self.send_changes(host);
+    }
+
+    fn save_outbox(&self, host: &str) {
+        let Some(h) = self.host(host) else { return };
+        if let Err(e) = self.cache.lock().unwrap().set_outbox(host, h.outbox.unanswered()) {
+            tracing::warn!(%host, "outbox: {e:#}");
+        }
+    }
+
+    fn send_changes(&mut self, host: &str) {
+        let id = self.next_id();
+        if let Some(request) = self.host_mut(host).and_then(|h| h.outbox.next_request(id)) {
+            self.net.send(host, request);
+        }
+    }
+
+    fn change_answered(&mut self, host: &str, request: u64) -> bool {
+        if !self.host_mut(host).is_some_and(|h| h.outbox.answered(request)) {
+            return false;
+        }
+        self.save_outbox(host);
+        self.send_changes(host);
+        true
+    }
+
     pub fn set_input(&self, input: &Entity<TextInput>, text: &str, cx: &mut Context<Self>) {
         let (window, input, text) = (self.window, input.clone(), text.to_owned());
         cx.defer(move |cx| {
@@ -789,16 +821,8 @@ impl Dirigent {
     }
 
     pub fn set_pinned(&mut self, host: &str, thread_id: &str, pinned: bool, cx: &mut Context<Self>) {
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::PinThread { id, thread_id: thread_id.to_owned(), pinned });
-        if let Some(t) = self.summary_mut(host, thread_id) {
-            t.pinned = pinned;
-        }
+        self.change(host, Change::Pin { thread_id: thread_id.to_owned(), pinned });
         cx.notify();
-    }
-
-    fn summary_mut(&mut self, host: &str, thread_id: &str) -> Option<&mut ThreadSummary> {
-        self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id))
     }
 
     fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
@@ -811,11 +835,8 @@ impl Dirigent {
     }
 
     pub fn set_snoozed(&mut self, host: &str, thread_id: &str, snoozed: bool, cx: &mut Context<Self>) {
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::SnoozeThread { id, thread_id: thread_id.to_owned(), snoozed });
-        if let Some(t) = self.summary_mut(host, thread_id) {
-            t.snoozed = snoozed;
-        }
+        let Some(updated_at) = self.summary(host, thread_id).map(|t| t.updated_at) else { return };
+        self.change(host, Change::Snooze { thread_id: thread_id.to_owned(), snoozed, updated_at });
         cx.notify();
     }
 
@@ -858,11 +879,7 @@ impl Dirigent {
         let Some(updated_at) = self.summary(host, id).filter(|t| self.unread(host, t)).map(|t| t.updated_at) else {
             return;
         };
-        let rid = self.next_id();
-        self.net.send(host, ClientMessage::MarkSeen { id: rid, thread_id: id.to_owned(), updated_at });
-        if let Some(t) = self.summary_mut(host, id) {
-            t.seen_at = Some(updated_at);
-        }
+        self.change(host, Change::Seen { thread_id: id.to_owned(), updated_at });
     }
 
     pub fn all_threads(&self) -> Vec<(&str, &ThreadSummary)> {
@@ -959,6 +976,7 @@ impl Dirigent {
                     self.forks.retain(|_, (h, _)| *h != host);
                     self.leaderboard.drop_uploads(&host);
                     if let Some(h) = self.host_mut(&host) {
+                        h.outbox.disconnected();
                         for t in &mut h.threads {
                             t.running_since = None;
                         }
@@ -1039,7 +1057,9 @@ impl Dirigent {
             }
             ServerMessage::Ok { reply_to } => {
                 self.prompts.remove(&reply_to);
-                let _ = self.on_login_reply(&host, reply_to, Ok(()), cx) || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
+                let _ = self.change_answered(&host, reply_to)
+                    || self.on_login_reply(&host, reply_to, Ok(()), cx)
+                    || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
             }
             ServerMessage::McpServers { reply_to, servers, path } => self.on_mcp_servers(&host, reply_to, servers, path, cx),
             ServerMessage::McpStatus { reply_to, status } => self.on_mcp_status(&host, reply_to, status),
@@ -1047,6 +1067,7 @@ impl Dirigent {
             ServerMessage::Projects { projects, .. } => {
                 if let Some(h) = self.host_mut(&host) {
                     h.projects = projects;
+                    h.outbox.apply(&mut h.projects, &mut h.threads);
                 }
             }
             ServerMessage::ProjectAdded { reply_to, project } => {
@@ -1084,18 +1105,27 @@ impl Dirigent {
                 }
                 self.hold_effort();
             }
-            ServerMessage::Threads { threads, .. } => {
+            ServerMessage::Threads { reply_to, threads } => {
                 let was_running = self.is_running();
                 let ran: HashSet<String> =
                     self.host(&host).map(|h| h.threads.iter().filter(|t| t.running()).map(|t| t.id.clone()).collect()).unwrap_or_default();
                 let ours: Vec<_> = self.pending.iter().filter(|p| p.target.host == host).map(|p| p.thread.clone()).collect();
+                let listed_on_connect = reply_to == Some(CONNECT_LIST_ID);
                 if let Some(h) = self.host_mut(&host) {
+                    if listed_on_connect {
+                        h.outbox.host_listed_its_threads(&threads);
+                    }
                     h.threads = threads;
+                    h.outbox.apply(&mut h.projects, &mut h.threads);
                     for t in ours {
                         if !h.threads.iter().any(|x| x.id == t.id) {
                             h.threads.insert(0, t);
                         }
                     }
+                }
+                if listed_on_connect {
+                    self.save_outbox(&host);
+                    self.send_changes(&host);
                 }
                 self.request_sidebar_vcs(&host, &ran);
                 if !was_running && self.is_running() && self.menu == Some(Menu::Base) {
@@ -1234,6 +1264,10 @@ impl Dirigent {
                 }
             }
             ServerMessage::Error { reply_to, message } => {
+                if reply_to.is_some_and(|id| self.change_answered(&host, id)) {
+                    self.request(&host, |id| ClientMessage::ListProjects { id });
+                    self.request(&host, |id| ClientMessage::ListThreads { id });
+                }
                 if let Some(blob) = reply_to.and_then(|id| self.blob_requests.get(&host)?.get(&id)) {
                     tracing::info!(%host, %blob, "blob fetch failed: {message}");
                     return;
@@ -1610,6 +1644,9 @@ impl Dirigent {
     }
 
     pub fn archive_with_workspace(&mut self, host: &str, thread_id: &str, detach: bool, cx: &mut Context<Self>) {
+        if !self.connected(host) {
+            return self.toast(format!("{host} is offline"), cx);
+        }
         self.remove_workspace(host, thread_id, detach, cx);
         if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
             t.workspace = None;
@@ -1773,27 +1810,20 @@ impl Dirigent {
             return;
         }
         let asking = matches!(&self.menu, Some(Menu::ConfirmArchive { host: h, id, .. }) if h == host && id == thread_id);
-        if archived && !asking && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) {
+        if archived && !asking && self.connected(host) && self.summary(host, thread_id).is_some_and(|t| t.workspace.is_some()) {
             if self.open_menu(Menu::ConfirmArchive { host: host.to_owned(), id: thread_id.to_owned(), at }, cx) {
                 self.request_thread_vcs(host, thread_id);
             }
             return;
         }
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::ArchiveThread { id, thread_id: thread_id.to_owned(), archived });
-        if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
-            t.archived = archived;
-        }
+        let Some(updated_at) = self.summary(host, thread_id).map(|t| t.updated_at) else { return };
+        self.change(host, Change::Archive { thread_id: thread_id.to_owned(), archived, updated_at });
         self.menu = None;
         cx.notify();
     }
 
     pub fn delete_thread(&mut self, host: &str, thread_id: &str, cx: &mut Context<Self>) {
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::DeleteThread { id, thread_id: thread_id.to_owned() });
-        if let Some(h) = self.host_mut(host) {
-            h.threads.retain(|t| t.id != thread_id);
-        }
+        self.change(host, Change::Delete { thread_id: thread_id.to_owned() });
         if self.open().is_some_and(|t| t.host == host && t.id == thread_id) {
             self.show(Pane::Inbox, cx);
         }
@@ -2516,12 +2546,14 @@ impl Dirigent {
         for name in stale {
             self.net.remove(&name);
             self.hosts.retain(|h| h.name != name);
-            self.links.retain(|(h, _), _| *h != name);
             self.blob_requests.remove(&name);
             if self.open().is_some_and(|t| t.host == name) {
                 self.set_pane(Pane::Inbox, cx);
             }
-            let _ = self.cache.lock().unwrap().remove_host(&name);
+            if !wanted.contains_key(&name) {
+                self.links.retain(|(h, _), _| *h != name);
+                let _ = self.cache.lock().unwrap().remove_host(&name);
+            }
         }
         for (name, host) in wanted {
             if self.host(&name).is_none() {
@@ -2552,8 +2584,7 @@ impl Dirigent {
     }
 
     pub fn remove_project(&mut self, host: &str, project_id: &str, cx: &mut Context<Self>) {
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::RemoveProject { id, project_id: project_id.to_owned() });
+        self.change(host, Change::RemoveProject { project_id: project_id.to_owned() });
         let _ = self.cache.lock().unwrap().set_link(host, project_id, None);
         self.links.remove(&(host.to_owned(), project_id.to_owned()));
         self.menu = None;
@@ -2682,14 +2713,11 @@ impl Dirigent {
     }
 
     fn rename_thread(&mut self, host: &str, thread_id: &str, name: String) {
-        let Some(t) = self.summary_mut(host, thread_id) else { return };
-        if name.is_empty() || t.name.as_ref() == Some(&name) {
+        if name.is_empty() || self.summary(host, thread_id).is_none_or(|t| t.name.as_ref() == Some(&name)) {
             return;
         }
-        t.name = Some(name.clone());
         self.titling.remove(&(host.to_owned(), thread_id.to_owned()));
-        let id = self.next_id();
-        self.net.send(host, ClientMessage::RenameThread { id, thread_id: thread_id.to_owned(), name });
+        self.change(host, Change::Rename { thread_id: thread_id.to_owned(), name });
     }
 
     pub fn show_thread_menu(&mut self, host: &str, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
@@ -3583,7 +3611,6 @@ impl Dirigent {
     }
 
     pub fn toggle_pin(&mut self, ix: usize, cx: &mut Context<Self>) {
-        let id = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
         let Some(entry_id) = t.timeline.entry_id(ix).filter(|e| !e.is_empty()).map(str::to_owned) else { return };
         let pinned = !t.pins.remove(&entry_id);
@@ -3591,13 +3618,7 @@ impl Dirigent {
             t.pins.insert(entry_id.clone());
         }
         let (host, thread_id) = (t.host.clone(), t.id.clone());
-        if let Some(s) = self.summary_mut(&host, &thread_id) {
-            s.pinned_entries.retain(|e| *e != entry_id);
-            if pinned {
-                s.pinned_entries.push(entry_id.clone());
-            }
-        }
-        self.net.send(&host, ClientMessage::PinMessage { id, thread_id, entry_id, pinned });
+        self.change(&host, Change::PinMessage { thread_id, entry_id, pinned });
         cx.notify();
     }
 
@@ -3956,7 +3977,7 @@ fn held_effort(effort: &str, efforts: &[String]) -> Option<String> {
 }
 
 fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
-    HostState {
+    let mut state = HostState {
         name: name.to_owned(),
         config: host.clone(),
         status: HostStatus::Disconnected,
@@ -3965,7 +3986,10 @@ fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
         threads: cache.threads(name).unwrap_or_default(),
         models: cache.models(name),
         service_id: None,
-    }
+        outbox: Outbox::new(cache.outbox(name)),
+    };
+    state.outbox.apply(&mut state.projects, &mut state.threads);
+    state
 }
 
 fn blob_from(mime: &str, bytes: Vec<u8>) -> Option<Blob> {

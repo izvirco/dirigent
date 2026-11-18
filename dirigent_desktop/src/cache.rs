@@ -1,4 +1,5 @@
 use crate::input::Content;
+use crate::outbox::Change;
 use anyhow::Result;
 use dirigent_protocol::transcript::Entry;
 use dirigent_protocol::{ModelInfo, Project, ThreadSummary};
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS transcript (
     PRIMARY KEY (host, thread_id, seq)
 );
 CREATE TABLE IF NOT EXISTS models (host TEXT PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS outbox (host TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS blobs (id TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS seen (host TEXT NOT NULL, thread_id TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host, thread_id));
 CREATE TABLE IF NOT EXISTS snoozed (host TEXT NOT NULL, thread_id TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (host, thread_id));
@@ -45,8 +47,8 @@ pub type DraftImage = (u32, String, Vec<u8>);
 
 const PER_THREAD: [&str; 3] = ["transcript", "drafts", "draft_images"];
 
-const HOST_TABLES: [&str; 10] =
-    ["projects", "links", "threads", "transcript", "models", "seen", "snoozed", "pinned", "drafts", "draft_images"];
+const HOST_TABLES: [&str; 11] =
+    ["projects", "links", "threads", "transcript", "models", "outbox", "seen", "snoozed", "pinned", "drafts", "draft_images"];
 
 const COLUMNS: &[(&str, &str, &str)] = &[
     ("threads", "workspace", "TEXT"),
@@ -289,6 +291,23 @@ impl Cache {
         Ok(())
     }
 
+    pub fn outbox(&self, host: &str) -> Vec<Change> {
+        let stored: Vec<serde_json::Value> = self
+            .conn
+            .query_row("SELECT json FROM outbox WHERE host = ?1", [host], |r| r.get::<_, String>(0))
+            .optional()
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        stored.into_iter().filter_map(|change| serde_json::from_value(change).ok()).collect()
+    }
+
+    pub fn set_outbox(&self, host: &str, changes: &[Change]) -> Result<()> {
+        self.conn.execute("INSERT OR REPLACE INTO outbox (host, json) VALUES (?1, ?2)", params![host, serde_json::to_string(changes)?])?;
+        Ok(())
+    }
+
     pub fn take_legacy_seen(&self, host: &str) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             "SELECT s.thread_id, s.updated_at FROM seen s JOIN threads t ON t.host = s.host AND t.id = s.thread_id
@@ -440,6 +459,65 @@ mod tests {
             screen: false,
             locked: false,
         }
+    }
+
+    #[test]
+    fn the_outbox_keeps_its_order_and_follows_its_host() {
+        let mut cache = Cache::in_memory().unwrap();
+        let changes = [
+            Change::Pin { thread_id: "t".into(), pinned: true },
+            Change::RemoveProject { project_id: "p".into() },
+            Change::Pin { thread_id: "t".into(), pinned: false },
+        ];
+        cache.set_outbox("h", &changes).unwrap();
+        assert_eq!(cache.outbox("h"), changes);
+        assert!(cache.outbox("other").is_empty());
+
+        cache.set_outbox("h", &changes[1..]).unwrap();
+        assert_eq!(cache.outbox("h"), changes[1..]);
+
+        cache.rename_host("h", "renamed").unwrap();
+        assert!(cache.outbox("h").is_empty());
+        assert_eq!(cache.outbox("renamed"), changes[1..]);
+
+        cache.remove_host("renamed").unwrap();
+        assert!(cache.outbox("renamed").is_empty());
+    }
+
+    #[test]
+    fn changes_stored_by_an_earlier_build_still_read() {
+        let cache = Cache::in_memory().unwrap();
+        let stored = r#"[
+            {"type":"remove_project","project_id":"p"},
+            {"type":"archive","thread_id":"t","archived":true,"updated_at":5},
+            {"type":"delete","thread_id":"t"},
+            {"type":"rename","thread_id":"t","name":"n"},
+            {"type":"pin","thread_id":"t","pinned":true},
+            {"type":"snooze","thread_id":"t","snoozed":true,"updated_at":5},
+            {"type":"seen","thread_id":"t","updated_at":5},
+            {"type":"pin_message","thread_id":"t","entry_id":"e","pinned":true}
+        ]"#;
+        cache.conn.execute("INSERT INTO outbox VALUES ('h', ?1)", [stored]).unwrap();
+        let t = || "t".to_owned();
+        let read = [
+            Change::RemoveProject { project_id: "p".into() },
+            Change::Archive { thread_id: t(), archived: true, updated_at: 5 },
+            Change::Delete { thread_id: t() },
+            Change::Rename { thread_id: t(), name: "n".into() },
+            Change::Pin { thread_id: t(), pinned: true },
+            Change::Snooze { thread_id: t(), snoozed: true, updated_at: 5 },
+            Change::Seen { thread_id: t(), updated_at: 5 },
+            Change::PinMessage { thread_id: t(), entry_id: "e".into(), pinned: true },
+        ];
+        assert_eq!(cache.outbox("h"), read);
+    }
+
+    #[test]
+    fn a_stored_change_that_no_longer_reads_is_dropped() {
+        let cache = Cache::in_memory().unwrap();
+        let stored = r#"[{"type":"from_a_newer_build"},{"type":"delete","thread_id":"t"}]"#;
+        cache.conn.execute("INSERT INTO outbox VALUES ('h', ?1)", [stored]).unwrap();
+        assert_eq!(cache.outbox("h"), [Change::Delete { thread_id: "t".into() }]);
     }
 
     #[test]

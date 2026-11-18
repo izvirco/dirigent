@@ -1,4 +1,5 @@
 use crate::net::HostStatus;
+use crate::outbox::Outbox;
 use dirigent_protocol::{ModelInfo, Project, ThreadSummary};
 use std::collections::HashMap;
 
@@ -11,6 +12,7 @@ pub struct HostState {
     pub threads: Vec<ThreadSummary>,
     pub models: Vec<ModelInfo>,
     pub service_id: Option<String>,
+    pub outbox: Outbox,
 }
 
 pub const ORPHANS: &str = "orphans";
@@ -241,6 +243,7 @@ mod tests {
             threads,
             models: vec![],
             service_id: None,
+            outbox: Outbox::default(),
         }
     }
 

@@ -24,6 +24,7 @@ mod modal;
 mod net;
 mod onboarding;
 mod orchestra;
+mod outbox;
 mod picker;
 mod placement;
 mod projects;
