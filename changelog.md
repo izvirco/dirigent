@@ -1,5 +1,9 @@
 ## 0.0.11 (draft)
 
+- Lowercase `agents.md` and `skill.md` are read too ([#199])
+
+[#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
+
 ## 0.0.10
 
 Pi was irrational, so we wrote our own agent: MCP servers, codemode and computer use.

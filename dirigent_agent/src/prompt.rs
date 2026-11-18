@@ -124,7 +124,7 @@ impl Prompt {
 }
 
 fn instructions_in(dir: &Path) -> Option<(PathBuf, String)> {
-    ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"].iter().find_map(|name| {
+    ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "agents.md", "CLAUDE.md", "CLAUDE.MD"].iter().find_map(|name| {
         let path = dir.join(name);
         let text = std::fs::read_to_string(&path).ok()?;
         Some((path, text.trim_start_matches('\u{FEFF}').to_owned()))
@@ -144,7 +144,7 @@ fn skills(dir: &Path) -> Vec<Skill> {
 }
 
 fn collect(dir: &Path, top: bool, found: &mut Vec<Skill>) {
-    if let Some(skill) = skill(&dir.join("SKILL.md")) {
+    if let Some(skill) = ["SKILL.md", "skill.md"].iter().find_map(|name| skill(&dir.join(name))) {
         found.push(skill);
         return;
     }
@@ -218,12 +218,14 @@ mod tests {
         std::fs::create_dir_all(config.join("skills/nested/review")).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::write(config.join("AGENTS.md"), "mine").unwrap();
-        std::fs::write(repo.join("AGENTS.md"), "the repo's").unwrap();
+        std::fs::write(repo.join("agents.md"), "the repo's").unwrap();
         std::fs::write(cwd.join("CLAUDE.md"), "the crate's").unwrap();
         std::fs::write(config.join("skills/ship/SKILL.md"), "---\nname: ship\ndescription: Use when asked to ship <changes>\n---\nbody")
             .unwrap();
         std::fs::write(config.join("skills/nested/review/SKILL.md"), "---\ndescription: >\n  Review a change,\n  carefully\n---\n")
             .unwrap();
+        std::fs::create_dir_all(config.join("skills/lower")).unwrap();
+        std::fs::write(config.join("skills/lower/skill.md"), "---\ndescription: In lowercase\n---\n").unwrap();
         std::fs::write(config.join("skills/hidden.md"), "---\ndescription: x\ndisable-model-invocation: true\n---\n").unwrap();
         std::fs::write(config.join("skills/notes.md"), "no frontmatter").unwrap();
 
@@ -231,7 +233,10 @@ mod tests {
         let texts: Vec<&str> = prompt.instructions.iter().map(|(_, text)| text.as_str()).collect();
         assert_eq!(texts, ["mine", "the repo's", "the crate's"]);
         let skills: Vec<(&str, &str)> = prompt.skills.iter().map(|s| (s.name.as_str(), s.description.as_str())).collect();
-        assert_eq!(skills, [("review", "Review a change, carefully"), ("ship", "Use when asked to ship <changes>")]);
+        assert_eq!(
+            skills,
+            [("lower", "In lowercase"), ("review", "Review a change, carefully"), ("ship", "Use when asked to ship <changes>")]
+        );
 
         let read = ToolSpec {
             snippet: Some("Read file contents".into()),
@@ -247,7 +252,7 @@ mod tests {
         );
         assert!(system.contains(&format!(
             "<project_instructions path=\"{}\">\nthe repo's\n</project_instructions>",
-            repo.join("AGENTS.md").display()
+            repo.join("agents.md").display()
         )));
         assert!(system.contains("<description>Use when asked to ship &lt;changes&gt;</description>"));
         assert!(system.ends_with(&format!("<cwd>\n{}\n\n{CWD}\n</cwd>", cwd.display())));
