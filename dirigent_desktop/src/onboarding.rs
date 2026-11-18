@@ -554,7 +554,7 @@ fn labeled(label: &'static str, body: impl IntoElement) -> Div {
         .child(body)
 }
 
-pub fn primary(id: &'static str, label: &'static str) -> Stateful<Div> {
+fn primary(id: &'static str, label: &'static str) -> Stateful<Div> {
     let t = theme::t();
     div()
         .id(id)

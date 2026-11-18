@@ -42,7 +42,6 @@ either: `examples/run.rs` is a session with a printer for a host, the tests scri
 | `codemode` | the QuickJS sandbox and the `codemode` tool                                                                  |
 | `mcp`      | the MCP client, a session's servers as tools, what Settings does to them                                     |
 | `config`   | `agent.toml`                                                                                                 |
-| `import`   | pi's entries and agent dir as ours (Dirigent ran pi before it had this crate)                                |
 
 ## How a run goes
 

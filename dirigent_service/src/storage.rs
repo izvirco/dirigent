@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use dirigent_agent::import;
 use dirigent_protocol::transcript::{self, Body, Entry, Stop, Usage, text_of};
 use dirigent_protocol::{
     Ask, ForkedFrom, Notify, Project, ProxySample, Report, SearchHit, Spend, ThreadSummary, UsageBucket, prompt_title,
@@ -7,7 +6,7 @@ use dirigent_protocol::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 const SCHEMA: &str = "
@@ -111,6 +110,8 @@ impl Storage {
             std::fs::create_dir_all(dir)?;
         }
         let conn = Connection::open(path).with_context(|| format!("open {}", path.display()))?;
+        let pis = conn.prepare("SELECT 1 FROM pragma_table_info('threads') WHERE name = 'thinking_level'")?.exists([])?;
+        anyhow::ensure!(!pis, "{} is from Dirigent 0.0.9 or older: start Dirigent 0.0.10 on it once, which converts it", path.display());
         conn.pragma_update(None, "journal_mode", "WAL")?;
         Self::init(conn)
     }
@@ -550,7 +551,7 @@ impl Storage {
         insert_entry(&tx, thread_id, &entry)?;
         index_text(&tx, thread_id, &entry.body)?;
         if let Some((provider, model, usage)) = used(&entry.body) {
-            add_usage(&tx, entry.at, &provider, model, usage)?;
+            add_usage(&tx, entry.at, provider, model, usage)?;
             add_spend(&tx, thread_id, usage)?;
         }
         // MUST KILL: extract: a moves_updated_at(&Body) helper instead of the inline Store exception to the updated_at bump
@@ -677,12 +678,12 @@ fn index_text(conn: &Connection, thread_id: &str, body: &Body) -> Result<()> {
     Ok(())
 }
 
-fn used(body: &Body) -> Option<(String, &str, &Usage)> {
+fn used(body: &Body) -> Option<(&str, &str, &Usage)> {
     match body {
         // MUST KILL: type: agent-closed turns are told by empty provider and zero usage; give them a marker of their own
         Body::Assistant(a) if a.provider.is_empty() && a.usage == Usage::default() => None,
-        Body::Assistant(a) => Some((a.provider.clone(), &a.model, &a.usage)),
-        Body::Compaction { model, usage, .. } => Some((import::provider(model, ""), model, usage)),
+        Body::Assistant(a) => Some((&a.provider, &a.model, &a.usage)),
+        Body::Compaction { model, usage, .. } => Some((maker(model), model, usage)),
         _ => None,
     }
 }
@@ -714,195 +715,19 @@ fn add_spend(conn: &Connection, thread_id: &str, usage: &Usage) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct Migration {
-    pub threads: usize,
-    pub entries: usize,
-    pub kept: usize,
-    pub dropped: BTreeMap<String, usize>,
-    pub locked: Vec<(String, Vec<String>)>,
-}
-
-pub fn from_pi(db: &Path) -> Result<bool> {
-    if !db.exists() {
-        return Ok(false);
+// MUST KILL: type: Body::Compaction names no provider, so its usage is filed under one guessed from the model id; store the provider
+fn maker(model: &str) -> &'static str {
+    let o_series = model.strip_prefix('o').is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+    if model.starts_with("claude") {
+        "anthropic"
+    } else if model.starts_with("gpt") || model.starts_with("codex") || o_series {
+        "openai"
+    } else if model.starts_with("gemini") {
+        "google"
+    } else {
+        ""
     }
-    let conn = Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    Ok(columns(&conn, "main", "threads")?.iter().any(|column| column == "thinking_level"))
 }
-
-/// Make the file alone all of `db`, with nobody else on it: for a copy of it, and before
-/// it is replaced. Leaving sqlite's WAL mode does both: its log (of a service that was
-/// killed) is folded into the file, and sqlite refuses while another connection is open.
-/// A Dirigent that runs on the db would go on writing into a file that is no longer there.
-pub fn settle(db: &Path) -> Result<()> {
-    let conn = Connection::open(db)?;
-    conn.busy_timeout(std::time::Duration::ZERO)?;
-    let left = match conn.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get::<_, String>(0)) {
-        Ok(mode) => mode == "delete",
-        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::DatabaseBusy => false,
-        Err(e) => return Err(e.into()),
-    };
-    anyhow::ensure!(left, "{} is in use: is another Dirigent running on it?", db.display());
-    conn.close().map_err(|(_, e)| e)?;
-    Ok(())
-}
-
-pub fn migrate(db: &Path, progress: impl FnMut(usize, usize)) -> Result<Option<Migration>> {
-    if !from_pi(db)? {
-        return Ok(None);
-    }
-    let beside = |suffix: &str| {
-        let mut name = db.as_os_str().to_owned();
-        name.push(suffix);
-        std::path::PathBuf::from(name)
-    };
-    let building = beside(".migrating");
-    let _ = std::fs::remove_file(&building);
-    let built = build(db, &building, progress).and_then(|migration| {
-        for suffix in ["-wal", "-shm"] {
-            let _ = std::fs::remove_file(beside(suffix));
-        }
-        std::fs::rename(&building, db)?;
-        Ok(migration)
-    });
-    if built.is_err() {
-        let _ = std::fs::remove_file(&building);
-    }
-    Ok(Some(built.with_context(|| format!("migrate {}", db.display()))?))
-}
-
-fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Result<Migration> {
-    let conn = Connection::open(new)?;
-    conn.pragma_update(None, "journal_mode", "OFF")?;
-    conn.execute_batch(SCHEMA)?;
-    conn.execute("ATTACH DATABASE ?1 AS old", [read_only_uri(old)])?;
-    conn.execute_batch("BEGIN")?;
-    for table in ["projects", "threads", "blobs", "usage", "asks", "message_pins", "meta", "api_keys", "proxy_samples"] {
-        let theirs = columns(&conn, "old", table)?;
-        let both: Vec<String> = columns(&conn, "main", table)?.into_iter().filter(|c| theirs.contains(c)).collect();
-        if !both.is_empty() {
-            let (both, order) = (both.join(", "), if table == "proxy_samples" { "at" } else { "rowid" });
-            conn.execute(&format!("INSERT INTO main.{table} ({both}) SELECT {both} FROM old.{table} ORDER BY {order}"), [])?;
-        }
-    }
-    let models: Vec<(String, String)> = {
-        let mut stmt = conn.prepare("SELECT DISTINCT provider, model FROM main.usage")?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
-    };
-    for (provider, model) in models {
-        conn.execute(
-            "UPDATE main.usage SET provider = ?1 WHERE provider = ?2 AND model = ?3",
-            params![import::provider(&model, &provider), provider, model],
-        )?;
-    }
-    conn.execute("UPDATE main.threads SET spend_cost = 0, spend_input = 0, spend_output = 0, spend_cached = 0", [])?;
-    let threads: Vec<String> = {
-        let mut stmt = conn.prepare("SELECT id FROM main.threads")?;
-        stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?
-    };
-    let mut migration = Migration::default();
-    let mut row = conn
-        .prepare("SELECT o.model, o.thinking_level, t.forked_at FROM main.threads t JOIN old.threads o ON o.id = t.id WHERE t.id = ?1")?;
-    let mut read = conn.prepare("SELECT json FROM old.entries WHERE thread_id = ?1 ORDER BY seq")?;
-    let total = threads.len();
-    for id in threads {
-        progress(migration.threads, total);
-        let (model, effort, forked_at): (Option<String>, Option<String>, Option<String>) =
-            row.query_row([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-        let pi = read.query_map([&id], |r| r.get::<_, String>(0))?;
-        let pi: Vec<Value> = pi.map(|json| Ok(serde_json::from_str(&json?).unwrap_or(Value::Null))).collect::<rusqlite::Result<_>>()?;
-        let converted = import::entries(&pi);
-        let forked = forked_at.as_deref().and_then(|at| pi.iter().position(|e| pi_id(e) == Some(at)));
-        let theirs: HashSet<&str> = forked.map(|at| pi[..=at].iter().filter_map(pi_id).collect()).unwrap_or_default();
-        let copied = converted.entries.iter().take_while(|e| theirs.contains(e.id.as_str())).count();
-        if let Some(last) = copied.checked_sub(1).map(|last| &converted.entries[last]) {
-            conn.execute("UPDATE main.threads SET forked_at = ?2 WHERE id = ?1", params![id, last.id])?;
-        }
-        let mut made_by = String::new();
-        for (i, entry) in converted.entries.iter().enumerate() {
-            insert_entry(&conn, &id, entry)?;
-            index_text(&conn, &id, &entry.body)?;
-            if let Body::Assistant(a) = &entry.body {
-                made_by.clone_from(&a.provider);
-            }
-            if i < copied {
-                continue;
-            }
-            match &entry.body {
-                Body::Assistant(a) => add_spend(&conn, &id, &a.usage)?,
-                Body::Compaction { model, usage, .. } if *usage != Usage::default() => {
-                    add_usage(&conn, entry.at, &import::provider(model, &made_by), model, usage)?;
-                    add_spend(&conn, &id, usage)?;
-                }
-                _ => {}
-            }
-        }
-        let model = model.or(converted.model).map(|m| import::model_id(&m));
-        conn.execute(
-            "UPDATE main.threads SET model = ?2, effort = ?3, locked = ?4 WHERE id = ?1",
-            params![id, model, effort.or(converted.effort), !converted.unreadable.is_empty()],
-        )?;
-        migration.threads += 1;
-        migration.entries += pi.len();
-        migration.kept += converted.entries.len();
-        for (what, n) in converted.dropped {
-            *migration.dropped.entry(what).or_default() += n;
-        }
-        if !converted.unreadable.is_empty() {
-            let name: Option<String> = conn.query_row("SELECT name FROM main.threads WHERE id = ?1", [&id], |r| r.get(0))?;
-            migration.locked.push((name.unwrap_or(id), converted.unreadable));
-        }
-    }
-    progress(total, total);
-    drop((row, read));
-    conn.execute_batch("COMMIT")?;
-    conn.close().map_err(|(_, e)| e)?;
-    Ok(migration)
-}
-
-fn pi_id(entry: &Value) -> Option<&str> {
-    entry.get("id").and_then(Value::as_str)
-}
-
-fn columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info({table})"))?;
-    Ok(stmt.query_map([], |r| r.get(1))?.collect::<rusqlite::Result<_>>()?)
-}
-
-/// `path` as a URI that sqlite opens read-only (sqlite.org/uri.html has the recipe).
-fn read_only_uri(path: &Path) -> String {
-    let mut path = path.to_string_lossy().replace('%', "%25").replace('?', "%3f").replace('#', "%23");
-    if cfg!(windows) {
-        path = path.replace('\\', "/");
-        // A drive letter is no host name.
-        if !path.starts_with('/') {
-            path.insert(0, '/');
-        }
-    }
-    format!("file:{path}?mode=ro")
-}
-
-#[cfg(test)]
-pub(crate) const PI_SCHEMA: &str = "
-    CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT NOT NULL, origin TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER);
-    CREATE TABLE threads (id TEXT PRIMARY KEY, project_id TEXT, cwd TEXT NOT NULL, name TEXT, header TEXT, model TEXT,
-        thinking_level TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, last_run_ms INTEGER, archived_at INTEGER,
-        run_id TEXT, tools TEXT, workspace TEXT, parent_id TEXT, pinned INTEGER NOT NULL DEFAULT 0,
-        spend_cost REAL NOT NULL DEFAULT 0, spend_input INTEGER NOT NULL DEFAULT 0, spend_output INTEGER NOT NULL DEFAULT 0,
-        spend_cached INTEGER NOT NULL DEFAULT 0, forked_from TEXT, forked_at TEXT);
-    CREATE TABLE entries (thread_id TEXT NOT NULL, seq INTEGER NOT NULL, id TEXT NOT NULL, parent_id TEXT, kind TEXT NOT NULL,
-        json TEXT NOT NULL, PRIMARY KEY (thread_id, seq));
-    CREATE TABLE blobs (id TEXT PRIMARY KEY, mime TEXT NOT NULL, bytes BLOB NOT NULL);
-    CREATE TABLE usage (at INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, input INTEGER NOT NULL,
-        output INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_write INTEGER NOT NULL, cost REAL NOT NULL);
-    CREATE TABLE asks (thread_id TEXT NOT NULL, id TEXT NOT NULL, json TEXT NOT NULL, created_at INTEGER NOT NULL,
-        PRIMARY KEY (thread_id, id));
-    CREATE VIRTUAL TABLE entries_fts USING fts5 (thread_id UNINDEXED, text);
-    CREATE TABLE message_pins (thread_id TEXT NOT NULL, entry_id TEXT NOT NULL, PRIMARY KEY (thread_id, entry_id));
-    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-    CREATE TABLE workflow_runs (id TEXT PRIMARY KEY);
-";
 
 #[cfg(test)]
 mod tests {
@@ -938,6 +763,20 @@ mod tests {
 
     fn by_id(s: &Storage, id: &str) -> ThreadSummary {
         s.list_threads().unwrap().into_iter().find(|t| t.id == id).unwrap()
+    }
+
+    #[test]
+    fn a_db_of_pis_is_refused_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("service.db");
+        let conn = Connection::open(&db).unwrap();
+        conn.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, thinking_level TEXT); INSERT INTO threads VALUES ('t', 'high')")
+            .unwrap();
+        drop(conn);
+        let before = std::fs::read(&db).unwrap();
+        let refused = Storage::open(&db).err().expect("a db of pi's is not opened").to_string();
+        assert!(refused.ends_with("is from Dirigent 0.0.9 or older: start Dirigent 0.0.10 on it once, which converts it"), "{refused}");
+        assert_eq!(std::fs::read(&db).unwrap(), before);
     }
 
     #[test]
@@ -1210,397 +1049,5 @@ mod tests {
         assert_eq!(s.list_threads().unwrap()[0].spend, want);
         s.delete_thread("t1").unwrap();
         assert_eq!(s.usage(0, 10_000, 10_000).unwrap().iter().map(|b| b.messages).sum::<u64>(), 4);
-    }
-
-    #[test]
-    fn a_service_db_is_migrated() {
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path().join("50% #1?");
-        std::fs::create_dir(&dir).unwrap();
-        let live = dir.join("service.db");
-        assert_eq!(migrate(&live, |_, _| {}).unwrap(), None);
-        assert!(!live.exists() && !from_pi(&live).unwrap());
-
-        let conn = Connection::open(&live).unwrap();
-        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
-        conn.execute_batch(PI_SCHEMA).unwrap();
-        conn.execute_batch(
-            "INSERT INTO projects VALUES ('p', '/x', NULL, 1, NULL);
-             INSERT INTO threads (id, project_id, cwd, name, header, model, thinking_level, created_at, updated_at, tools, pinned, spend_cost)
-                VALUES ('t', 'p', '/x', 'Bug hunt', '{}', 'cliproxyapi/claude-opus-5-5', 'high', 1, 9, '[\"ask_user\"]', 1, 77),
-                       ('fork', 'p', '/x', 'Bug hunt', NULL, NULL, NULL, 5, 5, NULL, 0, 77),
-                       ('late', 'p', '/x', 'Bug hunt', NULL, NULL, NULL, 5, 5, NULL, 0, 77),
-                       ('odd', 'p', '/x', NULL, NULL, 'anthropic/claude-opus-5-5', 'low', 6, 6, NULL, 0, 0);
-             UPDATE threads SET forked_from = 't', forked_at = 'a' WHERE id = 'fork';
-             UPDATE threads SET forked_from = 't', forked_at = 'l' WHERE id = 'late';
-             INSERT INTO blobs VALUES ('ab', 'image/png', x'010203');
-             INSERT INTO usage VALUES (3000, 'cliproxyapi', 'claude-opus-5-5', 1, 2, 3, 4, 0.5), (10, 'cliproxyapi', 'qwen3', 9, 9, 9, 9, 9.0);
-             INSERT INTO asks VALUES ('t', 'q', '{\"id\":\"q\",\"questions\":[{\"text\":\"db?\"}]}', 8);
-             INSERT INTO message_pins VALUES ('t', 'a');
-             INSERT INTO meta VALUES ('service_id', 'the-id');",
-        )
-        .unwrap();
-        let pi_reply = |timestamp: i64| {
-            json!({"role":"assistant","api":"cliproxyapi-codex-responses","provider":"cliproxyapi","model":"claude-opus-5-5","stopReason":"stop",
-                "timestamp":timestamp,"content":[{"type":"text","text":"found it"}],
-                "usage":{"input":1,"output":2,"cacheRead":3,"cacheWrite":4,"cost":{"input":0.25,"output":0.25,"total":0.5}}})
-        };
-        let message =
-            |id: &str, parent: Option<&str>, message: Value| json!({"type":"message","id":id,"parentId":parent,"message":message});
-        let image = json!({"type":"image","mimeType":"image/png","blob":"ab"});
-        let model = json!({"type":"model_change","id":"m","parentId":null,"provider":"cliproxyapi","modelId":"claude-opus-5-5"});
-        let named = json!({"type":"session_info","id":"n","parentId":"a","name":"Bug hunt"});
-        let compaction = json!({"type":"compaction","id":"c","parentId":"n","timestamp":"1970-01-01T00:00:04.000Z","summary":"so far",
-            "firstKeptEntryId":"u","tokensBefore":9,"usage":{"input":10,"output":20,"cost":{"input":1.0,"output":1.0,"total":2.0}}});
-        let level = json!({"type":"thinking_level_change","id":"l","parentId":"c","thinkingLevel":"high"});
-        let said = || message("u", Some("m"), json!({"role":"user","timestamp":2000,"content":"find the bug"}));
-        let pi = [
-            ("t", model.clone()),
-            ("t", message("u", Some("m"), json!({"role":"user","timestamp":2000,"content":[{"type":"text","text":"find the bug"},image]}))),
-            ("t", message("a", Some("u"), pi_reply(3000))),
-            ("t", named.clone()),
-            ("t", compaction.clone()),
-            ("t", level.clone()),
-            ("fork", json!({"type":"model_change","id":"m","parentId":null,"provider":"cliproxyapi","modelId":"gpt-9"})),
-            ("fork", said()),
-            ("fork", message("a", Some("u"), pi_reply(3000))),
-            ("fork", message("b", Some("a"), pi_reply(6000))),
-            ("late", model),
-            ("late", said()),
-            ("late", message("a", Some("u"), pi_reply(3000))),
-            ("late", named),
-            ("late", compaction),
-            ("late", level),
-            ("late", message("b", Some("l"), pi_reply(6000))),
-            ("odd", message("x", None, json!({"role":"bashExecution","command":"ls"}))),
-        ];
-        for (seq, (thread, json)) in pi.iter().enumerate() {
-            conn.execute("INSERT INTO entries VALUES (?1, ?2, '', NULL, '', ?3)", params![thread, seq as i64, json.to_string()]).unwrap();
-        }
-        let killed = dir.join("killed");
-        std::fs::create_dir(&killed).unwrap();
-        for suffix in ["", "-wal", "-shm"] {
-            let name = format!("service.db{suffix}");
-            std::fs::copy(dir.join(&name), killed.join(&name)).unwrap();
-        }
-        drop(conn);
-        let db = killed.join("service.db");
-        assert!(from_pi(&db).unwrap());
-        settle(&db).unwrap();
-        assert!(!killed.join("service.db-wal").exists());
-
-        let mut told = vec![];
-        let migration = migrate(&db, |done, total| told.push((done, total))).unwrap().unwrap();
-        assert_eq!(told, [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)]);
-        assert_eq!((migration.threads, migration.entries, migration.kept), (4, 18, 11));
-        let dropped = [("model_change", 3), ("session_info", 2), ("thinking_level_change", 2)].map(|(what, n)| (what.to_owned(), n));
-        assert_eq!(migration.dropped, dropped.into());
-        assert_eq!(migration.locked, [("odd".to_owned(), vec!["entry x (message): a message of role \"bashExecution\"".to_owned()])]);
-        assert!(!from_pi(&db).unwrap());
-        assert_eq!(migrate(&db, |_, _| {}).unwrap(), None);
-        let left: Vec<_> = std::fs::read_dir(&killed).unwrap().map(|entry| entry.unwrap().file_name()).collect();
-        assert_eq!(left, ["service.db"]);
-
-        let s = Storage::open(&db).unwrap();
-        let t = by_id(&s, "t");
-        assert_eq!((t.name.as_deref(), t.model.as_deref(), t.effort.as_deref()), (Some("Bug hunt"), Some("claude-opus-5-5"), Some("high")));
-        assert_eq!((t.project_id.as_deref(), t.updated_at, t.pinned, t.locked), (Some("p"), 9, true, false));
-        assert_eq!((t.asks.len(), t.pinned_entries.as_slice(), t.entry_count), (1, &["a".to_owned()][..], 3));
-        assert_eq!(s.thread_tools("t").unwrap(), ["ask_user"]);
-        let entries = s.get_thread("t").unwrap().unwrap();
-        assert_eq!(
-            entries.iter().map(|e| (e.seq, e.id.as_str(), e.parent_id.as_deref(), e.at)).collect::<Vec<_>>(),
-            [(0, "u", None, 2000), (1, "a", Some("u"), 3000), (2, "c", Some("a"), 4000)]
-        );
-        let image = Block::Image { mime: "image/png".into(), blob: "ab".into() };
-        assert_eq!(entries[0].body, Body::User { content: vec![Block::text("find the bug"), image] });
-        assert_eq!(s.blob("ab").unwrap(), Some(("image/png".to_owned(), vec![1, 2, 3])));
-        assert_eq!(s.service_id().unwrap(), "the-id");
-        let spend = Spend { input: 8, output: 2, cached: 3, cost: 0.5 };
-        assert_eq!((t.spend, by_id(&s, "fork").spend), (Spend { input: 18, output: 22, cached: 3, cost: 2.5 }, spend));
-        let late = by_id(&s, "late");
-        assert_eq!((late.spend, late.entry_count), (spend, 4));
-        assert_eq!(late.forked_from, Some(ForkedFrom { thread_id: "t".into(), entry_id: "c".into() }));
-        assert_eq!(by_id(&s, "fork").model.as_deref(), Some("gpt-9"));
-        assert_eq!(by_id(&s, "fork").forked_from, Some(ForkedFrom { thread_id: "t".into(), entry_id: "a".into() }));
-        let usage = s.usage(0, 10_000, 10_000).unwrap();
-        let mut by: Vec<_> = usage.iter().map(|b| (b.provider.as_str(), b.model.as_str(), b.messages, b.cost)).collect();
-        by.sort_by_key(|by| by.0);
-        assert_eq!(by, [("anthropic", "claude-opus-5-5", 2, 2.5), ("cliproxyapi", "qwen3", 1, 9.0)]);
-        assert_eq!(s.search("bug", 10).unwrap().len(), 3);
-        assert!(by_id(&s, "odd").locked);
-        assert_eq!(s.get_thread("odd").unwrap().unwrap()[0].body, Body::Unknown);
-        s.append_entry("t", reply("r", "a", 4000, Stop::End, "and another", 1, 0.5), 10).unwrap();
-        assert_eq!(by_id(&s, "t").spend.cost, 3.0);
-    }
-
-    #[test]
-    #[ignore = "needs a snapshot of a real service.db: see testing.md"]
-    fn a_real_service_db_is_migrated() {
-        let old = std::env::var("DIRIGENT_MIGRATE").expect("DIRIGENT_MIGRATE: the path of a snapshot of a service.db");
-        let old = Path::new(&old);
-        let dir = tempfile::tempdir().unwrap();
-        let new = dir.path().join("service.db");
-        std::fs::copy(old, &new).unwrap();
-        settle(&new).unwrap();
-        let started = std::time::Instant::now();
-        let migration = migrate(&new, |_, _| {}).unwrap().expect("a db to migrate");
-        let size = |path: &Path| path.metadata().unwrap().len() >> 20;
-        println!("migrated in {:.1?}: {} MB to {} MB", started.elapsed(), size(old), size(&new));
-        println!("{} threads, {} entries: {} kept, dropped {:#?}", migration.threads, migration.entries, migration.kept, migration.dropped);
-        println!("locked: {:#?}", migration.locked);
-
-        let s = Storage::open(&new).unwrap();
-        s.conn.execute("ATTACH DATABASE ?1 AS old", [read_only_uri(old)]).unwrap();
-        let count = |sql: &str| s.conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
-        let counts = |sql: &str| -> BTreeMap<String, i64> {
-            let mut stmt = s.conn.prepare(sql).unwrap();
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
-        };
-        let strings = |sql: &str| -> Vec<String> {
-            let mut stmt = s.conn.prepare(sql).unwrap();
-            stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
-        };
-
-        assert_eq!(strings("SELECT id FROM main.threads ORDER BY id"), strings("SELECT id FROM old.threads ORDER BY id"));
-        assert_eq!(migration.threads as i64, count("SELECT COUNT(*) FROM old.threads"));
-        assert_eq!(migration.entries as i64, count("SELECT COUNT(*) FROM old.entries"), "entries of threads that are gone?");
-        assert_eq!(migration.kept as i64, count("SELECT COUNT(*) FROM main.entries"));
-        assert_eq!(migration.kept + migration.dropped.values().sum::<usize>(), migration.entries);
-        let before = counts(
-            "SELECT CASE kind WHEN 'message' THEN 'message:' || COALESCE(json_extract(json, '$.message.role'), '?')
-                              WHEN 'custom' THEN 'custom:' || COALESCE(json_extract(json, '$.customType'), '?')
-                              WHEN 'custom_message' THEN 'custom_message:' || COALESCE(json_extract(json, '$.customType'), '?')
-                              ELSE kind END, COUNT(*)
-             FROM old.entries GROUP BY 1",
-        );
-        let after = counts(
-            "SELECT CASE kind WHEN 'notice' THEN 'notice:' || json_extract(json, '$.kind') ELSE kind END, COUNT(*) FROM main.entries GROUP BY 1",
-        );
-        println!("pi's entries: {before:#?}\nours: {after:#?}");
-        let n = |counts: &BTreeMap<String, i64>, kind: &str| counts.get(kind).copied().unwrap_or(0);
-        let dropped = |what: &str| migration.dropped.get(what).copied().unwrap_or(0) as i64;
-        let unread = n(&after, "unknown");
-        assert_eq!(unread, migration.locked.iter().map(|(_, why)| why.len() as i64).sum::<i64>());
-        for (ours, pis) in [
-            ("user", "message:user"),
-            ("assistant", "message:assistant"),
-            ("tool_result", "message:toolResult"),
-            ("notice:job", "custom_message:dirigent:job"),
-            ("notice:child", "custom_message:dirigent:child"),
-            ("notice:answer", "custom_message:dirigent:answer"),
-            ("compaction", "compaction"),
-            ("compaction_failed", "custom:dirigent:compaction_failed"),
-        ] {
-            let (ours, pis) = (n(&after, ours), n(&before, pis));
-            assert!(ours <= pis && pis - ours <= unread, "{ours} of {pis}");
-        }
-        assert_eq!(n(&after, "store") + dropped("custom:codemode-store"), n(&before, "custom:codemode-store"));
-        for what in migration.dropped.keys().filter(|what| *what != "custom:codemode-store") {
-            assert_eq!(dropped(what), n(&before, what), "{what}");
-        }
-        assert_eq!(
-            strings("SELECT id FROM main.threads WHERE locked ORDER BY id"),
-            strings("SELECT DISTINCT thread_id FROM main.entries WHERE kind = 'unknown' ORDER BY 1")
-        );
-
-        let mut compacted: HashMap<String, Vec<(String, Usage)>> = HashMap::new();
-        for thread in s.list_threads().unwrap() {
-            let entries = s.get_thread(&thread.id).unwrap().unwrap();
-            let copied = thread.forked_from.and_then(|from| entries.iter().position(|e| e.id == from.entry_id)).map_or(0, |at| at + 1);
-            for e in &entries[copied..] {
-                if let Body::Compaction { model, usage, .. } = &e.body
-                    && *usage != Usage::default()
-                {
-                    compacted.entry(thread.id.clone()).or_default().push((model.clone(), *usage));
-                }
-            }
-        }
-        type Sums = (i64, i64, i64, i64, i64, f64);
-        let by_model = |schema: &str| -> BTreeMap<String, Sums> {
-            let sql = format!(
-                "SELECT model, COUNT(*), SUM(input), SUM(output), SUM(cache_read), SUM(cache_write), SUM(cost) FROM {schema}.usage GROUP BY 1"
-            );
-            let mut stmt = s.conn.prepare(&sql).unwrap();
-            let sums = |r: &rusqlite::Row| Ok((r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)));
-            stmt.query_map([], sums).unwrap().map(Result::unwrap).collect()
-        };
-        let mut want = by_model("old");
-        for (model, usage) in compacted.values().flatten() {
-            let sums = want.entry(model.clone()).or_default();
-            *sums = (
-                sums.0 + 1,
-                sums.1 + usage.input as i64,
-                sums.2 + usage.output as i64,
-                sums.3 + usage.cache_read as i64,
-                sums.4 + usage.cache_write as i64,
-                sums.5 + usage.cost.total(),
-            );
-        }
-        let ours = by_model("main");
-        assert_eq!(ours.keys().collect::<Vec<_>>(), want.keys().collect::<Vec<_>>());
-        for (model, ours) in &ours {
-            let want = want[model];
-            assert_eq!((ours.0, ours.1, ours.2, ours.3, ours.4), (want.0, want.1, want.2, want.3, want.4), "{model}");
-            assert!((ours.5 - want.5).abs() < 1e-6, "{model} cost ${}, wanted ${}", ours.5, want.5);
-        }
-        println!("usage: {ours:#?}\nunder: {:?}", counts("SELECT provider, COUNT(*) FROM main.usage GROUP BY 1"));
-        let spends = |schema: &str| -> Vec<(String, i64, i64, i64, f64)> {
-            let sql = format!("SELECT id, spend_input, spend_output, spend_cached, spend_cost FROM {schema}.threads ORDER BY id");
-            let mut stmt = s.conn.prepare(&sql).unwrap();
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap().map(Result::unwrap).collect()
-        };
-        for (ours, mut pis) in spends("main").into_iter().zip(spends("old")) {
-            for (_, usage) in compacted.get(&pis.0).into_iter().flatten() {
-                pis = (
-                    pis.0,
-                    pis.1 + usage.prompt() as i64,
-                    pis.2 + usage.output as i64,
-                    pis.3 + usage.cache_read as i64,
-                    pis.4 + usage.cost.total(),
-                );
-            }
-            assert_eq!((&ours.0, ours.1, ours.2, ours.3), (&pis.0, pis.1, pis.2, pis.3));
-            assert!((ours.4 - pis.4).abs() < 1e-6, "thread {} spent ${}, wanted ${}", ours.0, ours.4, pis.4);
-        }
-        let compactions: Vec<&Usage> = compacted.values().flatten().map(|(_, usage)| usage).collect();
-        println!(
-            "spend: ${:.2}, ${:.2} of it by {} compactions the old db did not count",
-            s.list_threads().unwrap().iter().map(|t| t.spend.cost).sum::<f64>(),
-            compactions.iter().map(|usage| usage.cost.total()).sum::<f64>(),
-            compactions.len()
-        );
-
-        for table in ["projects", "blobs", "asks", "message_pins", "meta", "api_keys", "proxy_samples"] {
-            let rows = |schema: &str| count(&format!("SELECT COUNT(*) FROM {schema}.{table}"));
-            assert_eq!(rows("main"), rows("old"), "{table}");
-        }
-        let same = count("SELECT COUNT(*) FROM main.blobs b JOIN old.blobs o ON o.id = b.id AND o.mime = b.mime AND o.bytes = b.bytes");
-        assert_eq!(same, count("SELECT COUNT(*) FROM old.blobs"));
-        let id = "SELECT value FROM {}.meta WHERE key = 'service_id'";
-        assert_eq!(strings(&id.replace("{}", "main")), strings(&id.replace("{}", "old")));
-        let rows = "SELECT id || ' ' || COALESCE(name, '-') || ' ' || COALESCE({effort}, '-') || ' ' || COALESCE({model}, '-') || ' ' || updated_at
-                           || ' ' || COALESCE(parent_id, '-') || ' ' || COALESCE(project_id, '-') || ' ' || cwd FROM {db}.threads ORDER BY id";
-        let ours = rows.replace("{effort}", "effort").replace("{model}", "model").replace("{db}", "main");
-        let pis =
-            rows.replace("{effort}", "thinking_level").replace("{model}", "substr(model, instr(model, '/') + 1)").replace("{db}", "old");
-        assert_eq!(strings(&ours), strings(&pis));
-
-        let dangling = [
-            "SELECT COUNT(*) FROM main.message_pins p
-              WHERE NOT EXISTS (SELECT 1 FROM main.entries e WHERE e.thread_id = p.thread_id AND e.id = p.entry_id)",
-            "SELECT COUNT(*) FROM main.threads t
-              WHERE forked_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.entries e WHERE e.thread_id = t.id AND e.id = t.forked_at)",
-            "SELECT COUNT(*) FROM main.entries e
-              WHERE parent_id IS NOT NULL
-                AND NOT EXISTS (SELECT 1 FROM main.entries p WHERE p.thread_id = e.thread_id AND p.id = e.parent_id AND p.seq < e.seq)",
-            "SELECT COUNT(*) FROM main.entries e, json_each(json_extract(e.json, '$.content')) b
-              WHERE e.kind IN ('user', 'tool_result') AND json_extract(b.value, '$.type') = 'image'
-                AND NOT EXISTS (SELECT 1 FROM main.blobs WHERE id = json_extract(b.value, '$.blob'))",
-            "SELECT COUNT(*) FROM main.entries e, json_each(json_extract(e.json, '$.content')) b, json_each(json_extract(b.value, '$.blobs')) l
-              WHERE e.kind = 'assistant' AND NOT EXISTS (SELECT 1 FROM main.blobs WHERE id = l.value)",
-        ];
-        for sql in dangling {
-            assert_eq!(count(sql), 0, "{sql}");
-        }
-
-        let mut edited = 0;
-        for thread in s.list_threads().unwrap() {
-            let ours = s.get_thread(&thread.id).unwrap().unwrap();
-            let pis: Vec<Value> = strings(&format!("SELECT json FROM old.entries WHERE thread_id = '{}' ORDER BY seq", thread.id))
-                .iter()
-                .map(|json| serde_json::from_str(json).unwrap())
-                .collect();
-            let by_id: HashMap<&str, &Value> = pis.iter().filter_map(|e| Some((e["id"].as_str()?, e))).collect();
-            let mut pis_branch = vec![];
-            let mut next = pis.last();
-            while let Some(e) = next {
-                pis_branch.push(e);
-                next = e["parentId"].as_str().and_then(|parent| by_id.get(parent).copied());
-            }
-            pis_branch.reverse();
-            edited += usize::from(pis_branch.len() < pis.len());
-            let was: Vec<&str> = pis_branch
-                .iter()
-                .filter(|e| match e["type"].as_str() {
-                    Some("message") => e["message"]["role"] != "system",
-                    kind => matches!(kind, Some("custom_message" | "branch_summary" | "compaction")),
-                })
-                .filter_map(|e| e["id"].as_str())
-                .collect();
-            let branch = current_branch(&ours);
-            let is: Vec<&str> = branch
-                .iter()
-                .filter(|e| !matches!(e.body, Body::Store { .. } | Body::CompactionFailed { .. }))
-                .map(|e| e.id.as_str())
-                .collect();
-            if !thread.locked {
-                assert_eq!(is, was, "thread {}", thread.id);
-            }
-            let calls: std::collections::HashSet<&str> = ours
-                .iter()
-                .flat_map(|e| match &e.body {
-                    Body::Assistant(a) => a.content.as_slice(),
-                    _ => &[],
-                })
-                .filter_map(|b| match b {
-                    Block::ToolCall { id, .. } => Some(id.as_str()),
-                    _ => None,
-                })
-                .collect();
-            for e in &ours {
-                match &e.body {
-                    Body::ToolResult(r) => {
-                        assert!(calls.contains(r.call_id.as_str()), "thread {}: result {} answers no call", thread.id, e.id)
-                    }
-                    Body::Compaction { first_kept, .. } => {
-                        assert!(ours.iter().any(|o| &o.id == first_kept), "thread {}: compaction {} keeps from nowhere", thread.id, e.id)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        println!("{edited} threads with an edited message");
-
-        s.conn
-            .execute_batch(
-                "CREATE VIRTUAL TABLE temp.said USING fts5 (thread_id UNINDEXED, text);
-                 INSERT INTO temp.said
-                 SELECT e.thread_id, CASE json_type(e.json, '$.message.content')
-                     WHEN 'array' THEN (SELECT group_concat(json_extract(b.value, '$.text'), char(10))
-                                        FROM json_each(json_extract(e.json, '$.message.content')) b WHERE json_extract(b.value, '$.type') = 'text')
-                     ELSE json_extract(e.json, '$.message.content') END
-                 FROM old.entries e WHERE e.kind = 'message' AND json_extract(e.json, '$.message.role') IN ('user', 'assistant');",
-            )
-            .unwrap();
-        let words: std::collections::BTreeSet<String> = strings("SELECT name FROM old.threads WHERE name IS NOT NULL")
-            .iter()
-            .flat_map(|name| name.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).collect::<Vec<_>>())
-            .filter(|word| word.chars().count() > 2)
-            .collect();
-        let matching = |table: &str, word: &str| -> Vec<String> {
-            let sql = format!("SELECT DISTINCT thread_id FROM {table} WHERE {} MATCH ?1 ORDER BY 1", table.split('.').next_back().unwrap());
-            let mut stmt = s.conn.prepare(&sql).unwrap();
-            stmt.query_map([format!("\"{word}\"*")], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
-        };
-        let (mut more, mut fewer) = (0, 0);
-        for word in &words {
-            let (ours, said, pis) = (matching("main.entries_fts", word), matching("temp.said", word), matching("old.entries_fts", word));
-            assert_eq!(ours, said, "{word}");
-            let missed: Vec<&String> = ours.iter().filter(|thread| !pis.contains(thread)).collect();
-            for thread in &missed {
-                let escaped = ["n", "t", "r"].iter().any(|e| matching("old.entries_fts", &format!("{e}{word}")).contains(thread));
-                assert!(escaped, "{word}: the old index doesn't find thread {thread}");
-            }
-            more += usize::from(!missed.is_empty());
-            fewer += usize::from(pis.iter().any(|thread| !ours.contains(thread)));
-            let hits = s.search(word, 100).unwrap();
-            assert!(hits.iter().all(|hit| ours.contains(&hit.thread_id)) && hits.is_empty() == ours.is_empty(), "{word}");
-        }
-        println!(
-            "search: {} words. Next to the old index, it finds threads the old one missed for {more} of them (a word after a line break), \
-             and fewer threads for {fewer} (words that were not said: thinking, tool calls)",
-            words.len()
-        );
     }
 }

@@ -1,8 +1,10 @@
 ## 0.0.11 (draft)
 
 - Lowercase `agents.md` and `skill.md` are read too ([#199])
+- The migration from pi is gone: start 0.0.10 once on an install of 0.0.9 or older before updating it ([#200])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
+[#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
 
 ## 0.0.10
 
