@@ -63,7 +63,7 @@
       cargoDeps = rustPlatform.fetchCargoVendor {
         name = "dirigent";
         src = rustSrc;
-        hash = "sha256-VYxhEPlf7rqnF/Z7PVAlRGW1oAIlKFfa0EIPGPZ4y4s=";
+        hash = "sha256-RzcdtnU61Xe4/rUTptgodublkWV9R4NAUuKdZgIbXTg=";
       };
       crate =
         name: args:
@@ -139,7 +139,10 @@
 
         dirigent_desktop = withTools [
           (crate "dirigent_desktop" {
-            nativeBuildInputs = [ pkgs.pkg-config ];
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.python3 # stylo's build script runs it (blitz-dom)
+            ];
             buildInputs = gpuiLibs;
             env.DIRIGENT_LILEX_DIR = lilexDir;
             # gpui dlopens these. After fixup, whose rpath shrinking would drop them again.
@@ -240,6 +243,7 @@
             pkgs.oxfmt
             pkgs.pkg-config
             pkgs.cmake
+            pkgs.python3 # stylo's build script runs it (blitz-dom)
             pkgs.sccache
             cuaDriver
             pkgs.xvfb
@@ -277,6 +281,7 @@
           packages = [
             (rustToolchain.override { targets = [ "x86_64-pc-windows-gnu" ]; })
             pkgs.pkgsCross.mingwW64.stdenv.cc
+            pkgs.python3 # stylo's build script runs it (blitz-dom)
           ];
           env.DIRIGENT_LILEX_DIR = lilexDir;
         };

@@ -1,5 +1,6 @@
 use crate::config::Dirs;
 use crate::tool::ToolSpec;
+use dirigent_protocol::visuals::{FENCE, WIDTH};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -14,6 +15,29 @@ inline in the reply. png, jpg, gif, webp and bmp work; a relative path is taken 
 
 Images the user attaches to a message are also saved as files on this machine: the `[image-N]: /path` lines at the end of the \
 message give the file of each `[image-N]`, for when you need the image itself (to upload, edit or attach it).";
+
+fn visuals() -> String {
+    format!(
+        "## Showing visuals
+When a picture says it better than text and markdown can (a chart, a diagram, a layout, a timeline), write it as HTML and CSS in a \
+fenced code block with the info string `{FENCE}`:
+
+```{FENCE}
+<div style=\"display: flex; gap: 8px\">…</div>
+```
+
+It is drawn inline in the reply, as a picture {WIDTH} CSS px wide and as tall as its content: the page has no height of its own, so \
+`100vh` is zero.
+
+- HTML and CSS only (flexbox, grid, tables, inline SVG): no JavaScript, no animation or interaction, and nothing loaded from \
+elsewhere (images, fonts, stylesheets).
+- The background is transparent over the app's theme, dark or light, and text has the theme's colour and font. Take colours from \
+the theme's variables: `--fg`, `--muted`, `--border`, `--surface`, `--accent`, `--info`, `--success`, `--warning`, `--danger`.
+- In an SVG, style elements with their attributes (`fill=\"var(--accent)\"`, `stroke=\"currentColor\"`) rather than CSS: the page's \
+rules don't reach an SVG, and the theme's variables only work in its attributes. Set no `font-family` there: text in a font the \
+machine lacks is not drawn."
+    )
+}
 
 const CWD: &str = "Every tool call starts in this directory: bash commands run in it, and relative paths are taken from it. So no \
 command needs a `cd` to it first; `cd` is for running something in another directory.";
@@ -83,7 +107,7 @@ impl Prompt {
                 ),
             );
         }
-        section("addendum", IMAGES);
+        section("addendum", &format!("{IMAGES}\n\n{}", visuals()));
         if !self.instructions.is_empty() {
             let files: Vec<String> = self
                 .instructions
@@ -255,6 +279,7 @@ mod tests {
             repo.join("agents.md").display()
         )));
         assert!(system.contains("<description>Use when asked to ship &lt;changes&gt;</description>"));
+        assert!(system.contains("the info string `visual`:\n\n```visual\n") && system.contains("720 CSS px wide"));
         assert!(system.ends_with(&format!("<cwd>\n{}\n\n{CWD}\n</cwd>", cwd.display())));
         assert_eq!(
             system,

@@ -41,6 +41,7 @@ mod toasts;
 mod update;
 mod usage;
 mod view;
+mod visual;
 mod working;
 
 use app::{Dirigent, Dismiss, FocusComposer, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
