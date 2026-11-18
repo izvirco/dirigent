@@ -444,6 +444,7 @@ pub struct Dirigent {
     pub leaderboard: leaderboard::State,
     pub forge: account::State,
     ticks: u64,
+    pub clock: i64,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub presets: Vec<Preset>,
@@ -613,6 +614,7 @@ impl Dirigent {
             leaderboard,
             forge,
             ticks: 0,
+            clock: this_second_ms(),
             model,
             effort,
             presets,
@@ -1618,8 +1620,14 @@ impl Dirigent {
     fn tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(1)).await;
+                cx.background_executor().timer(until_next_second()).await;
                 let alive = this.update(cx, |this, cx| {
+                    let second = this_second_ms();
+                    let woke_early = second == this.clock;
+                    if woke_early {
+                        return;
+                    }
+                    this.clock = second;
                     this.ticks += 1;
                     if this.ticks % USAGE_REFRESH_SECS == 0 && this.modal == Some(Modal::Usage) {
                         match this.usage.tab {
@@ -3869,6 +3877,14 @@ impl Focusable for Dirigent {
 
 fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+fn this_second_ms() -> i64 {
+    now_ms() / 1000 * 1000
+}
+
+fn until_next_second() -> Duration {
+    Duration::from_millis((1000 - now_ms() % 1000) as u64)
 }
 
 const DRAFT_KEY: (&str, &str) = ("", "");

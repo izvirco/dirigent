@@ -4,10 +4,12 @@
 - The migration from pi is gone: start 0.0.10 once on an install of 0.0.9 or older before updating it ([#200])
 - `agent.toml` no longer holds the proxy's key, so machines that all run 0.0.11 can share it: the proxy moved to `proxy.json` in the data dir ([#201])
 - If you published an `agent.toml` of 0.0.10, change your proxy's API key: it was in that file ([#201])
+- Running timers all change at the same moment, once a second ([#205])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
 [#201]: https://forge.sebba.dev/izvir/dirigent/changes/201
+[#205]: https://forge.sebba.dev/izvir/dirigent/changes/205
 
 ## 0.0.10
 
