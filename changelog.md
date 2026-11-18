@@ -5,10 +5,14 @@
 - `agent.toml` no longer holds the proxy's key, so machines that all run 0.0.11 can share it: the proxy moved to `proxy.json` in the data dir ([#201])
 - If you published an `agent.toml` of 0.0.10, change your proxy's API key: it was in that file ([#201])
 - Running timers all change at the same moment, once a second ([#205])
+- Remove a project, or archive, delete, rename, pin and snooze a thread, while its host is offline: the host gets the change when it is back ([#203])
+- The Projects list says which hosts are offline ([#203])
+- Fixed: editing a host's address or key dropped its drafts ([#203])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
 [#201]: https://forge.sebba.dev/izvir/dirigent/changes/201
+[#203]: https://forge.sebba.dev/izvir/dirigent/changes/203
 [#205]: https://forge.sebba.dev/izvir/dirigent/changes/205
 
 ## 0.0.10

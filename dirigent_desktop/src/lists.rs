@@ -203,7 +203,7 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
     let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
     // MUST KILL: rearchitect: hosts.dedup() relies on Group::members coming sorted by host; collect into a BTreeSet
     hosts.dedup();
-    let hosts = hosts.join(", ");
+    let hosts = hosts.into_iter().map(|h| this.host_label(h)).collect::<Vec<_>>().join(", ");
     let k = key.clone();
     let places = div()
         .id(SharedString::from(format!("exp/{key}")))
