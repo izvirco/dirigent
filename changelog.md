@@ -19,6 +19,8 @@
 - On a Wayland desktop, computer use operates Wayland apps, where it reached those under XWayland alone; on sway it types with `wtype` ([#214])
 - On a sway desktop with an X11 app open, computer use can't aim at windows, only at the screen's pixels: `CUA_DRIVER_RS_ENABLE_WAYLAND=0` in Dirigent's environment goes back to X11 apps alone ([#214])
 - The update button shows as soon as a new version is found, with the download's progress in its menu ([#209])
+- Every release has `dirigent_service` in it: `install.sh --headless` makes a Linux machine or a Mac a remote host that starts by itself, and the Windows installer can run the service at sign-in ([#213])
+- Update a remote host from the update button: at once, or when its agents are done ([#213])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
@@ -34,6 +36,7 @@
 [#212]: https://forge.sebba.dev/izvir/dirigent/changes/212
 [#214]: https://forge.sebba.dev/izvir/dirigent/changes/214
 [#209]: https://forge.sebba.dev/izvir/dirigent/changes/209
+[#213]: https://forge.sebba.dev/izvir/dirigent/changes/213
 
 ## 0.0.10
 

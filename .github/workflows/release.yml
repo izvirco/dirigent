@@ -47,16 +47,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build the desktop and the command line
+      - name: Build the desktop, the command line and the service
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli -p dirigent_service
 
       - name: Stage the install
         shell: bash
         run: |
           mkdir -p dist/licenses
-          cp target/release/dirigent_desktop.exe target/release/dirigent.exe dist/
+          cp target/release/dirigent_desktop.exe target/release/dirigent.exe target/release/dirigent_service.exe dist/
           packaging/cua-driver.sh dist
           mv dist/cua-driver-LICENSE.md dist/licenses/
           # Lilex (embedded in dirigent_desktop.exe by dirigent_desktop/build.rs) is under the OFL,
@@ -109,17 +109,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libfontconfig-dev libxcb1-dev libxkbcommon-x11-dev libwayland-dev
 
-      - name: Build the desktop and the command line
+      - name: Build the desktop, the command line and the service
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli -p dirigent_service
 
       - name: Pack the tarball
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
-          cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
+          cp target/release/dirigent_desktop target/release/dirigent target/release/dirigent_service dist/dirigent/
           packaging/cua-driver.sh dist/dirigent
           mv dist/dirigent/cua-driver-LICENSE.md dist/dirigent/licenses/
           cp packaging/linux/install.sh dist/dirigent/
@@ -166,10 +166,10 @@ jobs:
       - name: Metal toolchain
         run: xcrun -sdk macosx metal --version || xcodebuild -downloadComponent MetalToolchain
 
-      - name: Build the desktop and the command line
+      - name: Build the desktop, the command line and the service
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
-        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
+        run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli -p dirigent_service
 
       # Without a developer account nothing is signed for real: Apple silicon runs any binary
       # with an ad-hoc signature (the linker makes one; this makes sure), and Gatekeeper only
@@ -179,9 +179,9 @@ jobs:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
-          cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
-          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop
-          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop
+          cp target/release/dirigent_desktop target/release/dirigent target/release/dirigent_service dist/dirigent/
+          codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/dirigent_service
+          codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop dist/dirigent/dirigent_service
           cp packaging/linux/install.sh dist/dirigent/
           case "$VERSION" in *-nightly.*) touch dist/dirigent/nightly ;; esac
           curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt

@@ -36,7 +36,6 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4", "v7"] }
 ureq.workspace = true
 semver.workspace = true
-minisign-verify = "0.3"
 blitz-dom = { version = "=0.3.0-beta.4", default-features = false, features = [
   "svg",
   "system-fonts",
