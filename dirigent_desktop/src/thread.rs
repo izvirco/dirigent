@@ -1266,7 +1266,7 @@ fn stats_card(t: &OpenThread) -> AnyElement {
 pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
     let live = live_work(this);
-    let now = now_ms();
+    let now = this.clock;
     let fonts = this.fonts.clone();
     let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Thread, ix);
@@ -1310,15 +1310,11 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     div().w_full().flex().flex_col().items_center().px_6().pb(overscroll).child(col).into_any()
 }
 
-fn now_ms() -> i64 {
-    std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
-}
-
-fn work_started(this: &Dirigent, t: &OpenThread, now: i64) -> i64 {
+fn work_started(this: &Dirigent, t: &OpenThread) -> i64 {
     if let Some(prompted) = t.timeline.prompted_at() {
         return prompted;
     }
-    let Some(began) = this.summary(&t.host, &t.id).and_then(|thread| thread.running_since) else { return now };
+    let Some(began) = this.summary(&t.host, &t.id).and_then(|thread| thread.running_since) else { return this.clock };
     let cut = t.timeline.items.iter().rev().find_map(|i| if let Item::Work(w) = i { w.ended } else { None });
     began.max(cut.unwrap_or(0))
 }
@@ -1334,7 +1330,7 @@ fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
             _ => (TAIL, Work::default()),
         },
         None => {
-            let started = if t.streaming.echo.is_empty() { work_started(this, t, now_ms()) } else { now_ms() };
+            let started = if t.streaming.echo.is_empty() { work_started(this, t) } else { this.clock };
             (TAIL, Work { model: this.model.clone(), effort: this.effort.clone(), started, ..Default::default() })
         }
     };
@@ -1814,7 +1810,7 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
             );
             div().py_0p5().text_color(rgba(theme::t().fg)).child(body).into_any()
         }
-        Step::Tool(call) => render_tool(call, (key, six), t, blobs, now_ms(), keys, cx),
+        Step::Tool(call) => render_tool(call, (key, six), t, blobs, this.clock, keys, cx),
         Step::Steer { text, queued, .. } => steer_row((key, six), text, *queued, t, keys, cx).into_any(),
         Step::Child { thread_id, text } => child_line(format!("log-child/{key}/{six}"), &t.host, thread_id, text, cx),
         Step::CacheMiss(text) => div()

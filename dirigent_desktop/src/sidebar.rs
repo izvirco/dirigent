@@ -112,7 +112,6 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 
 fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (groups, _) = this.groups();
-    let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
     let inbox = this.inbox_threads();
     let working = this.busy_threads();
 
@@ -204,9 +203,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         cx,
     );
     let both = !this.collapsed.contains(&Section::Inbox) && !this.collapsed.contains(&Section::Workpool) && n_inbox > 0 && n_working > 0;
-    let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, now, this, cx).track_scroll(&this.inbox_scroll);
-    let working_cards =
-        cards("workpool-cards", Section::Workpool, working, false, now, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
+    let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, this, cx).track_scroll(&this.inbox_scroll);
+    let working_cards = cards("workpool-cards", Section::Workpool, working, false, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
 
     let hidden = this.sidebar_hidden;
     let panel_icon = if hidden { "panel-left-open" } else { "panel-left-close" };
@@ -354,7 +352,6 @@ fn cards(
     section: Section,
     rows: Vec<(&str, &ThreadSummary)>,
     below: bool,
-    now: i64,
     this: &Dirigent,
     cx: &mut Context<Dirigent>,
 ) -> Stateful<Div> {
@@ -365,7 +362,7 @@ fn cards(
         .into_iter()
         .map(|(host, t)| {
             let elapsed = match (t.running_since, t.last_run_ms) {
-                (Some(since), _) => elapsed(now - since),
+                (Some(since), _) => elapsed(this.clock - since),
                 (None, Some(ms)) => duration(ms),
                 (None, None) => String::new(),
             };

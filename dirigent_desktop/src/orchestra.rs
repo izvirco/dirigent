@@ -76,36 +76,28 @@ impl<'a> Family<'a, '_> {
 pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let open = this.open()?;
     let (host, id) = (open.host.clone(), open.id.clone());
-    let (host, id, now) = (host.as_str(), id.as_str(), now_ms());
+    let (host, id) = (host.as_str(), id.as_str());
     let nodes = this.lineage(host, id);
     let Some(Line::Thread(root)) = nodes.first().map(|n| &n.line) else { return None };
     let total = this.host(host).map(|h| spend(&h.threads, root)).unwrap_or_default();
     let rows: Vec<AnyElement> = nodes
         .iter()
         .map(|n| match n.line {
-            Line::Thread(t) => thread_row(host, t, n.depth, t.id == id, now, this, cx),
+            Line::Thread(t) => thread_row(host, t, n.depth, t.id == id, this, cx),
             Line::Archived { parent, count, open } => fold_row(parent, count, open, n.depth, cx),
         })
         .collect();
     Some(div().flex().flex_col().gap(u(2.)).pt_2().children(rows).when(total != Spend::default(), |d| d.child(spend_line(total))))
 }
 
-fn thread_row(
-    host: &str,
-    t: &ThreadSummary,
-    depth: usize,
-    selected: bool,
-    now: i64,
-    this: &Dirigent,
-    cx: &mut Context<Dirigent>,
-) -> AnyElement {
+fn thread_row(host: &str, t: &ThreadSummary, depth: usize, selected: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let (h, tid, archived) = (host.to_owned(), t.id.clone(), t.archived);
     let status = this.status(host, t);
     let active = status.busy() || status == Status::Asking;
     let color = if active || selected { this.title_color(host, t) } else { theme::t().fg_1 };
     let model = t.model.as_deref().map(theme::short_model).unwrap_or("").to_owned();
     let time = match (t.running_since, t.last_run_ms) {
-        (Some(since), _) => elapsed(now - since),
+        (Some(since), _) => elapsed(this.clock - since),
         (None, Some(ms)) => duration(ms),
         (None, None) => String::new(),
     };
@@ -219,10 +211,6 @@ fn tree_row(
 
 fn small(text: impl Into<SharedString>) -> Div {
     div().flex_shrink_0().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(text.into())
-}
-
-fn now_ms() -> i64 {
-    std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 #[cfg(test)]
