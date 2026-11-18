@@ -117,9 +117,18 @@ machine without one that starts (`cua-driver --version`) has no computer use, an
 why. On macOS that is the user's own install
 (`/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"`): its `CuaDriver.app` holds the permissions.
 Untested by us, like the rest of the macOS build. Windows is untested too: the driver is what its release ships.
-Its telemetry, update check and on-screen cursor are off, and it keeps its state under `<data dir>/screens/`,
+Its telemetry and update check are off, and it keeps its state under `<data dir>/screens/`,
 which a service wipes as it starts. On Linux it drives X11 windows (and XWayland ones in a Wayland session); it
 needs `libX11`, `libXi` and `libxkbcommon`, which a desktop has.
+
+The driver draws a cursor of its own on the screen, over the window it acts on, and leaves the user's pointer
+where it is. On the desktop it shows unless Settings › Agent tools turns it off (`computer_cursor` in
+`config.toml`, an option in a prompt's `tools`); on a private screen it never does (`--no-overlay`): the thread's
+panel draws its own there. The switch is read when a screen opens, so a desktop that is open keeps what it had.
+A click waits for the cursor to get there, about a second. On an X11 desktop without a compositor the cursor
+covers the window, and the pictures the agent and the panel get of it are black where the cursor rests. In a
+Wayland session the driver draws none (`WAYLAND_DISPLAY` set; seen on sway): the desktop is as with the switch
+off. On macOS `mcp` is a client of the user's own driver, whose settings decide, not the switch.
 
 `Xvfb` makes a thread's private screen: an X display nobody sees but in the thread. Linux only. The nix packages
 ship it next to the binaries; the tarball doesn't, and takes it from PATH (`xvfb` on Debian and Ubuntu,

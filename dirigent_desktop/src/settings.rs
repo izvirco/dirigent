@@ -401,6 +401,7 @@ pub(crate) fn switch(
 fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let c = &this.config.tools;
     let bash_background = switch("tool-bash-background", c.bash_background, cx, |this, cx| this.toggle_tool("bash_background", cx));
+    let computer_cursor = switch("tool-computer-cursor", c.computer_cursor, cx, |this, cx| this.toggle_tool("computer_cursor", cx));
     section(
         "Agent tools",
         theme::stack()
@@ -409,6 +410,7 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(row("ask_user", switch("tool-ask-user", c.ask_user, cx, |this, cx| this.toggle_tool("ask_user", cx))))
             .child(row("dirigent", switch("tool-dirigent", c.dirigent, cx, |this, cx| this.toggle_tool("dirigent", cx))))
             .child(row("computer", switch("tool-computer", c.computer, cx, |this, cx| this.toggle_tool("computer", cx))))
+            .when(c.computer, |d| d.child(sub_row("Show the agent's cursor on your desktop, over the window it works in", computer_cursor)))
             .child(row("codemode", switch("tool-codemode", c.codemode, cx, |this, cx| this.toggle_tool("codemode", cx)))),
     )
 }
