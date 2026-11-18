@@ -247,7 +247,21 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 }
 
 fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
-    let ready = this.updater.ready.as_ref()?;
+    let Some(ready) = this.updater.ready.as_ref() else {
+        let download = this.updater.downloading.as_ref()?;
+        let menu = (this.menu == Some(Menu::Update)).then(|| {
+            let mut rows = vec![menu::header(format!("Downloading Dirigent {}", download.version))];
+            if let Some(t) = &download.transfer {
+                let total = t.total.map(|total| format!("/{}", total >> 20)).unwrap_or_default();
+                rows.push(menu::header(format!("{}{total} MiB, {:.1} MiB/s", t.received >> 20, t.per_second / f64::from(1 << 20))));
+            }
+            menu::popup(Side::Above, rows, cx)
+        });
+        let button = theme::tinted_icon_button("update", "circle-arrow-down", theme::t().accent_ink, cx, |this, cx| {
+            this.toggle_menu(Menu::Update, cx)
+        });
+        return Some(button.children(menu).into_any_element());
+    };
     let armed = this.updater.when_idle;
     let menu = (this.menu == Some(Menu::Update)).then(|| {
         let busy = this.local_busy();

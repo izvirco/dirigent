@@ -1,9 +1,9 @@
-use crate::app::Dirigent;
+use crate::app::{Dirigent, Menu};
 use anyhow::{Context as _, Result, bail};
 use dirigent_protocol::release::{self, Release};
 use gpui::Context;
 use semver::Version;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -19,9 +19,26 @@ pub struct Ready {
     pub installer: PathBuf,
 }
 
+pub struct Download {
+    pub version: String,
+    pub transfer: Option<Transfer>,
+}
+
+pub struct Transfer {
+    pub received: u64,
+    pub total: Option<u64>,
+    pub per_second: f64,
+}
+
+enum Report {
+    Progress(Option<Download>),
+    Ready(Ready),
+}
+
 #[derive(Default)]
 pub struct State {
     pub ready: Option<Ready>,
+    pub downloading: Option<Download>,
     pub when_idle: bool,
     idle_since: Option<Instant>,
 }
@@ -39,29 +56,45 @@ pub fn start(cx: &mut Context<Dirigent>) {
     std::thread::spawn(move || {
         let mut offered: Option<String> = None;
         let mut failing = false;
+        let progress = |download| {
+            let _ = tx.unbounded_send(Report::Progress(Some(download)));
+        };
         loop {
-            match check(&endpoint, offered.as_deref()) {
+            match check(&endpoint, offered.as_deref(), progress) {
                 Ok(ready) => {
                     failing = false;
                     if let Some(ready) = ready {
                         offered = Some(ready.version.clone());
-                        if tx.unbounded_send(ready).is_err() {
+                        if tx.unbounded_send(Report::Ready(ready)).is_err() {
                             return;
                         }
                     }
                 }
-                Err(e) if !std::mem::replace(&mut failing, true) => warn!("update check: {e:#}"),
-                Err(_) => {}
+                Err(e) => {
+                    let _ = tx.unbounded_send(Report::Progress(None));
+                    if !std::mem::replace(&mut failing, true) {
+                        warn!("update check: {e:#}");
+                    }
+                }
             }
             std::thread::sleep(CHECK_EVERY);
         }
     });
     cx.spawn(async move |this, cx| {
         use futures::StreamExt;
-        while let Some(ready) = rx.next().await {
-            info!(version = %ready.version, "update ready");
+        while let Some(report) = rx.next().await {
             let shown = this.update(cx, |this, cx| {
-                this.updater.ready = Some(ready);
+                match report {
+                    Report::Progress(download) => this.updater.downloading = download,
+                    Report::Ready(ready) => {
+                        info!(version = %ready.version, "update ready");
+                        this.updater.ready = Some(ready);
+                        this.updater.downloading = None;
+                    }
+                }
+                if this.updater.ready.is_none() && this.updater.downloading.is_none() && this.menu == Some(Menu::Update) {
+                    this.menu = None;
+                }
                 cx.notify();
             });
             if shown.is_err() {
@@ -72,12 +105,13 @@ pub fn start(cx: &mut Context<Dirigent>) {
     .detach();
 }
 
-fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
+fn check(endpoint: &str, offered: Option<&str>, progress: impl Fn(Download)) -> Result<Option<Ready>> {
     let platform = release::platform();
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
             .user_agent(format!("Dirigent/{} ({platform})", release::VERSION))
             .timeout_connect(Some(Duration::from_secs(20)))
+            .timeout_per_read(Some(Duration::from_secs(30)))
             .build(),
     );
     let url = format!("{endpoint}/{platform}");
@@ -96,6 +130,8 @@ fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
     if offered == Some(&release.version) && installer.exists() {
         return Ok(None);
     }
+    let report = |transfer| progress(Download { version: release.version.clone(), transfer });
+    report(None);
     let signature = agent.get(format!("{}.minisig", release.url)).call()?.body_mut().read_to_string()?;
     let test_key = std::env::var("DIRIGENT_UPDATE_KEY").ok().filter(|_| cfg!(debug_assertions));
     let keys: Vec<String> = release::KEYS.iter().map(|k| k.to_string()).chain(test_key).collect();
@@ -105,7 +141,26 @@ fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
         std::fs::create_dir_all(&dir)?;
         let part = installer.with_extension("part");
         let mut res = agent.get(&release.url).call().with_context(|| format!("GET {}", release.url))?;
-        std::io::copy(&mut res.body_mut().as_reader(), &mut std::fs::File::create(&part)?)?;
+        let total = res.body().content_length();
+        let sample = |received, per_second| report(Some(Transfer { received, total, per_second }));
+        let (mut body, mut file) = (res.body_mut().as_reader(), std::fs::File::create(&part)?);
+        let (mut buf, mut done, mut speed, mut mark) = (vec![0; 1 << 16], 0u64, None, (Instant::now(), 0u64));
+        loop {
+            let n = body.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n])?;
+            done += n as u64;
+            let since = mark.0.elapsed();
+            if since >= Duration::from_secs(1) {
+                let per_second = (done - mark.1) as f64 / since.as_secs_f64();
+                (speed, mark) = (Some(per_second), (Instant::now(), done));
+                sample(done, per_second);
+            }
+        }
+        drop(file);
+        sample(done, speed.unwrap_or_else(|| done as f64 / mark.0.elapsed().as_secs_f64()));
         verify(&part)?;
         std::fs::rename(&part, &installer)?;
     }

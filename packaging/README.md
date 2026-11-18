@@ -296,8 +296,10 @@ management key. That is a credential too: the proxy's management API hands out t
 
 Release builds check `https://dirigent.sebba.dev/api/v0/updates/<channel>/<platform>` every 5 minutes
 (`dirigent_desktop/src/update.rs`), download a newer installer (Linux: the tarball) and its minisign signature,
-verify both, and then show the update button in the sidebar. Restarting starts that installer and quits; it waits
-for Dirigent to exit, installs, and starts it again:
+and verify both; a download that stalls for 30 seconds fails and is retried at the next check. The update button
+shows in the sidebar as soon as a newer release is found, its menu showing the download's progress until the
+installer is verified. Restarting starts that installer and quits; it waits for Dirigent to exit, installs, and
+starts it again:
 
 - Windows: the setup exe, silently (`/UPDATE /WAITPID=<pid>`).
 - Linux and macOS: the tarball, unpacked in `<data dir>/updates/`, then its
