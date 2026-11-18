@@ -105,6 +105,7 @@ which is who makes the model (`anthropic`, `openai`).
 
 `agent.toml` is read when it is asked for, so an edit applies to the next request. Project
 instructions are the `AGENTS.md` (or `CLAUDE.md`) files from the thread's directory up.
+Lowercase `agents.md` and `skill.md` are read too.
 
 ## Working on it
 
