@@ -42,7 +42,7 @@ mod usage;
 mod view;
 mod working;
 
-use app::{Dirigent, Dismiss, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
+use app::{Dirigent, Dismiss, FocusComposer, NewThread, Quit, TextBigger, TextReset, TextSmaller, ToggleLog, ToggleSidebar};
 use cache::Cache;
 use dirigent_protocol::release;
 use dirigent_service::hosts;
@@ -83,10 +83,12 @@ fn main() {
         })
         .detach();
         cx.bind_keys(input::key_bindings());
+        let outside_input = format!("{} && !{}", app::KEY_CONTEXT, input::KEY_CONTEXT);
         // `secondary-`: cmd on macOS, ctrl elsewhere.
         cx.bind_keys([
             KeyBinding::new("secondary-n", NewThread, Some(app::KEY_CONTEXT)),
             KeyBinding::new("escape", Dismiss, Some(app::KEY_CONTEXT)),
+            KeyBinding::new("i", FocusComposer, Some(&outside_input)),
             KeyBinding::new("[", ToggleSidebar, Some(app::KEY_CONTEXT)),
             KeyBinding::new("]", ToggleLog, Some(app::KEY_CONTEXT)),
             KeyBinding::new("secondary-q", Quit, Some(app::KEY_CONTEXT)),
@@ -139,7 +141,9 @@ fn start(open: Option<String>, launches: Option<futures::channel::mpsc::Unbounde
         .unwrap();
     window
         .update(cx, |view, window, cx| {
-            window.focus(&view.focus_handle(cx), cx);
+            if window.focused(cx).is_none() {
+                window.focus(&view.focus_handle(cx), cx);
+            }
             placement::remember(window, cx);
             view.serve_launches(open, launches, cx);
         })

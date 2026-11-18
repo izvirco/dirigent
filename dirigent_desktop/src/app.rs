@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-actions!(dirigent, [NewThread, Dismiss, ToggleSidebar, ToggleLog, Quit, TextBigger, TextSmaller, TextReset]);
+actions!(dirigent, [NewThread, Dismiss, FocusComposer, ToggleSidebar, ToggleLog, Quit, TextBigger, TextSmaller, TextReset]);
 
 pub const KEY_CONTEXT: &str = "Dirigent";
 const TOAST_TTL: Duration = Duration::from_secs(8);
@@ -2289,7 +2289,6 @@ impl Dirigent {
             self.log_on = true;
             self.show_latest_log();
         }
-        self.focus_composer(cx);
         cx.notify();
     }
 
@@ -3392,11 +3391,27 @@ impl Dirigent {
             cx.notify();
             return;
         }
-        if self.panel_open() {
-            self.close_panel();
-            cx.notify();
-        } else if matches!(self.pane, Pane::Projects) {
+        if matches!(self.pane, Pane::Projects) {
             self.go_back(cx);
+        } else {
+            self.focus_root(cx);
+        }
+    }
+
+    fn overlay_open(&self) -> bool {
+        self.preview.is_some()
+            || self.screen_preview
+            || self.menu.is_some()
+            || self.add_project.is_some()
+            || self.onboarding_open()
+            || self.modal.is_some()
+            || self.renaming.is_some()
+    }
+
+    pub fn focus_composer_key(&mut self, _: &FocusComposer, _: &mut Window, cx: &mut Context<Self>) {
+        let editing = self.open().is_some_and(|t| t.editing.is_some());
+        if composer_key(&self.pane).is_some() && !self.overlay_open() && !editing {
+            self.focus_composer(cx);
         }
     }
 
@@ -4123,7 +4138,7 @@ impl Render for Dirigent {
         }
         let app = (shown > 0.).then(|| {
             let main = match &self.pane {
-                Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, cx),
+                Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, window, cx),
                 _ => lists::render(self, cx),
             };
             let panel = div()
@@ -4166,6 +4181,7 @@ impl Render for Dirigent {
             .on_action(cx.listener(menu::pick))
             .on_action(cx.listener(Self::new_thread))
             .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(Self::focus_composer_key))
             .on_action(cx.listener(Self::toggle_sidebar))
             .on_action(cx.listener(Self::toggle_log_key))
             .on_action(|_: &Quit, _, cx| cx.quit())
