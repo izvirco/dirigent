@@ -54,12 +54,21 @@ pub struct ToolsConfig {
     pub ask_user: bool,
     pub dirigent: bool,
     pub computer: bool,
+    pub computer_cursor: bool,
     pub codemode: bool,
 }
 
 impl Default for ToolsConfig {
     fn default() -> Self {
-        Self { async_bash: true, bash_background: true, ask_user: true, dirigent: true, computer: true, codemode: true }
+        Self {
+            async_bash: true,
+            bash_background: true,
+            ask_user: true,
+            dirigent: true,
+            computer: true,
+            computer_cursor: true,
+            codemode: true,
+        }
     }
 }
 
@@ -71,6 +80,7 @@ impl ToolsConfig {
             ("ask_user", self.ask_user),
             ("dirigent", self.dirigent),
             ("computer", self.computer),
+            ("computer_cursor", self.computer && self.computer_cursor),
             ("codemode", self.codemode),
         ]
         .into_iter()
@@ -276,14 +286,17 @@ mod tests {
         assert_eq!(c.fonts.ui, "Lilex");
         assert_eq!(c.fonts.size(), 13.);
         assert_eq!(c.title.reasoning, "low");
-        assert_eq!(c.tools.enabled(), ["async_bash", "bash_background", "ask_user", "dirigent", "computer", "codemode"]);
+        let all = ["async_bash", "bash_background", "ask_user", "dirigent", "computer", "computer_cursor", "codemode"];
+        assert_eq!(c.tools.enabled(), all);
         assert!(c.background.pattern == Pattern::Halftone && c.background.reach == Reach::Full);
         let c: Config = toml::from_str("[background]\npattern = \"spring\"\nreach = \"edge\"\n").unwrap();
         assert!(c.background.pattern == Pattern::Spring && c.background.reach == Reach::Edge);
         let c: Config = toml::from_str("[tools]\nask_user = false\nbash_background = false\ncomputer = false\n").unwrap();
         assert_eq!(c.tools.enabled(), ["async_bash", "dirigent", "codemode"]);
         let c: Config = toml::from_str("[tools]\nasync_bash = false\ncodemode = false\n").unwrap();
-        assert_eq!(c.tools.enabled(), ["ask_user", "dirigent", "computer"]);
+        assert_eq!(c.tools.enabled(), ["ask_user", "dirigent", "computer", "computer_cursor"]);
+        let c: Config = toml::from_str("[tools]\ncomputer_cursor = false\n").unwrap();
+        assert_eq!(c.tools.enabled(), ["async_bash", "bash_background", "ask_user", "dirigent", "computer", "codemode"]);
         let c: Config = toml::from_str("[fonts]\nsize = 15\n").unwrap();
         assert_eq!(c.fonts.size(), 15.);
         let c: Config = toml::from_str("[fonts]\nsize = 99\n").unwrap();

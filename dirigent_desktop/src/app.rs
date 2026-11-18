@@ -2282,6 +2282,7 @@ impl Dirigent {
                 "ask_user" => c.tools.ask_user = !c.tools.ask_user,
                 "dirigent" => c.tools.dirigent = !c.tools.dirigent,
                 "computer" => c.tools.computer = !c.tools.computer,
+                "computer_cursor" => c.tools.computer_cursor = !c.tools.computer_cursor,
                 "codemode" => c.tools.codemode = !c.tools.codemode,
                 _ => {}
             },

@@ -91,6 +91,8 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   - An app there: `scripts/ui.sh run sh -c 'setsid xcalc -geometry 300x400+500+200 &'` (`nixpkgs#xcalc`).
   - The app back on top: `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | xargs xdotool windowraise'`.
   - A covered window is only captured under a compositor: `picom --backend xrender` (`nixpkgs#picom`).
+  - The driver's cursor shows on your screen with `"computer_cursor"` in the `tools` too. Without a compositor it
+    covers the window: the agent's pictures are black where it rests.
   - A private screen that doesn't start (an error, not the desktop): a `UI_PATH` directory with an `Xvfb` that exits 1.
     The fallback to the desktop is for a machine with no `Xvfb` at all: a `PATH` without one.
   - Over `rpc`: `screen` events, `get_screen`, and `screen: true` in `list_threads`.

@@ -37,7 +37,7 @@ pub struct Thread {
     pub model: Option<String>,
     pub effort: Option<String>,
     /// The tool switches that are on (`async_bash`, `ask_user`, `dirigent`, `computer`,
-    /// `codemode`) and the option `bash_background`.
+    /// `codemode`) and the options `bash_background` and `computer_cursor`.
     pub tools: Vec<String>,
 }
 

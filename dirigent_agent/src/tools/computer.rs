@@ -20,6 +20,7 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 pub const COMPUTER: &str = "computer";
+const CURSOR: &str = "computer_cursor";
 
 const LOOKS: [&str; 2] = ["get_desktop_state", "get_window_state"];
 const PICTURES: [&str; 3] = ["get_desktop_state", "get_window_state", "zoom"];
@@ -179,7 +180,7 @@ fn literal(value: &str) -> String {
     value.replace('$', "$$")
 }
 
-fn entry(command: &Path, place: Where, home: &Path, display: Option<&str>) -> Server {
+fn entry(command: &Path, place: Where, home: &Path, display: Option<&str>, cursor: bool) -> Server {
     let mut env = vec![("CUA_TELEMETRY_ENABLED", "0".to_owned()), ("CUA_DRIVER_RS_UPDATE_CHECK", "0".to_owned())];
     if !cfg!(target_os = "macos") {
         env.push(("CUA_DRIVER_RS_HOME", literal(&home.to_string_lossy())));
@@ -195,9 +196,13 @@ fn entry(command: &Path, place: Where, home: &Path, display: Option<&str>) -> Se
             "Operate the apps on the user's desktop: list and launch apps, read a window's accessibility tree and screenshot, click, type, scroll and press keys, in the background where the app allows."
         }
     };
+    let mut args = vec!["mcp".to_owned()];
+    if !(cursor && place == Where::Desktop) {
+        args.push("--no-overlay".into());
+    }
     Server {
         command: Some(command.to_string_lossy().into_owned()),
-        args: vec!["mcp".into(), "--no-overlay".into()],
+        args,
         env: env.into_iter().map(|(name, value)| (name.to_owned(), value)).collect(),
         description: Some(description.into()),
         ..Server::default()
@@ -307,7 +312,8 @@ impl Computer {
             leave_started: place == Where::Desktop,
         };
         let server = place.server();
-        if let Err(e) = session.mcp.add(server, entry(&command, place, &dir.join("driver"), name.as_deref()), with).await {
+        let driver = entry(&command, place, &dir.join("driver"), name.as_deref(), session.is_on(CURSOR));
+        if let Err(e) = session.mcp.add(server, driver, with).await {
             recording.stop();
             if let Some(display) = display {
                 display.end().await;
@@ -691,6 +697,14 @@ mod tests {
     }
 
     #[test]
+    fn the_driver_draws_its_cursor_on_the_desktop_alone_and_only_when_asked() {
+        let args = |place, display, cursor| entry(Path::new("cua-driver"), place, Path::new("/driver"), display, cursor).args;
+        assert_eq!(args(Where::Desktop, None, true), ["mcp"]);
+        assert_eq!(args(Where::Desktop, None, false), ["mcp", "--no-overlay"]);
+        assert_eq!(args(Where::Private, Some(":7"), true), ["mcp", "--no-overlay"]);
+    }
+
+    #[test]
     fn a_recording_is_read_turn_by_turn() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("recording");
@@ -807,7 +821,7 @@ mod tests {
         let socket = |display: &str| Path::new(&format!("/tmp/.X11-unix/X{}", &display[1..])).exists();
         let display_of = |opened: &str| opened.split_once("`DISPLAY=").unwrap().1.split_once('`').unwrap().0.to_owned();
 
-        session.prompt(Prompt { tools: Some(vec![COMPUTER.into()]), ..prompt("open a screen") }).await.unwrap();
+        session.prompt(Prompt { tools: Some(vec![COMPUTER.into(), CURSOR.into()]), ..prompt("open a screen") }).await.unwrap();
         host.settled(1).await;
         let transcript = host.transcript();
         assert_eq!(transcript.len(), 10, "{transcript:#?}");
