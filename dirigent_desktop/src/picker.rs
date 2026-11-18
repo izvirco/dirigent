@@ -4,7 +4,7 @@ use crate::menu::{self, ROW_H, Side};
 use crate::net::HostStatus;
 use crate::theme::{self, text, u};
 use dirigent_protocol::ModelInfo;
-use gpui::{AnyElement, Context, Div, ElementId, Stateful, div, prelude::*, rgba};
+use gpui::{AnyElement, Context, ElementId, div, prelude::*, rgba};
 
 const WIDTH: f32 = 430.;
 const LIST_H: f32 = 240.;
@@ -22,12 +22,12 @@ fn presets(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
     let saved = current.as_ref().is_some_and(|c| this.presets.contains(c));
     let left: AnyElement = match &current {
         Some(_) if !saved => {
-            let save = header_button("save-preset", "Save preset", None, theme::t().accent_ink);
+            let save = menu::header_button("save-preset", "Save preset", None, theme::t().accent_ink);
             menu::header_stop(save, |this, _, cx| this.save_preset(cx), cx).into_any()
         }
         _ => div().px_1p5().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child("Saved presets").into_any(),
     };
-    let all = header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1);
+    let all = menu::header_button("all-models", "All models", Some("chevron-right"), theme::t().fg_1);
     let all = menu::header_stop(all, |this, window, cx| this.open_all_models(window, cx), cx);
     let header = div().flex().flex_row().items_center().justify_between().h(u(ROW_H)).flex_shrink_0().px_0p5().child(left).child(all);
 
@@ -151,24 +151,6 @@ fn preset_row(
                 .child(icon("x", theme::t().fg_1).size(u(12.)))
         }))
         .into_any()
-}
-
-fn header_button(id: &'static str, label: &'static str, trailing: Option<&'static str>, color: u32) -> Stateful<Div> {
-    div()
-        .id(id)
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_0p5()
-        .h(u(22.))
-        .px_1p5()
-        .rounded_md()
-        .cursor_pointer()
-        .text_size(text::sm())
-        .text_color(rgba(color))
-        .hover(|d| d.text_color(rgba(theme::t().fg)))
-        .child(label)
-        .children(trailing.map(|name| icon(name, color).size(u(12.))))
 }
 
 #[cfg(test)]

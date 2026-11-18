@@ -37,6 +37,7 @@ mod sidebar;
 mod theme;
 mod thread;
 mod titlebar;
+mod toasts;
 mod update;
 mod usage;
 mod view;
