@@ -111,6 +111,13 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   tarball of `dirigent/` with the debug binary as `dirigent` and `packaging/linux/install.sh`, signed with your
   own key (`DIRIGENT_UPDATE_KEY=<public key>`). It installs into `<session>/prefix`
   (`<session>/data/logs/install.log`). "Restart when idle" needs an agent working.
+- **An outdated proxy** (the sidebar's warning, its line in Settings › Proxy): a stand-in CLIProxyAPI, as a test
+  instance has no management key. An http server that answers `/v1/models` with
+  `{"data": [{"id": "claude-haiku-5-5", "owned_by": "anthropic"}]}`, `/v8/management/credentials` with
+  `{"files": []}` and the header `X-CPA-VERSION: 8.0.75`, and `/v8/management/server/latest-version` with
+  `{"latest-version": "v8.0.85"}` (a proxy is outdated 10 patch releases behind, or a minor one); then
+  Settings › Proxy with its address and any two keys. To see the warning go, answer with a newer `X-CPA-VERSION`
+  and click it (Settings › Proxy asks again; left alone, the app asks every hour).
 - **Forge sign-in**, never against the real forge: a local `vir_central` with a public app (redirect
   `http://127.0.0.1/forge/callback`), `DIRIGENT_FORGE_URL` / `DIRIGENT_FORGE_CLIENT_ID`, and a fake `xdg-open`
   that approves (`POST /api/oauth/authorize?<the url's query>` with `{"allow":true}` and a test user's session as

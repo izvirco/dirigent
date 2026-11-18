@@ -1,6 +1,6 @@
 use crate::net::HostStatus;
 use crate::outbox::Outbox;
-use dirigent_protocol::{ModelInfo, Project, ThreadSummary};
+use dirigent_protocol::{ModelInfo, Project, ProxyUpdate, ThreadSummary};
 use std::collections::HashMap;
 
 pub struct HostState {
@@ -13,6 +13,7 @@ pub struct HostState {
     pub models: Vec<ModelInfo>,
     pub service_id: Option<String>,
     pub outbox: Outbox,
+    pub proxy_update: Option<ProxyUpdate>,
 }
 
 pub const ORPHANS: &str = "orphans";
@@ -244,6 +245,7 @@ mod tests {
             models: vec![],
             service_id: None,
             outbox: Outbox::default(),
+            proxy_update: None,
         }
     }
 
