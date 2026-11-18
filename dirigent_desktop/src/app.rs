@@ -534,6 +534,9 @@ impl Dirigent {
             }
         })
         .detach();
+        // A focused input the frame no longer draws (an edited message scrolled out of the list) takes keys out of
+        // every context; the root takes the focus back.
+        cx.on_focus_lost(window, |this, _, cx| this.focus_root(cx)).detach();
 
         let composer = cx.new(|cx| TextInput::new(cx, "Makoto - Golden Girl feat. MC Conrad (Lenzman VIP)", false));
         let path_input = cx.new(|cx| TextInput::new(cx, "~/path/to/project", true));
@@ -3409,8 +3412,7 @@ impl Dirigent {
     }
 
     pub fn focus_composer_key(&mut self, _: &FocusComposer, _: &mut Window, cx: &mut Context<Self>) {
-        let editing = self.open().is_some_and(|t| t.editing.is_some());
-        if composer_key(&self.pane).is_some() && !self.overlay_open() && !editing {
+        if composer_key(&self.pane).is_some() && !self.overlay_open() {
             self.focus_composer(cx);
         }
     }
@@ -4136,7 +4138,7 @@ impl Render for Dirigent {
         if self.onboarding.as_ref().is_some_and(|s| s.leaving.is_some()) {
             window.request_animation_frame();
         }
-        let app = (shown > 0.).then(|| {
+        let app = (!self.onboarding_open()).then(|| {
             let main = match &self.pane {
                 Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, window, cx),
                 _ => lists::render(self, cx),
