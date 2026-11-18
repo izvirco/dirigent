@@ -9,18 +9,20 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::hash::{DefaultHasher, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 pub const COMPUTER: &str = "computer";
 const CURSOR: &str = "computer_cursor";
+const WAYLAND_BACKEND: &str = "CUA_DRIVER_RS_ENABLE_WAYLAND";
+const IPC: &str = "sway.sock";
 
 const LOOKS: [&str; 2] = ["get_desktop_state", "get_window_state"];
 const PICTURES: [&str; 3] = ["get_desktop_state", "get_window_state", "zoom"];
@@ -76,16 +78,13 @@ impl fmt::Display for Where {
     }
 }
 
-// MUST KILL: extract: a per-user, per-display screenshot path fn (shared /tmp) out of the guide text
-fn private_guide(display: &str) -> String {
-    let user = ["USER", "LOGNAME"].iter().find_map(|name| std::env::var(name).ok()).unwrap_or_else(|| "user".into());
-    let number: String = display.chars().filter(char::is_ascii_digit).collect();
-    let screen = format!("/tmp/screen-{user}-{number}.png");
-    let part = screen.replace(".png", "-part.png");
+fn private_guide(dir: &Path) -> String {
+    let screen = dir.join("screen.png").display().to_string();
+    let part = dir.join("part.png").display().to_string();
     [
-        "A private screen has no window manager: windows have no title bars and stay where they open, and input aimed at a window (`pid`, `window_id`) doesn't reach every app. So operate it by its pixels:",
+        "A private screen is a Wayland display under sway, a tiling window manager: a window fills the screen, a second one shares it side by side, and none has a title bar. It takes Wayland apps only: one that needs X11 doesn't start. Input aimed at a window (`pid`, `window_id`) is refused. So operate it by its pixels:",
         "- See it: `get_desktop_state({})` answers with the screen's picture: pass the image block in its `content` to `image()`.",
-        "- Act on it with `target: {kind: \"desktop\", display_id: \"primary\"}` and the `x`, `y` you read off your latest picture of the screen (`get_desktop_state`): `click` (`button: \"right\"` for a right click, `count: 2` for a double click), `move_cursor` (to hover), `scroll` (`direction`, `amount`), `drag` (`from_x`, `from_y`, `to_x`, `to_y`), `type_text` (`text`), `press_key` (`key`, `modifiers`) and `hotkey` (`keys`). Keys go to the window under the pointer, so click into it first. `target` goes alone: with `scope`, `pid` or `window_id` next to it the call is refused.",
+        "- Act on it with `target: {kind: \"desktop\", display_id: \"primary\"}` and the `x`, `y` you read off your latest picture of the screen (`get_desktop_state`): `click` (`button: \"right\"` for a right click, `count: 2` for a double click), `move_cursor` (to hover), `scroll` (`direction`, `amount`), `drag` (`from_x`, `from_y`, `to_x`, `to_y`), `type_text` (`text`), `press_key` (`key`, `modifiers`) and `hotkey` (`keys`). Keys go to the focused window: the one that opened last, or the one you clicked into since. `target` goes alone: with `scope`, `pid` or `window_id` next to it the call is refused.",
         "- See what it did: take the picture after the action in the same script (it is held a moment for the app to draw; after something slower, an animation, look again), or in a later message. Not in another tool call of the same message: those run at the same time, and the picture shows the screen as it was before.",
         "- An action here always answers `effect: \"unverifiable\"`, which says nothing: the picture is the check. A refused call doesn't throw: its result has `isError: true` and the reason in `content[0].text`.",
         &format!("- A cheaper look: `get_desktop_state({{screenshot_out_file: \"{screen}\"}})` writes the picture to that file and answers without it; crop the part you need (with ImageMagick, if it is installed: `magick {screen} -crop 400x200+0+600 {part}`) and read that. `max_image_dimension` answers with a smaller picture, and until your next `get_desktop_state` `x` and `y` are taken as pixels of that one: read them off the picture of the screen you took last, never off an earlier, larger one."),
@@ -130,49 +129,90 @@ async fn driver() -> Result<PathBuf> {
     FOUND.get_or_try_init(find).await.cloned()
 }
 
-// MUST KILL: extract: HOLD into a named script file, so "ends Xvfb when stdin closes" is its name
-const HOLD: &str = r#""$@" & xvfb=$!; exec >/dev/null; read -r _; kill "$xvfb" 2>/dev/null; wait "$xvfb""#;
+// MUST KILL: extract: HOLD into a named script file, so "ends the compositor and removes its directory on EOF or a signal" is its name
+const HOLD: &str = r#"trap : TERM INT HUP; "$@" & screen=$!; read -r _; kill "$screen" 2>/dev/null; wait "$screen"; rm -rf "$0""#;
+const LISTENS: Duration = Duration::from_millis(20);
 
 struct Display {
-    name: String,
+    dir: PathBuf,
+    socket: PathBuf,
     hold: Child,
 }
 
 impl Display {
-    fn xvfb() -> Result<PathBuf, &'static str> {
+    fn sway() -> Result<PathBuf, &'static str> {
         if !cfg!(target_os = "linux") {
             return Err("private screens are made on Linux only");
         }
-        program("Xvfb").ok_or("Xvfb is not installed")
+        if program("wtype").is_none() {
+            return Err("wtype is not installed");
+        }
+        program("sway").ok_or("sway is not installed")
     }
 
-    async fn start(xvfb: &Path, width: u32, height: u32) -> Result<Self> {
+    async fn start(sway: &Path, width: u32, height: u32) -> Result<Self> {
+        let dir = std::env::temp_dir().join(format!("dirigent-screen-{}", crate::short_id(8)));
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(&dir)?;
+        #[cfg(not(unix))]
+        std::fs::create_dir(&dir)?;
+        let config = dir.join("config");
+        let lines = format!(
+            "output * resolution {width}x{height}\ndefault_border none\nfocus_follows_mouse no\nxwayland disable\nswaybg_command -\n"
+        );
         let mut hold = Command::new("sh");
-        // `-displayfd 1`: it writes its number to stdout once it takes connections.
-        hold.args(["-c", HOLD, "sh"]).arg(xvfb).args(["-displayfd", "1", "-screen", "0", &format!("{width}x{height}x24")]);
-        hold.args(["-nolisten", "tcp"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        let mut hold = hold.spawn().map_err(|e| anyhow!("Xvfb did not start: {e}"))?;
-        let mut said = String::new();
-        // The pipe stays with the shell: nothing more is read from it, and nothing that
-        // still writes to it is ended for that.
-        let number = match &mut hold.stdout {
-            Some(stdout) => tokio::time::timeout(START, BufReader::new(stdout).read_line(&mut said)).await.map(|_| said.trim()),
-            None => Ok(""),
+        // sway up to 1.9 exits where the NVIDIA module is loaded, whatever it draws with.
+        hold.args(["-c", HOLD]).arg(&dir).arg(sway).args(["--unsupported-gpu", "-c"]).arg(&config);
+        hold.env("XDG_RUNTIME_DIR", &dir).env("SWAYSOCK", dir.join(IPC)).env_remove("WAYLAND_DISPLAY").env_remove("DISPLAY");
+        hold.envs([("WLR_BACKENDS", "headless"), ("WLR_RENDERER", "pixman"), ("WLR_LIBINPUT_NO_DEVICES", "1")]);
+        hold.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        let hold = match std::fs::write(&config, lines).and_then(|()| hold.spawn()) {
+            Ok(hold) => hold,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                bail!("sway did not start: {e}");
+            }
         };
-        let display = Self { name: format!(":{}", number.unwrap_or_default()), hold };
-        if display.name.len() < 2 || !display.name[1..].bytes().all(|b| b.is_ascii_digit()) {
-            display.end().await;
-            bail!("Xvfb did not start");
-        }
-        Ok(display)
+        let listens = async {
+            loop {
+                if let Some(socket) = wayland_socket(&dir) {
+                    break socket;
+                }
+                tokio::time::sleep(LISTENS).await;
+            }
+        };
+        let Ok(socket) = tokio::time::timeout(START, listens).await else {
+            Self::stop(hold, &dir).await;
+            bail!("sway did not start");
+        };
+        Ok(Self { dir, socket, hold })
     }
 
-    async fn end(mut self) {
-        drop(self.hold.stdin.take());
-        if tokio::time::timeout(START, self.hold.wait()).await.is_err() {
-            tracing::warn!("computer: the X display {} is slow to end", self.name);
+    async fn end(self) {
+        Self::stop(self.hold, &self.socket).await;
+    }
+
+    async fn stop(mut hold: Child, screen: &Path) {
+        drop(hold.stdin.take());
+        if tokio::time::timeout(START, hold.wait()).await.is_err() {
+            tracing::warn!("computer: the Wayland display {} is slow to end", screen.display());
         }
     }
+}
+
+fn wayland_socket(dir: &Path) -> Option<PathBuf> {
+    let numbered =
+        |name: &str| name.strip_prefix("wayland-").is_some_and(|number| !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()));
+    let names = std::fs::read_dir(dir).ok()?.flatten().filter_map(|entry| entry.file_name().into_string().ok());
+    names.filter(|name| numbered(name)).map(|name| dir.join(name)).next()
+}
+
+fn path_led_by(dir: &Path, path: Option<&OsStr>) -> Option<OsString> {
+    let dirs: Vec<PathBuf> = path.into_iter().flat_map(std::env::split_paths).collect();
+    if dirs.iter().any(|on_path| on_path == dir) {
+        return None;
+    }
+    std::env::join_paths(std::iter::once(dir.to_owned()).chain(dirs)).ok()
 }
 
 // MUST KILL: rename: `literal` → `escape_for_resolve` (keeps `mcp::config::resolve` from expanding `$` in it)
@@ -180,13 +220,25 @@ fn literal(value: &str) -> String {
     value.replace('$', "$$")
 }
 
-fn entry(command: &Path, place: Where, home: &Path, display: Option<&str>, cursor: bool) -> Server {
+fn entry(command: &Path, place: Where, home: &Path, display: Option<&Path>, cursor: bool) -> Server {
     let mut env = vec![("CUA_TELEMETRY_ENABLED", "0".to_owned()), ("CUA_DRIVER_RS_UPDATE_CHECK", "0".to_owned())];
+    let path = |path: &Path| literal(&path.to_string_lossy());
     if !cfg!(target_os = "macos") {
-        env.push(("CUA_DRIVER_RS_HOME", literal(&home.to_string_lossy())));
+        env.push(("CUA_DRIVER_RS_HOME", path(home)));
     }
-    if let Some(display) = display {
-        env.extend([("DISPLAY", display.to_owned()), ("WAYLAND_DISPLAY", String::new()), ("XDG_SESSION_TYPE", "x11".to_owned())]);
+    if let Some(socket) = display {
+        env.extend([("WAYLAND_DISPLAY", path(socket)), ("SWAYSOCK", path(&socket.with_file_name(IPC)))]);
+        env.extend([(WAYLAND_BACKEND, "1".to_owned()), ("XDG_SESSION_TYPE", "wayland".to_owned()), ("DISPLAY", String::new())]);
+        // The driver takes these, of the user's own session, for the compositor it talks to.
+        env.extend([("HYPRLAND_INSTANCE_SIGNATURE", String::new()), ("NIRI_SOCKET", String::new())]);
+    } else if std::env::var_os("WAYLAND_DISPLAY").is_some_and(|name| !name.is_empty()) && std::env::var_os(WAYLAND_BACKEND).is_none() {
+        env.push((WAYLAND_BACKEND, "1".to_owned()));
+    }
+    // The driver types on a Wayland display with `wtype`, which it looks for on PATH alone.
+    let wtype = program("wtype");
+    let shipped = wtype.as_deref().and_then(Path::parent);
+    if let Some(led) = shipped.and_then(|dir| path_led_by(dir, std::env::var_os("PATH").as_deref())) {
+        env.push(("PATH", path(Path::new(&led))));
     }
     let description = match place {
         Where::Private => {
@@ -269,8 +321,8 @@ impl Computer {
         let command = driver().await?;
         let (mut stood_in, mut display) = (String::new(), None);
         if place == Where::Private && !open.contains_key(&place) {
-            match Display::xvfb() {
-                Ok(xvfb) => match Display::start(&xvfb, width, height).await {
+            match Display::sway() {
+                Ok(sway) => match Display::start(&sway, width, height).await {
                     Ok(started) => display = Some(started),
                     Err(e) => bail!(
                         "The private screen didn't open: {e}. Try again, and tell the user if it still doesn't: their desktop is \
@@ -287,7 +339,8 @@ impl Computer {
         }
         let how = how(place, session.is_on(CODEMODE));
         if let Some(opened) = open.get(&place) {
-            let at = opened.display.as_ref().map(|display| format!(" (`DISPLAY={}`)", display.name)).unwrap_or_default();
+            let at =
+                opened.display.as_ref().map(|display| format!(" (`WAYLAND_DISPLAY={}`)", display.socket.display())).unwrap_or_default();
             return Ok(format!("{stood_in}The {place} screen is open already{at}. {how}"));
         }
         let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
@@ -304,15 +357,16 @@ impl Computer {
             }
         };
         let recording = Recording::new(dir.join("recording"), self.shown.clone(), place == Where::Desktop, update);
-        let name = display.as_ref().map(|display| display.name.clone());
+        let private = display.as_ref().map(|display| (display.socket.clone(), private_guide(&display.dir)));
         let with = Added {
-            only: name.as_ref().map(|_| PRIVATE_TOOLS.map(str::to_owned).to_vec()),
-            instructions: name.as_deref().map(private_guide),
+            only: private.as_ref().map(|_| PRIVATE_TOOLS.map(str::to_owned).to_vec()),
+            instructions: private.as_ref().map(|(_, guide)| guide.clone()),
             watch: Some(Arc::new(Recorder { recording: recording.clone(), acted: Mutex::default() })),
             leave_started: place == Where::Desktop,
         };
         let server = place.server();
-        let driver = entry(&command, place, &dir.join("driver"), name.as_deref(), session.is_on(CURSOR));
+        let socket = private.as_ref().map(|(socket, _)| socket.as_path());
+        let driver = entry(&command, place, &dir.join("driver"), socket, session.is_on(CURSOR));
         if let Err(e) = session.mcp.add(server, driver, with).await {
             recording.stop();
             if let Some(display) = display {
@@ -321,21 +375,23 @@ impl Computer {
             bail!("{stood_in}{e}");
         }
         open.insert(place, Open { recording, display });
-        let Some(name) = name else {
+        let Some((socket, guide)) = private else {
             return Ok(format!(
                 "{stood_in}The user's desktop is open to you. {how} It is the screen they are working on: act only on what they asked \
                  for, and leave their other windows as they are. An app you launch here stays open when this screen closes: end it \
                  yourself if it was only for your work."
             ));
         };
+        let (socket, ipc) = (socket.display(), socket.with_file_name(IPC));
+        let ipc = ipc.display();
         Ok(format!(
-            "Your private screen is open: an X display of this thread's own (`DISPLAY={name}`, {width}x{height}), which nobody sees but \
-             in this thread. {how}\n\
-             Start apps on it with `mcp__{server}__launch_app`, or from bash, in the background, with `env -u WAYLAND_DISPLAY \
-             DISPLAY={name} <command>`: anything started without that opens on the user's desktop.\n\
-             {}\n\
-             The screen closes, with the apps on it, when the thread has been idle for a while; open it again then.",
-            private_guide(&name)
+            "Your private screen is open: a Wayland display of this thread's own (`WAYLAND_DISPLAY={socket}`, {width}x{height}), which \
+             nobody sees but in this thread. {how}\n\
+             Start apps on it with `mcp__{server}__launch_app`, or from bash, in the background, with `env -u DISPLAY \
+             WAYLAND_DISPLAY={socket} SWAYSOCK={ipc} <command>`: anything started without that opens on the user's desktop, and a \
+             `swaymsg` without it talks to the user's own sway.\n\
+             {guide}\n\
+             The screen closes, with the apps on it, when the thread has been idle for a while; open it again then."
         ))
     }
 
@@ -701,7 +757,27 @@ mod tests {
         let args = |place, display, cursor| entry(Path::new("cua-driver"), place, Path::new("/driver"), display, cursor).args;
         assert_eq!(args(Where::Desktop, None, true), ["mcp"]);
         assert_eq!(args(Where::Desktop, None, false), ["mcp", "--no-overlay"]);
-        assert_eq!(args(Where::Private, Some(":7"), true), ["mcp", "--no-overlay"]);
+        assert_eq!(args(Where::Private, Some(Path::new("/screen/wayland-1")), true), ["mcp", "--no-overlay"]);
+    }
+
+    #[test]
+    fn a_private_screens_driver_gets_its_own_wayland_display_and_nothing_of_the_users() {
+        let env = entry(Path::new("cua-driver"), Where::Private, Path::new("/driver"), Some(Path::new("/screen/wayland-1")), false).env;
+        let got = |name: &str| env.get(name).map(String::as_str);
+        assert_eq!(
+            (got("WAYLAND_DISPLAY"), got("SWAYSOCK"), got(WAYLAND_BACKEND)),
+            (Some("/screen/wayland-1"), Some("/screen/sway.sock"), Some("1"))
+        );
+        assert_eq!([got("DISPLAY"), got("HYPRLAND_INSTANCE_SIGNATURE"), got("NIRI_SOCKET")], [Some(""); 3]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_leads_a_path_it_is_not_on() {
+        let led = |path: Option<&str>| path_led_by(Path::new("/shipped"), path.map(OsStr::new));
+        assert_eq!(led(Some("/usr/local/bin:/usr/bin")), Some("/shipped:/usr/local/bin:/usr/bin".into()));
+        assert_eq!(led(Some("/usr/bin:/shipped")), None);
+        assert_eq!(led(None), Some("/shipped".into()));
     }
 
     #[test]
@@ -796,7 +872,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    #[ignore = "runs Xvfb and Cua Driver"]
+    #[ignore = "runs sway and Cua Driver"]
     async fn a_private_screen_opens_shows_what_is_done_on_it_and_closes() {
         use crate::session::Prompt;
         use crate::testing::{Script, Step, call, prompt, session, text};
@@ -805,6 +881,7 @@ mod tests {
         let script = Script::new(vec![
             Step::Say(vec![call("c1", COMPUTER, json!({"screen": "private", "width": 640, "height": 480}))]),
             Step::Say(vec![call("c2", "mcp__private_screen__click", json!({"target": target, "x": 160, "y": 120}))]),
+            Step::Say(vec![call("c8", "mcp__private_screen__type_text", json!({"target": target, "text": "hi"}))]),
             Step::Say(vec![call("c3", "mcp__private_screen__get_desktop_state", json!({}))]),
             Step::Say(vec![call("c4", COMPUTER, json!({"screen": "private"}))]),
             Step::Say(vec![text("operated")]),
@@ -816,28 +893,36 @@ mod tests {
         ]);
         let (host, session) = session(dir.path(), script.clone());
         let recordings = dir.path().join("data/screens/thread/private/recording");
-        let ours = || started().into_iter().filter(|(_, command)| command.contains("Xvfb") || command.contains("cua-driver"));
+        let ours = || started().into_iter().filter(|(_, command)| command.contains("dirigent-screen-") || command.contains("cua-driver"));
         let running = |pids: &[u32]| pids.iter().filter(|pid| Path::new(&format!("/proc/{pid}")).exists()).count();
-        let socket = |display: &str| Path::new(&format!("/tmp/.X11-unix/X{}", &display[1..])).exists();
-        let display_of = |opened: &str| opened.split_once("`DISPLAY=").unwrap().1.split_once('`').unwrap().0.to_owned();
+        let socket = |display: &str| Path::new(display).exists();
+        let display_of = |opened: &str| opened.split_once("`WAYLAND_DISPLAY=").unwrap().1.split_once('`').unwrap().0.to_owned();
 
         session.prompt(Prompt { tools: Some(vec![COMPUTER.into(), CURSOR.into()]), ..prompt("open a screen") }).await.unwrap();
         host.settled(1).await;
         let transcript = host.transcript();
-        assert_eq!(transcript.len(), 10, "{transcript:#?}");
+        assert_eq!(transcript.len(), 12, "{transcript:#?}");
         let opened = &transcript[2];
-        assert!(opened.starts_with("result: Your private screen is open: an X display of this thread's own (`DISPLAY=:"), "{opened}");
+        assert!(
+            opened.starts_with("result: Your private screen is open: a Wayland display of this thread's own (`WAYLAND_DISPLAY=/"),
+            "{opened}"
+        );
         assert!(opened.contains(", 640x480), which nobody sees but in this thread. Operate it with the `mcp__private_screen__…` tools"));
-        assert!(opened.contains("\nA private screen has no window manager") && opened.ends_with("open it again then."), "{opened}");
+        assert!(
+            opened.contains("\nA private screen is a Wayland display under sway") && opened.ends_with("open it again then."),
+            "{opened}"
+        );
         let display = display_of(opened);
+        let screen_dir = Path::new(&display).parent().unwrap().to_owned();
         assert_eq!(
-            transcript[8],
-            format!("result: The private screen is open already (`DISPLAY={display}`). {}", how(Where::Private, false))
+            transcript[10],
+            format!("result: The private screen is open already (`WAYLAND_DISPLAY={display}`). {}", how(Where::Private, false))
         );
         let pids: Vec<u32> = ours().map(|(pid, _)| pid).collect();
         let commands: Vec<String> = ours().map(|(_, command)| command).collect();
         let count = |what: &str| commands.iter().filter(|command| command.contains(what)).count();
-        assert_eq!((count("Xvfb -displayfd 1 -screen 0 640x480x24"), count("cua-driver mcp --no-overlay")), (2, 1), "{commands:?}");
+        let sway = format!("sway --unsupported-gpu -c {}", screen_dir.join("config").display());
+        assert_eq!((count(&sway), count("cua-driver mcp --no-overlay")), (2, 1), "{commands:?}");
         assert!(socket(&display) && recordings.join("1").is_dir());
         let tools = script.requests.lock().unwrap()[1].2.clone();
         let mut driver: Vec<&str> = tools.iter().filter_map(|tool| tool.strip_prefix("mcp__private_screen__")).collect();
@@ -845,25 +930,26 @@ mod tests {
         driver.sort();
         wanted.sort();
         assert_eq!(driver, wanted, "the driver's tools: were some renamed?");
-        assert_eq!(session.mcp.namespace("mcp__private_screen").unwrap().instructions, Some(private_guide(&display)));
+        assert_eq!(session.mcp.namespace("mcp__private_screen").unwrap().instructions, Some(private_guide(&screen_dir)));
 
         assert!(transcript[4].starts_with("result: ✅ Sent screen-absolute click at (160,120)"), "{}", transcript[4]);
-        assert!(transcript[6].starts_with("result: (image) ✅ Desktop screenshot 640x480"), "{}", transcript[6]);
+        assert_eq!(transcript[6], "result: Typed text into the focused desktop application.");
+        assert!(transcript[8].starts_with("result: (image) ✅ Desktop screenshot 640x480"), "{}", transcript[8]);
         let steps: Vec<Screen> =
             host.outs.lock().unwrap().iter().filter_map(|o| if let Out::Screen(s) = o { Some(s.clone()) } else { None }).collect();
         let pictures: Vec<&Vec<u8>> = steps.iter().filter_map(|step| step.image.as_ref()).collect();
         assert!(!pictures.is_empty() && pictures.iter().all(|png| dimensions(png) == Some((640., 480.))), "{} pictures", pictures.len());
         let actions: Vec<_> = steps.iter().filter_map(|step| Some((step.action.as_deref()?, step.cursor, step.desktop))).collect();
-        assert_eq!(actions, [("click", Some([0.25, 0.25]), false)]);
+        assert_eq!(actions, [("click", Some([0.25, 0.25]), false), ("type \"hi\"", None, false)]);
         assert_eq!(std::fs::read_dir(recordings.join("1")).unwrap().flatten().filter(|e| e.path().is_dir()).count(), 0);
 
         session.prompt(prompt("close it")).await.unwrap();
         host.settled(2).await;
         let transcript = host.transcript();
-        let said = [&transcript[12], &transcript[14], &transcript[15]];
+        let said = [&transcript[14], &transcript[16], &transcript[17]];
         let closed = "result: Closed the private screen, and the apps on it.";
         assert_eq!(said, [closed, "result: The private screen wasn't open.", "assistant: closed"]);
-        assert_eq!((running(&pids), socket(&display), recordings.exists()), (0, false, false), "{:?}", started());
+        assert_eq!((running(&pids), screen_dir.exists(), recordings.exists()), (0, false, false), "{:?}", started());
         assert!(session.tool("mcp__private_screen__click").is_none());
 
         session.prompt(prompt("once more")).await.unwrap();

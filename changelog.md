@@ -14,7 +14,10 @@
 - Esc takes the focus off the composer where it used to close the right panel, and `i` focuses the composer again; its ring shows while it has focus ([#208])
 - Fixed: while you edited a message and scrolled it out of view, Esc and every shortcut did nothing ([#212])
 - Toasts: a repeat counts up instead of stacking, a click dismisses one, and the sidebar keeps the session's history ([#211])
-- Computer use shows the agent's cursor on your desktop (Windows, X11), over the window it works in; Settings › Agent tools turns it off ([#206])
+- Computer use shows the agent's cursor on your desktop (Windows, X11, sway), over the window it works in; Settings › Agent tools turns it off ([#206])
+- A private screen is a Wayland display now, made with sway: it needs `sway` and `wtype` where it needed Xvfb, and apps that need X11 don't open on it ([#214])
+- On a Wayland desktop, computer use operates Wayland apps, where it reached those under XWayland alone; on sway it types with `wtype` ([#214])
+- On a sway desktop with an X11 app open, computer use can't aim at windows, only at the screen's pixels: `CUA_DRIVER_RS_ENABLE_WAYLAND=0` in Dirigent's environment goes back to X11 apps alone ([#214])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
@@ -28,6 +31,7 @@
 [#210]: https://forge.sebba.dev/izvir/dirigent/changes/210
 [#211]: https://forge.sebba.dev/izvir/dirigent/changes/211
 [#212]: https://forge.sebba.dev/izvir/dirigent/changes/212
+[#214]: https://forge.sebba.dev/izvir/dirigent/changes/214
 
 ## 0.0.10
 

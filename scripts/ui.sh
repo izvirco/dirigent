@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # Run a debug dirigent_desktop to test, on your private screen. Guide: testing.md.
 #
-#   scripts/ui.sh start DISPLAY          build, (re)launch on your private screen, filling it (DISPLAY as the
-#                                        `computer` tool named it, e.g. :3)
+#   scripts/ui.sh start SCREEN           build, (re)launch on your private screen (SCREEN: the
+#                                        WAYLAND_DISPLAY the `computer` tool named, /tmp/dirigent-screen-…/wayland-1)
 #   scripts/ui.sh setup [DIR] [MODEL]    add DIR as a project, pick MODEL, restart the app
 #   scripts/ui.sh wait-idle [SECS]       until no thread runs or has async_bash jobs (default 300 s)
 #   scripts/ui.sh rpc JSON [EXPR]        one protocol request to the session's service, print the reply
-#   scripts/ui.sh run CMD...             CMD with the dev-shell tools, DISPLAY, UI_DIR and UI_PORT set
+#   scripts/ui.sh run CMD...             CMD with the dev-shell tools, the screen's WAYLAND_DISPLAY and SWAYSOCK,
+#                                        UI_DIR and UI_PORT set
 #   scripts/ui.sh log [N]                last N (40) lines of the app's stdout/stderr
 #   scripts/ui.sh stop                   kill the app
 #   scripts/ui.sh reset                  stop and wipe the session's data (fresh service + desktop dbs)
 #
 # Seeing and operating the app is the `computer` tool's: open a private screen with it, `start` the app
-# there, and use the screen's tools. Only ever a private screen: `start` refuses a display that is not an
-# Xvfb of yours, so the app never opens on a desktop.
+# there, and use the screen's tools. Only ever a private screen: `start` refuses a display that is not one
+# the tool made, so the app never opens on a desktop.
 #
 # Each session (UI_SESSION; default: the last 8 chars of the calling agent's thread id, else
 # "default") gets its own service port, data and config dirs under /tmp/dirigent-ui-<user>/<session>.
@@ -72,18 +73,25 @@ kill_app() {
   rm -f "$DIR/app.pid"
 }
 private_screen() {
-  ss -Hxlp 2>/dev/null | grep -F "/tmp/.X11-unix/X$1 " | grep -q '"Xvfb"'
+  case $1 in */dirigent-screen-*/wayland-*) ;; *) return 1 ;; esac
+  SWAYSOCK=${1%/*}/sway.sock swaymsg -t get_version >/dev/null 2>&1
+}
+screen_env() {
+  WAYLAND_DISPLAY=$(cat "$DIR/display"); SWAYSOCK=${WAYLAND_DISPLAY%/*}/sway.sock
+  export WAYLAND_DISPLAY SWAYSOCK
+  unset DISPLAY
 }
 need_display() {
-  [ -s "$DIR/display" ] || { echo "no session '$SESSION'; run: scripts/ui.sh start DISPLAY" >&2; exit 1; }
+  [ -s "$DIR/display" ] || { echo "no session '$SESSION'; run: scripts/ui.sh start SCREEN" >&2; exit 1; }
   private_screen "$(cat "$DIR/display")" ||
-    { echo "session '$SESSION': its screen :$(cat "$DIR/display") is gone; open your private screen again and start" >&2; exit 1; }
-  DISPLAY=:$(cat "$DIR/display"); export DISPLAY
+    { echo "session '$SESSION': its screen $(cat "$DIR/display") is gone; open your private screen again and start" >&2; exit 1; }
+  screen_env
 }
 need_app() {
-  alive || { echo "the app of session '$SESSION' isn't running; run: scripts/ui.sh start DISPLAY" >&2; exit 1; }
+  alive || { echo "the app of session '$SESSION' isn't running; run: scripts/ui.sh start SCREEN" >&2; exit 1; }
 }
-port() { echo $((7800 + $(cat "$DIR/display"))); }
+port() { cat "$DIR/port"; }
+port_taken() { ss -ltnH "sport = :$1" | grep -q .; }
 rpc() { node "$ROOT/scripts/ui-rpc.mjs" "$(port)" "$@"; }
 
 build() {
@@ -108,35 +116,38 @@ onboarding() {
 
 # MUST KILL: extract: a named list of the vars the test app must not inherit, out of launch
 launch() {
-  DISPLAY=:$(cat "$DIR/display"); export DISPLAY
-  read -r W H < <(xdotool getdisplaygeometry)
-  PORT=$(port)
-  ! ss -ltnH "sport = :$PORT" | grep -q . || { echo "port $PORT is taken: by another session's app on this screen? One app per screen" >&2; exit 1; }
+  screen_env
+  PORT=$(port 2>/dev/null || true)
+  if [ -z "$PORT" ] || port_taken "$PORT"; then
+    PORT=$((7800 + $(printf %s "$SESSION" | cksum | cut -d' ' -f1) % 190))
+    while port_taken "$PORT"; do PORT=$((PORT + 1)); done
+    echo "$PORT" >"$DIR/port"
+  fi
   mkdir -p "$DIR/data" "$DIR/config"
   onboarding
-  env -u WAYLAND_DISPLAY -u DIRIGENT_URL -u DIRIGENT_DATA_DIR -u DIRIGENT_THREAD_ID -u UI_SESSION \
+  env -u DIRIGENT_URL -u DIRIGENT_DATA_DIR -u DIRIGENT_THREAD_ID -u UI_SESSION \
     VK_ICD_FILENAMES="$DIRIGENT_UI_VK_ICD" \
     DIRIGENT_PORT="$PORT" DIRIGENT_BIND=127.0.0.1 \
     DIRIGENT_PREFIX="$PREFIX" setsid "$BIN" --data-dir "$DIR/data" --config-dir "$DIR/config" >"$DIR/app.log" 2>&1 </dev/null &
   echo $! >"$DIR/app.pid"
-  WIN=$(timeout 20 xdotool search --sync --onlyvisible --class dirigent | head -1) ||
-    { echo "window never appeared, see $DIR/app.log" >&2; exit 1; }
-  xdotool windowmove "$WIN" 0 0 windowsize "$WIN" "$W" "$H"
-  sleep 1
+  for _ in $(seq 1 200); do
+    if swaymsg -r -t get_tree | grep -Ec '"app_id": ?"dirigent' >/dev/null; then sleep 1; return; fi
+    sleep 0.1
+  done
+  echo "window never appeared, see $DIR/app.log" >&2; exit 1
 }
 
 case "${1:-}" in
   start)
-    D=${2:-}; D=${D#:}
-    private_screen "$D" || {
-      echo "not a private screen: '${2:-}'. Open one with the computer tool (screen: private) and pass the display it names: scripts/ui.sh start :N" >&2
+    private_screen "${2:-}" || {
+      echo "not a private screen: '${2:-}'. Open one with the computer tool (screen: private) and pass the WAYLAND_DISPLAY it names: scripts/ui.sh start /tmp/dirigent-screen-…/wayland-1" >&2
       exit 1
     }
     build
     kill_app
-    echo "$D" >"$DIR/display"
+    echo "$2" >"$DIR/display"
     launch
-    echo "session '$SESSION' ready: ${W}x$H on $DISPLAY, service :$PORT, dir $DIR"
+    echo "session '$SESSION' ready on $WAYLAND_DISPLAY, service :$PORT, dir $DIR"
     ;;
   setup)
     # MUST KILL: rearchitect: set model and target over rpc, not by writing desktop.db kv across a restart
@@ -176,8 +187,8 @@ case "${1:-}" in
   run)
     shift
     [ $# -ge 1 ] || { echo "usage: scripts/ui.sh run CMD..." >&2; exit 1; }
-    unset DISPLAY
-    if [ -s "$DIR/display" ] && private_screen "$(cat "$DIR/display")"; then DISPLAY=:$(cat "$DIR/display"); export DISPLAY; fi
+    unset DISPLAY WAYLAND_DISPLAY SWAYSOCK
+    if [ -s "$DIR/display" ] && private_screen "$(cat "$DIR/display")"; then screen_env; fi
     UI_DIR=$DIR UI_PORT=$(port 2>/dev/null || true) exec "$@"
     ;;
   log)
@@ -191,7 +202,7 @@ case "${1:-}" in
     rm -rf "$DIR"
     ;;
   *)
-    sed -n '2,21p' "$0"
+    sed -n '2,22p' "$0"
     exit 1
     ;;
 esac
