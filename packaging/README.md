@@ -148,17 +148,30 @@ The agent is part of the service (`dirigent_agent`): an install ships nothing fo
 reads is the user's, in the config dir:
 
 ```
-agent.toml   the proxy's address and API key, compaction, MCP servers (`dirigent_agent/src/config.rs`); owner-only
+agent.toml   compaction, MCP servers (`dirigent_agent/src/config.rs`); owner-only
 AGENTS.md    the user's instructions, in every thread's system prompt
 skills/      a directory per skill, each with its SKILL.md
 ```
 
-and, in the data dir, `service.db` (the threads), `mcp-auth.json` (MCP sign-ins), `proxy.json` (the proxy's
-management key, for Usage), `jobs/` (the logs of the commands agents run) and caches. Settings writes
-`agent.toml`; editing it by hand works too, and applies to the next request.
+and, in the data dir, `service.db` (the threads), `mcp-auth.json` (MCP sign-ins), `proxy.json` (the proxy),
+`jobs/` (the logs of the commands agents run) and caches. Settings writes `agent.toml` and `proxy.json`; editing
+them by hand works too, and applies to the next request.
+
+`agent.toml` holds no key of Dirigent's, so a user can keep it in a repo and share it between machines. The keys
+of an MCP server can stay out of it too: the values of `env` and `headers` may name an environment variable
+(`${TOKEN}`) or a command (`!pass show token`).
 
 Models come through a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) the user runs, and only that
 way: the setup and Settings › Proxy ask for its address and API key. Dirigent neither installs nor starts one.
+The proxy is the host's and not the user's, so it is in the data dir: `proxy.json` has its `url`, its `api_key`
+and, for Usage, its `management_key`.
+
+0.0.10 kept the address and the API key in `agent.toml` (`[proxy]`, with `url` and `key`), and the management key
+in `proxy.json` as `key`, which is still read as `management_key`. A start moves a `[proxy]` it finds in
+`agent.toml` to `proxy.json` and takes it out of the file (`move_proxy` in `dirigent_agent/src/config.rs`), through
+a link if the file is one. A `proxy.json` that already has an API key stays as it is, and the `[proxy]` only goes;
+a management key 0.0.10 left there stays if it is for the same address. A save of `agent.toml` makes the move first,
+should a start not have made it (the file did not parse then).
 
 Up to 0.0.9 Dirigent ran pi, as a bundled runtime, and 0.0.10 brought an install over on its first start. That
 migration is gone: a `service.db` as pi left it is refused with a line that says to start 0.0.10 on it once
@@ -168,7 +181,8 @@ fork, but take no more messages. And the backups 0.0.10 made beside the data and
 a `migration.txt`): nothing removes them, they are the user's to delete.
 
 A `--config-dir` instance without an `agent.toml` copies the real install's `agent.toml`, `AGENTS.md` and
-`skills/` (the proxy's API key with them, the management key not).
+`skills/`, and with them, if it has no proxy of its own, the proxy's address and API key into its own `proxy.json`,
+the management key not.
 
 ## Remote hosts
 
@@ -247,8 +261,8 @@ refresh the forge refuses signs the data dir out, said in Settings › Forge pro
 signs in again. `forge.json` is a credential: a copy acts as that account wherever it is, so have each machine sign
 in itself.
 
-A host's CLIProxyAPI (Settings › Proxy) is in `<data dir>/proxy.json` (owner-only): its address and management key.
-That is a credential too: the proxy's management API hands out the tokens of every account behind it.
+A host's CLIProxyAPI (Settings › Proxy) is in `<data dir>/proxy.json` (owner-only): its address, API key and
+management key. That is a credential too: the proxy's management API hands out the tokens of every account behind it.
 `DIRIGENT_FORGE_URL` and `DIRIGENT_FORGE_CLIENT_ID` point an instance at another forge or app (tests).
 
 ## Updates

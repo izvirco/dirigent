@@ -126,7 +126,7 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   (a hover), on a screen without a window manager. What was typed and clicked meanwhile is not lost: it took
   effect, or does once the window has the keyboard focus again, so look before doing it over. To set it right:
   `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | head -1 | xargs xdotool windowfocus'`.
-- **A model under test reads what it can reach**, the session's `config/agent.toml` with the proxy's API key
+- **A model under test reads what it can reach**, the session's `data/proxy.json` with the proxy's API key
   included: don't print the tool results of a thread you didn't write the prompt for.
 - Logs: `DIRIGENT_LOG=dirigent_desktop=debug` (every keystroke with its key context), `dirigent_service=debug`,
   `dirigent=debug` for both. Not a bare `debug`.
@@ -160,6 +160,7 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 
 - `cargo test -p dirigent_agent proxy::live -- --ignored`: the proxy. They spend tokens, asking `claude-haiku-5-5`
   for little. The proxy, theirs and the examples': the one `DIRIGENT_PROXY_URL` and `DIRIGENT_PROXY_KEY` name, else
-  this machine's install's (`[proxy]` in `~/.config/dirigent/agent.toml`).
+  this machine's install's (`~/.local/share/dirigent/proxy.json`; an install that is still a 0.0.10 has no API key
+  there, so name the proxy then).
 - `cua_driver` and `public_http` (`mcp`: the real driver, real servers), `a_private_screen` (computer use, on an
   Xvfb of its own).

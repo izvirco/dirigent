@@ -21,7 +21,11 @@ use tokio_util::sync::CancellationToken;
 fn dirs(tmp: &tempfile::TempDir, servers: impl IntoIterator<Item = (&'static str, Server)>) -> Dirs {
     let dirs = Dirs { config: tmp.path().join("config"), data: tmp.path().join("data") };
     let mcp = servers.into_iter().map(|(name, server)| (name.to_owned(), server)).collect();
-    Config { mcp, ..Config::default() }.save(&dirs).unwrap();
+    Config::update(&dirs, |config| {
+        config.mcp = mcp;
+        Ok(())
+    })
+    .unwrap();
     dirs
 }
 

@@ -41,7 +41,7 @@ either: `examples/run.rs` is a session with a printer for a host, the tests scri
 | `tools`    | `read`, `bash`, `edit`, `write`, `async_bash` (jobs), `ask_user`, `computer`                                 |
 | `codemode` | the QuickJS sandbox and the `codemode` tool                                                                  |
 | `mcp`      | the MCP client, a session's servers as tools, what Settings does to them                                     |
-| `config`   | `agent.toml`                                                                                                 |
+| `config`   | `agent.toml` and `proxy.json`                                                                                |
 
 ## How a run goes
 
@@ -91,10 +91,10 @@ which is who makes the model (`anthropic`, `openai`).
 ## Files
 
 ```
-<config dir>/agent.toml        proxy url + key, compaction, per-model settings, MCP servers (0600)
+<config dir>/agent.toml        compaction, per-model settings, MCP servers (0600); no key of ours, so it can be shared
 <config dir>/AGENTS.md         the user's instructions for every thread
 <config dir>/skills/<name>/SKILL.md
-<data dir>/proxy.json          the proxy's management key (Usage); never copied to a test instance
+<data dir>/proxy.json          the proxy's url, API key and management key (Usage) (0600); a test instance gets no management key
 <data dir>/mcp-auth.json       MCP OAuth tokens (0600)
 <data dir>/models.json, prices.json   what the proxy serves and what it costs, as last seen
 <data dir>/jobs/<thread>/      the logs of commands
@@ -102,7 +102,7 @@ which is who makes the model (`anthropic`, `openai`).
 <data dir>/screens/<thread>/   a thread's screen (computer use)
 ```
 
-`agent.toml` is read when it is asked for, so an edit applies to the next request. Project
+`agent.toml` and `proxy.json` are read when they are asked for, so an edit applies to the next request. Project
 instructions are the `AGENTS.md` (or `CLAUDE.md`) files from the thread's directory up.
 Lowercase `agents.md` and `skill.md` are read too.
 

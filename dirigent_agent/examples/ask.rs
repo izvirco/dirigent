@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use dirigent_agent::config::{self, Config, Dirs};
+use dirigent_agent::config::{self, Dirs};
 use dirigent_agent::proxy::{Chunk, Message, Model, Part, Proxy, Request};
 use dirigent_protocol::transcript::Api;
 use std::io::Write;
@@ -25,15 +25,15 @@ async fn main() -> Result<()> {
     let tmp = tempfile::tempdir()?;
     let dirs = Dirs { config: tmp.path().join("config"), data: tmp.path().join("data") };
     let proxy = match (std::env::var("DIRIGENT_PROXY_URL"), std::env::var("DIRIGENT_PROXY_KEY")) {
-        (Ok(url), Ok(key)) => config::Proxy { url, key },
+        (Ok(url), Ok(api_key)) => config::Proxy { url, api_key, management_key: String::new() },
         _ => {
-            let real = Dirs { config: format!("{}/.config/dirigent", std::env::var("HOME")?).into(), data: dirs.data.clone() };
-            Config::load(&real)?.proxy
+            let real = Dirs { config: dirs.config.clone(), data: format!("{}/.local/share/dirigent", std::env::var("HOME")?).into() };
+            config::Proxy { management_key: String::new(), ..config::Proxy::load(&real)? }
         }
     };
-    anyhow::ensure!(!proxy.url.is_empty(), "no proxy: set DIRIGENT_PROXY_URL and DIRIGENT_PROXY_KEY");
-    Config::update(&dirs, |config| {
-        config.proxy = proxy;
+    anyhow::ensure!(!proxy.api_key.is_empty(), "no proxy: set DIRIGENT_PROXY_URL and DIRIGENT_PROXY_KEY");
+    config::Proxy::update(&dirs, |own| {
+        *own = proxy;
         Ok(())
     })?;
     let proxy = Proxy::new(dirs);
