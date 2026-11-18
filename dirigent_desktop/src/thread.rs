@@ -1,26 +1,3 @@
-//! Main pane for one thread: header, the entries as a lazy `list()` in a centered reading
-//! column, and the composer card with its model / effort chips. Also the new-thread page,
-//! which is the same composer alone, centered in the pane.
-//!
-//! The transcript: user messages are raised, replies are markdown prose, and everything
-//! the model did in between (thinking, interim prose, tool calls) is one *work* line per
-//! turn (`model effort · duration · n tool calls · what it's doing now`). The transcript
-//! never shows the steps themselves: clicking a work line (or `]`) opens `log_panel`, a
-//! resizable panel on the pane's right with the full log, so the reading column only ever
-//! grows. While a run goes on, the model's latest prose streams below its work line a line
-//! at a time; the next prose, or the final reply, replaces it. The ruler (`ruler.rs`) lies
-//! over the column's left edge, transcript and composer: one mark per message, hover to preview, click to jump.
-//! Scrolled up from the end, a small pill above the composer brings you back (`jump_button`).
-//! Messages can be pinned (the button next to `copy`); pins colour their marks. Any message
-//! can start a fork (a new thread with the history up to there), and a user message can be
-//! edited in place: its bubble takes the composer (`edit_bubble`), and sending runs the
-//! thread again from there, on a new branch of its history (only the current one shows).
-//! Questions the model asked (`ask_user`) float above the composer (`ask_card`), out of the
-//! transcript's flow, until they are answered or dismissed: one call at a time, the oldest,
-//! so a model that asks twice doesn't bury the transcript; the next shows once it's gone.
-//! Steers (typed, or the answers to an ask) are user bubbles: `steer · pending` below the
-//! work line while the agent holds them, `steer` above it once the model has them.
-
 use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, PANE_MIN, Pane, PanelPart, Resize, Target, default_base};
 use crate::icons::icon;
 use crate::lists::{Via, breadcrumb, header};
@@ -43,18 +20,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Work key for the run in progress while it has no persisted item yet.
+// MUST KILL: type: a WorkKey enum (Item(usize) | Tail) instead of the usize::MAX sentinel
 pub const TAIL: usize = usize::MAX;
 const MAX_RESULT_CHARS: usize = 20_000;
-/// Tool rows are compact and table-like: this tall, their text `text::sm`.
 const ROW_H: f32 = 22.;
-/// Default log panel width; the user can drag it from `app::LOG_MIN` up to all of the pane
-/// but `app::PANE_MIN`.
 pub const LOG_WIDTH: f32 = 400.;
 
 pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
-    // Back at the end: what arrived while scrolled up has been seen (`jump_button`).
     if let Pane::Thread(t) = &mut this.pane
         && t.list.is_following_tail()
     {
@@ -68,7 +41,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     };
     let list_state = t.list.clone();
     let (host, id) = (t.host.clone(), t.id.clone());
-    // Only the oldest ask shows; the rest wait their turn (`ask_card`).
     let ask = t.asks.first().map(|form| ask_card(form, t.asks.len() - 1, cx));
     let jump = jump_button(t, cx);
     let summary = this.summary(&host, &id).cloned();
@@ -111,7 +83,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     });
     let archive_confirm = archive_confirm(&host, &id, ArchiveAt::Header, Side::BelowRight(26.), this, cx);
     let archive_open = archive_confirm.is_some();
-    // A fork: its source, a click away (gone with a deleted source).
     let fork_source = summary.as_ref().and_then(|s| s.forked_from.clone()).and_then(|from| {
         let name = this.summary(&host, &from.thread_id)?.name.clone().unwrap_or_else(|| "Untitled".into());
         let host = host.clone();
@@ -127,7 +98,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .gap_1()
         .font_weight(FontWeight::NORMAL)
         .children(fork_source)
-        // The thread's id (its full uuid), e.g. to point an agent at it; a check for a moment once copied.
         .child(
             theme::icon_button(copy_btn.clone(), if id_copied { "check" } else { "copy" }, cx, move |this, cx| {
                 this.copy_item(copy_btn.clone(), thread_id.clone(), cx)
@@ -135,7 +105,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .tooltip(theme::tooltip("Copy thread id")),
         )
         .when(summary.as_ref().is_some_and(|s| this.snoozable(&host, s)), |d| {
-            // Snooze: out of the sidebar until the next run; amber while snoozed, click wakes it.
             d.child(theme::tinted_icon_button(
                 "hdr-snooze",
                 "moon",
@@ -144,12 +113,9 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 move |this, cx| this.set_snoozed(&h3, &i3, !snoozed, cx),
             ))
         })
-        // Pin: on top of its list (an amber pin before the title shows it); amber while
-        // pinned, click again unpins.
         .child(theme::tinted_icon_button("hdr-pin", "pin", if pinned { theme::t().warn } else { theme::t().fg_1 }, cx, move |this, cx| {
             this.set_pinned(&h4, &i4, !pinned, cx)
         }))
-        // Archive (only at rest: nothing working, sub-agents included) or restore.
         .when(archived || summary.as_ref().is_some_and(|s| this.at_rest(&host, s)), |d| {
             d.child(
                 theme::icon_button("hdr-archive", if archived { "archive-restore" } else { "archive" }, cx, move |this, cx| {
@@ -164,7 +130,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .when(confirm_open, |d| d.bg(rgba(theme::t().hover)))
                 .children(confirm),
         )
-        // The right panel's button, outermost (`]` does the same).
         .child(
             theme::icon_button("hdr-panel", if panel_open { "panel-right-close" } else { "panel-right-open" }, cx, |this, cx| {
                 this.toggle_panel(cx)
@@ -173,8 +138,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         )
         .into_any_element();
 
-    // The ruler spans the whole column, composer included, so it stays put while the
-    // composer grows and shrinks; it sits in the margin left of the composer.
     let column = div()
         .relative()
         .flex_1()
@@ -184,10 +147,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .flex_col()
         .child(list(list_state, cx.processor(|this, ix, _window, cx| render_item(this, ix, cx))).flex_1().min_h_0().w_full())
         .child(
-            // The ask stack is a zero-height layer at the composer's top edge that grows
-            // upward (`justify_end`), so it covers the transcript instead of pushing it.
-            // Its height pads the transcript's tail (`set_ask_height`) so the end can be
-            // scrolled out from under it.
+            // MUST KILL: extract: an ask_layer() for the zero-height stack that grows upward and pads the tail via set_ask_height
             div()
                 .relative()
                 .w_full()
@@ -223,7 +183,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         )
         .child(ruler::render(this, cx));
     let titling = this.titling(&host, &id);
-    // `⎇ dirigent-abcd1234` after the title while the thread works in its own workspace.
     let branch = workspace.as_deref().map(|w| {
         let name = workspace_name(w);
         div()
@@ -240,7 +199,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .child(icon("git-branch", if missing { theme::t().warn } else { theme::t().fg_2 }).size(u(12.)))
             .child(name)
     });
-    // A sub-agent's parent before its title, a click away (the right panel's tree has the whole family).
     let parent = summary.as_ref().and_then(|s| s.parent_id.clone()).and_then(|pid| this.summary(&host, &pid)).map(|p| Via {
         host: host.clone(),
         id: p.id.clone(),
@@ -254,10 +212,6 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .min_w_0()
         .child(breadcrumb(project, parent, Some(status), title, pinned, titling, cx))
         .children(branch);
-    // With the right panel open, its hairline runs the pane's full height: the header splits
-    // there, the crumb over the transcript (a long title stops short of the line) and the
-    // actions over the panel. The crumb's half then isn't at the window's right end: no room
-    // kept for the caption buttons.
     let (actions, panel) = if panel_open { (None, Some(side_panel(this, actions, cx))) } else { (Some(actions), None) };
     let main = div()
         .flex_1()
@@ -270,19 +224,13 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> Div {
     pane.child(div().flex_1().min_h_0().flex().flex_row().child(main).children(panel))
 }
 
-/// Back to the end: a small pill (`↓ Latest`) floating over the transcript just above the
-/// composer's top edge, centered on the column, while the transcript is scrolled up from its
-/// end. Ask cards lift it (`ask_h`) so it sits above their stack. Output that arrived
-/// meanwhile (`OpenThread::new_output`) turns it into an accent `↓ New output`. The list stops following its tail as
-/// soon as you scroll up, but only picks it up again in its layout, after this render,
-/// once you're back at the end (or everything fits): the canvas, prepainted after the
-/// list, asks for one more render then, which drops the button.
 fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
     if t.list.is_following_tail() {
         return None;
     }
     let th = theme::t();
     let list = t.list.clone();
+    // MUST KILL: extract: a named element that re-renders once the list follows its tail again
     let recheck = canvas(
         move |_, window, _| {
             if list.is_following_tail() {
@@ -312,34 +260,19 @@ fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
         .text_size(text::xs())
         .text_color(rgba(color))
         .hover(|d| d.bg(rgba(th.hover)))
-        // It floats over the transcript: clicks must not reach the text under it.
         .block_mouse_except_scroll()
         .on_click(cx.listener(|this, _, _, cx| this.jump_to_end(cx)))
         .child(icon("arrow-down", color).size(u(12.)))
         .child(label)
         .child(recheck.absolute().size_0())
-        // Fades in (at once with reduce motion: gpui's animations honour it); gone at once
-        // when you're back at the end.
         .with_animation("jump-latest-in", Animation::new(Duration::from_millis(150)), |d, v| d.opacity(v));
-    // A zero-height layer `lift` above the composer block's top edge (the ask stack's base,
-    // over the banner and composer), growing upward like the ask stack.
     let lift = if t.ask_h > px(0.) { t.ask_h + u(8.) } else { u(8.) };
     Some(div().absolute().top(-lift).left_0().right_0().h_0().flex().flex_col().items_center().justify_end().child(button))
 }
 
-/// The right panel, split off the pane by a full-height hairline, `log_width` wide (less
-/// in a pane too narrow for that and the transcript's `PANE_MIN`), with
-/// a drag handle on its left edge below the header. Its header: a toggle per section on
-/// the left, the thread's header `actions` on the right. Below it the thread's screen while
-/// its agent uses the computer (`screen::section`, no toggle: it comes and goes), its family
-/// (`orchestra::tree`; over the log, at most half the height, scrolling past that) and
-/// the work log (`log_body`), each when there is one and it isn't hidden
-/// (`Dirigent::panel_hidden`); a word on what would show when neither does. Untitled:
-/// the header's button shows its state. On screen while `panel_open`.
 fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) -> Div {
     let lineage = this.panel_shows(PanelPart::Lineage);
     let tree = if lineage { crate::orchestra::tree(this, cx) } else { None };
-    // A hidden log has no work to show (`Dirigent::set_panel_hidden`).
     let log = log_body(this, cx);
     let empty = (tree.is_none() && log.is_none()).then(|| {
         let what = if lineage { "Sub-agents this thread spawns show up here." } else { "Tool calls and thinking show up here." };
@@ -363,7 +296,6 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
             .when(log.is_none(), |d| d.flex_1().min_h_0())
             .child(tree)
     });
-    // Lit while its section shows. Clicking the only one lit does nothing: one always shows.
     let toggle = |id: &'static str, part: PanelPart, glyph: &'static str, tip: &'static str| {
         let on = this.panel_shows(part);
         let color = if on { theme::t().fg } else { theme::t().fg_2 };
@@ -376,7 +308,6 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
         .flex_row()
         .items_center()
         .gap_1()
-        // Clipped, not over the actions, in a panel too narrow for both.
         .min_w_0()
         .overflow_hidden()
         .child(toggle("panel-lineage", PanelPart::Lineage, "network", "Agent lineage"))
@@ -384,7 +315,6 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
     let handle = div()
         .id("panel-resize")
         .absolute()
-        // Below the header: on Windows that is the grab strip, which drags the window.
         .top(u(titlebar::HEIGHT))
         .bottom_0()
         .left(u(-3.))
@@ -395,16 +325,12 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
     div()
         .relative()
         .w(u(this.log_width))
-        // It shrinks, whatever is in it, when the pane is too narrow for its width and the
-        // transcript's `PANE_MIN`.
         .min_w_0()
         .h_full()
         .border_l_1()
         .border_color(rgba(theme::t().line_soft))
         .flex()
         .flex_col()
-        // `justify_end`: actions wider than a narrow panel spill left, over the hairline,
-        // not right under the caption buttons.
         .child(header(toggles, Some(actions)).justify_end())
         .children(crate::screen::section(this, cx))
         .children(tree)
@@ -413,9 +339,6 @@ fn side_panel(this: &Dirigent, actions: AnyElement, cx: &mut Context<Dirigent>) 
         .child(handle)
 }
 
-/// The `ConfirmArchive` popup for this thread, if it is the one asking: archive it and
-/// remove its workspace (uncommitted changes go with it), or leave the workspace on disk
-/// for the user and just let the thread go. Goes under the archive button that was clicked (`at`).
 pub fn archive_confirm(host: &str, id: &str, at: ArchiveAt, side: Side, this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     if this.menu.as_ref() != Some(&Menu::ConfirmArchive { host: host.to_owned(), id: id.to_owned(), at }) {
         return None;
@@ -443,14 +366,10 @@ pub fn archive_confirm(host: &str, id: &str, at: ArchiveAt, side: Side, this: &D
     ))
 }
 
-/// A workspace's name is its directory's basename: the host names the directory, the git
-/// branch and the jj workspace alike (`dirigent_protocol::workspace_name`).
 fn workspace_name(dir: &str) -> String {
     crate::projects::basename(dir).to_owned()
 }
 
-/// The thread's workspace directory is gone: nothing can run until it is recreated or
-/// the thread goes back to its project directory. Sits where the composer's top edge is.
 fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let (h1, i1) = (host.to_owned(), id.to_owned());
@@ -490,22 +409,15 @@ fn missing_banner(host: &str, id: &str, workspace: &str, mono: SharedString, cx:
         )
 }
 
-/// Height of the project list in the `Create thread in` popup (~10 rows).
 const TARGET_LIST_H: f32 = 270.;
 
-/// About how many characters (name + hosts) a row of that popup fits in the default font;
-/// past it the hosts collapse to `n hosts`.
 const TARGET_ROW_CHARS: usize = 44;
 
-/// The new-thread page: `Create thread in <project>` above the composer, both centered in
-/// the pane. Projects linked across hosts are one entry; `on <host>` then picks the host.
-/// Leaving the page (sidebar, a thread) keeps whatever was typed.
 fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let (groups, _) = this.groups();
     let group = target.as_ref().and_then(|t| groups.iter().find(|g| g.has(&t.host, &t.project_id)));
     let project = group.map(|g| g.name.clone());
     let target_open = this.menu == Some(Menu::Target);
-    // A search over the groups, then the matching ones' rows (`projects::search`).
     let target_menu = target_open.then(|| {
         if groups.is_empty() {
             return menu::popup(Side::Below(26.), vec![menu::header("No projects yet. Add one with the folder in the sidebar.")], cx);
@@ -516,10 +428,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
             let mut items = Vec::new();
             for g in &this.filtered_targets(cx) {
                 let selected = group.is_some_and(|s| s.key == g.key);
-                // Keep the host when switching to a group that also lives there.
                 let t: Target = g.member_for(target.as_ref().map(|t| t.host.as_str())).into();
-                // The name, and on the right the hosts it lives on (with more than one host;
-                // the `on <host>` chip picks among them), or their count when they don't fit.
                 let hosts = multi_host.then(|| {
                     let names = g.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>().join(", ");
                     let fits = g.name.chars().count() + names.chars().count() <= TARGET_ROW_CHARS;
@@ -541,8 +450,6 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
         let body = div().w(u(360.)).flex().flex_col().child(search).child(menu::separator()).child(list).into_any();
         menu::popup(Side::Below(26.), vec![body], cx)
     });
-    // `on <host>`: a plain chip when the project is on one host, a dropdown when it is linked
-    // across several.
     let host_chip = target.as_ref().filter(|_| this.hosts.len() > 1).map(|t| {
         let members = group.map(|g| g.members.as_slice()).unwrap_or_default();
         let host_open = this.menu == Some(Menu::TargetHost);
@@ -605,21 +512,13 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, cx: &mut Conte
         )
         .children(host_chip);
 
-    // The warnings hang off the card's bottom edge in a zero-height layer, so showing or
-    // hiding them (the chip toggles that) never moves the composer.
     let card =
         div().relative().w_full().max_w(u(theme::COMPOSER)).flex().flex_col().gap_3().child(where_row).child(composer(this, cx)).child(
             div().absolute().bottom_0().left_0().right_0().h_0().flex().flex_col().items_center().children(draft_warnings(this, cx)),
         );
-    // No header: the page is just the composer, a little above true center so it reads as
-    // the page's subject, not its footer.
     pane.child(div().flex_1().flex().flex_col().items_center().justify_center().px_6().pb(u(40.)).child(card))
 }
 
-/// What a thread started in the project directory would walk into: another thread already
-/// working there (the louder one: two agents in one checkout), or uncommitted changes.
-/// Centered under the composer; each line ends in an `isolate it` link, which flips the
-/// composer's chip. Nothing while isolated.
 fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let (target, path, info) = this.draft_vcs()?;
     let t = theme::t();
@@ -663,20 +562,6 @@ fn draft_warnings(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     )))
 }
 
-/// The composer's workspace chip, first in the footer (only when the project is a git / jj
-/// repo). One chip, three states:
-/// - `in project` (a draft, or a thread still in its project directory): opens the
-///   `New workspace from` popup (`base_picker`); picking a base makes the draft start its
-///   thread in a workspace there (the chip then reads `workspace from <base>`), or moves the
-///   thread there at once. A running thread, or one in a dirty checkout (its changes would
-///   stay behind), can't move: the chevron goes faint, the popup stays shut, and hovering
-///   says why.
-/// - `dirigent-abcd1234` in the accent colour: the thread works in that workspace; opens
-///   the copy path / back to project menu. While the thread runs, only `Copy path` works.
-///   While the host is still making it (a draft sent into a workspace), its name already
-///   shows, with a faint chevron and no menu.
-///
-/// Nothing while its workspace is missing (the banner takes over).
 fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let t = theme::t();
     let picker_open = this.menu == Some(Menu::Base);
@@ -736,7 +621,6 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                         let (h, i) = (host.clone(), id.clone());
                         let (h2, i2) = (host.clone(), id.clone());
                         let path = w.clone();
-                        // A toast, not a check: the menu closes on the click.
                         let copy_path = move |this: &mut Dirigent, cx: &mut Context<Dirigent>| {
                             cx.write_to_clipboard(ClipboardItem::new_string(path.clone()));
                             this.menu = None;
@@ -744,8 +628,6 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
                         };
                         let remove = format!("Back to project, remove the {kind}");
                         let detach = "Back to project, keep it on disk";
-                        // While it runs the thread can't leave: the header says so in place
-                        // of the clean / dirty state, which only matters for leaving.
                         let header = match (running, dirty) {
                             (true, _) => "The thread is working. Stop it to leave the workspace.",
                             (false, true) => "The workspace has uncommitted changes.",
@@ -773,14 +655,8 @@ fn workspace_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElem
     }
 }
 
-/// Height of the base list in the workspace popup (~6 rows).
 const BASE_LIST_H: f32 = 160.;
 
-/// The workspace popup: `in project` alone on top, a hairline, then `New workspace from`
-/// with a search over the repo's branches / tags / bookmarks, the vcs default first.
-/// Enter takes the top match, or the typed text as is when nothing matches (a commit,
-/// `main~3`, a revset). The list follows the repo: it is re-fetched every few seconds
-/// while open (`VCS_REFRESH_SECS`).
 fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Dirigent>) -> AnyElement {
     let search = menu::search(this.base_search.clone());
     let typed = this.base_search.read(cx).text().trim().to_owned();
@@ -788,8 +664,6 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
     let drafting = matches!(this.pane, Pane::Draft { .. });
     let isolated = drafting && this.isolate;
     let current = this.base.clone().filter(|_| isolated);
-    // `in project` is the other choice, apart from every base: on top, selected while that
-    // is the state (a thread here is always in its project; picking it just closes).
     let in_project = menu::item(
         "base/none",
         "in project",
@@ -840,8 +714,6 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
     menu::popup(Side::Above, vec![body], cx)
 }
 
-/// The model and effort chips with their menus. These open above the chips, or under them
-/// (`below`) in an edit bubble, which may sit at the top of the transcript.
 fn model_chips(this: &Dirigent, below: bool, cx: &mut Context<Dirigent>) -> (Stateful<Div>, Stateful<Div>) {
     let side = || if below { Side::Below(24.) } else { Side::Above };
     let no_target = matches!(this.pane, Pane::Draft { target: None });
@@ -873,7 +745,6 @@ fn model_chips(this: &Dirigent, below: bool, cx: &mut Context<Dirigent>) -> (Sta
     (model, effort)
 }
 
-/// The round send button: accent when `ready`. It submits the composer, wherever it is.
 fn send_button(id: &'static str, ready: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     div()
         .id(id)
@@ -892,13 +763,11 @@ fn send_button(id: &'static str, ready: bool, cx: &mut Context<Dirigent>) -> Sta
         .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))
 }
 
-/// `host offline`, left of a send button that is grey for it.
 fn offline_note(this: &Dirigent) -> Option<Div> {
     this.composer_offline()
         .then(|| div().flex_shrink_0().px_1().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child("host offline"))
 }
 
-/// In the composer's place while a bubble holds it (`edit_bubble`).
 fn editing_note() -> Div {
     div()
         .w_full()
@@ -912,10 +781,6 @@ fn editing_note() -> Div {
         .child("Editing a message above \u{b7} Esc to cancel")
 }
 
-/// The composer card: text on top, chips (model / effort / context) and the send or stop
-/// button in the footer (`host offline` left of it while its host is down). Sized by its
-/// parent (reading column or draft page). While an edit bubble holds the composer, a note
-/// in its place.
 fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     if this.open().is_some_and(|t| t.editing.is_some()) {
         return editing_note();
@@ -926,8 +791,6 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let no_target = matches!(this.pane, Pane::Draft { target: None });
     let (model_chip, effort_chip) = model_chips(this, false, cx);
 
-    // The context chip: tokens in the model's window right now; hovering it shows what the
-    // whole thread has cost so far (`stats_card`).
     let usage = (!drafting).then(|| this.open().and_then(|t| context_usage(t).map(|u| (t, u)))).flatten().map(|(t, used)| {
         let window = this.current_model().map(|m| m.context_window).unwrap_or(0);
         let label = if window > 0 { format!("{}/{}", kilo(used), kilo(window)) } else { kilo(used) };
@@ -951,11 +814,6 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .children(t.stats_hover.then(|| stats_card(t)))
     });
 
-    // One round button in the corner: send, or stop while running. While running, ctrl+Enter
-    // steers and shift+Enter queues a follow-up (see `input::Submitted`).
-    // A thread its host is still setting up can't take a message (`not_ready`), nor be
-    // stopped, and nothing reaches an offline host: the send button stays, grey, and says
-    // why when pressed (offline, `offline_note` beside it says so from the start).
     let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some()) || this.composer_offline();
     let action = if running && !blocked {
         div()
@@ -966,7 +824,6 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             .justify_center()
             .rounded_full()
             .cursor_pointer()
-            // Soft red, the same deep-fill / light-icon pairing as send.
             .bg(rgba(theme::t().danger))
             .hover(|d| d.bg(rgba(theme::t().danger_active)))
             .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
@@ -983,7 +840,6 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .flex_col()
         .rounded(u(CORNER))
         .bg(rgba(theme::t().raised))
-        // No border of its own: the glow rings are the only edge, so it stays soft.
         .border_1()
         .border_color(gpui::transparent_black())
         .shadow_md()
@@ -998,15 +854,11 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .gap_1()
                 .px_2()
                 .pb_2()
-                // The chips take what the button leaves. When they don't all fit, the usage
-                // label goes first, whole: it wraps onto a second line, clipped away (popups
-                // draw deferred, unclipped). Then the chips' labels truncate (effort stays
-                // whole: it's short).
                 .child(
                     div()
                         .flex_1()
                         .min_w_0()
-                        // One chip tall (`chip_in`, `ctx-usage`), so line two is clipped whole.
+                        // MUST KILL: rearchitect: hide `usage` when it doesn't fit instead of wrapping it onto this clipped second line
                         .h(u(24.))
                         .overflow_hidden()
                         .flex()
@@ -1021,7 +873,6 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                                 .flex_row()
                                 .items_center()
                                 .gap_1()
-                                // Where the work happens comes first, then what does it.
                                 .children(workspace_chip(this, cx))
                                 .child(model_chip)
                                 .child(effort_chip),
@@ -1033,17 +884,6 @@ fn composer(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         )
 }
 
-/// One `ask_user` call as a stack of cards, nine tenths of the composer's width. The
-/// question being answered is a card on top: each option on its own row (a circle for one
-/// choice, a square for several) and, where the question takes typed text, a row holding
-/// the text field. The other questions are collapsed to one-line rows in their order:
-/// answered ones above the card with a check and their answer, the rest below it, each
-/// a step further in and fainter, like a pile of notifications. Clicking a row opens it.
-/// `Next` (Enter in the field too) opens the next unanswered question; once every one
-/// has an answer `Answer` takes its place. The header holds `Insert into composer`, which
-/// moves the questions to the composer instead, `Dismiss`, and how many more asks
-/// (`waiting`) come once this one is gone.
-/// Goes grey once sent, until the host confirms and the card leaves.
 fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let ask_id = form.ask.id.clone();
@@ -1051,7 +891,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
     let complete = form.complete(cx);
     let answers = form.answers(cx);
 
-    // A collapsed question: its text, and its answer once it has one.
     let collapsed = |i: usize, depth: usize| {
         let question = &form.ask.questions[i];
         let answer = answers[i].join(", ");
@@ -1086,8 +925,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
     let above: Vec<_> = (0..qi).map(|i| collapsed(i, 0)).collect();
     let below: Vec<_> = (qi + 1..form.ask.questions.len()).enumerate().map(|(k, i)| collapsed(i, k)).collect();
 
-    // An option row: the mark (filled while picked), then the label or the text field. The
-    // label wraps, so the row grows past its one-line height for long options.
     let option_row = |id: ElementId, on: bool, multi: bool, body: AnyElement| {
         let mark = div()
             .size(u(11.))
@@ -1138,7 +975,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
         .on_click(cx.listener(move |this, _, _, cx| this.show_ask_tab(&focus_id, qi, cx)))
     });
 
-    // `Next` while another question waits for an answer; `Answer` once none does.
     let next = form.next_unanswered(cx).is_some();
     let next_id = ask_id.clone();
     let action = (complete || next).then(|| {
@@ -1176,7 +1012,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
         .child(div().flex().flex_col().gap_0p5().children(options).children(custom))
         .child(
             div()
-                // The action's height, so the card keeps its size when it comes and goes.
                 .min_h(u(24.))
                 .flex()
                 .flex_row()
@@ -1187,7 +1022,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
                 .children(action),
         );
 
-    // Answer in a message of your own instead (`insert_ask`).
     let insert_id = ask_id.clone();
     let insert = theme::button(format!("ask-insert/{ask_id}"), "corner-down-right", "Insert into composer")
         .tooltip(theme::tooltip("Put the questions in the composer to answer in your own message"))
@@ -1199,8 +1033,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
     div()
         .w_full()
         .max_w(u(theme::COMPOSER * 0.9))
-        // It floats over the transcript: clicks must not reach what's under it (the wheel
-        // still scrolls the transcript).
         .block_mouse_except_scroll()
         .flex()
         .flex_col()
@@ -1233,8 +1065,6 @@ fn ask_card(form: &AskForm, waiting: usize, cx: &mut Context<Dirigent>) -> Div {
         .children(below)
 }
 
-/// Thumbnails of the images referenced from the composer text, under it. Click one to see
-/// it full-size; the \u2715 (on hover) drops it and its `[image-N]` token.
 fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let attachments = this.attachments(cx);
     if attachments.is_empty() {
@@ -1278,15 +1108,9 @@ fn attachment_strip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> 
     Some(div().flex().flex_row().flex_wrap().gap_3().px_4().pt_1().pb_3().children(thumbs))
 }
 
-/// Thumbnail height in the composer strip, under user bubbles and in tool results.
 const THUMB: f32 = 64.;
-/// Tallest an image shown inline in a reply gets; wider ones also shrink to the column.
 const INLINE_IMAGE_H: f32 = 420.;
 
-/// How markdown draws a `blob:` image (`markdown::ImageFn`): the bitmap scaled into the
-/// column, click for full size; a blank accent box while its bytes are on their way (or
-/// if its header doesn't parse: gpui couldn't draw it either).
-/// `seed` (the item / step index) keeps the click ids apart across the document.
 fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context<Dirigent>) -> impl FnMut(&str) -> AnyElement + 'a {
     let mut n = 0u64;
     move |id| {
@@ -1316,9 +1140,6 @@ fn inline_image<'a>(blobs: &'a HashMap<String, Blob>, seed: u64, cx: &'a Context
     }
 }
 
-/// How markdown makes a code block's copy button (`markdown::CopyFn`): the code it shows
-/// to the clipboard, and a check on the button for a moment, like a message's copy
-/// (`copied` is `OpenThread::copied`). Revealed while the block is hovered or it shows the check.
 fn copy_code<'a>(copied: Option<&'a ElementId>, cx: &'a Context<Dirigent>) -> impl Fn(ElementId, SharedString) -> AnyElement + 'a {
     move |id, code| {
         let done = copied == Some(&id);
@@ -1332,13 +1153,10 @@ fn copy_code<'a>(copied: Option<&'a ElementId>, cx: &'a Context<Dirigent>) -> im
     }
 }
 
-/// An icon button that floats over text (a message's corner buttons, a code block's copy):
-/// raised, with a border.
 fn raised(b: Stateful<Div>) -> Stateful<Div> {
     b.bg(rgba(theme::t().raised)).border_1().border_color(rgba(theme::t().line))
 }
 
-/// Thumbnails of the images in a tool's result (`read` on an image file); click for full size.
 fn result_images(images: &[String], blobs: &HashMap<String, Blob>, seed: u64, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_row().flex_wrap().gap_3().children(images.iter().enumerate().map(|(i, id)| {
         let blob = blobs.get(id);
@@ -1360,15 +1178,10 @@ fn result_images(images: &[String], blobs: &HashMap<String, Blob>, seed: u64, cx
     }))
 }
 
-/// Thumbnail width for `blob`: its shape at THUMB tall, so the image fills the box with
-/// no letterbox, kept between half and four times THUMB (`thumb` crops an image more
-/// extreme than that). 3:2 while the bytes are on their way, or if the size is unknown
-/// (gpui can't draw such an image either; the box stays blank).
 fn thumb_w(blob: Option<&Blob>) -> f32 {
     THUMB * blob.and_then(|b| b.size).map_or(1.5, |(w, h)| (w / h).clamp(0.5, 4.))
 }
 
-/// The thumbnail box for `blob` (`None`: not here yet); `thumb` goes inside.
 fn thumb_box(blob: Option<&Blob>) -> Div {
     div().relative().flex_shrink_0().w(u(thumb_w(blob))).h(u(THUMB)).rounded_md()
 }
@@ -1380,7 +1193,6 @@ fn thumb(blob: &Blob) -> gpui::Img {
     img(blob.image.clone()).size_full().aspect_ratio(thumb_w(Some(blob)) / THUMB).rounded_md().object_fit(ObjectFit::Cover)
 }
 
-/// An image full-size over the whole window, on a dark scrim. Any click (or Esc) closes it.
 pub fn preview(image: Arc<gpui::Image>, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     div()
         .id("preview")
@@ -1390,21 +1202,15 @@ pub fn preview(image: Arc<gpui::Image>, cx: &mut Context<Dirigent>) -> Stateful<
         .items_center()
         .justify_center()
         .bg(rgba(0x000000d0))
-        // Over the grab strip (`titlebar.rs`): a press at the top closes it too.
         .occlude()
         .cursor_pointer()
         .on_click(cx.listener(|this, _, _, cx| this.set_preview(None, cx)))
         .child(img(image).max_w(relative(0.9)).max_h(relative(0.9)).rounded_md().object_fit(ObjectFit::Contain))
 }
 
-/// Composer corner radius; the glow rings follow it.
 const CORNER: f32 = 12.;
-/// Horizontal padding of a user bubble; it overhangs the column by the same amount.
 const BUBBLE_PAD: f32 = 16.;
 
-/// A soft glow in the theme's `glow` colour: three 1px rings stepping out from the card,
-/// the first at the colour's alpha, the next two at a half and a fifth of it, with a 1px
-/// gap between rings. Absolute, so they take no space and no clicks.
 fn glow() -> impl Iterator<Item = Div> {
     let color = theme::t().glow;
     [1., 0.5, 0.21].into_iter().enumerate().map(move |(i, k)| {
@@ -1414,8 +1220,6 @@ fn glow() -> impl Iterator<Item = Div> {
     })
 }
 
-/// The tokens in the model's context: what the last reply on the current branch that
-/// didn't fail used, its prompt and what it wrote.
 fn context_usage(t: &OpenThread) -> Option<u64> {
     let branch = t.entries.last().map(|last| dirigent_protocol::transcript::branch(&t.entries, &last.id)).unwrap_or_default();
     branch.into_iter().rev().find_map(|e| match &e.body {
@@ -1424,8 +1228,6 @@ fn context_usage(t: &OpenThread) -> Option<u64> {
     })
 }
 
-/// The thread's totals, floated above the context chip while it is hovered: tokens in
-/// and out, how much of the input was cached, message counts, and the bill so far.
 fn stats_card(t: &OpenThread) -> AnyElement {
     let s = Stats::of(&t.entries);
     let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
@@ -1451,7 +1253,7 @@ fn stats_card(t: &OpenThread) -> AnyElement {
         .child(dim(count(s.compactions, "compaction")))
         .child(div().pt_0p5().font_weight(FontWeight::MEDIUM).child(dollars(s.cost)));
     // Zero-size absolute wrapper so the anchored card sits at the chip's corner, not the
-    // flex static position (see AGENTS.md).
+    // flex static position.
     div()
         .absolute()
         .top_0()
@@ -1461,11 +1263,6 @@ fn stats_card(t: &OpenThread) -> AnyElement {
         .into_any()
 }
 
-/// One list item: a timeline item, or (last index) the live tail: the optimistic echoes of
-/// sent messages (prompts above the work in progress, follow-ups below it), the work and
-/// its latest prose, then the steers the agent still holds. Everything sits in the reading
-/// column.
-/// Also what `Dirigent::copy_selection` calls to collect an item's text.
 pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
     let live = live_work(this);
@@ -1473,11 +1270,9 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     let fonts = this.fonts.clone();
     let blobs = &this.blobs;
     let keys = &mut Keys::new(&this.selection, Doc::Thread, ix);
-    // User bubbles go gray in an archived thread, so it reads as one at a glance.
     let archived = this.summary(&t.host, &t.id).is_some_and(|s| s.archived);
     let busy = this.summary(&t.host, &t.id).and_then(|s| busy(s, now));
     let bubble = if archived { theme::t().hover } else { theme::t().bubble };
-    // Messages can be edited while nothing runs and no edit is on its way.
     let idle = !this.is_running() && t.rewound.is_none();
     let mut col = div().w_full().max_w(u(theme::COLUMN)).flex().flex_col();
     if ix < t.timeline.items.len() {
@@ -1490,18 +1285,15 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             });
         }
     } else {
-        // Echoes show their text only; the thumbnails come with the persisted entry.
         let echo = |mode| t.streaming.echo.iter().filter(move |(_, m)| *m == mode).map(|(text, _)| text.as_str()).collect::<Vec<_>>();
         for text in echo(PromptMode::Prompt) {
             col = col.child(user_bubble(text, &[], blobs, TAIL, t, bubble, false, &fonts, keys, cx));
         }
         if let Some((key, work)) = live {
             col = col.child(work_block(&work, key, true, busy, t, bubble, blobs, now, &fonts, keys, cx));
-            // Streamed text is already cut at its last completed line (`Streaming::live_steps`).
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
             }
-            // Pending steers last: the newest user input, closest to the composer.
             for (six, text, images, _) in work.steers().filter(|(.., queued)| *queued) {
                 col = col.child(steer_bubble(text, images, (key, six), true, t, bubble, blobs, &fonts, keys, cx));
             }
@@ -1514,7 +1306,6 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
     if ix == 0 {
         col = col.pt_4();
     }
-    // Room under the tail for the ask stack that covers the transcript's end (`set_ask_height`).
     let overscroll = if ix == t.timeline.items.len() { t.ask_h } else { px(0.) };
     div().w_full().flex().flex_col().items_center().px_6().pb(overscroll).child(col).into_any()
 }
@@ -1523,25 +1314,15 @@ fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// When the work that is about to start began, while none is open: at the user's message
-/// that prompted the run, else when its host says the run began (one a notice woke), or
-/// where the run's work so far ended (it goes on after a compaction); now, for a run its
-/// host has yet to begin.
 fn work_started(this: &Dirigent, t: &OpenThread, now: i64) -> i64 {
     if let Some(prompted) = t.timeline.prompted_at() {
         return prompted;
     }
     let Some(began) = this.summary(&t.host, &t.id).and_then(|thread| thread.running_since) else { return now };
-    // (A work that ended before the run began is an earlier run's.)
     let cut = t.timeline.items.iter().rev().find_map(|i| if let Item::Work(w) = i { w.ended } else { None });
     began.max(cut.unwrap_or(0))
 }
 
-/// The run in progress, keyed for `expanded` / `log`: the open work's persisted steps plus
-/// what is in flight (`Streaming::live_steps`: the streaming message, then the steers the
-/// agent still holds, so a pending steer rides at the log's end until it is taken). A
-/// just-sent message (the echo) counts as running so the work line and the log panel appear
-/// at once rather than when the host confirms the run.
 fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
     let Pane::Thread(t) = &this.pane else { return None };
     if !this.is_running() && t.streaming.echo.is_empty() && t.streaming.answers.is_empty() {
@@ -1553,7 +1334,6 @@ fn live_work(this: &Dirigent) -> Option<(usize, Work)> {
             _ => (TAIL, Work::default()),
         },
         None => {
-            // An echoed message is the run's start until its persisted entry lands.
             let started = if t.streaming.echo.is_empty() { work_started(this, t, now_ms()) } else { now_ms() };
             (TAIL, Work { model: this.model.clone(), effort: this.effort.clone(), started, ..Default::default() })
         }
@@ -1579,7 +1359,6 @@ fn render_timeline_item(
         Item::User { text, images, .. } => user_bubble(text, images, blobs, ix, t, bubble, idle, fonts, keys, cx).into_any(),
         Item::Work(w) => work_block(w, ix, false, None, t, bubble, blobs, now, fonts, keys, cx).into_any(),
         Item::Assistant(text) => reply_block(text, ix, t, blobs, fonts, keys, cx).into_any(),
-        // Same voice as a tool row: one quiet line, just red.
         Item::Error(text) => div()
             .w_full()
             .py(u(2.))
@@ -1594,7 +1373,6 @@ fn render_timeline_item(
     }
 }
 
-/// A sub-agent's start or end: `↳ sub-agent "…" started`; the line opens its thread.
 fn child_line(id: String, host: &str, thread_id: &str, text: &str, cx: &mut Context<Dirigent>) -> AnyElement {
     let (host, thread_id) = (host.to_owned(), thread_id.to_owned());
     div()
@@ -1615,7 +1393,6 @@ fn child_line(id: String, host: &str, thread_id: &str, text: &str, cx: &mut Cont
         .into_any()
 }
 
-/// A quiet one-liner between messages (compaction, warnings, unknown entries).
 fn notice_line(text: impl IntoElement) -> AnyElement {
     div().w_full().py_1().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text).into_any()
 }
@@ -1638,9 +1415,7 @@ fn reply_block(
         Some(&copy_code(t.copied.as_ref(), cx)),
         &[],
     );
-    // A reply opening with a code block gives its corner buttons (26 px) a row of their own
-    // above it, off the block's copy button (the live tail too, so it doesn't jump); its
-    // pin bar starts at the block.
+    // MUST KILL: extract: a named const for the corner-button row reserved above a leading code block
     let top = if markdown::starts_with_code(text) { 30. } else { 4. };
     div()
         .group("msg")
@@ -1656,20 +1431,12 @@ fn reply_block(
         .children(corner_buttons(ix, text, t, true, false, cx))
 }
 
-/// How far left of a message's box its pin bar sits.
 const PIN_GAP: f32 = 6.;
 
-/// A pinned message's amber bar in the left margin, `left` px before the block's edge
-/// (so bubbles and replies line up despite the bubble's overhang).
 fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
     t.is_pinned(ix).then(|| div().absolute().left(u(-left)).top_1().bottom_1().w(u(2.)).rounded_full().bg(rgba(theme::t().warn)))
 }
 
-/// A message's buttons in its top right corner, revealed on hover: `edit` (a user message
-/// it may rewrite, `Dirigent::start_edit`), `fork` (`Dirigent::fork_at`), pin and copy.
-/// Copy puts the message's markdown on the clipboard and shows a check for a moment; pin
-/// marks the message in the ruler and with a bar in the margin (the pin is amber while
-/// pinned). Not for the live tail (`TAIL`).
 fn corner_buttons(ix: usize, text: &str, t: &OpenThread, fork: bool, edit: bool, cx: &mut Context<Dirigent>) -> Option<Div> {
     if ix == TAIL {
         return None;
@@ -1706,12 +1473,7 @@ fn corner_buttons(ix: usize, text: &str, t: &OpenThread, fork: bool, edit: bool,
     )
 }
 
-/// A sent message's `[image-N]` tokens as links to the images they name
-/// (`dirigent://image/<blob id>`, see `Dirigent::open_app_link`). `refs` is the `N` of each
-/// image, in order, as its host recorded them (`view::split_image_refs`). An older message
-/// has none: its images went out in paste order, which is N ascending, and only those
-/// whose token was in the text (`Dirigent::attachments`), so the k-th distinct N names the
-/// k-th image, unless a token typed by hand, with no image of its own, shifts that.
+// MUST KILL: rearchitect: pair images by stored refs only (backfill older messages) instead of guessing from token order
 fn image_links(text: &str, refs: &[u32], images: &[String]) -> Vec<(String, SharedString)> {
     let ns = if refs.is_empty() { crate::input::image_numbers(text) } else { refs.to_vec() };
     ns.into_iter().zip(images).map(|(n, id)| (crate::input::image_token(n), format!("dirigent://image/{id}").into())).collect()
@@ -1740,11 +1502,6 @@ fn thumbs(images: &[String], blobs: &HashMap<String, Blob>, id: impl Fn(usize) -
     })
 }
 
-/// The bubble bleeds past the column by its own padding, so its text lines up with
-/// replies and work lines instead of being inset. Attached images go under the text as
-/// `thumbs`; click one, or its `[image-N]` in the text, to see it. The text's image file
-/// links are the model's: they don't show, nor go with a copy.
-/// `ix` is the bubble's timeline index, for the thumbnails' ids.
 #[allow(clippy::too_many_arguments)]
 fn user_bubble(
     text: &str,
@@ -1758,8 +1515,6 @@ fn user_bubble(
     keys: &mut Keys,
     cx: &mut Context<Dirigent>,
 ) -> Div {
-    // A message the user typed can be edited while the thread is idle, and forked from
-    // unless nothing comes before it.
     let typed = if ix == TAIL { None } else { t.typed_message(ix) };
     let (edit, fork) = (typed.is_some() && idle, typed.is_some_and(|e| e.parent_id.is_some()));
     let (body, refs) = split_image_refs(text);
@@ -1773,8 +1528,6 @@ fn user_bubble(
         .px(u(BUBBLE_PAD))
         .py_3()
         .rounded_lg()
-        // A shade under the send button's accent, so bubbles sit back from the chrome
-        // (`hover` gray in an archived thread; see `render_item`).
         .bg(rgba(bubble))
         .font_family(fonts.prose.clone())
         .text_size(text::lg())
@@ -1785,10 +1538,6 @@ fn user_bubble(
         .children(corner_buttons(ix, body, t, fork, edit, cx).map(|b| b.top_2().right_2()))
 }
 
-/// The user bubble being edited (`Dirigent::start_edit`): it holds the composer, the
-/// edited message's images under it, then the model and effort chips, `Cancel` and send
-/// (ctrl+Enter sends too, Esc cancels; grey with `host offline` while the host is down).
-/// Sending rewrites the message and runs from there.
 fn edit_bubble(this: &Dirigent, bubble: u32, fonts: &Fonts, cx: &mut Context<Dirigent>) -> Div {
     let (model, effort) = model_chips(this, true, cx);
     let blocked = this.open().is_some_and(|t| this.not_ready(&t.host, &t.id).is_some()) || this.composer_offline();
@@ -1841,9 +1590,6 @@ fn edit_bubble(this: &Dirigent, bubble: u32, fonts: &Fonts, cx: &mut Context<Dir
         )
 }
 
-/// What a thread's run is busy with besides the model, from its summary: the step it is
-/// being set up with, or compacting its context (and for how long). The live work line
-/// shows it in place of the time and tool count.
 fn busy(s: &ThreadSummary, now: i64) -> Option<String> {
     match s.setup {
         Some(Setup::Workspace) => Some("Creating a workspace…".into()),
@@ -1852,11 +1598,6 @@ fn busy(s: &ThreadSummary, now: i64) -> Option<String> {
     }
 }
 
-/// A turn's work in the transcript: the steers the model has already taken (user bubbles,
-/// kept after the run), the work line, then the sub-agents it started or that finished
-/// meanwhile (`Step::Child`). Pending steers are rendered by the tail; cache misses show
-/// only in the log. `live` is the run in progress, `busy` what it is busy with besides the
-/// model (`busy()`).
 #[allow(clippy::too_many_arguments)]
 fn work_block(
     w: &Work,
@@ -1888,11 +1629,6 @@ fn work_block(
     div().w_full().flex().flex_col().children(taken).child(work_line(w, key, live, busy, t, now, cx)).children(children)
 }
 
-/// A steer as a user bubble with a `steer` label; `pending` (and `cancel` on hover, for a
-/// typed steer the agent still holds) at the right until the model has it. Answers to an
-/// ask are steers too, but can't be cancelled: the host already has them. Its images go
-/// under the text as in `user_bubble`; `key` is its (work, step) index, for the thumbnails'
-/// ids.
 #[allow(clippy::too_many_arguments)]
 fn steer_bubble(
     text: &str,
@@ -1953,10 +1689,6 @@ fn steer_bubble(
         .children(thumbs(images, blobs, |i| ElementId::NamedInteger("steer-img".into(), step_id_n(key) << 8 | i as u64), cx))
 }
 
-/// A steer in the work log: `steer` tinted, the message, and `queued` at the right (where a
-/// tool's time sits) until the agent hands it to the model, with `cancel` revealed on hover
-/// just before it (typed steers only; see `steer_bubble`). Text only: its images show in
-/// the transcript's bubble.
 fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys: &mut Keys, cx: &mut Context<Dirigent>) -> Div {
     let cancel = (queued && t.streaming.queued_steers().any(|s| s == text)).then(|| {
         let text = text.to_owned();
@@ -1984,16 +1716,10 @@ fn steer_row(key: (usize, usize), text: &str, queued: bool, t: &OpenThread, keys
         .line_height(u(19.))
         .child(div().flex_shrink_0().text_color(rgba(theme::t().accent_ink)).child("steer"))
         .child(div().flex_1().min_w_0().text_color(rgba(theme::t().fg_1)).child(keys.plain(split_image_refs(text).0.to_owned())))
-        // `cancel` sits left of `queued` so `queued` stays flush right while it's invisible.
         .children(cancel)
         .when(queued, |d| d.child(div().flex_shrink_0().text_color(rgba(theme::t().fg_2)).child("queued")))
 }
 
-/// A turn's work as one line: `model effort · 1m 23s · 4 tool calls`; while `live`,
-/// `· Working for 12s ·` and the line animated (`working.rs`). Click to show its log in the
-/// panel; tinted while the panel shows it.
-/// What the run is busy with besides the model (`busy`: setting the thread up, compacting
-/// its context) stands in for the time and tool count meanwhile.
 fn work_line(w: &Work, key: usize, live: bool, busy: Option<String>, t: &OpenThread, now: i64, cx: &mut Context<Dirigent>) -> AnyElement {
     let shown = t.log == Some(key);
     let tools = match w.tool_count() {
@@ -2021,7 +1747,6 @@ fn work_line(w: &Work, key: usize, live: bool, busy: Option<String>, t: &OpenThr
     row.children(parts.into_iter().map(|p| div().when(p == "·", |d| d.text_color(rgba(theme::t().fg_2))).child(p))).into_any()
 }
 
-/// The work the log panel shows (`t.log`) and whether it is the run in progress.
 pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
     let Pane::Thread(t) = &this.pane else { return None };
     let key = t.log?;
@@ -2034,12 +1759,7 @@ pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
     }
 }
 
-/// The right panel's log section: the full log of the work `t.log` points at as a lazy
-/// `list()` of its steps (`render_step`), one mono size; tool rows open to their arguments
-/// and output. It opens where the user left it (`Dirigent::show_log`), else at its end, and
-/// follows the end (`FollowMode::Tail`) unless they scroll up. The list's item count is
-/// reconciled here, so every path that changes the steps (events, entries, a new prompt)
-/// is covered; those paths remeasure the items.
+// MUST KILL: rearchitect: keep log_list's item count in step where the steps change, not on every render
 fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let Pane::Thread(t) = &this.pane else { return None };
     t.log?;
@@ -2067,8 +1787,6 @@ fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     Some(steps.flex_1().min_h_0().w_full().text_size(text::sm()).line_height(u(19.)).into_any_element())
 }
 
-/// One step of the shown work as a log list item; a placeholder while it has none.
-/// Also what `Dirigent::copy_selection` calls to collect a step's text.
 pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx: &mut Context<Dirigent>) -> AnyElement {
     let Pane::Thread(t) = &this.pane else { return div().into_any() };
     let Some(key) = t.log else { return div().into_any() };
@@ -2105,7 +1823,6 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
             .items_center()
             .child(div().min_w_0().truncate().text_color(rgba(theme::t().warn)).child(keys.plain(text.clone())))
             .into_any(),
-        // A job notice in the row voice: `job` where a tool's name goes, red when it failed.
         Step::Notice(text) => {
             let failed = text.contains("exit ") && !text.contains("exit 0");
             div()
@@ -2128,9 +1845,6 @@ pub fn render_step(this: &mut Dirigent, work: &Work, live: bool, six: usize, cx:
     }
 }
 
-/// One tool call on one line: tinted name, primary argument, and its time at the right —
-/// `12s`, `1.3s / 30s` against the timeout while running, red when it failed. Click for
-/// all arguments and the output (thumbnails for the images in it).
 fn render_tool(
     call: &ToolCall,
     key: (usize, usize),
@@ -2177,8 +1891,6 @@ fn render_tool(
     div().w_full().flex().flex_col().child(line).children(body).into_any()
 }
 
-/// A clickable one-liner in the work log. Bleeds 4px past the column so the hover
-/// highlight frames the text without shifting it.
 fn row(id: ElementId) -> gpui::Stateful<Div> {
     div()
         .id(id)
@@ -2201,8 +1913,6 @@ fn step_id_n((item, step): (usize, usize)) -> u64 {
     (item as u64).wrapping_mul(100_000) ^ step as u64
 }
 
-/// A finished span: `34ms` under a tenth of a second, `0.34s` / `0.1s` under a second,
-/// else whole seconds (`12s`, `1m 23s`, `1h 05m`).
 pub fn duration(ms: i64) -> String {
     let ms = ms.max(0);
     if ms < 100 {
@@ -2214,8 +1924,6 @@ pub fn duration(ms: i64) -> String {
     }
 }
 
-/// A span still running: whole seconds only (`0s`, `12s`, `1m 23s`, `1h 05m`), so it
-/// advances exactly once per `tick` instead of jittering with every event.
 pub fn elapsed(ms: i64) -> String {
     let s = ms.max(0) / 1000;
     if s < 60 {

@@ -1,11 +1,3 @@
-//! A thread's branch as the model is given it (`messages`), and keeping that under the
-//! model's context window: once it gets close, the older part is replaced by a summary the
-//! model writes (`Plan`, `summarize`).
-//!
-//! Nothing here changes the stored history. What a request needs that the history lacks
-//! is made up for as the request is built: a tool call left without its result gets one
-//! saying so, and a reply that failed midway is left out with whatever it called.
-
 use crate::Llm;
 use crate::proxy::{Message, Model, Part, Request};
 use anyhow::{Result, anyhow, bail};
@@ -13,26 +5,18 @@ use dirigent_protocol::transcript::{Assistant, Block, Body, Entry, Stop, Usage, 
 use std::collections::{BTreeSet, HashSet};
 use tokio_util::sync::CancellationToken;
 
-/// What an image counts as when sizes are estimated, in characters.
 const IMAGE_CHARS: usize = 4800;
-/// How much of a tool result a summary's author gets to read.
 const SUMMARY_RESULT_CHARS: usize = 2000;
 
 const SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
 const SUMMARY_SUFFIX: &str = "\n</summary>";
 
-/// The part of `branch` the model's context is made of: with a compaction on it, from the
-/// entry that kept first (`first_kept`) on; all of it without. `messages`, `tokens` and
-/// `Plan` need be given no more than this.
 pub fn window(branch: &[Entry]) -> &[Entry] {
     let Some(at) = branch.iter().rposition(|e| matches!(e.body, Body::Compaction { .. })) else { return branch };
     let Body::Compaction { first_kept, .. } = &branch[at].body else { unreachable!() };
-    // A compaction whose first kept entry is gone from the branch kept nothing.
     &branch[branch[..at].iter().position(|e| e.id == *first_kept).unwrap_or(at)..]
 }
 
-/// The entries of `branch` the model sees: those of its `window` that are part of the
-/// conversation. And the summary standing for what came before, if it was compacted.
 fn visible(branch: &[Entry]) -> (Option<&str>, Vec<&Entry>) {
     let in_context = |e: &&Entry| matches!(e.body, Body::User { .. } | Body::Assistant(_) | Body::ToolResult(_) | Body::Notice(_));
     let window = window(branch);
@@ -41,10 +25,6 @@ fn visible(branch: &[Entry]) -> (Option<&str>, Vec<&Entry>) {
     (summary, window.iter().filter(in_context).collect())
 }
 
-/// The branch as a request's messages, for `model` (its id): a reply's thinking goes back
-/// only to the model that thought it, since another one can't check its signature, be it
-/// on the same wire. `blob` loads an image's bytes as base64, with its mime type; `images`:
-/// the model takes images (they are named, not sent, to one that doesn't).
 pub fn messages(branch: &[Entry], model: &str, images: bool, blob: &mut dyn FnMut(&str) -> Option<(String, String)>) -> Vec<Message> {
     let (summary, entries) = visible(branch);
     let mut parts = |content: &[Block]| -> Vec<Part> {
@@ -66,8 +46,7 @@ pub fn messages(branch: &[Entry], model: &str, images: bool, blob: &mut dyn FnMu
     if let Some(summary) = summary {
         out.push(Message::User(vec![Part::Text(format!("{SUMMARY_PREFIX}{summary}{SUMMARY_SUFFIX}"))]));
     }
-    // A reply that failed or was stopped midway is no part of the conversation, nor is
-    // what it called: half a message, maybe half a tool call.
+    // MUST KILL: rename: whole -> not_failed_or_aborted, so dropping a failed reply and its calls reads from the name
     let whole = |a: &Assistant| !matches!(a.stop, Stop::Error | Stop::Aborted);
     let called: HashSet<&str> = entries
         .iter()
@@ -75,7 +54,6 @@ pub fn messages(branch: &[Entry], model: &str, images: bool, blob: &mut dyn FnMu
         .filter(|a| whole(a))
         .flat_map(|a| a.content.iter().filter_map(|b| if let Block::ToolCall { id, .. } = b { Some(id.as_str()) } else { None }))
         .collect();
-    // The calls of the last reply that still wait for their result, in order.
     let mut open: Vec<&str> = vec![];
     let close = |open: &mut Vec<&str>, out: &mut Vec<Message>| {
         for call_id in open.drain(..) {
@@ -112,8 +90,6 @@ pub fn messages(branch: &[Entry], model: &str, images: bool, blob: &mut dyn FnMu
     out
 }
 
-/// Roughly how many tokens an entry is in the context: a quarter of its characters, which
-/// errs on the high side.
 fn estimate(entry: &Entry) -> u64 {
     let blocks = |content: &[Block]| -> usize {
         let size = |b: &Block| match b {
@@ -133,7 +109,6 @@ fn estimate(entry: &Entry) -> u64 {
     chars.div_ceil(4) as u64
 }
 
-/// What a request used, when that says how big the context was: not a reply that failed.
 fn usage(entry: &Entry) -> Option<&Usage> {
     match &entry.body {
         Body::Assistant(a) if !matches!(a.stop, Stop::Error | Stop::Aborted) && a.usage.prompt() + a.usage.output > 0 => Some(&a.usage),
@@ -141,9 +116,6 @@ fn usage(entry: &Entry) -> Option<&Usage> {
     }
 }
 
-/// How many tokens the branch is as a context: what the last request used (the provider's
-/// own count of everything up to its reply) plus an estimate of what came since. Estimated
-/// throughout when no request was made since the last compaction.
 pub fn tokens(branch: &[Entry]) -> u64 {
     let (summary, entries) = visible(branch);
     let after_compaction = branch.iter().rposition(|e| matches!(e.body, Body::Compaction { .. })).map_or(0, |at| at + 1);
@@ -157,39 +129,29 @@ pub fn tokens(branch: &[Entry]) -> u64 {
     }
 }
 
-/// What a compaction of a branch would do.
 #[derive(Debug, PartialEq)]
 pub struct Plan<'a> {
-    /// The id of the first entry that stays as it is.
     pub first_kept: String,
-    /// What is summarized: whole turns.
     older: Vec<&'a Entry>,
-    /// When the cut falls inside a turn (one too long to keep whole): the turn's start, up
-    /// to the cut, which gets a summary of its own.
     turn_prefix: Vec<&'a Entry>,
-    /// The summary of the compaction before, which the new one carries on from.
     previous: Option<&'a str>,
     pub tokens_before: u64,
 }
 
 impl<'a> Plan<'a> {
-    /// Plan a compaction of `branch` that keeps about `keep_recent` tokens of its end as
-    /// they are. `None`: there is nothing to summarize.
+    // MUST KILL: extract: Plan::new's cut search into a fn that never cuts between a tool call and its result
     pub fn new(branch: &'a [Entry], keep_recent: u64) -> Option<Self> {
         if matches!(branch.last()?.body, Body::Compaction { .. }) {
             return None;
         }
         let (previous, entries) = visible(branch);
-        // A turn starts where the model is given something: a message or a notice.
         let starts_turn = |e: &Entry| matches!(e.body, Body::User { .. } | Body::Notice(_));
-        // A cut can fall before anything but a tool result, which belongs to the call before it.
         let cut_points: Vec<usize> = (0..entries.len()).filter(|i| !matches!(entries[*i].body, Body::ToolResult(_))).collect();
         let mut cut = *cut_points.first()?;
         let mut kept = 0;
         for i in (0..entries.len()).rev() {
             kept += estimate(entries[i]);
             if kept >= keep_recent {
-                // The nearest cut at or after it: a tool result too big to keep still keeps its call.
                 cut = cut_points.iter().copied().find(|c| *c >= i).unwrap_or(*cut_points.last()?);
                 break;
             }
@@ -203,7 +165,6 @@ impl<'a> Plan<'a> {
         Some(Plan { first_kept: entries[cut].id.clone(), older, turn_prefix, previous, tokens_before: tokens(branch) })
     }
 
-    /// Have `model` write the summary. Returns it and what writing it used.
     pub async fn summarize(
         &self,
         llm: &dyn Llm,
@@ -239,7 +200,6 @@ impl<'a> Plan<'a> {
     }
 }
 
-/// The summarizer's answer to `prompt`; what it used is added to `usage`.
 async fn ask(
     llm: &dyn Llm,
     model: &Model,
@@ -287,8 +247,6 @@ pub async fn complete(
     }
 }
 
-/// The files a conversation read and changed, which a summary lists at its end so the model
-/// knows what it has seen.
 #[derive(Debug, Default, PartialEq)]
 struct Files {
     read: BTreeSet<String>,
@@ -296,7 +254,6 @@ struct Files {
 }
 
 impl Files {
-    /// A summary without the lists `tags` put at its end, and those lists.
     fn split(summary: &str) -> (String, Files) {
         let mut files = Files::default();
         let mut text = summary.to_owned();
@@ -310,7 +267,6 @@ impl Files {
         (text.trim_end().to_owned(), files)
     }
 
-    /// Take down the files a reply's tool calls name.
     fn note(&mut self, entry: &Entry) {
         let Body::Assistant(a) = &entry.body else { return };
         for block in &a.content {
@@ -324,7 +280,6 @@ impl Files {
         }
     }
 
-    /// The lists as a summary carries them: files only read, and files changed.
     fn tags(&self) -> String {
         let read: Vec<&str> = self.read.difference(&self.modified).map(String::as_str).collect();
         let modified: Vec<&str> = self.modified.iter().map(String::as_str).collect();
@@ -338,8 +293,6 @@ impl Files {
     }
 }
 
-/// A conversation as text, for the summary's author to read rather than carry on. Thinking
-/// is left out (what was said and done records what happened); tool results are cut short.
 fn serialize(entries: &[&Entry]) -> String {
     let mut parts = vec![];
     for entry in entries {
@@ -525,15 +478,12 @@ mod tests {
         messages.iter().map(kind).collect::<Vec<_>>().join(" ")
     }
 
-    /// What the history lacks is made up for in the request: a call without a result gets
-    /// one, a reply that failed is left out with its calls' results.
     #[test]
     fn a_request_is_whole_whatever_the_history_went_through() {
         let branch = [
             user("u1", "go"),
             assistant("a1", vec![call("c1", "a"), call("c2", "b")], Stop::ToolUse, 100),
             result("r1", "c1", "A"),
-            // The run died before c2 ended; the user wrote again.
             user("u2", "still there?"),
             assistant("a2", vec![Block::text("half"), call("c3", "c")], Stop::Aborted, 0),
             result("r3", "c3", "C"),
@@ -574,7 +524,6 @@ mod tests {
             .map(|m| if let Message::User(p) = m { if let Part::Text(t) = &p[0] { t.as_str() } else { "" } } else { "" })
             .collect();
         assert_eq!(texts, [&format!("{SUMMARY_PREFIX}S{SUMMARY_SUFFIX}"), "kept", "new"]);
-        // No request since the compaction: sized by estimate (1 + 1 + 1 tokens).
         assert_eq!(tokens(&branch), 3);
     }
 
@@ -583,7 +532,6 @@ mod tests {
         let mut branch =
             vec![user("u1", "go"), assistant("a1", vec![call("c1", "a")], Stop::ToolUse, 1000), result("r1", "c1", &"x".repeat(400))];
         assert_eq!(tokens(&branch), 1000 + 10 + 100);
-        // A failed reply's usage says nothing.
         branch.push(assistant("a2", vec![], Stop::Error, 0));
         assert_eq!(tokens(&branch), 1000 + 10 + 100);
     }
@@ -601,12 +549,9 @@ mod tests {
             result("r2", "c2", &big),
         ];
         let ids = |entries: &[&Entry]| entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>().join(" ");
-        // Room for everything: the cut falls before the first entry, nothing to summarize.
         assert_eq!(Plan::new(&branch, 1_000_000), None);
-        // Room for the last result only: it keeps its call; the turn's start gets a summary of its own.
         let plan = Plan::new(&branch, 500).unwrap();
         assert_eq!((plan.first_kept.as_str(), ids(&plan.older), ids(&plan.turn_prefix)), ("a3", "u1 a1".into(), "u2 a2 r1".into()));
-        // Room for the second turn: a clean cut at its start.
         let plan = Plan::new(&branch, 2009).unwrap();
         assert_eq!((plan.first_kept.as_str(), ids(&plan.older), plan.turn_prefix.len()), ("u2", "u1 a1".into(), 0));
     }

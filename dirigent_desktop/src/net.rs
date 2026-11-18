@@ -1,11 +1,3 @@
-//! One WebSocket connection per host, on a dedicated tokio thread. Incoming
-//! messages update the cache and are forwarded to the UI through a channel;
-//! outgoing requests come from the UI through a per-host channel. Hosts can be
-//! added and removed while running (`hosts.toml` edits). Each (re)connect resolves its host
-//! afresh (`Host::endpoint`): an `ssh://` host through its tunnel, which a dead ssh restarts,
-//! and with its bearer token, if any. A host counts as connected, and is asked anything, once
-//! its `Hello` is read and says our protocol.
-
 use crate::cache::Cache;
 use crate::hosts::{Host, LOCAL};
 use anyhow::Result;
@@ -23,18 +15,14 @@ use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{error, info, warn};
 
-/// Request id used by the connection task itself for the refresh requests on (re)connect.
 pub const CONNECT_LIST_ID: u64 = 0;
 
-/// How long a host that can't be talked to (another protocol, silence) is left alone before it
-/// is looked at again, and a local service that stopped before it is started again.
+// MUST KILL: extract: UNFIT_RETRY doubles as the embedded service's restart interval; split it in two
 const UNFIT_RETRY: Duration = Duration::from_secs(60);
 
-/// How long a host that took the connection gets to say its first word.
 const HELLO_WAIT: Duration = Duration::from_secs(20);
 
-/// Largest message (and frame: the host sends each message as one) we read; the host
-/// reads the same (`dirigent_service` `server.rs`).
+// MUST KILL: extract: MAX_MESSAGE → one const in dirigent_protocol that both ends read
 const MAX_MESSAGE: usize = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,16 +33,8 @@ pub enum HostStatus {
 }
 
 pub enum Incoming {
-    /// With why the last connect failed (ssh's stderr, a 401), until one succeeds.
-    Status {
-        host: String,
-        status: HostStatus,
-        error: Option<String>,
-    },
-    Message {
-        host: String,
-        msg: Box<ServerMessage>,
-    },
+    Status { host: String, status: HostStatus, error: Option<String> },
+    Message { host: String, msg: Box<ServerMessage> },
 }
 
 pub type UiSender = futures::channel::mpsc::UnboundedSender<Incoming>;
@@ -64,22 +44,18 @@ pub struct Net {
     control: mpsc::UnboundedSender<Control>,
 }
 
-/// What runs a host's service in-process until it fails: `embedded_service` for `local`.
 type Service = fn() -> BoxFuture<'static, Result<()>>;
 
 fn embedded_service() -> BoxFuture<'static, Result<()>> {
     Box::pin(dirigent_service::run(dirigent_service::port()))
 }
 
-/// To the net thread: start or stop a host's connection task.
 enum Control {
     Add { name: String, host: Host, rx: mpsc::UnboundedReceiver<ClientMessage> },
     Remove(String),
 }
 
 impl Net {
-    /// Spawn the tokio thread and one connection task per `(name, host)`.
-    /// The `local` host gets an in-process service started for it if nothing is listening.
     pub fn start(hosts: Vec<(String, Host)>, cache: Arc<Mutex<Cache>>, ui: UiSender) -> Self {
         let (control, mut control_rx) = mpsc::unbounded_channel::<Control>();
         std::thread::Builder::new()
@@ -119,7 +95,6 @@ impl Net {
         let _ = self.control.send(Control::Add { name, host, rx });
     }
 
-    /// Drops the connection; the UI gets no final status for it.
     pub fn remove(&mut self, name: &str) {
         info!(host = %name, "host removed");
         self.hosts.remove(name);
@@ -133,7 +108,6 @@ impl Net {
     }
 }
 
-/// Connect to `host` as it resolves now, with its bearer token if it has one.
 async fn connect(host: &Host) -> Result<WebSocket> {
     let endpoint = host.endpoint().await?;
     let mut request = endpoint.url.as_str().into_client_request()?;
@@ -143,12 +117,10 @@ async fn connect(host: &Host) -> Result<WebSocket> {
     let config = WebSocketConfig::default().max_frame_size(Some(MAX_MESSAGE)).max_message_size(Some(MAX_MESSAGE));
     match tokio_tungstenite::connect_async_with_config(request, Some(config), false).await {
         Ok((ws, _)) => Ok(ws),
-        // A refusal says why in its body (a public listener's 401: `auth.rs`).
         Err(tokio_tungstenite::tungstenite::Error::Http(res)) => {
             let body = res.body().as_deref().map(String::from_utf8_lossy).unwrap_or_default();
             let why: String = body.trim().chars().take(300).collect();
             match res.status() {
-                // Its body says why, and what to fix.
                 StatusCode::UNAUTHORIZED if !why.is_empty() => anyhow::bail!("refused: {why}"),
                 status if why.is_empty() => anyhow::bail!("{status}"),
                 status => anyhow::bail!("{status}: {why}"),
@@ -160,8 +132,8 @@ async fn connect(host: &Host) -> Result<WebSocket> {
 
 type WebSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// A host's connection, kept up for as long as the host is listed. `service`: the host is
-/// this desktop's own, which runs its service when nothing listens there.
+// MUST KILL: extract: host_loop's embedded-service retry state (stopped, started, failing) → a struct of its own
+// MUST KILL: extract: host_loop's three `while rx.try_recv()` drains → a named drop_unsent_requests
 async fn host_loop(
     name: String,
     host: Host,
@@ -176,12 +148,8 @@ async fn host_loop(
     };
     let mut backoff = Duration::from_millis(300);
     let mut embedded: Option<tokio::task::JoinHandle<Result<()>>> = None;
-    // Why the embedded service last stopped, until a connect succeeds: nothing listens
-    // because of it, so it is what the host's error says.
     let mut stopped: Option<String> = None;
-    // When the embedded service was last started.
     let mut started: Option<Instant> = None;
-    // A host that stays unreachable is logged once, not on every retry.
     let mut failing = false;
     loop {
         status(HostStatus::Connecting, None);
@@ -191,17 +159,12 @@ async fn host_loop(
                 failing = false;
                 stopped = None;
                 let (mut sink, mut stream) = ws.split();
-                // The host's first message is read, and it is one to talk to. Until then it
-                // is asked nothing and not reported connected.
                 let mut greeted = false;
-                // Why the host is not talked to, if it isn't: it speaks another protocol.
                 let mut unfit = None;
                 let silent = tokio::time::sleep(HELLO_WAIT);
                 tokio::pin!(silent);
                 loop {
                     tokio::select! {
-                        // Something else listens there, or the host hangs: it is left alone
-                        // like one that can't be talked to.
                         () = &mut silent, if !greeted => {
                             unfit = Some("It took the connection and said nothing".to_owned());
                             break;
@@ -216,9 +179,6 @@ async fn host_loop(
                         item = stream.next() => match item {
                             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
                                 Ok(msg) => {
-                                    // The service's first message. One that speaks another protocol
-                                    // is left alone until either side is updated: what it says
-                                    // would not be read, or read wrong.
                                     if let ServerMessage::Hello { host_name, version, protocol, .. } = &msg {
                                         info!(host = %name, machine = %host_name, %version, protocol, "connected");
                                         if *protocol != dirigent_protocol::PROTOCOL {
@@ -229,12 +189,8 @@ async fn host_loop(
                                         }
                                     }
                                     if !std::mem::replace(&mut greeted, true) {
-                                        // What was asked while the host was down (or left alone)
-                                        // is dropped, not sent now: the UI gave back what it had
-                                        // pending when it saw `Disconnected`.
                                         while rx.try_recv().is_ok() {}
                                         status(HostStatus::Connected, None);
-                                        // Refresh everything we cache for this host.
                                         for req in [
                                             ClientMessage::ListProjects { id: CONNECT_LIST_ID },
                                             ClientMessage::ListThreads { id: CONNECT_LIST_ID },
@@ -259,8 +215,6 @@ async fn host_loop(
                         }
                     }
                 }
-                // What was sent meanwhile is dropped too, not sent on the reconnect: the UI
-                // gives back what it had pending once it sees `Disconnected`.
                 while rx.try_recv().is_ok() {}
                 info!(host = %name, "disconnected");
                 let wait = unfit.as_ref().map(|why| {
@@ -268,23 +222,16 @@ async fn host_loop(
                     UNFIT_RETRY
                 });
                 status(HostStatus::Disconnected, unfit);
-                // Looked at again now and then: an update may have come. Hung up meanwhile.
                 if let Some(wait) = wait {
                     drop((sink, stream));
                     tokio::time::sleep(wait).await;
                 }
             }
             Err(e) => {
-                // `local` refusing before we ever started the service is the normal start-up,
-                // not worth a line in the log or an error in Settings.
                 let starting = service.is_some() && embedded.is_none() && stopped.is_none();
                 if !starting && !std::mem::replace(&mut failing, true) {
                     warn!(host = %name, "connect {url}: {e:#} (retrying)");
                 }
-                // Nothing listening locally: run the service in-process. It lives and dies
-                // with the desktop. If it exits (bind failed, pi's threads didn't migrate),
-                // the next refusal retries, quietly: a service that keeps failing the same
-                // way is logged once, like the connect.
                 if let Some(run) = service
                     && embedded.as_ref().is_none_or(|h| h.is_finished())
                 {
@@ -299,9 +246,6 @@ async fn host_loop(
                         }
                         stopped = Some(why);
                     }
-                    // One that stopped is started again now and then, not at every refusal:
-                    // what stopped it (pi's threads not migrating: a full disk) costs as much
-                    // every time.
                     if stopped.is_none() || started.is_none_or(|at| at.elapsed() >= UNFIT_RETRY) {
                         if stopped.is_none() {
                             info!("starting embedded service on :{}", dirigent_service::port());
@@ -310,7 +254,6 @@ async fn host_loop(
                         started = Some(Instant::now());
                     }
                 }
-                // Requests made while offline are dropped, not queued for a later reconnect.
                 while rx.try_recv().is_ok() {}
                 let error = match &stopped {
                     Some(why) => format!("Its service stopped: {why}"),
@@ -324,7 +267,6 @@ async fn host_loop(
     }
 }
 
-/// Mirror host data into the cache before the UI sees it.
 fn update_cache(cache: &Mutex<Cache>, host: &str, msg: &ServerMessage) -> Result<()> {
     let mut cache = cache.lock().unwrap();
     match msg {
@@ -347,7 +289,6 @@ mod tests {
     use futures::channel::mpsc::UnboundedReceiver;
     use tokio::net::TcpListener;
 
-    /// A host's loop on `url`: what it tells the UI, and the way to ask the host things.
     fn start(name: &str, url: String, service: Option<Service>) -> (UnboundedReceiver<Incoming>, mpsc::UnboundedSender<ClientMessage>) {
         let (ui, ui_rx) = futures::channel::mpsc::unbounded();
         let (tx, rx) = mpsc::unbounded_channel();
@@ -356,7 +297,6 @@ mod tests {
         (ui_rx, tx)
     }
 
-    /// The next status the UI is told.
     async fn status(ui: &mut UnboundedReceiver<Incoming>) -> (HostStatus, Option<String>) {
         loop {
             if let Incoming::Status { status, error, .. } = ui.next().await.expect("the host's loop ended") {
@@ -365,8 +305,6 @@ mod tests {
         }
     }
 
-    /// A service that greets its one client with `hello`: its address, and the first
-    /// `count` requests it gets (fewer if the client hangs up first).
     async fn host(hello: String, count: usize) -> (String, tokio::task::JoinHandle<Vec<ClientMessage>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}/ws", listener.local_addr().unwrap());
@@ -387,7 +325,6 @@ mod tests {
     #[tokio::test]
     async fn host_is_asked_nothing_before_its_hello_is_read() {
         let queued = ClientMessage::ListDirs { id: 7, path: "asked while it was down".into() };
-        // One from before `PROTOCOL` is never called connected, and gets no request at all.
         let (url, asked) = host(r#"{"type":"hello","host_name":"h","version":"0.0.9"}"#.into(), 1).await;
         let (mut ui, tx) = start("old", url, None);
         tx.send(queued.clone()).unwrap();
@@ -397,7 +334,6 @@ mod tests {
         assert!(why.unwrap().ends_with("update that host"));
         assert_eq!(asked.await.unwrap(), []);
 
-        // One on ours is connected once it said so, and what was asked before is dropped.
         let (host_name, version, service_id) = ("h".into(), "0".into(), "s".into());
         let hello = ServerMessage::Hello { host_name, version, service_id, protocol: dirigent_protocol::PROTOCOL };
         let (url, asked) = host(serde_json::to_string(&hello).unwrap(), 4).await;
@@ -423,10 +359,8 @@ mod tests {
         fn broken() -> BoxFuture<'static, Result<()>> {
             Box::pin(async { anyhow::bail!("migrate service.db: disk full") })
         }
-        // A port nothing listens on.
         let port = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
         let (mut ui, _tx) = start(LOCAL, format!("ws://127.0.0.1:{port}/ws"), Some(broken));
-        // The first refusal starts the service and is no error; the next is the service's.
         assert_eq!(status(&mut ui).await, (HostStatus::Connecting, None));
         assert_eq!(status(&mut ui).await, (HostStatus::Disconnected, None));
         assert_eq!(status(&mut ui).await, (HostStatus::Connecting, None));

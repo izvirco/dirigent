@@ -1,30 +1,3 @@
-# Builds the Windows installer and the Linux and macOS tarballs and publishes them to a channel. Run by
-# hand (Actions › Release › Run workflow). Master is always the next version, in draft:
-# `[workspace.package] version` in Cargo.toml, with a `## <version> (draft)` section in
-# changelog.md.
-#
-#   nightly  any time, as often as you like: a prerelease of that draft version named by the
-#            time of the run, `0.0.10-nightly.202611151432`. Nothing to edit first. Such a
-#            version makes the build Dirigent Nightly, an app of its own that installs and
-#            runs next to a stable one (packaging/README.md).
-#   stable   the version itself, once: make its changelog.md section final first (no
-#            "(draft)"); the commit after the release bumps the version and opens the next
-#            draft section.
-#
-# A version is published once per channel and platform (`dirigent_api publish` refuses to
-# overwrite it). Channels are independent builds: a machine only updates within its own.
-#
-# Repository settings it needs:
-#   variables  S3_ENDPOINT (https://fsn1.your-objectstorage.com), S3_REGION, S3_BUCKET
-#   secrets    S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY: write access to the bucket
-#              DIRIGENT_SIGNING_KEY: the minisign secret key (`dirigent_api keygen`), whose
-#              public half is in dirigent_protocol/src/release.rs
-#
-# A job per platform, each publishing its own (gpui's Windows build compiles its shaders with
-# the Windows SDK's fxc, its macOS build with Xcode's metal). If one fails, re-run just that
-# one: the others' releases are up.
-# The secrets are only given to the publish steps.
-
 name: Release
 
 on:
@@ -40,8 +13,6 @@ on:
 concurrency: release
 
 jobs:
-  # The version every platform builds and publishes, worked out once so they agree (a job
-  # re-run alone gets the same one).
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -55,9 +26,6 @@ jobs:
           CHANNEL: ${{ inputs.channel }}
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-          # No release without its changelog.md section, which the app shows after updating.
-          # A nightly takes it as a draft too (`## <version> (draft)`), stable only final.
-          # [[:space:]]* takes a CRLF line's CR.
           if [ "$CHANNEL" = nightly ]; then
             grep -Eq "^## $version( \(draft\))?[[:space:]]*\$" changelog.md || { echo "changelog.md has no \"## $version\" section" >&2; exit 1; }
             # The time (UTC) as one numeric identifier: semver orders it as a number, and
@@ -73,14 +41,12 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
-      # Baked into the binaries as their version (`dirigent_protocol::release::VERSION`).
       DIRIGENT_BUILD_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: Swatinem/rust-cache@v2
 
-      # The update endpoint is baked in: dev builds have none and never check.
       - name: Build the desktop and the command line
         env:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
@@ -91,7 +57,6 @@ jobs:
         run: |
           mkdir -p dist/licenses
           cp target/release/dirigent_desktop.exe target/release/dirigent.exe dist/
-          # Cua Driver, which computer use runs, next to them.
           packaging/cua-driver.sh dist
           mv dist/cua-driver-LICENSE.md dist/licenses/
           # Lilex (embedded in dirigent_desktop.exe by dirigent_desktop/build.rs) is under the OFL,
@@ -133,15 +98,12 @@ jobs:
     runs-on: ubuntu-22.04
     env:
       CARGO_TERM_COLOR: always
-      # Baked into the binaries as their version (`dirigent_protocol::release::VERSION`).
       DIRIGENT_BUILD_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: Swatinem/rust-cache@v2
 
-      # What gpui links against (xcb, xkbcommon) and what its build scripts probe for
-      # (fontconfig, wayland); Vulkan and the rest it loads at run time.
       - name: Install system libraries
         run: |
           sudo apt-get update
@@ -152,19 +114,15 @@ jobs:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
         run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
-      # The layout packaging/linux/install.sh expects, and installs as is.
       - name: Pack the tarball
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p dist/dirigent/licenses
           cp target/release/dirigent_desktop target/release/dirigent dist/dirigent/
-          # Cua Driver, which computer use runs, next to them.
           packaging/cua-driver.sh dist/dirigent
           mv dist/dirigent/cua-driver-LICENSE.md dist/dirigent/licenses/
           cp packaging/linux/install.sh dist/dirigent/
-          # A nightly installs as an app of its own (the `nightly` file tells install.sh), with
-          # its own icon.
           case "$VERSION" in
             *-nightly.*) touch dist/dirigent/nightly; cp dirigent_desktop/assets/dirigent_nightly.png dist/dirigent/dirigent.png ;;
             *) cp dirigent_desktop/assets/dirigent.png dist/dirigent/ ;;
@@ -195,11 +153,9 @@ jobs:
 
   macos:
     needs: version
-    # Apple silicon.
     runs-on: macos-15
     env:
       CARGO_TERM_COLOR: always
-      # Baked into the binaries as their version (`dirigent_protocol::release::VERSION`).
       DIRIGENT_BUILD_VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
@@ -215,7 +171,6 @@ jobs:
           DIRIGENT_BUILD_UPDATE_URL: https://dirigent.sebba.dev/api/v0/updates/${{ inputs.channel }}
         run: cargo build --release --locked -p dirigent_desktop -p dirigent_cli
 
-      # Linux's layout and install.sh, without a Cua Driver (packaging/cua-driver.sh says why).
       # Without a developer account nothing is signed for real: Apple silicon runs any binary
       # with an ad-hoc signature (the linker makes one; this makes sure), and Gatekeeper only
       # checks quarantined files, which a curl install and the app's own updates never are.
@@ -228,7 +183,6 @@ jobs:
           codesign --force --sign - dist/dirigent/dirigent dist/dirigent/dirigent_desktop
           codesign --verify --strict dist/dirigent/dirigent dist/dirigent/dirigent_desktop
           cp packaging/linux/install.sh dist/dirigent/
-          # A nightly installs as an app of its own (the `nightly` file tells install.sh).
           case "$VERSION" in *-nightly.*) touch dist/dirigent/nightly ;; esac
           curl -fsSL -o dist/dirigent/licenses/Lilex-OFL.txt https://raw.githubusercontent.com/mishamyrt/Lilex/2.700/OFL.txt
           echo "cc3bd94cf51f40137e353fc9ca0859d54ec07e59c2092270b64a0723f4b34011  dist/dirigent/licenses/Lilex-OFL.txt" | shasum -a 256 -c

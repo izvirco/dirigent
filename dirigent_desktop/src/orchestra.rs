@@ -1,10 +1,3 @@
-//! The lineage tree at the top of the right panel (`thread::side_panel`, over the work
-//! log): the open thread's family (`lineage`: the topmost ancestor down through every
-//! sub-agent; the working ones bright, the rest dim; a click opens a thread; hover for
-//! archive / restore). A parent's archived sub-agents fold into one short `› n archived`
-//! line under its live ones. A quiet line under the tree says what the whole family
-//! consumed.
-
 use crate::app::{ArchiveAt, Dirigent};
 use crate::icons::icon;
 use crate::menu::Side;
@@ -15,12 +8,9 @@ use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Stateful, div, pr
 use std::collections::HashSet;
 
 const ROW: f32 = 30.;
-/// The `n archived` line is shorter than a thread's: it only stands for them.
 const FOLD_ROW: f32 = 20.;
-/// Indent per tree level.
 const INDENT: f32 = 16.;
 
-/// One line of the agent tree, `depth` levels in.
 pub struct LineageNode<'a> {
     pub line: Line<'a>,
     pub depth: usize,
@@ -28,21 +18,10 @@ pub struct LineageNode<'a> {
 
 pub enum Line<'a> {
     Thread(&'a ThreadSummary),
-    /// `parent`'s archived sub-agents, `count` of them, folded into one line after its live
-    /// ones; while `open` they follow it.
-    Archived {
-        parent: &'a str,
-        count: usize,
-        open: bool,
-    },
+    Archived { parent: &'a str, count: usize, open: bool },
 }
 
-/// The family of thread `id` among a host's `threads`: from its topmost ancestor down,
-/// depth-first. A thread's sub-agents come in the order they were last given a task (their
-/// last new turn, `prompted_at`), so a new or re-used child lands last and nothing else
-/// moves. Sub-agents archived along with everything under them fold into an `Archived`
-/// line, open while their parent is in `unfolded`. Thread `id` always shows: while its fold
-/// is closed, its branch stays with the live ones. Empty for a thread with no relations.
+// MUST KILL: type: lineage's empty Vec for a thread with no relations → an Option
 pub fn lineage<'a>(threads: &'a [ThreadSummary], id: &str, unfolded: &HashSet<String>) -> Vec<LineageNode<'a>> {
     let find = |id: &str| threads.iter().find(|t| t.id == id);
     let Some(mut root) = find(id) else { return vec![] };
@@ -58,10 +37,8 @@ pub fn lineage<'a>(threads: &'a [ThreadSummary], id: &str, unfolded: &HashSet<St
     if out.len() == 1 { vec![] } else { out }
 }
 
-/// What `lineage` walks the tree with.
 struct Family<'a, 'b> {
     threads: &'a [ThreadSummary],
-    /// The open thread and its ancestors: never hidden by a closed fold.
     path: HashSet<&'a str>,
     unfolded: &'b HashSet<String>,
 }
@@ -71,17 +48,15 @@ impl<'a> Family<'a, '_> {
         self.threads.iter().filter(|k| k.parent_id.as_deref() == Some(id)).collect()
     }
 
-    /// Archived, and so is every sub-agent under it.
+    // MUST KILL: rename: archived → archived_with_all_below (it checks the whole branch)
     fn archived(&self, t: &ThreadSummary) -> bool {
         t.archived && self.kids(&t.id).into_iter().all(|k| self.archived(k))
     }
 
-    /// `node` and everything under it into `out`; `fold` folds archived branches (an open
-    /// fold's threads don't fold again: they are all archived).
+    // MUST KILL: type: descend's `fold` bool → an enum telling a closed tree from an open fold's archived-only branch
     fn descend(&self, node: &'a ThreadSummary, depth: usize, fold: bool, out: &mut Vec<LineageNode<'a>>) {
         out.push(LineageNode { line: Line::Thread(node), depth });
         let mut kids = self.kids(&node.id);
-        // (last given a task, created, id), so ties come out the same every time.
         kids.sort_by_key(|k| (k.prompted_at.unwrap_or(k.created_at), k.created_at, k.id.as_str()));
         let open = self.unfolded.contains(&node.id);
         let (folded, live): (Vec<_>, Vec<_>) =
@@ -98,14 +73,12 @@ impl<'a> Family<'a, '_> {
     }
 }
 
-/// The open thread's family tree, when it has any relations.
 pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let open = this.open()?;
     let (host, id) = (open.host.clone(), open.id.clone());
     let (host, id, now) = (host.as_str(), id.as_str(), now_ms());
     let nodes = this.lineage(host, id);
     let Some(Line::Thread(root)) = nodes.first().map(|n| &n.line) else { return None };
-    // Folded threads count too.
     let total = this.host(host).map(|h| spend(&h.threads, root)).unwrap_or_default();
     let rows: Vec<AnyElement> = nodes
         .iter()
@@ -117,9 +90,6 @@ pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     Some(div().flex().flex_col().gap(u(2.)).pt_2().children(rows).when(total != Spend::default(), |d| d.child(spend_line(total))))
 }
 
-/// A thread's row: status glyph, title, model, run time. Hovering one at rest (or archived)
-/// swaps its run time for archive (or restore); archiving one with a workspace asks under
-/// the button (`thread::archive_confirm`).
 fn thread_row(
     host: &str,
     t: &ThreadSummary,
@@ -140,7 +110,6 @@ fn thread_row(
         (None, None) => String::new(),
     };
     let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Tree, Side::BelowRight(20.), this, cx);
-    // The button stays (and the run time hidden) while the archive popup is open.
     let asking = archive_confirm.is_some();
     let action = (archived || this.at_rest(host, t)).then(|| {
         let (h, tid) = (h.clone(), tid.clone());
@@ -165,8 +134,6 @@ fn thread_row(
             .child(icon(if archived { "archive-restore" } else { "archive" }, theme::t().fg_1))
             .children(archive_confirm)
     });
-    // Fits `12m 01s` at 11px; longer values widen the column rather than wrap. The button
-    // sits over it, so swapping them doesn't shift layout.
     let time = div()
         .relative()
         .h_full()
@@ -199,8 +166,6 @@ fn thread_row(
         .into_any_element()
 }
 
-/// The `n archived` line standing for `parent`'s archived sub-agents: a click (un)folds
-/// them. Shorter and quieter than a thread's row, its chevron where their glyphs go.
 fn fold_row(parent: &str, count: usize, open: bool, depth: usize, cx: &mut Context<Dirigent>) -> AnyElement {
     let p = parent.to_owned();
     let chevron = icon(if open { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(u(12.));
@@ -212,7 +177,6 @@ fn fold_row(parent: &str, count: usize, open: bool, depth: usize, cx: &mut Conte
         .into_any_element()
 }
 
-/// What `t` and every sub-agent under it spent.
 fn spend(threads: &[ThreadSummary], t: &ThreadSummary) -> Spend {
     let mut total = t.spend;
     for kid in threads.iter().filter(|k| k.parent_id.as_deref() == Some(&t.id)) {
@@ -221,8 +185,6 @@ fn spend(threads: &[ThreadSummary], t: &ThreadSummary) -> Spend {
     total
 }
 
-/// The family's totals, right-aligned under the tree (once anything was spent), worded
-/// like the context chip's card.
 fn spend_line(s: Spend) -> Div {
     let cached = if s.input == 0 { 0 } else { (s.cached as f64 / s.input as f64 * 100.).round() as u64 };
     let (input, output, cost) = (theme::kilo(s.input), theme::kilo(s.output), theme::dollars(s.cost));
@@ -230,7 +192,6 @@ fn spend_line(s: Spend) -> Div {
     div().flex().justify_end().pr_2().pt_1().child(small(text))
 }
 
-/// A clickable tree line, `height` tall, `depth` levels in.
 fn tree_row(
     id: String,
     depth: usize,
@@ -302,8 +263,6 @@ mod tests {
         }
     }
 
-    /// The tree as text: a thread is its id, a fold `+n` (closed) or `-n` (open), each
-    /// indented a space per level.
     fn rows(threads: &[ThreadSummary], id: &str, unfolded: &[&str]) -> Vec<String> {
         let unfolded = unfolded.iter().map(|s| s.to_string()).collect();
         lineage(threads, id, &unfolded)
@@ -318,8 +277,6 @@ mod tests {
             .collect()
     }
 
-    /// Children come in the order they were last given a task; re-used ones (a later
-    /// `prompted_at`) move last.
     #[test]
     fn lineage_follows_the_last_task() {
         let threads = [
@@ -332,12 +289,9 @@ mod tests {
         ];
         let tree = ["p", " c2", "  g2", "  g1", " c3", " c1"];
         assert_eq!(rows(&threads, "p", &[]), tree);
-        // The same tree from anywhere in it.
         assert_eq!(rows(&threads, "g2", &[]), tree);
     }
 
-    /// Archived branches fold after the live ones; one with a live thread under it stays,
-    /// and so does the open thread's while its fold is closed.
     #[test]
     fn archived_sub_agents_fold() {
         let archived = |t: ThreadSummary| ThreadSummary { archived: true, ..t };
@@ -351,7 +305,6 @@ mod tests {
             thread("g2", Some("a3"), 6, 6),
         ];
         assert_eq!(rows(&threads, "p", &[]), ["p", " c1", " a3", "  g2", " +2"]);
-        // Open, its branches show whole: nothing folds inside a fold.
         assert_eq!(rows(&threads, "p", &["p"]), ["p", " c1", " a3", "  g2", " -2", " a1", " a2", "  g1"]);
         assert_eq!(rows(&threads, "g1", &[]), ["p", " c1", " a2", "  g1", " a3", "  g2", " +1"]);
         assert_eq!(rows(&threads, "g1", &["p"]), ["p", " c1", " a3", "  g2", " -2", " a1", " a2", "  g1"]);

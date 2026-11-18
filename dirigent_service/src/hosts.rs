@@ -1,23 +1,3 @@
-//! Remote hosts live in `<config dir>/hosts.toml`, edited by hand or from the
-//! desktop's Settings › Hosts. The file is the truth: the desktop rewrites it and then
-//! `Dirigent::sync_hosts` diffs it against the running connections. `local` is implicit and
-//! never in the file. The service reads the same file on its machine for `ListHosts`: the
-//! hosts its agents can reach (the `dirigent` tool), so it lives here, in the lib both share.
-//!
-//! ```toml
-//! [hosts]
-//! hetzner = "ws://hetzner.tail1234.ts.net:7777/ws"          # tailscale: no auth
-//! box = "ssh://seb@box.example.com"                          # over ssh (`tunnel.rs`)
-//! prod = { url = "wss://dirigent.example.com/ws", key = "dk_…" }  # public: an API key
-//! home = { url = "wss://home.example.com/ws", auth = "forge" }    # public: the forge account
-//! ```
-//!
-//! A host is a string (its address) or a table (`url` plus how to authenticate: `key`, an
-//! API key from the remote's `dirigent_service key add`, or `auth = "forge"`: a JWT for the
-//! host's url from this data dir's forge account, `forge.rs`, which the remote takes when
-//! it is signed in to the same account). The file holds keys, so it is written owner-only
-//! on unix.
-//!
 //! A forge token's audience is the host's url as normalized here (`normalize`), and the
 //! remote checks it against its `[public] url` normalized the same way (`auth.rs`): write
 //! either as you like (`wss://h/ws`, `WSS://H:443/ws`), they meet.
@@ -26,7 +6,6 @@ use anyhow::{Context, Result, bail};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-/// The implicit host: the service embedded in this desktop.
 pub const LOCAL: &str = "local";
 
 const HEADER: &str = "# Dirigent remote hosts. `local` is implicit.\n\
@@ -36,7 +15,6 @@ const HEADER: &str = "# Dirigent remote hosts. `local` is implicit.\n\
 # or with this machine's forge account (the service signed in to the same one):\n\
 # name = { url = \"wss://…/ws\", auth = \"forge\" }\n\n";
 
-/// A host as `hosts.toml` has it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
     /// Normalized (`normalize`): `ws://`, `wss://` or `ssh://`.
@@ -44,15 +22,11 @@ pub struct Host {
     pub auth: Auth,
 }
 
-/// How a host is authenticated to: the bearer token sent as `Authorization: Bearer`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Auth {
-    /// None: tailscale, ssh, loopback.
     #[default]
     None,
-    /// An API key of the remote's public listener.
     Key(String),
-    /// A JWT for the host's url, from the forge account (`forge::token`).
     Forge,
 }
 
@@ -152,7 +126,6 @@ pub fn save(hosts: &BTreeMap<String, Host>) -> Result<()> {
     write_private(&path, &format!("{HEADER}{}", render(hosts))).with_context(|| format!("write {}", path.display()))
 }
 
-/// The `[hosts]` table: a plain host as its url, one with auth as an inline table.
 fn render(hosts: &BTreeMap<String, Host>) -> String {
     let string = |s: &str| toml::Value::String(s.to_owned()).to_string();
     let mut out = String::from("[hosts]\n");
@@ -169,8 +142,6 @@ fn render(hosts: &BTreeMap<String, Host>) -> String {
     out
 }
 
-/// Write `text` to `path` readable by its owner only (unix; it holds keys, as `forge.json`
-/// its refresh token).
 pub(crate) fn write_private(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
@@ -212,7 +183,6 @@ pub fn normalize(input: &str) -> Result<String> {
     if authority.is_empty() {
         bail!("missing host name");
     }
-    // A port is a non-empty tail after the last colon, outside any IPv6 brackets.
     let has_port = authority.rsplit_once(':').is_some_and(|(_, p)| !p.is_empty() && !p.contains(']'));
     let authority = authority.to_ascii_lowercase();
     let authority = match authority.strip_suffix(":443") {
@@ -237,7 +207,6 @@ mod tests {
         assert_eq!(normalize("[fd7a::1]").unwrap(), "ws://[fd7a::1]:7777/ws");
         assert_eq!(normalize("[fd7a::1]:80").unwrap(), "ws://[fd7a::1]:80/ws");
         assert_eq!(normalize("ssh://seb@box:22/7777/").unwrap(), "ssh://seb@box:22");
-        // One form per address: what forge tokens' audiences are matched by.
         for same in ["wss://h.example/ws", "wss://h.example:443/ws", "WSS://H.Example/ws", " wss://h.example "] {
             assert_eq!(normalize(same).unwrap(), "wss://h.example/ws", "{same}");
         }
@@ -272,7 +241,6 @@ mod tests {
         assert!(rendered.contains("prod = { url = \"wss://d.example.com/ws\", key = \"dk_abc\" }\n"), "{rendered}");
         assert!(rendered.contains("home = { url = \"wss://home.example.com/ws\", auth = \"forge\" }\n"), "{rendered}");
         assert_eq!(parse(&format!("{HEADER}{rendered}")).unwrap(), want);
-        // Names that aren't bare keys are quoted.
         let odd = BTreeMap::from([("my host".to_owned(), Host::new("ws://h:1/ws".into()))]);
         assert_eq!(parse(&render(&odd)).unwrap(), odd);
         assert!(parse("[hosts]\nx = { key = \"dk_\" }").is_err());
@@ -280,7 +248,6 @@ mod tests {
         for bad in [r#"{ url = "h", auth = "forge", key = "dk_x" }"#, r#"{ url = "h", auth = "key" }"#, r#"{ url = "h", auth = "oidc" }"#] {
             assert!(parse(&format!("[hosts]\nx = {bad}")).is_err(), "{bad}");
         }
-        // A syntax error says where, without quoting the line (it may hold a key).
         let e = parse("[hosts]\nx = { url = \"a\", key = \"dk_secret\" \n").unwrap_err().to_string();
         assert!(e.contains("line 2") && !e.contains("dk_secret"), "{e}");
     }

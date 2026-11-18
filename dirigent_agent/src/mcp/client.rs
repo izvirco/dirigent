@@ -1,6 +1,3 @@
-//! The MCP client: JSON-RPC 2.0 over a `Transport`, MCP's lifecycle (`initialize`), and a
-//! server's tools (`tools/list`, `tools/call`).
-
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -17,33 +14,23 @@ use tokio_util::sync::CancellationToken;
 /// know ours says its latest).
 pub(crate) const PROTOCOL_VERSION: &str = "2025-11-25";
 const SUPPORTED_VERSIONS: [&str; 4] = [PROTOCOL_VERSION, "2025-06-18", "2025-03-26", "2024-11-05"];
-/// More than a list has: one that goes on is a server's mistake.
 const MAX_PAGES: usize = 1000;
-/// The largest message taken from a server.
 pub(crate) const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Why a request to a server came to nothing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
-    /// The server answered with an error.
     Rpc {
         code: i64,
         message: String,
     },
-    /// No answer in the time a request gets.
     Timeout(Duration),
-    /// The call was cancelled (`Call::cancel`).
     Aborted,
-    /// The connection is gone: the command exited, or it was closed.
     Closed,
-    /// The server couldn't be reached.
     Network(String),
-    /// An HTTP status in place of an answer.
     Http {
         status: u16,
         message: String,
     },
-    /// An HTTP server wants a sign-in: none is stored, or what is stored no longer does.
     AuthRequired,
     /// An HTTP server forgot the session (it restarted): the request didn't run.
     SessionExpired,
@@ -51,7 +38,6 @@ pub enum Error {
 }
 
 impl Error {
-    /// Worth trying again: the network, a server that is busy or restarting.
     pub(crate) fn is_transient(&self) -> bool {
         match self {
             Self::Network(_) => true,
@@ -77,33 +63,24 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// How messages get to a server and back. What the server sends comes through the
-/// channel a transport is made with, which closes when the connection does.
+// MUST KILL: type: put the incoming channel in the Transport trait, so "it closes when the connection does" is in the signature
 #[async_trait]
 pub(crate) trait Transport: Send + Sync + 'static {
-    /// Send one message. A request's answer comes through the channel, maybe before
-    /// this returns.
     async fn send(&self, message: &Value) -> Result<(), Error>;
 
-    /// The MCP version the server picked, for a transport that says it with every request.
     fn protocol_version(&self, _version: &str) {}
 
-    /// What the server last said for people (a command's stderr): why it failed.
     fn last_words(&self) -> Option<String> {
         None
     }
 
-    /// End the connection, and what is behind it.
     async fn close(&self);
 }
 
-/// A tool as its server lists it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolInfo {
-    /// The server's name for it.
     pub name: String,
     pub description: Option<String>,
-    /// JSON Schema of its input, an object's.
     pub input: Value,
 }
 
@@ -121,14 +98,11 @@ impl ToolInfo {
     }
 }
 
-/// A request waiting for its answer.
 struct Pending {
     answer: oneshot::Sender<Result<Value, Error>>,
-    /// The server reported progress on it.
     progress: Arc<Notify>,
 }
 
-/// What `initialize` told of the server.
 struct Told {
     has_tools: bool,
     instructions: Option<String>,
@@ -140,18 +114,13 @@ pub struct Client {
     pending: Mutex<HashMap<u64, Pending>>,
     next_id: AtomicU64,
     closed: CancellationToken,
-    /// How long a request gets unless it says.
     timeout: Duration,
-    /// The thread's directory, as the one root a server may ask for.
     root: Value,
     told: OnceLock<Told>,
-    /// The server says its tools changed.
     on_tools_changed: Box<dyn Fn() + Send + Sync>,
 }
 
 impl Client {
-    /// A client on `transport`, whose server's messages come through `incoming`. Not
-    /// connected until `initialize`.
     pub(crate) fn new(
         transport: Box<dyn Transport>,
         mut incoming: mpsc::UnboundedReceiver<Value>,
@@ -171,7 +140,6 @@ impl Client {
             told: OnceLock::new(),
             on_tools_changed: Box::new(on_tools_changed),
         });
-        // Weak: a client nobody holds any more goes, and its transport with it.
         let weak = Arc::downgrade(&client);
         tokio::spawn(async move {
             while let Some(message) = incoming.recv().await {
@@ -185,7 +153,6 @@ impl Client {
         client
     }
 
-    /// MCP's handshake: who we are, what the server speaks and offers.
     pub(crate) async fn initialize(&self) -> Result<(), Error> {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -205,7 +172,6 @@ impl Client {
         Ok(())
     }
 
-    /// How to use the server's tools, as it says.
     pub fn instructions(&self) -> Option<&str> {
         self.told.get()?.instructions.as_deref()
     }
@@ -218,7 +184,6 @@ impl Client {
         self.transport.last_words()
     }
 
-    /// The server's tools, all pages of them; none from a server that has no tools to list.
     pub async fn list_tools(&self) -> Result<Vec<ToolInfo>, Error> {
         if !self.told.get().is_some_and(|told| told.has_tools) {
             return Ok(vec![]);
@@ -259,7 +224,6 @@ impl Client {
         }
     }
 
-    /// Any request of the protocol: its result.
     pub async fn request(
         &self,
         method: &str,
@@ -336,7 +300,6 @@ impl Client {
         sent.unwrap_or(Err(Error::Timeout(self.timeout)))
     }
 
-    /// A message of the server's: an answer, a request of its own, or a notification.
     fn receive(self: &Arc<Self>, mut message: Value) {
         let id = message.get("id").filter(|id| !id.is_null()).cloned();
         let method = message.get("method").and_then(Value::as_str).map(str::to_owned);
@@ -372,7 +335,6 @@ impl Client {
         }
     }
 
-    /// The connection is gone: what waits on it hears so.
     fn mark_closed(&self) {
         self.closed.cancel();
         for (_, pending) in self.pending.lock().unwrap().drain() {
@@ -380,15 +342,12 @@ impl Client {
         }
     }
 
-    /// End the connection: a command exits (it is killed if it won't), an HTTP session is
-    /// given back.
     pub(crate) async fn close(&self) {
         self.mark_closed();
         self.transport.close().await;
     }
 }
 
-/// A request is over, however: nothing waits for its answer any more.
 struct Forget<'a>(&'a Client, u64);
 
 impl Drop for Forget<'_> {

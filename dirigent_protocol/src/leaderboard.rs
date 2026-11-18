@@ -50,7 +50,6 @@ pub struct Slot {
     pub messages: u64,
 }
 
-/// The windows the board is shown for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Range {
     Day,

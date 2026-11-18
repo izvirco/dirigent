@@ -1,31 +1,5 @@
-// What a codemode VM runs before the script (`vm.rs` compiles it in): it locks the built-ins
-// down and defines the script's globals on top of `bridge`, the one function that leaves the
-// VM. The bridge stays in this closure, so a script cannot call it. From pi-codemode's prelude.
-//
-// A module, whose default export is
-// `(bridge, toolsJson, storeJson, outOfMemory) => { settle, run, stalled }`.
-// - `toolsJson` lists `{ name, jsName, description }`: `tools[jsName]` and `tools[name]` call
-//   the tool, `ALL_TOOLS` lists `{ name: jsName, description }`.
-// - `storeJson` is `{ key: JSON text }`, the snapshot `store()` and `load()` work on.
-// - `outOfMemory` is the error text of a script that threw null.
-// - `bridge(kind, a, b, c)` takes strings, numbers and booleans only, the strings made what
-//   the other side reads (`wellFormed`, `toJson`):
-//   "call" (id, name, argsJson | undefined): start a tool call, settled later with `settle`;
-//   "output" ("text" | "console", text) or ("image", base64, mimeType);
-//   "done" (true, writesJson) or (false, errorText): the script's end, said once;
-//   "search" (query, limit, namespace | undefined): the JSON list of the matching tools' names;
-//   "namespace" (name): the JSON of `describeNamespace`'s answer, or undefined.
-// - `settle(id, ok, payload)` settles call `id` with the JSON of its value, or rejects it with
-//   an `Error` of that message.
-// - `run(fn)` starts the script, `fn(tools, console)`.
-// - `stalled()` ends a script that has not finished while no call is pending: with no timers
-//   or I/O in the VM, nothing can ever resume it.
+// MUST KILL: type: one named host function per bridge kind (call, output, done, search, namespace) instead of bridge(kind, a, b, c)
 export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
-  // Freeze every object reachable from the built-in globals, plus the intrinsics that are only
-  // reachable from instances (iterator and generator prototypes, %TypedArray%). The prelude
-  // shares the built-ins with the script: one that patched them (`Array.prototype.toJSON`)
-  // could otherwise corrupt what the prelude reports.
-  //
   // Freezing alone breaks ordinary code through the "override mistake": a data property that is
   // read-only on a prototype cannot be assigned on an instance either, so
   // this.name = "MyError" in an Error subclass would throw. Commonly overridden properties
@@ -136,7 +110,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   const pending = new Map();
   let nextId = 1;
   let finished = false;
-  // Thrown by exit() to unwind the script after it already reported success.
   const EXIT = Object.freeze({});
 
   // What crosses the bridge as text is read as UTF-8 on the other side: a lone surrogate (a
@@ -186,8 +159,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
     }
   }
 
-  // A script can throw anything, and set an error's name or message to anything: a value
-  // whose description throws gets a placeholder.
   function describeError(error) {
     // QuickJS throws null when it has no memory left for the error that would say so.
     if (error === null) return outOfMemory;
@@ -202,7 +173,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
 
   const tools = Object.create(null);
   const allTools = [];
-  // Every tool's `ALL_TOOLS` entry, by its name and by its identifier.
   const entries = new Map();
   for (const { name, jsName, description } of parse(toolsJson)) {
     const call = (args) =>
@@ -218,8 +188,7 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
         pending.set(id, { resolve, reject });
         bridge("call", id, name, json);
       });
-    // The first tool wins when two names normalize to the same identifier: the other goes by
-    // its name as it is, `tools["my-tool"]`.
+    // MUST KILL: extract: a named first-wins identifier resolver that falls back to the raw name on collision
     const callName = !(jsName in tools) ? jsName : name;
     if (callName in tools) continue;
     const entry = Object.freeze({ name: callName, description });
@@ -233,8 +202,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   Object.freeze(tools);
   Object.freeze(allTools);
 
-  // Reading a tool that does not exist throws an error that names the close matches, instead
-  // of a later "not a function". `in` checks still work.
   const comparable = (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
   const toolNames = allTools.map((tool) => tool.name);
   const toolsProxy = new Proxy(tools, {
@@ -304,7 +271,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
     return json === undefined ? undefined : parse(json);
   }
 
-  // key -> JSON text. Sizes count key and JSON characters.
   const stored = new Map(Object.entries(parse(storeJson)));
   const writes = new Map();
   let storedChars = 0;
@@ -315,13 +281,11 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   const STORE_HINT =
     "store() is for small state such as IDs or summaries. Show images with image(), keep large data in variables, or write it to a file with a tool.";
 
-  // The key `name()` was given as it is kept: text that crosses the bridge.
   function keyOf(name, key) {
     if (typeof key !== "string") throw new TypeError(name + "() key must be a string");
     return wellFormed(key);
   }
 
-  // Storing undefined or null forgets the key.
   function store(given, value) {
     const key = keyOf("store", given);
     const previous = stored.has(key) ? key.length + stored.get(key).length : 0;
@@ -373,19 +337,14 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
     return json === undefined ? undefined : parse(json);
   }
 
-  // `{ key: JSON text, or null for a forgotten key }`.
   const serializeWrites = () => stringify(Object.fromEntries(writes));
 
-  // What one script may put out with text(), image() and console.*: characters of text and
-  // base64 image data, and items. The host keeps all of it until the script ends, so a script
-  // that prints in a loop must not grow it without end. The item limit covers empty strings.
   const MAX_OUTPUT_CHARS = 16 * 1024 * 1024;
   const MAX_OUTPUT_ITEMS = 100_000;
   let outputChars = 0;
   let outputItems = 0;
 
-  // Past the limits the script fails: done() reports the error, so catching it does not
-  // resume output, and the host ends the script.
+  // MUST KILL: extract: a failOutputLimit() that ends the script via done() before throwing, so a caught error visibly cannot resume output
   function output(kind, data, mimeType) {
     if (finished) return;
     outputChars += data.length;
@@ -405,7 +364,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
     bridge("output", kind, kind === "image" ? data : wellFormed(data), mimeType);
   }
 
-  // Primitives become their string form, everything else JSON.
   function outputText(value) {
     if (
       value === undefined ||
@@ -554,7 +512,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
       promiseThen.call(
         promise,
         (value) => {
-          // A returned value is output like text().
           try {
             if (value !== undefined) output("text", outputText(value));
           } catch (error) {

@@ -1,57 +1,37 @@
-//! Per-host state and the cross-host project grouping the Projects page lists (and the
-//! sidebar, for the pinned ones).
-//!
-//! A project lives on one host. Projects on different hosts are shown as one group when
-//! they share a normalized git origin (automatic) or the user linked them (manual, stored
-//! in the desktop cache as a group key). Threads whose project was removed are orphans.
-//! A group shows its directory's name unless the user renamed it (desktop cache, by group
-//! key; the directory is untouched). The user orders the groups by dragging rows on the
-//! Projects page or in the sidebar: one order, wherever they are listed.
-
 use crate::net::HostStatus;
 use dirigent_protocol::{ModelInfo, Project, ThreadSummary};
 use std::collections::HashMap;
 
 pub struct HostState {
     pub name: String,
-    /// Its `hosts.toml` entry (`local`: the embedded service's url).
     pub config: dirigent_service::hosts::Host,
     pub status: HostStatus,
-    /// Why the last connect failed, until one succeeds.
     pub error: Option<String>,
     pub projects: Vec<Project>,
     pub threads: Vec<ThreadSummary>,
     pub models: Vec<ModelInfo>,
-    /// The service's id from its `Hello` (`leaderboard.rs` uploads under it); `None` until
-    /// it connects, or from a service too old to send one.
     pub service_id: Option<String>,
 }
 
-/// Pseudo group key for threads whose project was removed.
 pub const ORPHANS: &str = "orphans";
 
-/// (host, project id) → manual group key.
+// MUST KILL: type: Links' (host, project id) key → a ProjectRef struct
 pub type Links = HashMap<(String, String), String>;
 
-/// Group key → the name the user gave the group (UI only; else its directory's basename).
 pub type Names = HashMap<String, String>;
 
 pub struct Member {
     pub host: String,
     pub project: Project,
-    /// In its group through a manual link.
     pub linked: bool,
 }
 
 pub struct Group {
     pub key: String,
-    /// The name the user gave it, else `dir_name`.
     pub name: String,
-    /// The basename of a member's path (one that wasn't linked in, if it has one): its
-    /// name unless renamed.
     pub dir_name: String,
     pub members: Vec<Member>,
-    /// (host, thread), most recent first.
+    // MUST KILL: rename: threads → threads_newest_first
     pub threads: Vec<(String, ThreadSummary)>,
 }
 
@@ -64,15 +44,12 @@ impl Group {
         self.threads.iter().filter(|(h, t)| *h == member.host && t.project_id.as_deref() == Some(&member.project.id)).count()
     }
 
-    /// The member a new thread goes to: the one on `host` if the group has it, else the
-    /// host of the group's latest thread, else the first member.
     pub fn member_for(&self, host: Option<&str>) -> &Member {
         let on = |h: &str| self.members.iter().find(|m| m.host == h);
         host.and_then(on).or_else(|| self.threads.first().and_then(|(h, _)| on(h))).unwrap_or(&self.members[0])
     }
 }
 
-/// Manual link → git origin → the project itself.
 pub fn group_key(host: &str, project: &Project, links: &Links) -> String {
     links
         .get(&(host.to_owned(), project.id.clone()))
@@ -86,10 +63,7 @@ pub fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).find(|s| !s.is_empty()).unwrap_or(path)
 }
 
-/// Whether two paths on this machine name the same directory: trailing separators aside,
-/// and on Windows case and `/` vs `\` too.
 pub fn same_local_path(a: &str, b: &str) -> bool {
-    // e.g. `C:\Work\x\` and `c:/work/x` on Windows, `/home/x/` and `/home/x` everywhere.
     let norm = |p: &str| {
         let p = p.trim_end_matches(['/', '\\']);
         if cfg!(windows) { p.replace('/', "\\").to_lowercase() } else { p.to_owned() }
@@ -97,8 +71,8 @@ pub fn same_local_path(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-/// Groups in the user's `order` (group keys), those not in it after them by most recent
-/// activity (then name); plus orphan threads (most recent first).
+// MUST KILL: extract: groups' naming rule (the first member not linked in names the group) → a fn of its own
+// MUST KILL: extract: groups' two stable sorts → one sort_by_key on (order position, Reverse(latest), name)
 pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String]) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
     let mut by_key: HashMap<String, Group> = HashMap::new();
     let mut seen: Vec<String> = vec![];
@@ -110,7 +84,6 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
                 seen.push(key.clone());
                 Group { key: key.clone(), name: String::new(), dir_name: String::new(), members: vec![], threads: vec![] }
             });
-            // Named by its first member, until one comes that is its own.
             if group.members.iter().all(|m| m.linked && !linked) {
                 group.dir_name = basename(&project.path).to_owned();
                 group.name = names.get(&key).cloned().unwrap_or_else(|| group.dir_name.clone());
@@ -121,7 +94,6 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
 
     let mut orphans = vec![];
     for host in hosts {
-        // Sub-agents are listed under their parent (the orchestration panel), not here.
         for thread in host.threads.iter().filter(|t| t.top_level()) {
             let key = thread
                 .project_id
@@ -142,14 +114,12 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
     }
     let latest = |g: &Group| g.threads.first().map(|(_, t)| t.updated_at).unwrap_or(0);
     groups.sort_by(|a, b| latest(b).cmp(&latest(a)).then_with(|| a.name.cmp(&b.name)));
-    groups.sort_by_key(|g| order.iter().position(|k| *k == g.key).unwrap_or(usize::MAX)); // stable
+    groups.sort_by_key(|g| order.iter().position(|k| *k == g.key).unwrap_or(usize::MAX));
     orphans.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     (groups, orphans)
 }
 
-/// The groups matching every word of `query` (in a name, a path or a host), best first:
-/// a word the name starts with beats one inside it, which beats one only a path or a host
-/// has (most paths share a `/home` or a `/work`). Ties keep the groups' order.
+// MUST KILL: extract: search's 0 / 1 / 2 ranks → a Match enum (NamePrefix, InName, InPathOrHost) ordered best first
 pub fn search(groups: Vec<Group>, query: &str) -> Vec<Group> {
     let query = query.to_lowercase();
     let words: Vec<&str> = query.split_whitespace().collect();
@@ -173,18 +143,14 @@ pub fn search(groups: Vec<Group>, query: &str) -> Vec<Group> {
             Some((rank, g))
         })
         .collect();
-    ranked.sort_by_key(|(rank, _)| *rank); // stable
+    ranked.sort_by_key(|(rank, _)| *rank);
     ranked.into_iter().map(|(_, g)| g).collect()
 }
 
-/// The pinned groups (`pins`: group keys), in the groups' order.
 pub fn pinned<'a>(groups: &'a [Group], pins: &[String]) -> Vec<&'a Group> {
     groups.iter().filter(|g| pins.contains(&g.key)).collect()
 }
 
-/// `order` after a drag put the group `key` where the group `onto` is (so it lands after
-/// `onto` coming from above, before it coming from below). The shown groups not in `order`
-/// yet join it in their place; keys of groups that are gone (a host offline) stay.
 pub fn moved(order: &[String], groups: &[Group], key: &str, onto: &str) -> Vec<String> {
     let mut out = order.to_vec();
     out.extend(groups.iter().filter(|g| !order.contains(&g.key)).map(|g| g.key.clone()));
@@ -195,9 +161,7 @@ pub fn moved(order: &[String], groups: &[Group], key: &str, onto: &str) -> Vec<S
     out
 }
 
-/// The slot a dragged Projects page row takes with the mouse `y` under the list's top.
-/// It passes a row once the mouse is where its own gap will be after the move, so rows
-/// of different heights don't swap back on the next mouse move.
+// MUST KILL: rename: drop_slot's y → y_below_list_top
 pub fn drop_slot(heights: &[f32], gap: f32, dragged: usize, y: f32) -> usize {
     let Some(&own) = heights.get(dragged) else { return dragged };
     let (mut top, mut slot) = (0., dragged);
@@ -214,9 +178,6 @@ pub fn drop_slot(heights: &[f32], gap: f32, dragged: usize, y: f32) -> usize {
     slot
 }
 
-/// A list of group keys (the pins, the order) after a group's key changed (it was linked
-/// into another group, or unlinked into its members' own keys): `new` takes `old`'s place,
-/// minus keys already listed. `old` not listed: unchanged.
 pub fn rekey(keys: &[String], old: &str, new: &[String]) -> Vec<String> {
     let Some(at) = keys.iter().position(|k| k == old) else { return keys.to_vec() };
     let mut out: Vec<String> = keys.iter().filter(|k| *k != old).cloned().collect();
@@ -316,10 +277,9 @@ mod tests {
 
         assert!(app.has("box", "b") && !app.has("box", "a"));
         assert_eq!(app.member_for(Some("local")).host, "local");
-        assert_eq!(app.member_for(None).host, "box"); // t3 is the latest thread
-        assert_eq!(notes.member_for(None).host, "box"); // no threads: first member
+        assert_eq!(app.member_for(None).host, "box");
+        assert_eq!(notes.member_for(None).host, "box");
 
-        // A project linked into a group doesn't name it, though its host comes first.
         let links: Links = [(("local".to_owned(), "a".to_owned()), "box/m".to_owned())].into();
         let (groups, _) = super::groups(&hosts, &links, &Names::new(), &[]);
         let joined = groups.iter().find(|g| g.key == "box/m").unwrap();
@@ -336,12 +296,10 @@ mod tests {
         let names: Names = [("local/b".to_owned(), "bee".to_owned())].into();
         let names_of = |gs: &[&Group]| gs.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
         let (groups, _) = groups(&hosts, &Links::new(), &names, &[]);
-        assert_eq!(names_of(&groups.iter().collect::<Vec<_>>()), ["d", "c", "bee", "a"]); // by activity; b renamed
-        // Ordered ones first (a stale key ignored), the rest by activity.
+        assert_eq!(names_of(&groups.iter().collect::<Vec<_>>()), ["d", "c", "bee", "a"]);
         let order: Vec<String> = ["local/a", "gone", "local/b"].map(String::from).to_vec();
         let (groups, _) = super::groups(&hosts, &Links::new(), &names, &order);
         assert_eq!(names_of(&groups.iter().collect::<Vec<_>>()), ["a", "bee", "d", "c"]);
-        // Pins follow that order.
         let pins = ["local/c".into(), "local/a".into()];
         assert_eq!(names_of(&pinned(&groups, &pins)), ["a", "c"]);
     }
@@ -359,13 +317,11 @@ mod tests {
             vec![],
         )];
         let names = |query: &str| {
-            let (groups, _) = groups(&hosts, &Links::new(), &Names::new(), &[]); // by name
+            let (groups, _) = groups(&hosts, &Links::new(), &Names::new(), &[]);
             search(groups, query).into_iter().map(|g| g.name).collect::<Vec<_>>()
         };
         assert_eq!(names(""), ["homework", "notes", "sebba.dev", "workspace"]);
-        // The name starts with it, has it, only the path has it.
         assert_eq!(names("Work"), ["workspace", "homework", "sebba.dev"]);
-        // Every word has to match; a host counts.
         assert_eq!(names("local no"), ["notes"]);
     }
 
@@ -373,10 +329,8 @@ mod tests {
     fn moved_takes_the_place_of_onto() {
         let hosts = vec![host("local", vec![project("a", "/a", None), project("b", "/b", None), project("c", "/c", None)], vec![])];
         let order: Vec<String> = ["gone", "local/b"].map(String::from).to_vec();
-        let (groups, _) = groups(&hosts, &Links::new(), &Names::new(), &order); // b, a, c
-        // Down onto the last: after it. The unordered groups join, the stale key stays.
+        let (groups, _) = groups(&hosts, &Links::new(), &Names::new(), &order);
         assert_eq!(moved(&order, &groups, "local/b", "local/c"), ["gone", "local/a", "local/c", "local/b"]);
-        // Up onto the first shown: before it.
         assert_eq!(moved(&order, &groups, "local/c", "local/b"), ["gone", "local/c", "local/b", "local/a"]);
         assert_eq!(moved(&order, &groups, "local/a", "local/a"), ["gone", "local/b", "local/a", "local/c"]);
     }
@@ -389,11 +343,10 @@ mod tests {
         assert_eq!(drop_slot(&even, 4., 0, 500.), 2);
         assert_eq!(drop_slot(&even, 4., 2, 50.), 1);
         assert_eq!(drop_slot(&even, 4., 2, -5.), 0);
-        // A short row passes a tall one (expanded) only in its far end, and stays there.
         let down = [36., 120., 36.];
         assert_eq!(drop_slot(&down, 4., 0, 100.), 0);
         assert_eq!(drop_slot(&down, 4., 0, 130.), 1);
-        let up = [120., 36., 36.]; // after the move
+        let up = [120., 36., 36.];
         assert_eq!(drop_slot(&up, 4., 1, 130.), 1);
         assert_eq!(drop_slot(&up, 4., 1, 100.), 1);
         assert_eq!(drop_slot(&up, 4., 1, 30.), 0);
@@ -404,12 +357,9 @@ mod tests {
     #[test]
     fn rekey_keeps_the_place() {
         let keys: Vec<String> = ["x", "old", "y"].map(String::from).to_vec();
-        // Linked into a group: its key takes the place.
         assert_eq!(rekey(&keys, "old", &["new".into()]), ["x", "new", "y"]);
-        // Linked into a listed group, or unlinked into several keys (deduped).
         assert_eq!(rekey(&keys, "old", &["y".into()]), ["x", "y"]);
         assert_eq!(rekey(&keys, "old", &["a".into(), "b".into(), "a".into()]), ["x", "a", "b", "y"]);
-        // Not listed: nothing changes.
         assert_eq!(rekey(&keys, "z", &["new".into()]), keys);
     }
 }

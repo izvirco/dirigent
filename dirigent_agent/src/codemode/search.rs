@@ -1,18 +1,10 @@
-//! `searchTools()`: the tools ranked for a query, BM25 over what is known of each (as pi's
-//! tool search ranked them).
-
 use super::Namespace;
 use super::declare::resolve_ref;
 use crate::tool::ToolSpec;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// A query term in the name counts this many times its IDF. The text part of a term is at
-/// most `K1 + 1` times its IDF and about 1 for a single mention, so a name match beats any
-/// number of mentions in the description.
 const NAME_WEIGHT: f64 = 3.0;
-/// A query term in the namespace's name, description or instructions. Those are shared by
-/// every tool of the server: they help find the server, not the tool in it.
 const NAMESPACE_WEIGHT: f64 = 0.5;
 const K1: f64 = 1.2;
 const B: f64 = 0.75;
@@ -21,12 +13,9 @@ const STOP_WORDS: [&str; 21] = [
     "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "with",
 ];
 
-/// What is searched of a tool.
 pub struct Document<'a> {
     pub name: &'a str,
-    /// Its description, and its schema's descriptions and property names.
     text: String,
-    /// Its namespace's name, description and instructions.
     namespace: String,
 }
 
@@ -41,8 +30,6 @@ impl<'a> Document<'a> {
     }
 }
 
-/// A schema's descriptions and property names, all the way down, following local `$ref`s into
-/// `root`. `seen` holds the definitions already read: a recursive or shared one is read once.
 fn schema_text<'a>(schema: &'a Value, root: &'a Value, parts: &mut Vec<&'a str>, seen: &mut Vec<&'a Value>) {
     let Some(fields) = schema.as_object() else { return };
     if let Some(target) = fields.get("$ref").and_then(Value::as_str).and_then(|reference| resolve_ref(reference, root))
@@ -69,15 +56,12 @@ fn schema_text<'a>(schema: &'a Value, root: &'a Value, parts: &mut Vec<&'a str>,
     }
 }
 
-/// The words of `text`: identifiers split at their boundaries (`threadRead`, `thread_read`),
-/// lowercase, without English stop words, plurals made singular.
 fn tokenize(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut spaced = String::with_capacity(text.len());
     for (i, &c) in chars.iter().enumerate() {
         let previous = i.checked_sub(1).map(|i| chars[i]);
         let next = chars.get(i + 1);
-        // `threadRead` → `thread Read`, `HTTPServer` → `HTTP Server`.
         let after_word = previous.is_some_and(|p| p.is_ascii_lowercase() || p.is_ascii_digit());
         let ends_acronym = previous.is_some_and(|p| p.is_ascii_uppercase()) && next.is_some_and(|n| n.is_ascii_lowercase());
         if c.is_ascii_uppercase() && (after_word || ends_acronym) {
@@ -90,7 +74,6 @@ fn tokenize(text: &str) -> Vec<String> {
     words.map(|word| if word.is_ascii() { stem(word) } else { word.to_string() }).collect()
 }
 
-/// A naive singular, so `issues` matches `issue` and `searches` matches `search`.
 fn stem(term: &str) -> String {
     let cut = |n: usize| &term[..term.len() - n];
     if term.len() > 4 && term.ends_with("ies") {
@@ -105,8 +88,6 @@ fn stem(term: &str) -> String {
     term.into()
 }
 
-/// Lowercase, with the characters a script identifier can't have as `_`: `dev-radius` is
-/// `dev_radius`.
 fn normalize_name(name: &str) -> String {
     let valid = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '$';
     name.trim().to_lowercase().chars().map(|c| if valid(c) { c } else { '_' }).collect()
@@ -115,7 +96,7 @@ fn normalize_name(name: &str) -> String {
 struct Indexed<'a> {
     name: &'a str,
     name_terms: HashSet<String>,
-    /// The terms of the name after its last `__`: the tool's own name in its server.
+    // MUST KILL: rename: `local_terms` → `own_name_terms` (the terms after the name's last `__`)
     local_terms: Vec<String>,
     text_counts: HashMap<String, usize>,
     text_length: usize,
@@ -137,17 +118,6 @@ fn index<'a>(document: &Document<'a>) -> Indexed<'a> {
     }
 }
 
-/// The names of the `limit` best tools for `query`, best first. Okapi BM25 over the
-/// description, with the name and the namespace as fields of their own:
-/// - a tool that matches more of the query's terms, in any field, ranks above one that
-///   matches fewer, whatever their scores;
-/// - a term in the name scores more than any number of mentions in the description;
-/// - a tool whose whole own name is in the query (`app` in `peekaboo app` for
-///   `mcp__peekaboo__app`) gets a bonus worth one more match of every term;
-/// - a query that is exactly a tool's name (or its name after a `__`) ranks it first.
-///
-/// Only the description is length-normalized, so a long name or long namespace instructions
-/// do not lower a tool's score. Ties keep the documents' order.
 pub fn rank<'a>(query: &str, documents: &[Document<'a>], limit: usize) -> Vec<&'a str> {
     let mut terms = tokenize(query);
     let mut seen = HashSet::new();
@@ -172,7 +142,7 @@ pub fn rank<'a>(query: &str, documents: &[Document<'a>], limit: usize) -> Vec<&'
     let full_name_bonus: f64 = idf.iter().sum();
     let exact_query = normalize_name(query);
 
-    // (exact, covered, score, name)
+    // MUST KILL: type: a named Match struct (exact, covered, score, name) with its own ordering instead of a tuple
     let mut matches: Vec<(bool, usize, f64, &str)> = vec![];
     for document in &indexed {
         let norm = K1 * (1.0 - B + B * document.text_length as f64 / average_length);
@@ -235,11 +205,8 @@ mod tests {
             tool("mcp__peekaboo__app", "Launch or quit an app."),
             tool("bash", "Run a shell command."),
         ];
-        // The name beats mentions, plurals match, and tools without a match are left out.
         assert_eq!(ranked("search issues", &tools, 8), ["mcp__github__search_issues", "mcp__github__create_issue"]);
-        // More of the query's terms beats a name match of one of them.
         assert_eq!(ranked("screenshot window", &tools, 1), ["mcp__peekaboo__see"]);
-        // The whole own name in the query, and a query that is a tool's name.
         assert_eq!(ranked("peekaboo app", &tools, 1), ["mcp__peekaboo__app"]);
         assert_eq!(ranked("create_issue", &tools, 1), ["mcp__github__create_issue"]);
         assert_eq!(ranked("the of", &tools, 8), Vec::<String>::new());

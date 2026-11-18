@@ -1,7 +1,3 @@
-//! Root view: all UI state, incoming host messages, and user actions.
-//! Rendering lives in `sidebar.rs` (navigation), `lists.rs` (inbox / workpool / project
-//! pages) and `thread.rs` (one thread + composer).
-
 use crate::add_project;
 use crate::ambient::{self, Pattern, Reach};
 use crate::cache::Cache;
@@ -38,133 +34,73 @@ actions!(dirigent, [NewThread, Dismiss, ToggleSidebar, ToggleLog, Quit, TextBigg
 
 pub const KEY_CONTEXT: &str = "Dirigent";
 const TOAST_TTL: Duration = Duration::from_secs(8);
-/// How often the draft page / an open workspace menu re-asks the host about the repo.
 const VCS_REFRESH_SECS: u64 = 2;
 const LAST_MODEL_KEY: &str = "last_model";
-/// Set once what this desktop keeps names models by id (see `name_models_by_id`).
 const MODEL_IDS_KEY: &str = "model_ids";
 const LAST_EFFORT_KEY: &str = "last_effort";
 const LAST_TARGET_KEY: &str = "last_target";
-/// Whether the last draft asked for an isolated workspace; the next one starts the same way.
 const LAST_ISOLATE_KEY: &str = "last_isolate";
 const PRESETS_KEY: &str = "presets";
 const SIDEBAR_WIDTH_KEY: &str = "sidebar_width";
-/// The folded sidebar sections (`Section::parse_folded`).
 const COLLAPSED_KEY: &str = "collapsed";
-/// The project groups pinned to the sidebar: a JSON list of group keys. Missing (an older
-/// install): nothing pinned. (The old `project_order` key is unused.)
 const PINNED_PROJECTS_KEY: &str = "pinned_projects";
-/// The order the user dragged the project groups into (`projects::groups`): a JSON list of
-/// group keys. Missing (an older install): the pins', which used to be ordered on their own.
 const GROUP_ORDER_KEY: &str = "group_order";
-/// Where the user was when the app last closed (see `remember_pane`).
 const PANE_KEY: &str = "pane";
 const SIDEBAR_MIN: f32 = 180.;
-/// What the sidebar leaves of the window for the main pane, and the right panel of the pane
-/// for the transcript, however wide they are dragged (or the window shrinks under them):
-/// a strip that keeps their resize handles apart and on screen, and the panel's off the
-/// transcript's ruler (`ruler::WIDTH`). The layout holds it, not the stored widths, which
-/// are only what the user asked for.
 pub const PANE_MIN: f32 = 32.;
 const LOG_WIDTH_KEY: &str = "log_width";
-/// The right panel's hidden section: `lineage`, `log`, or empty for none (`PanelPart`).
 const PANEL_HIDDEN_KEY: &str = "panel_hidden";
 const LOG_MIN: f32 = 280.;
-/// How long a copy button shows its check (`Dirigent::copy_item`).
 const COPIED_TTL: Duration = Duration::from_millis(1200);
-/// How often the Usage modal re-asks the hosts while it shows a window that ends now.
 const USAGE_REFRESH_SECS: u64 = 30;
-/// A thread's title shows as generating for at most this long after its first prompt (or a
-/// `Regenerate title`).
 const TITLING_TTL: Duration = Duration::from_secs(60);
 
-/// Which edge the mouse is dragging.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Resize {
     Sidebar,
     Log,
 }
 
-/// A section of the right panel, each with a toggle in its header (`thread::side_panel`).
 #[derive(Clone, Copy, PartialEq)]
 pub enum PanelPart {
-    /// The thread's family (`orchestra::tree`).
     Lineage,
-    /// The work log: tool calls and thinking.
     Log,
 }
 
-/// The thread shown in the main pane.
 pub struct OpenThread {
     pub host: String,
     pub id: String,
-    /// Every entry, old branches included (see `Entry`).
     pub entries: Vec<Entry>,
-    /// What the pane renders, folded from the current branch's entries as they arrive
-    /// (`timeline_of`).
     pub timeline: Timeline,
     pub streaming: Streaming,
-    /// `timeline.items.len() + 1` items: the last one is the live tail (echoed messages, work in progress).
     pub list: ListState,
-    /// (work item index, step index) of the tool calls whose details are open in the log
-    /// panel. `thread::TAIL` as item index addresses the streaming tail.
     pub expanded: HashSet<(usize, usize)>,
-    /// The work whose full log the right panel's log section shows (item index,
-    /// `thread::TAIL` for a live work that has no persisted item yet); `None` = no log.
     pub log: Option<usize>,
-    /// The log panel's steps, one item each; follows the end unless the user scrolled up.
     pub log_list: ListState,
-    /// The copy button just clicked, a message's, a code block's or the header's copy id (it
-    /// shows a check for a moment, see `Dirigent::copy_item`).
     pub copied: Option<ElementId>,
-    /// Entry ids of the pinned messages (amber in the ruler; the host keeps them, see
-    /// `ThreadSummary::pinned_entries`), kept in step on every `Threads` push.
     pub pins: HashSet<String>,
-    /// The ruler's animation and hover state (see `ruler.rs`).
     pub ruler: ruler::State,
-    /// The composer's context chip is hovered: show the thread's totals (`thread::stats_card`).
     pub stats_hover: bool,
-    /// A `jump_to` in progress: the item to center and the frames left to get it there.
     center_on: Option<(usize, u8)>,
-    /// Output arrived while the transcript was scrolled up from its end: the jump-to-latest
-    /// pill reads `New output` (`thread::jump_button`). Cleared once the list follows its end again.
     pub new_output: bool,
-    /// A form per open `ask_user` call (`ThreadSummary::asks`), kept in step by `sync_asks`,
-    /// oldest first. Only the first shows (`thread::ask_card`).
     pub asks: Vec<AskForm>,
-    /// The ask stack's height as last painted (`set_ask_height`): the transcript's tail
-    /// gets as much extra room, so it scrolls clear of the stack that covers it.
     pub ask_h: Pixels,
-    /// The right panel (lineage over the work log): the user's choice from the header
-    /// button, or `None` for the default (open while there is something to show; see
-    /// `panel_open`). Clicking a work line resets it to the default; closing it from a
-    /// work line or Esc sets `Some(false)`.
+    // MUST KILL: type: an enum (Auto | Open | Closed) instead of Option<bool>
     pub panel: Option<bool>,
-    /// Its latest `GetThread` and the last entry it held when asking (see `fetch_open`).
+    // MUST KILL: type: a named struct (request id, last seq held) for fetch_open's stale cut
     fetching: Option<(u64, Option<u64>)>,
-    /// A user message being edited in place: its bubble holds the composer.
     pub editing: Option<Editing>,
-    /// An edit on its way (`Dirigent::send_edit`).
     pub rewound: Option<Rewound>,
-    /// The entry to scroll to once the host's entries are in (`Dirigent::open_fork_source`).
     jump_entry: Option<String>,
-    /// What its agent is doing on the computer, once its host has that to show (`screen.rs`).
     pub screen: Option<crate::screen::Screen>,
 }
 
-/// An edit in progress (`Dirigent::start_edit`): the user message (its entry's id) whose
-/// bubble holds the composer, and what the composer held before, the thread's draft,
-/// which it gets back when the edit is sent or cancelled.
 pub struct Editing {
     pub entry_id: String,
     stash: input::Content,
     images: Vec<Attachment>,
 }
 
-/// A sent edit: the transcript shows the branch up to the edited message's parent, the
-/// new text echoed below, until the host's first entry on the new branch replaces that
-/// view (`OpenThread::fold`). If the edit fails (`Dirigent::unrewind`) the old branch
-/// comes back, the edit open again in its bubble.
 pub struct Rewound {
     request: u64,
     entry_id: String,
@@ -172,26 +108,18 @@ pub struct Rewound {
     images: Vec<Attachment>,
 }
 
-/// The timeline of `entries`' current branch (`dirigent_protocol::branch`).
 fn timeline_of(entries: &[Entry]) -> Timeline {
     let branch = entries.last().map(|last| dirigent_protocol::transcript::branch(entries, &last.id)).unwrap_or_default();
     Timeline::from_entries(branch)
 }
 
-/// How the user left a thread's log, kept in memory (`Dirigent::logs`) so coming back to the
-/// thread puts them where they were: `stash_log` fills it, `select_thread` and `show_log` read it.
 #[derive(Default)]
 struct LogMemory {
-    /// Per work key, where its log was left scrolled up from its end. A work not in here
-    /// opens at its end and follows it.
     tops: HashMap<usize, ListOffset>,
-    /// The tool calls left open (`OpenThread::expanded`).
     expanded: HashSet<(usize, usize)>,
 }
 
 impl OpenThread {
-    /// The thread `id` on `host` as `entries` (from the cache) show it, before anything else
-    /// is known about it.
     fn new(host: &str, id: &str, entries: Vec<Entry>) -> Self {
         let timeline = timeline_of(&entries);
         let list = ListState::new(timeline.items.len() + 1, ListAlignment::Top, px(300.));
@@ -223,11 +151,7 @@ impl OpenThread {
         }
     }
 
-    /// Start the list over on a timeline that was rebuilt (a snapshot, an edit's view going
-    /// up or coming down), every item to be measured again. A list following its end goes
-    /// on doing so; one scrolled up stays at the item it was at, where a bare `reset`, which
-    /// forgets the position, would leave it at the top. A rebuilt timeline has the same
-    /// items up to where its entries differ, so the index holds; past its end is the end.
+    // MUST KILL: rename: reset_keeping_scroll, unlike ListState::reset it keeps a scrolled-up position
     fn relist(&mut self) {
         let top = (!self.list.is_following_tail()).then(|| self.list.logical_scroll_top());
         self.list.reset(self.timeline.items.len() + 1);
@@ -236,28 +160,19 @@ impl OpenThread {
         }
     }
 
-    /// Timeline item `ix` is a pinned message.
     pub fn is_pinned(&self, ix: usize) -> bool {
         self.timeline.entry_id(ix).is_some_and(|id| self.pins.contains(id))
     }
 
-    /// Fold a persisted entry in, from its push or from a snapshot, for a push that overtook
-    /// it or one this client never got (never both, see `ServerMessage::Entry`): the message
-    /// it persists supersedes what was streamed or echoed for it. Returns the item count
-    /// before and the first item it changed (`Timeline::push`): item 0 when the entry starts
-    /// a new branch (an edit), whose timeline replaces the old one; none for an entry kept
-    /// out of a sent edit's view (`Rewound`).
+    // MUST KILL: type: a named result (items before, first changed) instead of (usize, Option<usize>)
     fn fold(&mut self, entry: Entry) -> (usize, Option<usize>) {
         match &entry.body {
             Body::Assistant(_) => self.streaming.steps.clear(),
-            // A user message into an open work is a steer; the agent's queue already
-            // dropped its echo (see `Timeline::push`, `Streaming::apply`).
             Body::User { content } if self.timeline.open_work().is_none() => self.streaming.confirm_prompt(&text_of(content)),
             Body::Notice(Notice::Answer { ask_id, .. }) => self.streaming.confirm_answer(ask_id),
             _ => {}
         }
         let n = self.timeline.items.len();
-        // An edit branched off an earlier entry: the timeline is the new branch's from here.
         let branched = self.entries.last().is_some_and(|last| entry.parent_id.as_deref() != Some(last.id.as_str()));
         self.entries.push(entry);
         if branched {
@@ -265,8 +180,6 @@ impl OpenThread {
             self.timeline = timeline_of(&self.entries);
             return (n, Some(0));
         }
-        // A sent edit's view holds until the new branch starts: entries still on the old
-        // one (a job's notice landing meanwhile) stay out of it.
         if self.rewound.is_some() {
             return (n, None);
         }
@@ -274,9 +187,6 @@ impl OpenThread {
         (n, changed)
     }
 
-    /// The message behind timeline item `ix` if the user typed it: a `Body::User` entry
-    /// (not the answers to an ask, which also show as a user bubble). What an edit
-    /// rewrites, and what a fork from its bubble starts before.
     pub fn typed_message(&self, ix: usize) -> Option<&Entry> {
         if !matches!(self.timeline.items.get(ix), Some(Item::User { .. })) {
             return None;
@@ -285,49 +195,38 @@ impl OpenThread {
         self.entries.iter().rev().find(|e| e.id == id).filter(|e| matches!(e.body, Body::User { .. }))
     }
 
-    /// The timeline item to show for entry `id`: the last one made by it or an entry
-    /// before it on its branch. `None` before the entries are in.
     fn item_at(&self, id: &str) -> Option<usize> {
         let branch: HashSet<&str> = dirigent_protocol::transcript::branch(&self.entries, id).into_iter().map(|e| e.id.as_str()).collect();
         (0..self.timeline.items.len()).rev().find(|&ix| self.timeline.entry_id(ix).is_some_and(|e| branch.contains(e)))
     }
 }
 
-/// The user's answers in progress to one `ask_user` call: the picked option indices and
-/// the text field (where the question allows one) per question, one question shown at a
-/// time (`current`).
 pub struct AskForm {
     pub ask: Ask,
     pub picked: Vec<HashSet<usize>>,
     pub custom: Vec<Option<Entity<TextInput>>>,
     pub current: usize,
-    /// Answered or dismissed; waiting for the host to drop the ask.
     pub sent: bool,
 }
 
 impl AskForm {
-    /// The typed text for question `i`, if any.
     fn typed(&self, i: usize, cx: &App) -> Option<String> {
         self.custom[i].as_ref().map(|input| input.read(cx).text().trim().to_owned()).filter(|t| !t.is_empty())
     }
 
-    /// Question `i` has an option picked or text typed.
     pub fn answered(&self, i: usize, cx: &App) -> bool {
         !self.picked[i].is_empty() || self.typed(i, cx).is_some()
     }
 
-    /// Every question is answered: the form can be sent.
     pub fn complete(&self, cx: &App) -> bool {
         (0..self.ask.questions.len()).all(|i| self.answered(i, cx))
     }
 
-    /// The next question after the shown one (wrapping) that still has no answer.
     pub fn next_unanswered(&self, cx: &App) -> Option<usize> {
         let n = self.ask.questions.len();
         (1..n).map(|k| (self.current + k) % n).find(|&i| !self.answered(i, cx))
     }
 
-    /// One list per question: the picked options in order, then the typed text.
     pub fn answers(&self, cx: &App) -> Vec<Vec<String>> {
         self.ask
             .questions
@@ -343,18 +242,15 @@ impl AskForm {
     }
 }
 
-/// A host's answer about a directory (`ServerMessage::VcsStatus`).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct VcsInfo {
-    /// `None`: not under git or jj (or gone).
     pub vcs: Option<Vcs>,
     pub dirty: bool,
     pub branch: Option<String>,
-    /// Branches / tags / bookmarks a workspace can start from.
     pub refs: Vec<String>,
 }
 
-/// What a workspace starts from when nothing is picked (mirrors the service's default).
+// MUST KILL: rearchitect: one default base in dirigent_protocol, shared with dirigent_service::vcs
 pub fn default_base(vcs: Vcs) -> &'static str {
     match vcs {
         Vcs::Git => "HEAD",
@@ -362,7 +258,6 @@ pub fn default_base(vcs: Vcs) -> &'static str {
     }
 }
 
-/// Where a new thread will run: a project on a host.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Target {
     pub host: String,
@@ -376,50 +271,31 @@ impl From<&projects::Member> for Target {
 }
 
 pub enum Pane {
-    /// Finished threads, newest first, across every host.
     Inbox,
-    /// Threads with an agent currently working.
     Workpool,
-    /// One project group: all its threads, archived ones last.
-    Project {
-        group_key: String,
-    },
-    /// Every project group: pin, link, remove, and the form to add one (`lists::projects_page`).
+    Project { group_key: String },
     Projects,
-    /// New-thread page: the composer alone, centered. The thread is created on the host
-    /// when the first message is sent.
-    Draft {
-        target: Option<Target>,
-    },
+    Draft { target: Option<Target> },
     Thread(Box<OpenThread>),
 }
 
-/// An image pasted into the composer. It is referenced from the text as `[image-N]`:
-/// the text is the truth, so deleting the token drops the image (see `attachments`).
 #[derive(Clone)]
 pub struct Attachment {
     pub n: u32,
     pub blob: Blob,
 }
 
-/// A message to put in the composer: its text and the images its tokens name.
 type Draft = (String, Vec<Attachment>);
 
-/// A sent draft waiting for its `ThreadCreated`: the request, where it went, the message,
-/// which goes back into the draft if the thread can't be created and prompted, and the
-/// thread as listed until the host lists it (it is open from the moment it is sent).
 struct PendingDraft {
     id: u64,
     target: Target,
-    /// The draft's workspace base, which a reopened draft would otherwise forget.
     base: Option<String>,
     text: String,
     images: Vec<Attachment>,
     thread: ThreadSummary,
 }
 
-/// A message sent to a thread (`ClientMessage::Prompt`), until its host answers: it goes back
-/// into the thread's composer if the model didn't take it.
 struct SentPrompt {
     host: String,
     thread_id: String,
@@ -428,31 +304,23 @@ struct SentPrompt {
     mode: PromptMode,
 }
 
-/// A folder to open (`Dirigent::open_folder`); `request`: the `AddProject` adding it.
 struct OpenFolder {
     path: String,
     request: Option<u64>,
 }
 
-/// An image an entry references by blob id (see `Dirigent::blobs`), or a pasted one.
 #[derive(Clone)]
 pub struct Blob {
     pub image: Arc<gpui::Image>,
-    /// Width and height in pixels, turned upright the way gpui draws it (EXIF orientation);
-    /// `None` if the header doesn't parse. Inline images size their box from it
-    /// (`thread::inline_image`).
     pub size: Option<(f32, f32)>,
 }
 
-/// A saved model + effort combo, listed first in the model picker.
 #[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Preset {
     pub model: String,
     pub effort: Option<String>,
 }
 
-/// Sidebar sections that fold their thread cards: Inbox / Workpool. Which are folded is
-/// saved under `COLLAPSED_KEY`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section {
     Inbox,
@@ -462,7 +330,6 @@ pub enum Section {
 impl Section {
     const ALL: [Section; 2] = [Section::Inbox, Section::Workpool];
 
-    /// Its name in the saved fold state.
     fn key(self) -> &'static str {
         match self {
             Section::Inbox => "inbox",
@@ -470,8 +337,6 @@ impl Section {
         }
     }
 
-    /// The folded sections saved as space-separated keys; unknown words are ignored. With
-    /// nothing saved yet only the Workpool is folded: running threads stay out of sight.
     fn parse_folded(saved: Option<&str>) -> HashSet<Section> {
         match saved {
             Some(s) => Self::ALL.into_iter().filter(|x| s.split_whitespace().any(|w| w == x.key())).collect(),
@@ -480,269 +345,136 @@ impl Section {
     }
 }
 
-/// The one popup that can be open.
 #[derive(Clone, PartialEq)]
 pub enum Menu {
-    /// Model picker, presets page.
     Model,
-    /// Model picker, searchable list of every model the host offers.
     AllModels,
     Effort,
-    /// Draft: which project group the thread will run in (`target_search` over them).
     Target,
-    /// Draft: which of the group's hosts.
     TargetHost,
-    /// Projects page: actions for a project group (rename / link / unlink / remove).
-    Project {
-        group_key: String,
-    },
-    /// Pick the group to link into `group_key`.
-    Link {
-        group_key: String,
-    },
-    /// Add project modal: the host the project is added on.
+    Project { group_key: String },
+    Link { group_key: String },
     NewProjectHost,
-    /// Thread header: confirm deletion.
     ConfirmDelete,
-    /// Archiving a thread that has a workspace asks what to do with it, under the archive
-    /// button that was clicked (`at`: the thread may show in several places at once).
-    ConfirmArchive {
-        host: String,
-        id: String,
-        at: ArchiveAt,
-    },
-    /// Composer chip on a thread: move into / out of a workspace.
+    ConfirmArchive { host: String, id: String, at: ArchiveAt },
     Workspace,
-    /// The `New workspace from` popup (`base_search` over the repo's refs) behind the
-    /// composer's workspace chip.
     Base,
-    /// Usage modal: what a series is (model / provider / everything).
     UsageGroup,
-    /// Usage modal: what the chart shows (cost, tokens, ...).
     UsageMetric,
-    /// Settings modal: theme, background pattern, title model, title reasoning level, the
-    /// host whose proxy and MCP servers show.
     Theme,
     Background,
     TitleModel,
     TitleEffort,
     SettingsHost,
-    /// Settings › Hosts: `Add host`'s choice of auth, and the form's auth chip.
     AddHost,
     HostAuth,
-    /// Settings › MCP servers: the unfolded server's exposure chip.
     McpExposure,
-    /// Sidebar: the update button's restart menu (`update.rs`).
     Update,
-    /// Sidebar: a thread card's right-click menu (rename, regenerate title), at the click
-    /// (window position).
-    ThreadActions {
-        host: String,
-        id: String,
-        at: Point<Pixels>,
-    },
+    ThreadActions { host: String, id: String, at: Point<Pixels> },
 }
 
-/// A project row being dragged to reorder (gpui drag payload; `Dirigent::dragging` while
-/// it lasts): its group key, and whether it is a sidebar row or a Projects page one. Each
-/// list follows only its own rows' drags.
 #[derive(Clone)]
 pub struct DragProject {
     pub key: String,
     pub sidebar: bool,
 }
 
-/// What the rename field (`Dirigent::rename_input`) is naming.
 #[derive(Clone, PartialEq)]
 pub enum Renaming {
-    /// A Projects page row, by group key: a name on this desktop only.
     Project(String),
-    /// A sidebar thread card: the name its host keeps, every client's.
     Thread { host: String, id: String },
 }
 
-/// The modals opened from the sidebar; they float over whatever pane is open (see
-/// `modal.rs`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Modal {
-    /// `settings.rs`: config, the proxy, thread titles, agent tools, MCP servers, hosts,
-    /// the forge sign-in.
     Settings,
-    /// `usage.rs`: tokens and cost over time, across hosts.
     Usage,
-    /// `changelog.rs`: the release history. Also opens by itself after an update.
     Changelog,
 }
 
-/// Which archive button opened `Menu::ConfirmArchive`, so only that one shows the popup.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArchiveAt {
     Header,
     Sidebar,
     List,
-    /// A row of the agent tree (`orchestra::tree`).
     Tree,
 }
 
 pub struct Dirigent {
     pub hosts: Vec<HostState>,
     pub links: Links,
-    /// Names the user gave project groups (`projects::Names`).
     pub names: projects::Names,
-    /// The project or thread being renamed, its name field `rename_input`.
     pub renaming: Option<Renaming>,
     pub rename_input: Entity<TextInput>,
-    /// The project group keys pinned to the sidebar (`projects::pinned`).
     pub pinned_projects: Vec<String>,
-    /// The group keys in the order the user dragged them into (`projects::groups`).
     pub group_order: Vec<String>,
-    /// The groups (keys) expanded on the Projects page. Not kept across restarts.
     pub expanded_projects: HashSet<String>,
-    /// The host the Add project modal adds on; `None`: the first connected one.
     pub new_project_host: Option<String>,
-    /// The Add project modal, while open (its path field is `path_input`).
     pub add_project: Option<add_project::State>,
-    /// `ListDirs` requests not answered yet: their errors are the modal's, never toasts.
     dir_requests: HashSet<u64>,
-    /// The project row being dragged, in the sidebar or on the Projects page; its row is a
-    /// gap meanwhile.
     pub dragging: Option<DragProject>,
-    /// The sidebar thread card under the mouse (host, thread id): its spec popup is open.
     pub hovered_card: Option<(String, String)>,
-    /// Threads whose archived sub-agents are unfolded in the agent tree (`orchestra::lineage`).
     pub unfolded: HashSet<String>,
     pub pane: Pane,
-    /// Settings or Usage, over the pane (the Add project modal is `add_project`).
     pub modal: Option<Modal>,
-    /// The setup, over everything until it's done (`onboarding.rs`).
     pub onboarding: Option<onboarding::State>,
     pub menu: Option<Menu>,
-    /// The current mouse press closed a menu (clicked outside it). Suppresses `toggle_menu`
-    /// for that click, so pressing a menu's own trigger closes it rather than reopening it.
-    /// Reset at the start of every press (`reset_menu_dismissed`).
     menu_dismissed: bool,
-    /// The current left press is on a title-bar grab area (`titlebar::grab`): it moves the
-    /// window, so the root's `on_mouse_down` leaves the selection and a rename alone. Reset
-    /// at the start of every press (`reset_menu_dismissed`), in case a listener stops the
-    /// press before the root's sees it.
     pub caption_press: bool,
-    /// Sidebar: user-dragged width (design pixels, `theme::u`), hidden with `[`, and "peek"
-    /// when hidden but the mouse rests on the window's left edge.
     pub sidebar_width: f32,
     pub sidebar_hidden: bool,
     pub sidebar_peek: bool,
     pub collapsed: HashSet<Section>,
-    /// Scroll state of the Inbox's and the Workpool's card lists: they tell the sidebar
-    /// whether they are clipped, i.e. have met (`sidebar::seam`).
     pub inbox_scroll: ScrollHandle,
     pub workpool_scroll: ScrollHandle,
-    /// Work log panel width in design pixels (drag its left edge; `]` toggles the panel).
     pub log_width: f32,
-    /// The log section is on: it sticks across threads, every thread opened showing its
-    /// latest work (`latest_work`). Set by opening a log by hand (a work line, the panel
-    /// button), cleared by closing the panel.
     pub log_on: bool,
-    /// The right panel's section the user turned off, if any (`toggle_panel_part`): never
-    /// both, so the panel always has something to show. Sticks across threads and restarts.
     pub panel_hidden: Option<PanelPart>,
-    /// Per thread id, how the user left its log (in memory only).
     logs: HashMap<String, LogMemory>,
     resizing: Option<Resize>,
     pub composer: Entity<TextInput>,
     pub path_input: Entity<TextInput>,
-    /// Settings › Hosts: the add / edit form and its fields.
     pub hosts_tab: hosts_tab::State,
-    /// Filter for the model picker's all-models page.
     pub model_search: Entity<TextInput>,
-    /// Filter (or free text) for the workspace base picker.
     pub base_search: Entity<TextInput>,
-    /// Filter for the draft's `Create thread in` popup.
     pub target_search: Entity<TextInput>,
-    /// Filter for the Projects page's `Link into` popup.
     pub link_search: Entity<TextInput>,
-    /// The Usage modal: window, grouping, hidden series and the hosts' buckets.
     pub usage: usage::State,
-    /// Its custom range's date fields (`YYYY-MM-DD`; Enter in either applies both).
     pub usage_from: Entity<TextInput>,
     pub usage_to: Entity<TextInput>,
-    /// The leaderboard: account, uploads, the board shown in the Usage modal.
     pub leaderboard: leaderboard::State,
-    /// The forge account (`account.rs`): forge-auth hosts and the leaderboard use it.
     pub forge: account::State,
-    /// Seconds since launch, from `tick`.
     ticks: u64,
-    /// Model (its id) and reasoning effort the next prompt is sent with.
     pub model: Option<String>,
     pub effort: Option<String>,
     pub presets: Vec<Preset>,
     pub toasts: Vec<(String, Instant)>,
     pub copied: Option<ElementId>,
-    /// `config.toml` as last loaded or saved, the fonts it resolves to, and the watcher
-    /// that notices hand edits.
     pub config: config::Config,
     pub fonts: theme::Fonts,
-    /// The background pattern's picture (`ambient.rs`), kept in step with the window by
-    /// `render` and moved along by `tick`.
     pub field: ambient::Field,
     watch: config::Watch,
-    /// Bumped on every keystroke in a text setting; the 300ms timer it starts only applies
-    /// if no later keystroke bumped it again (`schedule_apply`).
     config_edit: u64,
-    /// The Settings modal's tab, inputs and title test.
     pub settings: settings::State,
-    /// The host Settings › Proxy and MCP servers show, and an MCP server's sign-in in progress.
     pub login: crate::login::State,
-    /// Settings › Proxy: the same host's CLIProxyAPI, its address and management key.
     pub proxy: proxy::State,
-    /// Settings › MCP servers: the same host's MCP servers, and the form adding or editing one.
     pub mcp: mcp::State,
-    /// Threads whose title is being generated (since their first prompt, or a `Regenerate
-    /// title`), with when it started.
     titling: HashMap<(String, String), Instant>,
-    /// `RetitleThread` requests not answered yet: (host, thread id) by request id. Their
-    /// reply ends the thread's `titling`.
     retitles: HashMap<u64, (String, String)>,
-    /// Images pasted into the composer, in paste order. Only those whose `[image-N]` token
-    /// is still in the text count (`attachments()`); the rest are pruned on send.
-    /// Like the text, they belong to the thread (or draft) in view: `set_pane` saves them to
-    /// the cache and loads the other thread's (see `save_draft`).
     attachments: Vec<Attachment>,
-    /// Pasted images still being shrunk (`attach`): sending waits for them, as their tokens
-    /// aren't in the text yet.
     fitting: usize,
-    /// The image shown full-size over everything; click or Esc closes it.
     pub preview: Option<Arc<gpui::Image>>,
-    /// The open thread's screen is shown enlarged over everything (`screen::preview`).
     pub screen_preview: bool,
-    /// Mouse selection in the transcript or the work log.
     pub selection: Selection,
-    /// Images referenced from entries, by blob id: filled from the cache db, else fetched
-    /// from the host (`blob_requests`) when the thread shows them.
     pub blobs: HashMap<String, Blob>,
-    /// Blob ids asked of each host and not in yet, by request id. One the host doesn't have
-    /// stays, so it isn't asked again. A dropped connection (or a host removed from
-    /// `hosts.toml`) loses the answers: its host's map goes, so the open thread's fetch on
-    /// reconnect asks again.
     blob_requests: HashMap<String, HashMap<u64, String>>,
-    /// The drafts sent (`CreateThread` with its first prompt) and not yet confirmed.
     pending: Vec<PendingDraft>,
-    /// The `Prompt`s not answered yet, by request id.
     prompts: HashMap<u64, SentPrompt>,
-    /// `ForkThread` requests not answered yet, by request id: the host, and the draft the
-    /// fork opens with (a fork from a user message gets that message).
     forks: HashMap<u64, (String, Option<Draft>)>,
-    /// Draft: start the thread in its own workspace (the composer's `isolated` chip), and
-    /// from where (`None` = the vcs default; reset with every draft).
     pub isolate: bool,
     pub base: Option<String>,
-    /// Version control state by `(host, path)`, as last reported (`request_vcs`): the
-    /// draft's project directory, an open thread's project, a workspace before removal.
     pub vcs: HashMap<(String, String), VcsInfo>,
-    /// A downloaded update and the restart into it (`update.rs`).
     pub updater: update::State,
-    /// A folder to open from another launch ("Open in Dirigent", `instance.rs`), until the
-    /// local host lists it as a project: added if it isn't one (`request`, our
-    /// `AddProject`), then opened on a new-thread draft (`resume_open_folder`).
     open_folder: Option<OpenFolder>,
     net: Net,
     pub(crate) cache: Arc<Mutex<Cache>>,
@@ -753,7 +485,6 @@ pub struct Dirigent {
 
 impl Dirigent {
     pub fn new(cache: Cache, mut config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // `local` is the embedded service; the rest come from hosts.toml.
         let mut hosts = vec![(hosts::LOCAL.to_owned(), hosts::Host::new(format!("ws://127.0.0.1:{}/ws", dirigent_service::port())))];
         let hosts_error = match hosts::load() {
             Ok(remote) => {
@@ -762,11 +493,8 @@ impl Dirigent {
             }
             Err(e) => Some(format!("{e:#}")),
         };
-        // First, before anything is kept in `kv`: it tells a new data dir from an old one.
         let updated = changelog::after_update(&cache);
         let onboard = onboarding::needed(&cache);
-        // Before the cache is read, and before the config's watcher takes its first stamp
-        // (the write isn't a hand edit).
         if name_models_by_id(&cache, &mut config)
             && let Err(e) = config::save(&config)
         {
@@ -776,7 +504,6 @@ impl Dirigent {
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
         let pinned_projects: Vec<String> = cache.get(PINNED_PROJECTS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        // Seeded once, and kept: the pins are no longer ordered from here on.
         let group_order: Vec<String> = match cache.get(GROUP_ORDER_KEY).and_then(|s| serde_json::from_str(&s).ok()) {
             Some(order) => order,
             None => {
@@ -823,7 +550,6 @@ impl Dirigent {
         let rename_input = cx.new(|cx| TextInput::new(cx, "name", true));
         cx.subscribe(&rename_input, |this, _, _: &Submitted, cx| this.finish_rename(true, cx)).detach();
         let hosts_tab = hosts_tab::State::new(cx);
-        // The menus' searches; Enter in one takes the lit result (`menu::pick`).
         let model_search = cx.new(|cx| TextInput::new(cx, "Search models", true));
         let base_search = cx.new(|cx| TextInput::new(cx, "Branch, commit or revset", true));
         let target_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
@@ -837,7 +563,6 @@ impl Dirigent {
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.apply_custom_usage(cx)).detach();
         }
         let mut settings = settings::State::new(cx);
-        // Text settings apply as you type (debounced); nothing to press, nothing to lose.
         for input in [&settings.font_ui, &settings.font_prose, &settings.font_code, &settings.prompt] {
             cx.subscribe(input, |this, _, _: &input::Changed, cx| this.schedule_apply(cx)).detach();
         }
@@ -931,13 +656,11 @@ impl Dirigent {
             focus_handle: cx.focus_handle(),
             window: window.window_handle(),
         };
-        // The window was opened with this theme's background already (see `main`).
         match theme::load(&this.config.theme) {
             Ok(t) => theme::set(t),
             Err(e) => this.toast(format!("{e:#}"), cx),
         }
         this.restore_pane(cx);
-        // The setup goes first; the changelog is a click on the version away.
         if onboard {
             this.open_onboarding(cx);
         } else if updated {
@@ -959,15 +682,12 @@ impl Dirigent {
         self.next_id
     }
 
-    /// Send `host` the request `make` builds around a fresh id, and return the id. Dropped
-    /// while the host is offline: callers that wait on the reply check it is connected.
     pub fn request(&mut self, host: &str, make: impl FnOnce(u64) -> ClientMessage) -> u64 {
         let id = self.next_id();
         self.net.send(host, make(id));
         id
     }
 
-    /// Put `text` in `input` (deferred: listeners and spawned tasks lack the window).
     pub fn set_input(&self, input: &Entity<TextInput>, text: &str, cx: &mut Context<Self>) {
         let (window, input, text) = (self.window, input.clone(), text.to_owned());
         cx.defer(move |cx| {
@@ -983,17 +703,14 @@ impl Dirigent {
         self.hosts.iter().find(|h| h.name == name)
     }
 
-    /// `host` is up: requests to it get through (`request` drops them otherwise).
     pub fn connected(&self, host: &str) -> bool {
         self.host(host).is_some_and(|h| h.status == HostStatus::Connected)
     }
 
-    /// The composer's host is down: send stays grey and says so (`thread::composer`, `edit_bubble`).
     pub fn composer_offline(&self) -> bool {
         self.composer_host().is_some_and(|h| !self.connected(h))
     }
 
-    /// A host's name as pickers show it: `name (offline)` while it is down.
     pub fn host_label(&self, host: &str) -> String {
         if self.connected(host) { host.to_owned() } else { format!("{host} (offline)") }
     }
@@ -1009,20 +726,15 @@ impl Dirigent {
         self.host(host)?.threads.iter().find(|t| t.id == id)
     }
 
-    /// A draft's thread of ours, which its host is still creating.
     fn is_pending(&self, host: &str, id: &str) -> bool {
         self.pending.iter().any(|p| p.target.host == host && p.thread.id == id)
     }
 
-    /// The sent draft `host` answered with reply `request`, no longer pending.
     fn take_pending(&mut self, host: &str, request: u64) -> Option<PendingDraft> {
         let i = self.pending.iter().position(|p| p.id == request && p.target.host == host)?;
         Some(self.pending.remove(i))
     }
 
-    /// Why the thread can't take a message, if it can't: its host is still creating it or
-    /// setting it up (`ThreadSummary::setup`), or it never will (`ThreadSummary::locked`).
-    /// The composer keeps the text meanwhile.
     pub fn not_ready(&self, host: &str, id: &str) -> Option<&'static str> {
         if self.summary(host, id).is_some_and(|s| s.locked) {
             return Some("This thread could not be converted from pi whole: fork it from an earlier message to go on");
@@ -1035,33 +747,22 @@ impl Dirigent {
         }
     }
 
-    /// The open thread has an agent working.
     pub fn is_running(&self) -> bool {
         self.open().and_then(|t| self.summary(&t.host, &t.id)).is_some_and(|t| t.running())
     }
 
-    /// Finished since the user last opened it, on any device (never opened counts too). A
-    /// thread waiting on jobs or sub-agents isn't finished yet, and one still running (asking
-    /// while it works) isn't done moving, so neither is unread.
     pub fn unread(&self, host: &str, t: &ThreadSummary) -> bool {
         self.snoozable(host, t) && t.seen_at.is_none_or(|s| t.updated_at > s)
     }
 
-    /// Finished and at rest. Snoozing a running thread (asking while it works) would undo
-    /// itself on its next entry, so it only goes to these.
     pub fn snoozable(&self, host: &str, t: &ThreadSummary) -> bool {
         self.status(host, t).finished() && !t.running()
     }
 
-    /// Nothing going on: neither it nor a sub-agent runs or has jobs going it waits on (jobs
-    /// left running, `free_jobs`, don't count: archiving stops them). Only such a thread can
-    /// be archived (the host refuses the rest); a message or run brings it back.
     pub fn at_rest(&self, host: &str, t: &ThreadSummary) -> bool {
         !t.running() && t.jobs == 0 && !self.has_busy_children(host, &t.id)
     }
 
-    /// A thread's title colour in the sidebar and lists: amber while the model waits on an
-    /// answer, accent while unread, else `fg`.
     pub fn title_color(&self, host: &str, t: &ThreadSummary) -> u32 {
         if t.asking() {
             theme::t().warn
@@ -1072,9 +773,6 @@ impl Dirigent {
         }
     }
 
-    /// `Status::of`, with an idle thread that has `async_bash` jobs running it waits on
-    /// (`jobs`, not `free_jobs`) or sub-agents still at it reported as `Waiting`: their
-    /// results will wake it.
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
         match Status::of(t) {
             Status::Done if t.jobs > 0 || self.has_busy_children(host, &t.id) => Status::Waiting,
@@ -1082,7 +780,6 @@ impl Dirigent {
         }
     }
 
-    /// A sub-agent (at any depth) is working or has jobs running.
     fn has_busy_children(&self, host: &str, id: &str) -> bool {
         let Some(h) = self.host(host) else { return false };
         h.threads
@@ -1095,9 +792,6 @@ impl Dirigent {
         self.summary(host, thread_id).is_some_and(|t| t.pinned)
     }
 
-    /// Pin keeps a thread on top of its status group (pinned done threads above the other
-    /// done ones, pinned snoozed above the snoozed pile). The host keeps it (every device
-    /// and agents see it); the flag is set here ahead of its `Threads` push.
     pub fn set_pinned(&mut self, host: &str, thread_id: &str, pinned: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::PinThread { id, thread_id: thread_id.to_owned(), pinned });
@@ -1111,26 +805,15 @@ impl Dirigent {
         self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id))
     }
 
-    /// Group rows by status (working, waiting, asking, done, snoozed, archived) with the
-    /// pinned ones first in each group, keeping their order otherwise.
     fn sort_by_status(&self, rows: &mut [(&str, &ThreadSummary)]) {
         rows.sort_by_key(|(h, t)| (self.status(h, t), !t.pinned));
     }
 
-    /// Order `rows` (most recently updated first on input) as a queue, newest on top.
-    /// Working threads are ordered by when their run started, finished ones by when they
-    /// finished (their last entry): neither key changes while the thread is on that list,
-    /// so the order is fixed and a thread only moves when it enters the list. On top of
-    /// that, `sort_by_status` lifts the pinned ones (and sinks snoozed finished ones).
-    /// Shared by the Inbox, the Workpool and the project page.
     pub fn sort_as_queue(&self, rows: &mut [(&str, &ThreadSummary)]) {
         rows.sort_by_key(|(_, t)| std::cmp::Reverse(t.running_since));
         self.sort_by_status(rows);
     }
 
-    /// Snooze hides a finished thread from the sidebar's inbox without archiving it; it
-    /// comes back by itself once it runs again, or when the user wakes it. The host keeps
-    /// it (agents can snooze too); the flag is set here ahead of its `Threads` push.
     pub fn set_snoozed(&mut self, host: &str, thread_id: &str, snoozed: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::SnoozeThread { id, thread_id: thread_id.to_owned(), snoozed });
@@ -1140,25 +823,20 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// What the sidebar lists under Inbox: every finished thread that isn't snoozed. The
-    /// Inbox page itself lists them all (`inbox_all`).
     pub fn inbox_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         let mut rows = self.inbox_all();
         rows.retain(|(_, t)| !t.snoozed);
         rows
     }
 
-    /// The Inbox: threads waiting on the user, the ones asking a question first.
     pub fn inbox_all(&self) -> Vec<(&str, &ThreadSummary)> {
         self.threads_where(|s| s.finished())
     }
 
-    /// The Workpool: threads with an agent at it, directly or through sub-agents.
     pub fn busy_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         self.threads_where(|s| s.busy())
     }
 
-    /// The sidebar has a card for the thread: it is on the Inbox or the Workpool, unfolded.
     fn on_sidebar(&self, host: &str, id: &str) -> bool {
         let shown = |section, rows: Vec<(&str, &ThreadSummary)>| {
             !self.collapsed.contains(&section) && rows.iter().any(|(h, t)| *h == host && t.id == id)
@@ -1166,9 +844,6 @@ impl Dirigent {
         shown(Section::Inbox, self.inbox_threads()) || shown(Section::Workpool, self.busy_threads())
     }
 
-    /// After a push: a card's menu or rename goes with its card when the thread left the
-    /// sidebar (archived, snoozed or deleted elsewhere). Nothing else would close them:
-    /// they're drawn by the card.
     fn drop_gone_card(&mut self, cx: &mut Context<Self>) {
         if let Some(Menu::ThreadActions { host, id, .. }) = &self.menu
             && !self.on_sidebar(host, id)
@@ -1183,11 +858,6 @@ impl Dirigent {
         }
     }
 
-    /// The user is looking at this thread: whatever it has now is read, on every device.
-    /// Called again on each `Threads` push while the thread is open, so a mark goes out
-    /// only while the thread is `unread`: finished, at rest, and moved since the last mark
-    /// (the host's push of the mark must not trigger another). The flag is set here ahead
-    /// of that push.
     fn mark_seen(&mut self, host: &str, id: &str) {
         let Some(updated_at) = self.summary(host, id).filter(|t| self.unread(host, t)).map(|t| t.updated_at) else {
             return;
@@ -1199,8 +869,6 @@ impl Dirigent {
         }
     }
 
-    /// Every top-level thread on every host, most recently updated first, with its host.
-    /// Sub-agents stay out of the lists: their parent's orchestration panel is their place.
     pub fn all_threads(&self) -> Vec<(&str, &ThreadSummary)> {
         let mut all: Vec<_> =
             self.hosts.iter().flat_map(|h| h.threads.iter().filter(|t| t.top_level()).map(move |t| (h.name.as_str(), t))).collect();
@@ -1215,13 +883,11 @@ impl Dirigent {
         rows
     }
 
-    /// The family of a thread on `host`, for the orchestra panel (`orchestra::lineage`).
     pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
         let Some(h) = self.host(host) else { return vec![] };
         orchestra::lineage(&h.threads, id, &self.unfolded)
     }
 
-    /// Unfold or fold `parent`'s archived sub-agents in the agent tree.
     pub fn toggle_unfolded(&mut self, parent: &str, cx: &mut Context<Self>) {
         if !self.unfolded.remove(parent) {
             self.unfolded.insert(parent.to_owned());
@@ -1229,19 +895,16 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Group key of a project, if the host still lists it.
     pub fn group_key_of(&self, host: &str, project_id: &str) -> Option<String> {
         let project = self.host(host)?.projects.iter().find(|p| p.id == project_id)?;
         Some(projects::group_key(host, project, &self.links))
     }
 
-    /// Directory of a thread's project, if the host still lists it.
     pub fn project_path(&self, host: &str, t: &ThreadSummary) -> Option<String> {
         let pid = t.project_id.as_deref()?;
         self.host(host)?.projects.iter().find(|p| p.id == pid).map(|p| p.path.clone())
     }
 
-    /// Display name of a thread's project ("" for orphans): its group's, as on the Projects page.
     pub fn project_name(&self, host: &str, t: &ThreadSummary) -> String {
         t.project_id
             .as_deref()
@@ -1253,7 +916,6 @@ impl Dirigent {
             .unwrap_or_default()
     }
 
-    /// Host of whatever the composer currently targets: the draft's project, else the open thread.
     pub fn composer_host(&self) -> Option<&str> {
         match &self.pane {
             Pane::Draft { target: Some(t) } => Some(&t.host),
@@ -1262,7 +924,6 @@ impl Dirigent {
         }
     }
 
-    /// Models known for the composer's host (cached list; refreshed on connect).
     pub fn models(&self) -> &[ModelInfo] {
         self.composer_host().and_then(|h| self.host(h)).map(|h| h.models.as_slice()).unwrap_or(&[])
     }
@@ -1272,7 +933,6 @@ impl Dirigent {
         self.models().iter().find(|m| m.id == key)
     }
 
-    /// Show `message` for a while. Logged too: toasts are how most failures reach the user.
     pub fn toast(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         let message = message.into();
         tracing::info!("toast: {message}");
@@ -1289,29 +949,19 @@ impl Dirigent {
         cx.notify();
     }
 
-    // ---- incoming from hosts ----
-
     fn on_incoming(&mut self, msg: Incoming, cx: &mut Context<Self>) {
         match msg {
             Incoming::Status { host, status, error } => {
                 if let Some(h) = self.host_mut(&host) {
                     h.status = status;
-                    // Kept while it tries again, so Settings doesn't flicker.
                     if status != HostStatus::Connecting {
                         h.error = error;
                     }
                 }
-                // Images asked for and not in yet won't come over a dropped connection, nor
-                // forks or an edit (which, if its host got it, comes back with the thread's
-                // fetch on reconnect; the reopened edit then ends, `end_stale_edit`).
                 if status == HostStatus::Disconnected {
                     self.blob_requests.remove(&host);
                     self.forks.retain(|_, (h, _)| *h != host);
                     self.leaderboard.drop_uploads(&host);
-                    // Runs don't outlive the host's service (its agent's sessions are in
-                    // memory): a message sent meanwhile is a prompt, not a steer into a run
-                    // that is gone.
-                    // The thread list keeps the old entries until the reconnect's refresh.
                     if let Some(h) = self.host_mut(&host) {
                         for t in &mut h.threads {
                             t.running_since = None;
@@ -1320,23 +970,15 @@ impl Dirigent {
                     if self.open().is_some_and(|t| t.host == host) {
                         self.settle_open();
                         self.unrewind(cx);
-                        // Its screen was the run's, and a picture asked for won't come.
                         self.drop_screen(cx);
-                        // An answer may be lost with the connection: its form takes input
-                        // again, or it would hold back the asks behind it. One the host got
-                        // leaves with the reconnect's refresh.
                         if let Pane::Thread(t) = &mut self.pane {
                             t.asks.iter_mut().for_each(|f| f.sent = false);
                         }
                     }
                 }
-                // The open thread is fetched once its host connects (`fetch_open` doesn't ask
-                // while it's offline).
                 if status == HostStatus::Connected && self.open().is_some_and(|t| t.host == host) {
                     self.fetch_open();
                 }
-                // The modal's host: a reply can't come over a dropped connection (the add can
-                // be retried), and a listing asked for while offline is asked again.
                 if let Some(s) = self.add_project.as_mut().filter(|_| self.new_project_host.as_deref() == Some(&host)) {
                     if status == HostStatus::Disconnected {
                         s.add_request = None;
@@ -1349,9 +991,6 @@ impl Dirigent {
                     self.request_usage(cx);
                 }
                 self.shown_host_status(&host, status, cx);
-                // The connection dropped under a sent draft: its request may never have
-                // arrived (a host that got it still runs the thread), so the draft comes back.
-                // A message sent to a thread isn't given back: it may well have arrived.
                 if status == HostStatus::Disconnected {
                     let lost: Vec<_> = self.pending.extract_if(.., |p| p.target.host == host).collect();
                     if !lost.is_empty() {
@@ -1366,7 +1005,6 @@ impl Dirigent {
                     self.refresh_draft_vcs();
                 }
                 if status == HostStatus::Connected {
-                    // Snoozes, pins and seen marks from before the hosts kept them: handed over once.
                     let (snoozes, pins, seen) = {
                         let cache = self.cache.lock().unwrap();
                         (
@@ -1391,7 +1029,6 @@ impl Dirigent {
             }
             Incoming::Message { host, msg } => self.on_server_message(host, *msg, cx),
         }
-        // The local host connected, or listed its projects: a folder to open may be ready.
         self.resume_open_folder(cx);
         cx.notify();
     }
@@ -1405,7 +1042,6 @@ impl Dirigent {
                 self.upload_usage(&host);
             }
             ServerMessage::Ok { reply_to } => {
-                // The model has the message.
                 self.prompts.remove(&reply_to);
                 let _ = self.on_login_reply(&host, reply_to, Ok(()), cx) || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
             }
@@ -1423,12 +1059,9 @@ impl Dirigent {
                 {
                     h.projects.push(project.clone());
                 }
-                // The folder to open, added: its path as the host wrote it (`resume_open_folder`).
                 if let Some(f) = self.open_folder.as_mut().filter(|f| host == hosts::LOCAL && f.request == Some(reply_to)) {
                     f.path = project.path.clone();
                 }
-                // The modal's add: on to the link page if it has one to offer, else closed,
-                // back on the Projects page with the new row. Not pinned: the user's call.
                 let ours = self.add_project.as_ref().is_some_and(|s| s.add_request == Some(reply_to));
                 if ours {
                     match add_project::offer(&self.groups().0, &host, &project.id) {
@@ -1459,7 +1092,6 @@ impl Dirigent {
                 let was_running = self.is_running();
                 let ran: HashSet<String> =
                     self.host(&host).map(|h| h.threads.iter().filter(|t| t.running()).map(|t| t.id.clone()).collect()).unwrap_or_default();
-                // Our drafts' threads stay listed (and open) until their host lists them.
                 let ours: Vec<_> = self.pending.iter().filter(|p| p.target.host == host).map(|p| p.thread.clone()).collect();
                 if let Some(h) = self.host_mut(&host) {
                     h.threads = threads;
@@ -1470,9 +1102,6 @@ impl Dirigent {
                     }
                 }
                 self.request_sidebar_vcs(&host, &ran);
-                // A run started under the open base picker (a sub-agent's report, another
-                // client): the thread can't move now and the chip drops the picker, so close it
-                // rather than leave it open unseen, to pop back when the run ends.
                 if !was_running && self.is_running() && self.menu == Some(Menu::Base) {
                     self.close_menu(cx);
                 }
@@ -1481,25 +1110,19 @@ impl Dirigent {
                 {
                     let id = t.id.clone();
                     if let Some(pins) = self.summary(&host, &id).map(|s| s.pinned_entries.iter().cloned().collect()) {
-                        // The run is over, with or without a `RunEnd`: none comes for a run
-                        // the host counted from a message that its session then refused. The
-                        // host lists the thread idle, so nothing streams or runs any more.
+                        // MUST KILL: rearchitect: have the host send RunEnd for refused runs so the idle listing needn't end them here
                         let over = was_running && !self.is_running();
                         if let Pane::Thread(t) = &mut self.pane {
                             t.pins = pins;
                         }
                         if over {
                             self.settle_open();
-                            // An edit's run ended before its branch started: the host
-                            // refused it (its reply says why).
                             self.unrewind(cx);
                         }
                         self.mark_seen(&host, &id);
                         self.sync_asks(cx);
-                        // The run ended, or the thread moved: the repo state may have changed.
                         self.request_thread_vcs(&host, &id);
                     } else {
-                        // The open thread was deleted elsewhere.
                         self.show(Pane::Inbox, cx);
                     }
                 }
@@ -1510,8 +1133,6 @@ impl Dirigent {
                     && t.host == host
                     && t.id == thread_id
                 {
-                    // The reply to our latest fetch: what we held past its end is stale (see
-                    // `fetch_open`), in the cache too.
                     let end = entries.last().map(|e| e.seq);
                     let stale = t
                         .fetching
@@ -1526,21 +1147,15 @@ impl Dirigent {
                     let (kept, fresh) = merge_snapshot(entries, std::mem::take(&mut t.entries), stale);
                     t.timeline = timeline_of(&kept);
                     t.entries = kept;
-                    // Their pushes are still on the way and will be skipped (see `Entry`):
-                    // they are folded in now, as if pushed.
                     for e in fresh {
                         t.fold(e);
                     }
-                    // The reply can be a while behind the cached entries on show: the user may
-                    // have scrolled up in them already, and stays there.
                     t.relist();
                     self.end_stale_edit(cx);
                     let Pane::Thread(t) = &mut self.pane else { return };
-                    // A fork's source opens at the message it was forked at.
                     if let Some(ix) = t.jump_entry.take().and_then(|e| t.item_at(&e)) {
                         self.jump_to(ix, cx);
                     }
-                    // The cache may have lagged: the log follows the latest work again.
                     if self.open().is_some_and(|t| t.log.is_some()) {
                         self.show_latest_log();
                     }
@@ -1566,7 +1181,6 @@ impl Dirigent {
                 if self.settings.test_request.take_if(|(id, _)| *id == reply_to).is_some() {
                     self.settings.test_result = Some(Ok(settings::TitleResult { title, model, input, output, cost, duration_ms }));
                 }
-                // A retitle: the name itself comes with the host's `Threads` push.
                 if let Some(thread) = self.retitles.remove(&reply_to) {
                     self.titling.remove(&thread);
                 }
@@ -1586,11 +1200,8 @@ impl Dirigent {
             ServerMessage::VcsStatus { path, vcs, dirty, branch, refs, .. } => {
                 self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
             }
-            // An agent asked for the user's attention on a thread.
             ServerMessage::Focus { thread_id } => {
                 if self.summary(&host, &thread_id).is_some() {
-                    // The agent wants it seen: a Settings or Usage modal would hide it,
-                    // and keys would type into its composer under the dim.
                     self.modal = None;
                     self.select_thread(&host, &thread_id, cx);
                 }
@@ -1598,13 +1209,11 @@ impl Dirigent {
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, thread } => {
                 let pending = self.take_pending(&host, reply_to);
-                // Listed unless a push of the host's lists it already.
                 if let Some(h) = self.host_mut(&host)
                     && !h.threads.iter().any(|t| t.id == thread.id)
                 {
                     h.threads.insert(0, (*thread).clone());
                 }
-                // Our fork: it opens, with its draft (if any) in the composer.
                 if let Some((_, draft)) = self.forks.remove(&reply_to).filter(|(h, _)| *h == host) {
                     if let Some((text, images)) = draft {
                         let content = input::Content { selection: text.len()..text.len(), text, reversed: false };
@@ -1612,12 +1221,6 @@ impl Dirigent {
                     }
                     self.select_thread(&host, &thread.id, cx);
                 }
-                // Our draft's thread, open since it was sent: its host has it now, prompted
-                // (`CreateThread::prompt`), and it is fetched if open, as entries made while it
-                // wasn't are missing. A host from before `CreateThread::thread_id` picked an id
-                // of its own: ours makes way for its thread, opened in its place. It prompted
-                // the thread before replying, so the message is cached or on its way: no echo,
-                // which nothing would confirm if the cache has it (see `ServerMessage::Entry`).
                 if let Some(p) = pending {
                     let open = self.open().is_some_and(|t| t.host == host && t.id == p.thread.id);
                     if thread.id != p.thread.id {
@@ -1635,7 +1238,6 @@ impl Dirigent {
                 }
             }
             ServerMessage::Error { reply_to, message } => {
-                // A missing image is the transcript's to show (or not), not worth a toast.
                 if let Some(blob) = reply_to.and_then(|id| self.blob_requests.get(&host)?.get(&id)) {
                     tracing::info!(%host, %blob, "blob fetch failed: {message}");
                     return;
@@ -1644,7 +1246,6 @@ impl Dirigent {
                     self.settings.test_result = Some(Err(message));
                     return;
                 }
-                // Settings › Proxy and MCP servers show their own failures.
                 if let Some(id) = reply_to
                     && (self.on_login_reply(&host, id, Err(message.clone()), cx)
                         || self.on_proxy_settings(id, Err(message.clone()), cx)
@@ -1659,12 +1260,9 @@ impl Dirigent {
                     self.usage.proxies.insert(host, dirigent_protocol::Proxy::default());
                     return;
                 }
-                // A failed retitle keeps the name it had (and says why, below).
                 if let Some(thread) = reply_to.and_then(|id| self.retitles.remove(&id)) {
                     self.titling.remove(&thread);
                 }
-                // A listing failure is the modal's, shown in its list if it is the current
-                // listing, else dropped (an earlier directory's; the modal closed).
                 if let Some(id) = reply_to.filter(|id| self.dir_requests.remove(id)) {
                     if let Some(s) = self.add_project.as_mut().filter(|s| s.list_request == Some(id)) {
                         // An older service doesn't know `ListDirs`.
@@ -1677,27 +1275,21 @@ impl Dirigent {
                     }
                     return;
                 }
-                // The folder to open can't be added: nothing more to do with it.
                 if let Some(f) = self.open_folder.take_if(|f| host == hosts::LOCAL && reply_to.is_some() && f.request == reply_to) {
                     self.toast(format!("Can't open {}: {message}", f.path), cx);
                     return;
                 }
-                // The Add project modal shows its own add failures.
                 if let Some(s) = self.add_project.as_mut().filter(|s| reply_to.is_some() && s.add_request == reply_to) {
                     s.add_request = None;
                     s.error = Some(message);
                     return;
                 }
-                // A failed create (or first prompt: the host deleted the thread again) puts
-                // the draft back so nothing typed is lost. So does a message to a thread that
-                // its model didn't take.
                 if let Some(p) = reply_to.and_then(|id| self.take_pending(&host, id)) {
                     self.unsend_draft(p, cx);
                 }
                 if let Some(p) = reply_to.and_then(|id| self.prompts.remove(&id)) {
                     self.unsend_prompt(p, cx);
                 }
-                // So does a refused edit; a refused fork just never opens.
                 if self.open().and_then(|t| t.rewound.as_ref()).is_some_and(|r| Some(r.request) == reply_to) {
                     self.unrewind(cx);
                 }
@@ -1718,11 +1310,7 @@ impl Dirigent {
                     && t.host == host
                     && t.id == thread_id
                 {
-                    // One it has came with a snapshot (`select_thread`'s cache read, which the net
-                    // task fills before we see the push, or a `Thread` reply that overtook it) and
-                    // is skipped. An assistant message still drops what streamed, which the cache
-                    // read left alone: pushes come in order, so that is its own or older. (Not the
-                    // prompt echo: confirming twice would drop a later one.)
+                    // MUST KILL: extract: an OpenThread method for a push a snapshot already folded in
                     if t.entries.last().is_some_and(|e| entry.seq <= e.seq) {
                         if matches!(entry.body, Body::Assistant(_)) && !t.streaming.steps.is_empty() {
                             t.streaming.steps.clear();
@@ -1736,7 +1324,6 @@ impl Dirigent {
                     }
                     let (n, changed) = t.fold(entry);
                     let m = t.timeline.items.len();
-                    // The live work got its persisted item: the log panel follows it there.
                     if t.log == Some(thread::TAIL) {
                         t.log = Some(t.timeline.open_work().unwrap_or(thread::TAIL));
                     }
@@ -1745,7 +1332,6 @@ impl Dirigent {
                     } else if m < n {
                         t.list.splice(m..n, 0);
                     }
-                    // A tool result or new step lands in an existing work item; the tail always moves.
                     if let Some(c) = changed {
                         t.list.remeasure_items(c..n.min(m));
                     }
@@ -1760,20 +1346,14 @@ impl Dirigent {
             }
             ServerMessage::Event { thread_id, event } => {
                 match &event {
-                    // A warning is the host's to say: a title it gave up on, a nix shell that
-                    // failed, an MCP server that won't connect. Toasted, with the thread it
-                    // came from.
                     Event::Warning { message } => {
                         self.titling.remove(&(host.clone(), thread_id.clone()));
-                        // A thread's first load comes before its name.
                         let thread = self.summary(&host, &thread_id).and_then(|t| t.name.as_deref()).unwrap_or("new thread");
                         self.toast(format!("{host}: {thread}: {message}"), cx);
                     }
-                    // The name generated from its first prompt is there (a retitle ends with its reply).
                     Event::Titled if !self.retitling(&host, &thread_id) => {
                         self.titling.remove(&(host.clone(), thread_id.clone()));
                     }
-                    // A step of the thread's computer use.
                     Event::Screen { .. } => return self.on_screen_event(&host, &thread_id, &event),
                     _ => {}
                 }
@@ -1787,9 +1367,6 @@ impl Dirigent {
                     t.list.remeasure_items(tail..tail + 1);
                     if t.log.is_some() {
                         t.log_list.remeasure();
-                        // A run nobody sent a message for from here (a job or sub-agent ending
-                        // woke the agent, a follow-up's turn came): the log moves on to it, as
-                        // it does for a sent message (`echo`).
                         if t.timeline.begins_work(&event) {
                             self.show_latest_log();
                         }
@@ -1798,8 +1375,6 @@ impl Dirigent {
             }
         }
     }
-
-    // ---- navigation ----
 
     pub fn show(&mut self, pane: Pane, cx: &mut Context<Self>) {
         self.set_pane(pane, cx);
@@ -1810,19 +1385,11 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Every pane change goes through here: the composer belongs to the thread (or draft)
-    /// in view, so leaving one saves its text, selection and images and entering another
-    /// restores its own (`composer_key`). Other panes don't show the composer and leave it
-    /// alone. Leaving a thread keeps how its log was left (`stash_log`).
     fn set_pane(&mut self, pane: Pane, cx: &mut Context<Self>) {
-        // Both belong to the Projects page: leaving it drops them. (A sidebar card's rename
-        // stays: the sidebar does.)
         self.renaming.take_if(|r| matches!(r, Renaming::Project(_)));
         self.add_project = None;
         let (from, to) = (composer_key(&self.pane), composer_key(&pane));
         let (leaving, entering) = (from != to && from.is_some(), from != to && to.is_some());
-        // An edit ends with its pane. Leaving, its stash is the draft saved (`save_draft`);
-        // staying (the open thread opened again), the composer gets the stash back.
         if leaving {
             self.save_draft(cx);
         } else {
@@ -1831,16 +1398,12 @@ impl Dirigent {
         self.stash_log();
         self.drop_screen(cx);
         self.pane = pane;
-        // The composer's host may be another now, and the model take other efforts there.
         self.hold_effort();
         if entering {
             self.load_composer(cx);
         }
     }
 
-    /// Persist the pane so the next launch resumes there and Esc on the Projects page goes
-    /// back to it (`go_back`). That page and the draft page leave the last stored pane
-    /// alone (the draft's text is kept by `save_draft`, the page itself isn't).
     fn remember_pane(&self) {
         let value = match &self.pane {
             Pane::Inbox => "inbox".to_owned(),
@@ -1852,14 +1415,11 @@ impl Dirigent {
         let _ = self.cache.lock().unwrap().set(PANE_KEY, &value);
     }
 
-    /// Reopen the pane stored by `remember_pane`.
     fn restore_pane(&mut self, cx: &mut Context<Self>) {
         let Some(value) = self.cache.lock().unwrap().get(PANE_KEY) else { return };
         self.open_pane(&value, cx);
     }
 
-    /// Esc on the Projects page: back to the pane stored by `remember_pane`. The inbox goes first: it is the fallback when that pane is gone,
-    /// and `show` does the housekeeping (menu, selection, focus) that `open_pane` doesn't.
     fn go_back(&mut self, cx: &mut Context<Self>) {
         let back = self.cache.lock().unwrap().get(PANE_KEY);
         self.show(Pane::Inbox, cx);
@@ -1869,8 +1429,6 @@ impl Dirigent {
         }
     }
 
-    /// Open a pane stored by `remember_pane`; a thread only if the cache still knows it.
-    /// Anything else leaves the pane as it is.
     fn open_pane(&mut self, value: &str, cx: &mut Context<Self>) {
         let parts: Vec<&str> = value.split('\n').collect();
         match parts.as_slice() {
@@ -1884,11 +1442,6 @@ impl Dirigent {
         }
     }
 
-    /// A click on a `dirigent://` link (see `select.rs`). `dirigent://thread/<id>` opens the
-    /// thread wherever it lives: thread ids are unique across hosts, and sub-agents (not in
-    /// the sidebar) open like any other thread. `dirigent://image/<blob id>` (a user bubble's
-    /// `[image-N]`, see `thread::image_links`) shows that image full-size. Anything else, or
-    /// an id no connected host knows, gets a toast.
     fn open_app_link(&mut self, link: &OpenAppLink, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(id) = link.url.strip_prefix("dirigent://image/") {
             return match self.blobs.get(id) {
@@ -1908,12 +1461,9 @@ impl Dirigent {
         }
     }
 
-    /// Show cached entries immediately, then ask the host for the full thread.
     pub fn select_thread(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
-        // Before `logs` is read below: the thread may be the one open (its own card clicked).
         self.stash_log();
         let entries = self.cache.lock().unwrap().entries(host, id).unwrap_or_default();
-        // The thread's own model if it has one, else whatever we used last.
         if let Some((m, e)) = self.summary(host, id).filter(|s| s.model.is_some()).map(|s| (s.model.clone(), s.effort.clone())) {
             self.model = m;
             self.effort = e;
@@ -1932,8 +1482,6 @@ impl Dirigent {
         self.mark_seen(host, id);
         self.sync_asks(cx);
         self.fetch_blobs();
-        // A thread its host is still creating has nothing to fetch yet: its entries arrive as
-        // they are made, and `ThreadCreated` fetches it once it exists.
         if !self.is_pending(host, id) {
             self.fetch_open();
         }
@@ -1942,11 +1490,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Ask the open thread's host for all of its entries (a `Thread` reply). Whatever the
-    /// thread holds now is in that reply, as a host stores an entry before pushing it, unless
-    /// the host lost it: a cache ahead of its host (whose db was restored from a backup).
-    /// What it held past the reply's end goes then, unlike entries pushed since. Not while
-    /// the host is offline, where the request would be dropped: connecting fetches it.
     fn fetch_open(&mut self) {
         let Some(host) = self.open().map(|t| t.host.clone()) else { return };
         if self.host(&host).is_none_or(|h| h.status != HostStatus::Connected) {
@@ -1958,9 +1501,6 @@ impl Dirigent {
         self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: t.id.clone() });
     }
 
-    // ---- version control ----
-
-    /// Ask `host` about a directory; the reply lands in `vcs`.
     pub fn request_vcs(&mut self, host: &str, path: &str) {
         if self.host(host).is_none_or(|h| h.status != HostStatus::Connected) {
             return;
@@ -1969,11 +1509,8 @@ impl Dirigent {
         self.net.send(host, ClientMessage::VcsStatus { id, path: path.to_owned() });
     }
 
-    /// The repo state behind a thread: its project directory (is it a repo, is it clean,
-    /// so the workspace chip knows what it can offer) and its workspace (dirty before removal).
     fn request_thread_vcs(&mut self, host: &str, id: &str) {
         let Some(s) = self.summary(host, id) else { return };
-        // A missing workspace has nothing to report until it is recreated.
         let workspace = s.workspace.clone().filter(|_| !s.workspace_missing);
         let paths: Vec<String> = self.project_path(host, s).into_iter().chain(workspace).collect();
         for p in paths {
@@ -1981,10 +1518,6 @@ impl Dirigent {
         }
     }
 
-    /// What the sidebar cards show for threads in their project directory (workspace
-    /// threads have a known name, see `sidebar::vcs_label`): the directory's branch, asked
-    /// once per directory when first listed and again when a run there ends (`ran`: the
-    /// threads running before this push), since the agent may have committed or switched.
     fn request_sidebar_vcs(&mut self, host: &str, ran: &HashSet<String>) {
         let mut paths: Vec<String> = vec![];
         for (h, t) in self.inbox_threads().into_iter().chain(self.busy_threads()) {
@@ -2005,15 +1538,12 @@ impl Dirigent {
         self.vcs.get(&(host.to_owned(), path.to_owned()))
     }
 
-    /// The draft's project directory and what the host knows about it.
     pub fn draft_vcs(&self) -> Option<(&Target, &str, Option<&VcsInfo>)> {
         let Pane::Draft { target: Some(t) } = &self.pane else { return None };
         let path = self.host(&t.host)?.projects.iter().find(|p| p.id == t.project_id)?.path.as_str();
         Some((t, path, self.vcs_of(&t.host, path)))
     }
 
-    /// Threads working in `path` itself (not in a workspace of it) on `host`: a draft started
-    /// there now would share the checkout with them.
     pub fn working_in(&self, host: &str, path: &str) -> Vec<&ThreadSummary> {
         self.host(host)
             .map(|h| h.threads.iter().filter(|t| t.running() && t.workspace.is_none() && t.cwd == path).collect())
@@ -2027,7 +1557,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Open the base picker with an empty, focused search; or close it if it's open.
     pub fn toggle_base_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu == Some(Menu::Base) {
             self.close_menu(cx);
@@ -2037,7 +1566,6 @@ impl Dirigent {
         }
     }
 
-    /// The refs behind the open base picker: the draft's project, or the open thread's.
     pub fn base_refs(&self) -> Vec<String> {
         let info = match &self.pane {
             Pane::Draft { .. } => self.draft_vcs().and_then(|(_, _, v)| v),
@@ -2050,14 +1578,11 @@ impl Dirigent {
         info.map(|v| v.refs.clone()).unwrap_or_default()
     }
 
-    /// Refs containing the typed text, in host order.
     pub fn filtered_refs(&self, cx: &App) -> Vec<String> {
         let query = self.base_search.read(cx).text().to_lowercase();
         self.base_refs().into_iter().filter(|r| r.to_lowercase().contains(&query)).collect()
     }
 
-    /// A base was picked in the `New workspace from` popup (`None` = the vcs default): a
-    /// draft will start its thread in a workspace there; an open thread moves there now.
     pub fn pick_base(&mut self, base: Option<String>, cx: &mut Context<Self>) {
         match &self.pane {
             Pane::Thread(t) => {
@@ -2074,7 +1599,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Move the thread into its own workspace at `base`, or recreate one that went missing.
     pub fn move_to_workspace(&mut self, host: &str, thread_id: &str, base: Option<String>, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::MoveToWorkspace { id, thread_id: thread_id.to_owned(), base });
@@ -2082,7 +1606,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Back to the project directory; `detach` keeps the workspace on disk.
     pub fn remove_workspace(&mut self, host: &str, thread_id: &str, detach: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::RemoveWorkspace { id, thread_id: thread_id.to_owned(), detach });
@@ -2090,19 +1613,14 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Archive a thread with a workspace, after `ConfirmArchive` decided its fate.
     pub fn archive_with_workspace(&mut self, host: &str, thread_id: &str, detach: bool, cx: &mut Context<Self>) {
         self.remove_workspace(host, thread_id, detach, cx);
-        // Optimistic, like the archive flag: without it `set_archived` would ask again.
         if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
             t.workspace = None;
         }
         self.set_archived(host, thread_id, true, ArchiveAt::Header, cx);
     }
 
-    /// Re-render once a second, for as long as the app lives, so every clock on screen
-    /// (run and tool timers, `rel_time` ages) advances in whole-second steps. Also keeps
-    /// the Usage modal's numbers fresh while it is open, and the background pattern moving.
     fn tick(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
@@ -2113,7 +1631,6 @@ impl Dirigent {
                         match this.usage.tab {
                             usage::Tab::Mine if this.usage.at_now() => this.request_usage(cx),
                             usage::Tab::Board => this.fetch_board(cx),
-                            // The accounts are as of now, whatever the window.
                             usage::Tab::Proxy => this.request_proxy(cx),
                             _ => {}
                         }
@@ -2128,18 +1645,13 @@ impl Dirigent {
                         this.reload_config(cx);
                     }
                     this.titling.retain(|_, since| since.elapsed() < TITLING_TTL);
-                    // A retitle its host never answered (it went away) is given up with it.
                     let titling = &this.titling;
                     this.retitles.retain(|_, thread| titling.contains_key(thread));
                     this.tick_update(cx);
                     this.redraw_field(this.ticks.is_multiple_of(ambient::CLOCK_SECS), cx);
-                    // The repo changes under us (commits, rebases in a terminal): keep what the
-                    // draft page and the workspace menus show fresh while they are on screen.
                     if this.ticks.is_multiple_of(VCS_REFRESH_SECS) {
                         match &this.pane {
                             Pane::Draft { .. } => this.refresh_draft_vcs(),
-                            // A thread's chips show whether the checkout is clean (dirty greys
-                            // `in project` out), so they are kept fresh too.
                             Pane::Thread(t) => {
                                 let (host, id) = (t.host.clone(), t.id.clone());
                                 this.request_thread_vcs(&host, &id);
@@ -2161,12 +1673,10 @@ impl Dirigent {
         self.focus(self.composer.focus_handle(cx), cx);
     }
 
-    /// Focus the app itself, no input: its keys (Esc) work then.
     pub fn focus_root(&self, cx: &mut Context<Self>) {
         self.focus(self.focus_handle.clone(), cx);
     }
 
-    /// Focus `handle`; deferred because callers may not have the window at hand.
     pub fn focus(&self, handle: FocusHandle, cx: &mut Context<Self>) {
         let window = self.window;
         cx.defer(move |cx| {
@@ -2174,9 +1684,6 @@ impl Dirigent {
         });
     }
 
-    // ---- threads ----
-
-    /// Open the new-thread page. `target` defaults to the project in view, then the last one used.
     pub fn new_draft(&mut self, target: Option<Target>, cx: &mut Context<Self>) {
         let target = target.or_else(|| self.context_target()).or_else(|| self.last_target()).filter(|t| self.target_valid(t));
         self.set_pane(Pane::Draft { target }, cx);
@@ -2190,12 +1697,11 @@ impl Dirigent {
 
     pub fn new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
         if self.add_project.is_some() || self.modal.is_some() || self.onboarding_open() {
-            return; // modal: nothing happens under it
+            return;
         }
         self.new_draft(None, cx);
     }
 
-    /// The project implied by the current pane: the open thread's, or the project page's.
     fn context_target(&self) -> Option<Target> {
         match &self.pane {
             Pane::Thread(t) => {
@@ -2222,7 +1728,6 @@ impl Dirigent {
         self.host(&t.host).is_some_and(|h| h.projects.iter().any(|p| p.id == t.project_id))
     }
 
-    /// Open the `Create thread in` popup with an empty, focused search; or close it.
     pub fn toggle_target_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu == Some(Menu::Target) {
             self.close_menu(cx);
@@ -2231,7 +1736,6 @@ impl Dirigent {
         }
     }
 
-    /// Empty and focus the search (none shows without a project: the composer keeps focus).
     fn clear_target_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.groups().0.is_empty() {
             return;
@@ -2240,7 +1744,6 @@ impl Dirigent {
         self.focus(self.target_search.focus_handle(cx), cx);
     }
 
-    /// The project groups matching the target search, best first (`projects::search`).
     pub fn filtered_targets(&self, cx: &App) -> Vec<projects::Group> {
         projects::search(self.groups().0, self.target_search.read(cx).text())
     }
@@ -2256,7 +1759,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Ask the draft's host about its project directory (dirty? a repo at all?).
     fn refresh_draft_vcs(&mut self) {
         if let Some((t, path, _)) = self.draft_vcs() {
             let (host, path) = (t.host.clone(), path.to_owned());
@@ -2264,9 +1766,6 @@ impl Dirigent {
         }
     }
 
-    /// Archive / restore a thread. Archiving one that owns a workspace instead asks what to
-    /// do with it (`thread::archive_confirm`, under the button `at`); `archive_with_workspace`
-    /// comes back here once decided. Only a thread at rest is archived (`at_rest`).
     pub fn set_archived(&mut self, host: &str, thread_id: &str, archived: bool, at: ArchiveAt, cx: &mut Context<Self>) {
         if archived && !self.summary(host, thread_id).is_some_and(|t| self.at_rest(host, t)) {
             return;
@@ -2280,7 +1779,6 @@ impl Dirigent {
         }
         let id = self.next_id();
         self.net.send(host, ClientMessage::ArchiveThread { id, thread_id: thread_id.to_owned(), archived });
-        // Optimistic: the host's `Threads` push confirms it.
         if let Some(t) = self.host_mut(host).and_then(|h| h.threads.iter_mut().find(|t| t.id == thread_id)) {
             t.archived = archived;
         }
@@ -2302,9 +1800,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    // ---- projects ----
-
-    /// Take later launches of the app (`instance.rs`), and open `open`, this launch's folder.
     pub fn serve_launches(
         &mut self,
         open: Option<String>,
@@ -2326,7 +1821,6 @@ impl Dirigent {
         .detach();
     }
 
-    /// Another launch: to the front, opening its folder if it has one.
     fn on_launch(&mut self, launch: instance::Launch, cx: &mut Context<Self>) {
         self.window.update(cx, |_, window, _| window.activate_window()).ok();
         if let Some(path) = launch.open {
@@ -2336,16 +1830,12 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Open the folder from "Open in Dirigent" on a new-thread draft once the local host
-    /// lists it as a project, asking it to add the folder first if it isn't one. Called again
-    /// on everything the hosts send, so it goes on as soon as the host is up or has replied.
     fn resume_open_folder(&mut self, cx: &mut Context<Self>) {
         let Some(f) = &self.open_folder else { return };
         let Some(local) = self.host(hosts::LOCAL) else { return };
         if let Some(project) = local.projects.iter().find(|p| projects::same_local_path(&p.path, &f.path)) {
             let target = Target { host: hosts::LOCAL.to_owned(), project_id: project.id.clone() };
             self.open_folder = None;
-            // Over whatever is open: the user asked for this folder.
             self.modal = None;
             self.add_project = None;
             self.new_draft(Some(target), cx);
@@ -2359,8 +1849,6 @@ impl Dirigent {
         }
     }
 
-    /// The sidebar's folder: the Projects page. With no project yet, the Add project modal
-    /// opens over it.
     pub fn show_projects(&mut self, cx: &mut Context<Self>) {
         self.show(Pane::Projects, cx);
         if self.groups().0.is_empty() {
@@ -2368,7 +1856,6 @@ impl Dirigent {
         }
     }
 
-    /// The host the Add project modal adds on: the one picked, else the first connected one.
     pub fn new_project_host(&self) -> Option<String> {
         let picked = self.new_project_host.as_ref().filter(|h| self.hosts.iter().any(|s| s.name == **h));
         picked
@@ -2376,7 +1863,6 @@ impl Dirigent {
             .or_else(|| self.hosts.iter().find(|h| h.status == HostStatus::Connected).or(self.hosts.first()).map(|h| h.name.clone()))
     }
 
-    /// Pick the Add project modal's host: its path starts over at `~/`.
     pub fn pick_new_project_host(&mut self, host: String, cx: &mut Context<Self>) {
         self.new_project_host = Some(host);
         self.menu = None;
@@ -2385,11 +1871,9 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Open the Add project modal on its browse page, at `~/`.
     pub fn open_add_project(&mut self, cx: &mut Context<Self>) {
         self.renaming = None;
         self.add_project = Some(add_project::State::default());
-        // Fixed while the modal is open, even if the default host would change.
         self.new_project_host = self.new_project_host();
         self.menu = None;
         self.set_project_path("~/".to_owned(), cx);
@@ -2397,8 +1881,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Put `text` in the modal's path field (deferred: callers may lack the window), then
-    /// list its directory.
     pub fn set_project_path(&mut self, text: String, cx: &mut Context<Self>) {
         let (window, input, this) = (self.window, self.path_input.clone(), cx.entity().downgrade());
         cx.defer(move |cx| {
@@ -2407,8 +1889,6 @@ impl Dirigent {
         });
     }
 
-    /// The path field changed: the selection goes back to the top, the last error away,
-    /// and a new directory part gets listed.
     fn project_path_changed(&mut self, cx: &mut Context<Self>) {
         if let Some(s) = &mut self.add_project {
             s.selected = 0;
@@ -2419,8 +1899,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Ask the host for the subdirectories of the path field's directory part, unless that
-    /// listing is already there or on its way (`force`: ask anyway, e.g. after a reconnect).
     fn request_dirs(&mut self, force: bool, cx: &mut Context<Self>) {
         let text = self.path_input.read(cx).text().to_owned();
         let (dir, _) = add_project::split(&text);
@@ -2438,7 +1916,6 @@ impl Dirigent {
         }
     }
 
-    /// Up / Down in the path field.
     fn move_dir_selection(&mut self, by: i32, cx: &mut Context<Self>) {
         let text = self.path_input.read(cx).text().to_owned();
         let Some(s) = &mut self.add_project else { return };
@@ -2450,7 +1927,6 @@ impl Dirigent {
         }
     }
 
-    /// Enter in the path field: into the selected directory.
     fn enter_dir(&mut self, cx: &mut Context<Self>) {
         let text = self.path_input.read(cx).text().to_owned();
         let Some(s) = &self.add_project else { return };
@@ -2460,7 +1936,6 @@ impl Dirigent {
         }
     }
 
-    /// ctrl+Enter or `Add`: add the path as typed. The reply lands in `on_server_message`.
     pub fn confirm_add_project(&mut self, cx: &mut Context<Self>) {
         let path = self.path_input.read(cx).text().trim().to_owned();
         let Some(host) = self.new_project_host().filter(|_| !path.is_empty()) else { return };
@@ -2477,8 +1952,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Leave the link page: link the new project into `target` (or don't), back to the
-    /// Projects page.
     pub fn finish_add_project(&mut self, target: Option<String>, cx: &mut Context<Self>) {
         if self.add_project.as_ref().is_none_or(|s| s.link.is_none()) {
             return;
@@ -2491,8 +1964,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Esc or a press outside the card: the browse page just closes, the link page means
-    /// "don't link".
     pub(crate) fn close_add_project(&mut self, cx: &mut Context<Self>) {
         if self.add_project.as_ref().is_some_and(|s| s.link.is_some()) {
             return self.finish_add_project(None, cx);
@@ -2502,8 +1973,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A press on a modal's dim: closes it, unless the press only closed a menu (a
-    /// dropdown in the modal).
     pub fn dim_pressed(&mut self, cx: &mut Context<Self>) {
         if self.menu_dismissed {
             return;
@@ -2515,9 +1984,6 @@ impl Dirigent {
         }
     }
 
-    // ---- settings and usage modals ----
-
-    /// The gear: the Settings modal, on the tab it was left on.
     pub fn open_settings(&mut self, cx: &mut Context<Self>) {
         self.modal = Some(Modal::Settings);
         self.menu = None;
@@ -2525,10 +1991,6 @@ impl Dirigent {
         self.set_settings_tab(self.settings.tab, cx);
     }
 
-    /// Show a settings tab. Hosts also picks up hand edits to `hosts.toml` and focuses its
-    /// form, if open; Proxy and MCP servers ask their host and focus a field of theirs; the
-    /// others take focus off the inputs, so keys don't type under the modal (Forge providers
-    /// also loads the account's picture).
     pub fn set_settings_tab(&mut self, tab: settings::Tab, cx: &mut Context<Self>) {
         self.settings.tab = tab;
         if tab == settings::Tab::Hosts {
@@ -2550,7 +2012,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The chart button: the Usage modal, fresh numbers asked for.
     pub fn open_usage(&mut self, cx: &mut Context<Self>) {
         self.modal = Some(Modal::Usage);
         self.menu = None;
@@ -2561,8 +2022,6 @@ impl Dirigent {
         }
     }
 
-    /// The version beside the sidebar's title, and the first start after an update
-    /// (`changelog::after_update`): the changelog.
     pub fn open_changelog(&mut self, cx: &mut Context<Self>) {
         self.modal = Some(Modal::Changelog);
         self.menu = None;
@@ -2570,18 +2029,13 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Esc or a press on the dim: back to the pane, with the composer focused if it has one.
-    /// An MCP server's sign-in is cancelled: nobody would see its questions.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal = None;
         self.menu = None;
         self.cancel_login(cx);
-        // A form left open is cancelled: reopened, the tab shows what is there.
         self.hosts_tab.form = None;
         self.drop_mcp_form();
-        // The chart's hover-out never fires once it's gone; a reopen would show a stale readout.
         self.usage.hover = None;
-        // The changelog's (any other went with the press that opened the modal).
         self.selection.clear();
         if composer_key(&self.pane).is_some() {
             self.focus_composer(cx);
@@ -2591,9 +2045,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    // ---- config ----
-
-    /// Put the config into the Settings modal's fields (deferred: the fields need the window).
     fn fill_settings(&self, cx: &mut Context<Self>) {
         let (window, settings, config) = (self.window, self.settings.clone(), self.config.clone());
         cx.defer(move |cx| {
@@ -2601,9 +2052,6 @@ impl Dirigent {
         });
     }
 
-    /// Make `config` the one in force: theme, fonts and text size. Families that don't
-    /// resolve are remembered for the page's warning marks and returned for whoever wants
-    /// to toast.
     fn apply_config(&mut self, config: config::Config, cx: &mut Context<Self>) -> Vec<String> {
         let families_changed = config.fonts.families() != self.config.fonts.families();
         self.config = config;
@@ -2616,7 +2064,6 @@ impl Dirigent {
             (self.fonts, missing) = self.config.fonts.resolve(cx);
             self.settings.missing_fonts = missing.clone();
         }
-        // The transcript and log lists keep their items' measured heights.
         if theme::set_text_size(self.config.fonts.size())
             && let Pane::Thread(t) = &self.pane
         {
@@ -2627,8 +2074,6 @@ impl Dirigent {
         missing
     }
 
-    /// A hand edit to `config.toml` or a theme file (`watch`, from `tick`): the file wins,
-    /// so the page's fields are refilled too.
     fn reload_config(&mut self, cx: &mut Context<Self>) {
         match config::load() {
             Ok(c) => {
@@ -2643,8 +2088,6 @@ impl Dirigent {
         }
     }
 
-    /// Change the config through `f`, write it, apply it. The write is swallowed by the
-    /// watcher so it doesn't come back as a hand edit.
     fn edit_config(&mut self, f: impl FnOnce(&mut config::Config), cx: &mut Context<Self>) {
         let mut c = self.config.clone();
         f(&mut c);
@@ -2656,8 +2099,6 @@ impl Dirigent {
         self.apply_config(c, cx);
     }
 
-    /// Make `t` the palette and give the window the background it needs (see-through for a
-    /// translucent canvas). The window call is deferred: listeners don't hold the window.
     fn set_theme_now(&self, t: theme::Theme, cx: &mut Context<Self>) {
         theme::set(t);
         let (window, background) = (self.window, theme::background(&t));
@@ -2678,14 +2119,12 @@ impl Dirigent {
         self.edit_config(|c| c.title.reasoning = level, cx);
     }
 
-    /// Settings' size stepper and ctrl -/=: the next whole px up (`delta` > 0) or down.
     pub fn step_text_size(&mut self, delta: f32, cx: &mut Context<Self>) {
         let size = self.config.fonts.size();
         let next = if delta > 0. { size.floor() + 1. } else { size.ceil() - 1. };
         self.set_text_size(next.clamp(config::MIN_SIZE, config::MAX_SIZE), cx);
     }
 
-    /// Save `size` as the text size; nothing to save (no write, no menu closed) if it is already.
     fn set_text_size(&mut self, size: f32, cx: &mut Context<Self>) {
         if size != self.config.fonts.size() {
             self.edit_config(|c| c.fonts.size = size, cx);
@@ -2712,22 +2151,17 @@ impl Dirigent {
         self.edit_config(|c| c.background.pattern = pattern, cx);
     }
 
-    /// Settings' switch: the pattern behind the sidebar only, or through the main pane too.
     pub fn toggle_background_reach(&mut self, cx: &mut Context<Self>) {
         let reach = if self.config.background.reach == Reach::Full { Reach::Edge } else { Reach::Full };
         self.edit_config(|c| c.background.reach = reach, cx);
     }
 
-    /// What the background picture should be drawn for now (`None`: the pattern is off): the
-    /// window's height, by its width with `Reach::Full`, else by the strip the sidebar
-    /// covers (docked, or floating a gutter in), in the theme's `pattern` ink.
     fn field_spec(&self, window: &Window) -> Option<ambient::Spec> {
         let bg = self.config.background;
         if bg.pattern == Pattern::Off {
             return None;
         }
         let view = window.viewport_size();
-        // The setup has it across the whole window.
         let width = if self.onboarding.is_some() || bg.reach == Reach::Full {
             view.width
         } else {
@@ -2736,8 +2170,6 @@ impl Dirigent {
         Some(ambient::Spec::new(bg.pattern, f32::from(width), f32::from(view.height), window.scale_factor(), theme::t().pattern))
     }
 
-    /// Redraw the background picture if it is due (`tick`: the clock moved), off the main
-    /// thread; the picture it replaces leaves the atlas a round later (`Field::show`).
     fn redraw_field(&mut self, tick: bool, cx: &mut Context<Self>) {
         let Some(spec) = self.field.due(tick) else { return };
         let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_secs_f64() * 1000.).unwrap_or(0.);
@@ -2755,7 +2187,6 @@ impl Dirigent {
         .detach();
     }
 
-    /// A switch in Settings › Agent tools.
     pub fn toggle_tool(&mut self, name: &str, cx: &mut Context<Self>) {
         self.edit_config(
             |c| match name {
@@ -2771,11 +2202,6 @@ impl Dirigent {
         );
     }
 
-    // ---- right panel ----
-
-    /// Whether the right panel (the screen, the lineage, the work log) is showing: the
-    /// user's choice, else whenever there is something to show (a screen, a log, or a
-    /// family while the lineage isn't hidden).
     pub fn panel_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
         t.panel.unwrap_or_else(|| {
@@ -2783,14 +2209,10 @@ impl Dirigent {
         })
     }
 
-    /// Whether the right panel shows `part` while open.
     pub fn panel_shows(&self, part: PanelPart) -> bool {
         self.panel_hidden != Some(part)
     }
 
-    /// The panel header's toggles: hide `part`, or show it again. The only section showing
-    /// stays, so the panel is never empty. Pins the panel open on this thread: it may have
-    /// been open only for the log that is now hidden.
     pub fn toggle_panel_part(&mut self, part: PanelPart, cx: &mut Context<Self>) {
         let hidden = match self.panel_hidden {
             Some(p) if p == part => None,
@@ -2805,9 +2227,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A hidden log lets go of its work (`t.log`), so no work line stays tinted and nothing
-    /// points it at one (`show_latest_log`); shown again, `settle_panel` points it at the
-    /// latest work.
     fn set_panel_hidden(&mut self, hidden: Option<PanelPart>) {
         self.panel_hidden = hidden;
         let key = match hidden {
@@ -2824,8 +2243,6 @@ impl Dirigent {
         }
     }
 
-    /// The header's panel button and `]`: close the panel, or open it on the log of the
-    /// run in progress (else the last work).
     pub fn toggle_panel(&mut self, cx: &mut Context<Self>) {
         if self.panel_open() {
             self.close_panel();
@@ -2838,8 +2255,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Close the right panel and drop its log, so no work line stays tinted and the next
-    /// open starts from the latest work (where the user left it, see `stash_log`).
     fn close_panel(&mut self) {
         self.stash_log();
         if let Pane::Thread(t) = &mut self.pane {
@@ -2849,17 +2264,13 @@ impl Dirigent {
         }
     }
 
-    /// An open panel always shows a log: when it opened by itself (a family appeared) or
-    /// had no work to show yet (a run just started), point it at the latest work. Called
-    /// every frame, so every path into "open without a log" is covered.
+    // MUST KILL: rearchitect: point the log at the latest work where the panel opens, not by a per-frame fix-up
     fn settle_panel(&mut self) {
         if self.panel_open() && self.open().is_some_and(|t| t.log.is_none()) {
             self.show_latest_log();
         }
     }
 
-    /// The open thread's latest work: the run in progress (the tail while it has no
-    /// item yet), else the last work.
     fn latest_work(&self) -> Option<usize> {
         let t = self.open()?;
         match t.timeline.open_work() {
@@ -2869,7 +2280,6 @@ impl Dirigent {
         }
     }
 
-    /// Point the log at the latest work, when there is one and the log isn't hidden.
     fn show_latest_log(&mut self) {
         if !self.panel_shows(PanelPart::Log) {
             return;
@@ -2879,10 +2289,6 @@ impl Dirigent {
         }
     }
 
-    // ---- asks ----
-
-    /// Make the open thread's forms match its summary's asks: a form (with a text field
-    /// per question that takes one) for each new ask, forms of answered asks dropped.
     fn sync_asks(&mut self, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &self.pane else { return };
         let asks = self.summary(&t.host, &t.id).map(|s| s.asks.clone()).unwrap_or_default();
@@ -2902,13 +2308,11 @@ impl Dirigent {
                         let input =
                             cx.new(|cx| TextInput::new(cx, if q.options.is_empty() { "Your answer" } else { "Something else" }, true));
                         let (ask_id, qi) = (ask.id.clone(), qi);
-                        // Enter: on to the next question, or send once every one is answered.
                         cx.subscribe(&input, {
                             let ask_id = ask_id.clone();
                             move |this, _, _: &Submitted, cx| this.next_ask_tab(&ask_id, cx)
                         })
                         .detach();
-                        // Typing is the answer to a single-choice question: the picked option goes.
                         if !q.multi {
                             cx.subscribe(&input, move |this, input, _: &input::Changed, cx| {
                                 if !input.read(cx).text().trim().is_empty() {
@@ -2927,7 +2331,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Change the open thread's unsent form for `ask_id` and re-render.
     fn with_ask(&mut self, ask_id: &str, cx: &mut Context<Self>, f: impl FnOnce(&mut AskForm)) {
         if let Pane::Thread(t) = &mut self.pane
             && let Some(form) = t.asks.iter_mut().find(|f| f.ask.id == ask_id && !f.sent)
@@ -2937,8 +2340,6 @@ impl Dirigent {
         }
     }
 
-    /// An option row: pick it (alone, or with the others for a multiple-choice question).
-    /// On a single-choice question it also clears the typed text, which would be a second answer.
     pub fn pick_option(&mut self, ask_id: &str, question: usize, option: usize, cx: &mut Context<Self>) {
         let mut clear = None;
         self.with_ask(ask_id, cx, |form| {
@@ -2962,7 +2363,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A tab: show that question. Its text field, if any, takes focus.
     pub fn show_ask_tab(&mut self, ask_id: &str, question: usize, cx: &mut Context<Self>) {
         let mut input = None;
         self.with_ask(ask_id, cx, |form| {
@@ -2975,8 +2375,6 @@ impl Dirigent {
         }
     }
 
-    /// `Next` (and Enter in a text field): the next unanswered question, or send once
-    /// every one is answered.
     pub fn next_ask_tab(&mut self, ask_id: &str, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &self.pane else { return };
         let Some(form) = t.asks.iter().find(|f| f.ask.id == ask_id && !f.sent) else { return };
@@ -2988,7 +2386,6 @@ impl Dirigent {
         }
     }
 
-    /// Send the form's answers (`None`: dismiss it); the host hands them to the model.
     pub fn answer_ask(&mut self, ask_id: &str, cx: &mut Context<Self>) {
         self.send_ask(ask_id, true, cx);
     }
@@ -2997,9 +2394,6 @@ impl Dirigent {
         self.send_ask(ask_id, false, cx);
     }
 
-    /// `Insert into composer`: the questions, with the answers so far, go into the composer as a draft
-    /// reply (`view::draft_reply`, after what it holds), and the ask goes without a word
-    /// to the model: the message the user sends is the reply.
     pub fn insert_ask(&mut self, ask_id: &str, window: &Window, cx: &mut Context<Self>) {
         let id = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
@@ -3019,9 +2413,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The ask stack painted at `h` (0 without asks): give the transcript's tail as much
-    /// room. A list following the tail stays at the bottom, so the last text moves above
-    /// the stack.
     pub fn set_ask_height(&mut self, h: Pixels, window: &mut Window, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &mut self.pane else { return };
         if (t.ask_h - h).abs() < px(0.5) {
@@ -3030,11 +2421,9 @@ impl Dirigent {
         t.ask_h = h;
         let tail = t.timeline.items.len();
         t.list.remeasure_items(tail..tail + 1);
-        // Measured while painting: re-render once this frame is done.
         cx.defer_in(window, |_, _, cx| cx.notify());
     }
 
-    /// Also echoes the answers as a pending steer in the tail (see `Streaming::answers`).
     fn send_ask(&mut self, ask_id: &str, answer: bool, cx: &mut Context<Self>) {
         let id = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
@@ -3050,7 +2439,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A keystroke in a text setting: apply all of them 300ms after the last one.
     fn schedule_apply(&mut self, cx: &mut Context<Self>) {
         self.config_edit += 1;
         let edit = self.config_edit;
@@ -3066,8 +2454,6 @@ impl Dirigent {
         .detach();
     }
 
-    /// Write every text setting as it stands. An emptied field keeps its old value (the
-    /// user is mid-edit; the field is not refilled under them).
     fn apply_config_fields(&mut self, cx: &mut Context<Self>) {
         let read = |i: &Entity<TextInput>| i.read(cx).text().trim().to_owned();
         let s = &self.settings;
@@ -3094,7 +2480,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Name the sample message with the current title settings, on the local host.
     pub fn run_title_test(&mut self, cx: &mut Context<Self>) {
         if self.settings.test_request.is_some() {
             return;
@@ -3110,14 +2495,10 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The thread's title is still being generated (its first prompt or a `Regenerate title`
-    /// was sent recently and no name has come back yet).
     pub fn titling(&self, host: &str, id: &str) -> bool {
         self.titling.contains_key(&(host.to_owned(), id.to_owned()))
     }
 
-    /// Make the connections match `hosts.toml`: drop hosts that are gone or whose url or
-    /// key changed (with everything cached for them, and their ssh tunnels), connect the new ones.
     pub(crate) fn sync_hosts(&mut self, cx: &mut Context<Self>) {
         let wanted = match hosts::load() {
             Ok(h) => h,
@@ -3134,9 +2515,7 @@ impl Dirigent {
             self.net.remove(&name);
             self.hosts.retain(|h| h.name != name);
             self.links.retain(|(h, _), _| *h != name);
-            // Its connection ends without a `Disconnected`: what it was fetching never comes.
             self.blob_requests.remove(&name);
-            // Leave the thread first: its draft would otherwise be saved back after the wipe.
             if self.open().is_some_and(|t| t.host == name) {
                 self.set_pane(Pane::Inbox, cx);
             }
@@ -3151,14 +2530,9 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Host `old` is called `new` in `hosts.toml` now (Settings › Hosts): what's cached for it
-    /// (threads, drafts, pins, links) moves to the new name before `sync_hosts` swaps the
-    /// connection, and a thread open on it opens again under the new name. Projects without
-    /// a git origin are grouped by `old/<id>`: their custom names and places don't follow.
     pub(crate) fn rename_host(&mut self, old: &str, new: &str, cx: &mut Context<Self>) {
         let open = self.open().filter(|t| t.host == old).map(|t| t.id.clone());
         if open.is_some() {
-            // Saves its draft, under the old name, so it moves with the rest.
             self.set_pane(Pane::Inbox, cx);
         }
         let moved = self.cache.lock().unwrap().rename_host(old, new);
@@ -3175,8 +2549,6 @@ impl Dirigent {
         }
     }
 
-    /// Remove a project from its host (its threads are kept, as orphans). The pin and place
-    /// of a group that is gone stay unused: from here, it looks like a host that is offline.
     pub fn remove_project(&mut self, host: &str, project_id: &str, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.net.send(host, ClientMessage::RemoveProject { id, project_id: project_id.to_owned() });
@@ -3186,10 +2558,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Link every member of `group_key` into `target_key` (or clear their manual links).
     pub fn link_group(&mut self, group_key: &str, target_key: Option<&str>, cx: &mut Context<Self>) {
         self.relink(group_key, None, target_key);
-        // Linked into another group: its name goes along, unless that one has its own.
         if let Some(t) = target_key
             && let Some(name) = self.names.get(group_key).cloned()
         {
@@ -3202,8 +2572,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The group `other_key` joins `group_key`, which keeps its name and place. A name
-    /// `other_key` was given stays stored: it is back once unlinked.
     pub fn link_into(&mut self, group_key: &str, other_key: &str, cx: &mut Context<Self>) {
         self.relink(other_key, None, Some(group_key));
         self.expanded_projects.remove(other_key);
@@ -3219,8 +2587,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Point the manual links of `group_key`'s members (or `only` that one) at `target_key`,
-    /// or clear them. Their group key changes with it: pins and places follow (`rekey`).
     fn relink(&mut self, group_key: &str, only: Option<(&str, &str)>, target_key: Option<&str>) {
         let (groups, _) = self.groups();
         let Some(group) = groups.iter().find(|g| g.key == group_key) else {
@@ -3239,9 +2605,9 @@ impl Dirigent {
                 }
             }
         }
-        drop(cache); // `save_pins` locks it again
+        // MUST KILL: rearchitect: let save_pins take the held cache lock instead of an early drop
+        drop(cache);
         let mut new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
-        // What is left of the group keeps its place, what split off follows.
         new.sort_by_key(|k| k != group_key);
         self.pinned_projects = projects::rekey(&self.pinned_projects, group_key, &new);
         self.group_order = projects::rekey(&self.group_order, group_key, &new);
@@ -3271,27 +2637,20 @@ impl Dirigent {
         projects::search(others, self.link_search.read(cx).text())
     }
 
-    /// Every project group (the Projects page; the sidebar shows the pinned ones) and the
-    /// orphan threads.
     pub fn groups(&self) -> (Vec<projects::Group>, Vec<(String, ThreadSummary)>) {
         projects::groups(&self.hosts, &self.links, &self.names, &self.group_order)
     }
 
-    /// `Rename` in a Projects page row's menu: its name turns into a field (Enter saves,
-    /// Esc cancels).
     pub fn start_rename(&mut self, group_key: &str, cx: &mut Context<Self>) {
         let name = self.groups().0.into_iter().find(|g| g.key == group_key).map(|g| g.name).unwrap_or_default();
         self.begin_rename(Renaming::Project(group_key.to_owned()), name, cx);
     }
 
-    /// `Rename thread` in a sidebar card's menu: its title turns into a field, as a
-    /// project's name does.
     pub fn start_thread_rename(&mut self, host: &str, id: &str, cx: &mut Context<Self>) {
         let name = self.summary(host, id).and_then(|t| t.name.clone()).unwrap_or_default();
         self.begin_rename(Renaming::Thread { host: host.to_owned(), id: id.to_owned() }, name, cx);
     }
 
-    /// Put `name` in the rename field and focus it, for `target`.
     fn begin_rename(&mut self, target: Renaming, name: String, cx: &mut Context<Self>) {
         self.renaming = Some(target);
         self.menu = None;
@@ -3303,10 +2662,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Enter in the rename field (`refocus`: the focus goes back to the root), or a press
-    /// elsewhere (it keeps whatever focus the press gives). A project group shows that name
-    /// from now on; an empty one (or the directory's own name) goes back to the directory's
-    /// name. A thread is renamed on its host, unless the name is empty or unchanged.
     fn finish_rename(&mut self, refocus: bool, cx: &mut Context<Self>) {
         let Some(target) = self.renaming.take() else { return };
         let name = self.rename_input.read(cx).text().trim().to_owned();
@@ -3324,9 +2679,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Name the thread on its host: shown at once, the host's push confirms it. A first
-    /// title still being generated no longer applies (the host keeps this name), so the
-    /// title stops breathing.
     fn rename_thread(&mut self, host: &str, thread_id: &str, name: String) {
         let Some(t) = self.summary_mut(host, thread_id) else { return };
         if name.is_empty() || t.name.as_ref() == Some(&name) {
@@ -3338,24 +2690,16 @@ impl Dirigent {
         self.net.send(host, ClientMessage::RenameThread { id, thread_id: thread_id.to_owned(), name });
     }
 
-    /// Right click on a sidebar card: its menu, at the click. It opens even when the press
-    /// just closed another menu (`open_menu` wouldn't), as context menus do. A rename in
-    /// progress is saved first, as a left press would.
     pub fn show_thread_menu(&mut self, host: &str, id: &str, at: Point<Pixels>, cx: &mut Context<Self>) {
         self.finish_rename(false, cx);
         self.menu = Some(Menu::ThreadActions { host: host.to_owned(), id: id.to_owned(), at });
         cx.notify();
     }
 
-    /// A `Regenerate title` of the thread is waiting on its host. Its card's menu offers
-    /// nothing meanwhile: a rename or another retitle would race it.
     pub fn retitling(&self, host: &str, thread_id: &str) -> bool {
         self.retitles.values().any(|(h, t)| h == host && t == thread_id)
     }
 
-    /// `Regenerate title` in a sidebar card's menu: the thread's host titles it again from
-    /// its whole conversation (`RetitleThread`) with the `[title]` model and reasoning. The
-    /// title breathes until the reply.
     pub fn retitle(&mut self, host: &str, thread_id: &str, cx: &mut Context<Self>) {
         self.menu = None;
         if self.retitling(host, thread_id) {
@@ -3378,7 +2722,6 @@ impl Dirigent {
         };
     }
 
-    /// The keys of the pinned groups that exist, in the sidebar's order.
     pub fn pinned_keys(&self) -> Vec<String> {
         let (groups, _) = self.groups();
         projects::pinned(&groups, &self.pinned_projects).into_iter().map(|g| g.key.clone()).collect()
@@ -3388,7 +2731,6 @@ impl Dirigent {
         self.pinned_projects.iter().any(|k| k == group_key)
     }
 
-    /// Pin a project group to the sidebar (in its place in the order) or unpin it.
     pub fn set_project_pinned(&mut self, group_key: &str, pinned: bool, cx: &mut Context<Self>) {
         self.pinned_projects.retain(|k| k != group_key);
         if pinned {
@@ -3410,9 +2752,6 @@ impl Dirigent {
         }
     }
 
-    /// Put the group `group_key` where the group `onto` is: a drag's live reorder, in the
-    /// sidebar or on the Projects page (one order for both). A sidebar drag so also moves
-    /// it past the unpinned groups between the two on the Projects page.
     pub fn move_project(&mut self, group_key: &str, onto: &str, cx: &mut Context<Self>) {
         if group_key == onto {
             return;
@@ -3423,11 +2762,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    // ---- usage ----
-
-    /// Ask every host for the window shown. Replies to older requests are ignored. The
-    /// buckets already shown stay up until each host's reply replaces them, so a refresh
-    /// of unchanged data is invisible. The Proxy tab's data is for the same window.
     fn request_usage(&mut self, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.usage.request = Some(id);
@@ -3441,13 +2775,9 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Ask every host for its proxy: the accounts now and their limits over the window
-    /// shown. As with `request_usage`, what is shown stays up until the replies replace it.
     fn request_proxy(&mut self, cx: &mut Context<Self>) {
         let id = self.next_id();
         self.usage.proxy_request = Some(id);
-        // No answer comes from a host that is offline or gone, and its last one is no
-        // longer how its accounts are now.
         let hosts = &self.hosts;
         self.usage.proxies.retain(|name, _| hosts.iter().any(|h| h.name == *name && h.status == HostStatus::Connected));
         let (since, until, bucket_ms) = (self.usage.since, self.usage.until, self.usage.bucket());
@@ -3457,7 +2787,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The limit the Proxy tab's chart draws.
     pub fn set_usage_limit(&mut self, limit: String, cx: &mut Context<Self>) {
         self.usage.limit = limit;
         self.usage.hover = None;
@@ -3466,7 +2795,6 @@ impl Dirigent {
 
     pub fn set_usage_range(&mut self, range: usage::Range, cx: &mut Context<Self>) {
         if range == usage::Range::Custom {
-            // Seed the fields with the window shown, so Enter alone keeps it.
             let (from, to) = (usage::day_of(self.usage.since), usage::day_of(self.usage.until - 1));
             let (window, from_input, to_input) = (self.window, self.usage_from.clone(), self.usage_to.clone());
             cx.defer(move |cx| {
@@ -3486,7 +2814,6 @@ impl Dirigent {
         self.request_usage(cx);
     }
 
-    /// Enter in a date field: show `from..=to` (both `YYYY-MM-DD`).
     fn apply_custom_usage(&mut self, cx: &mut Context<Self>) {
         let parse = |input: &Entity<TextInput>, cx: &App| usage::parse_day(input.read(cx).text());
         match (parse(&self.usage_from, cx), parse(&self.usage_to, cx)) {
@@ -3498,7 +2825,6 @@ impl Dirigent {
         }
     }
 
-    /// `‹` / `›`: the previous / next window of the same length.
     pub fn page_usage(&mut self, dir: i64, cx: &mut Context<Self>) {
         self.usage.page(dir);
         self.request_usage(cx);
@@ -3510,8 +2836,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Your usage, the leaderboard or the proxy; the board and the proxy are fetched as
-    /// they show.
     pub fn set_usage_tab(&mut self, tab: usage::Tab, cx: &mut Context<Self>) {
         self.usage.tab = tab;
         self.usage.hover = None;
@@ -3524,20 +2848,17 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// What the open tab's chart shows.
     pub fn set_usage_metric(&mut self, metric: usage::Metric, cx: &mut Context<Self>) {
         self.usage.view_mut().metric = metric;
         self.menu = None;
         cx.notify();
     }
 
-    /// The open tab's chart per slot, or as running totals.
     pub fn set_usage_running(&mut self, running: bool, cx: &mut Context<Self>) {
         self.usage.view_mut().running = running;
         cx.notify();
     }
 
-    /// A legend row was clicked: hide its line, or show it again.
     pub fn toggle_usage_series(&mut self, key: &str, cx: &mut Context<Self>) {
         let hidden = &mut self.usage.view_mut().hidden;
         if !hidden.remove(key) {
@@ -3546,10 +2867,7 @@ impl Dirigent {
         cx.notify();
     }
 
-    // ---- composer ----
-
     pub fn set_model(&mut self, key: String, cx: &mut Context<Self>) {
-        // Keep the effort if the new model takes it (`held_effort`); with none picked, "high".
         let levels = self.models().iter().find(|m| m.id == key).map(|m| m.efforts.clone()).unwrap_or_default();
         self.effort = held_effort(self.effort.as_deref().unwrap_or("high"), &levels);
         self.model = Some(key);
@@ -3567,10 +2885,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Hold the effort shown to what the model takes, where the composer's host lists the
-    /// model: a host runs any other effort as the model's default, whatever the chip says.
-    /// What comes in from elsewhere may be one: a thread's own, a preset's, the one
-    /// remembered (pi's `off` and `minimal`, from when hosts ran pi), another host's.
     fn hold_effort(&mut self) {
         if let Some(model) = self.current_model()
             && let Some(effort) = &self.effort
@@ -3589,9 +2903,6 @@ impl Dirigent {
         }
     }
 
-    // ---- model picker ----
-
-    /// The current model + effort, if a model is picked.
     pub fn current_preset(&self) -> Option<Preset> {
         self.model.clone().map(|model| Preset { model, effort: self.effort.clone() })
     }
@@ -3606,7 +2917,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Save the current combo (no-op without a model or when it's already saved).
     pub fn save_preset(&mut self, cx: &mut Context<Self>) {
         if let Some(p) = self.current_preset()
             && !self.presets.contains(&p)
@@ -3631,7 +2941,6 @@ impl Dirigent {
         }
     }
 
-    /// Flip the model picker to the all-models page with an empty, focused search.
     pub fn open_all_models(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.model_search.update(cx, |input, cx| input.set_text("", window, cx));
         self.menu = Some(Menu::AllModels);
@@ -3639,7 +2948,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Host models matching every word of the search, in host order.
     pub fn filtered_models(&self, cx: &App) -> Vec<&ModelInfo> {
         let query = self.model_search.read(cx).text().to_lowercase();
         let words: Vec<&str> = query.split_whitespace().collect();
@@ -3652,12 +2960,6 @@ impl Dirigent {
             .collect()
     }
 
-    // ---- attachments ----
-
-    /// A pasted image, once shrunk to what a prompt carries (`images::fit`; off the UI
-    /// thread, a big screenshot takes a moment), gets the next number in this draft and its
-    /// token goes in at the cursor (which saves the draft, images included, through
-    /// `Changed`). Dropped if the composer moved on to another thread meanwhile.
     fn attach(&mut self, image: gpui::Image, cx: &mut Context<Self>) {
         let key = composer_key(&self.pane).map(|(h, id)| (h.to_owned(), id.to_owned()));
         let fitted = cx.background_spawn(async move {
@@ -3688,13 +2990,11 @@ impl Dirigent {
         .detach();
     }
 
-    /// Attachments whose token is still in the composer, in paste order.
     pub fn attachments(&self, cx: &App) -> Vec<Attachment> {
         let text = self.composer.read(cx).text();
         self.attachments.iter().filter(|a| text.contains(&image_token(a.n))).cloned().collect()
     }
 
-    /// The ✕ on a thumbnail: drop the image and its token from the text.
     pub fn remove_attachment(&mut self, n: u32, window: &mut Window, cx: &mut Context<Self>) {
         self.attachments.retain(|a| a.n != n);
         let token = image_token(n);
@@ -3707,13 +3007,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Write what the composer holds under the thread (or draft) in view. Called on every
-    /// edit and when leaving the pane; an empty composer deletes the row instead, so a
-    /// draft that was typed and erased leaves nothing behind (as does leaving a thread
-    /// that was deleted under us).
     fn save_draft(&self, cx: &App) {
         let Some((host, id)) = composer_key(&self.pane) else { return };
-        // Mid-edit the composer holds the message being edited; the draft is its stash.
         let (content, images) = match self.open().and_then(|t| t.editing.as_ref()) {
             Some(e) => (e.stash.clone(), &e.images),
             None => (self.composer.read(cx).content(), &self.attachments),
@@ -3723,16 +3018,10 @@ impl Dirigent {
         if gone || content.text.trim().is_empty() {
             let _ = cache.remove_draft(host, id);
         } else {
-            // Images are kept while their token is in the text; `attachments()` prunes the rest.
             let _ = cache.set_draft(host, id, &content, &image_rows(images));
         }
     }
 
-    /// Our draft's thread didn't start (or may not have: the connection dropped). It leaves
-    /// the lists, the message goes back into the draft, and the draft opens again in its
-    /// place if the thread is in view. What was typed for the thread while it started (its
-    /// composer takes text, `send` holds it back) goes along, after the message: from the
-    /// composer, as the cache drops a thread's draft once its host lists it no more.
     fn unsend_draft(&mut self, p: PendingDraft, cx: &mut Context<Self>) {
         let (host, id) = (p.target.host.clone(), p.thread.id);
         if let Some(h) = self.host_mut(&host) {
@@ -3751,13 +3040,10 @@ impl Dirigent {
         }
     }
 
-    /// A message sent to a thread wasn't taken by its model (the host says why, in a toast):
-    /// its echo goes, and the message is back in the thread's composer.
     fn unsend_prompt(&mut self, p: SentPrompt, cx: &mut Context<Self>) {
         if self.summary(&p.host, &p.thread_id).is_none() {
             return;
         }
-        // No title is on its way for a first message refused (`prompt`).
         if !self.retitling(&p.host, &p.thread_id) {
             self.titling.remove(&(p.host.clone(), p.thread_id.clone()));
         }
@@ -3774,11 +3060,6 @@ impl Dirigent {
         self.give_back((&p.host, &p.thread_id), (p.text, p.images), cx);
     }
 
-    /// Put a message that wasn't sent after all back where it was typed: in the draft of
-    /// `key` (a thread's, or the draft page's: `composer_key`), in front of what was typed
-    /// there since (`rejoin`), and in the composer if that draft is the one in view. The
-    /// cache has what the composer holds, as every change is saved (`save_draft`); all but
-    /// text an input method is still composing.
     fn give_back(&mut self, key: (&str, &str), message: Draft, cx: &mut Context<Self>) {
         let (host, id) = key;
         if message.0.trim().is_empty() {
@@ -3791,7 +3072,6 @@ impl Dirigent {
         if composer_key(&self.pane) != Some(key) {
             return;
         }
-        // Mid-edit the composer holds the message being edited; the draft is its stash.
         match &mut self.pane {
             Pane::Thread(t) if t.editing.is_some() => {
                 let e = t.editing.as_mut().unwrap();
@@ -3801,8 +3081,6 @@ impl Dirigent {
         }
     }
 
-    /// Fill the composer with the saved draft of the thread (or draft page) in view, or
-    /// empty it. The text goes in deferred, as `set_content` needs the window.
     fn load_composer(&mut self, cx: &mut Context<Self>) {
         let Some((host, id)) = composer_key(&self.pane) else { return };
         let (content, images) = self.cache.lock().unwrap().draft(host, id).unwrap_or_default();
@@ -3810,7 +3088,6 @@ impl Dirigent {
         self.set_composer(content, cx);
     }
 
-    /// Put `content` in the composer, deferred: `set_content` needs the window.
     fn set_composer(&self, content: input::Content, cx: &mut Context<Self>) {
         let (window, composer) = (self.window, self.composer.clone());
         cx.defer(move |cx| {
@@ -3818,8 +3095,6 @@ impl Dirigent {
         });
     }
 
-    /// Make sure every image the open thread shows (`view::blobs_shown`) is in `blobs`: from
-    /// the cache db, else asked of the host (once per connection: `blob_requests`).
     fn fetch_blobs(&mut self) {
         let Pane::Thread(t) = &self.pane else { return };
         let host = t.host.clone();
@@ -3851,8 +3126,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Submit from the composer: prompt the open thread, or create one for the draft.
-    /// While a run is active, `queued` sends a follow-up instead of steering.
     fn send(&mut self, queued: bool, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).text().trim().to_owned();
         if self.fitting > 0 {
@@ -3878,18 +3151,14 @@ impl Dirigent {
                 self.menu = Some(Menu::Model);
                 return;
             }
-            // A request to an offline host is dropped: keep the draft instead.
             if !self.connected(&target.host) {
                 self.toast(format!("{} is offline", target.host), cx);
                 return;
             }
             let _ = self.cache.lock().unwrap().set(LAST_TARGET_KEY, &format!("{}\n{}", target.host, target.project_id));
-            // Isolation is only on offer for a repo (the chip hides otherwise).
             let workspace = self.isolate && self.draft_vcs().is_some_and(|(_, _, v)| v.is_some_and(|v| v.vcs.is_some()));
             let base = self.base.clone().filter(|_| workspace);
             let cwd = self.draft_vcs().map(|(_, path, _)| path.to_owned()).unwrap_or_default();
-            // The first prompt goes with the create, so the thread exists only if it started
-            // (named from it: see `config.toml` `[title]`).
             let prompt = FirstPrompt {
                 text: text.clone(),
                 model: self.model.clone(),
@@ -3899,9 +3168,6 @@ impl Dirigent {
                 tools: Some(self.config.tools.enabled()),
             };
             let id = self.next_id();
-            // The thread opens at once, as it will be listed: working, named after the
-            // prompt until its title lands, and making its workspace if it gets one. The
-            // id is ours, so the host's pushes and reply land on it.
             let now = now_ms();
             let thread = ThreadSummary {
                 id: uuid::Uuid::now_v7().to_string(),
@@ -3955,7 +3221,6 @@ impl Dirigent {
                 self.toast("The thread's workspace is gone; recreate it or move the thread back first", cx);
                 return;
             }
-            // The text stays in the composer until the thread can take it.
             if let Some(why) = self.not_ready(&t.host, &t.id) {
                 self.toast(why, cx);
                 return;
@@ -3975,8 +3240,6 @@ impl Dirigent {
         }
     }
 
-    /// The open thread's run is over without a `RunEnd` to say so (its host lists it idle,
-    /// or went away): nothing streams, runs or is queued any more.
     fn settle_open(&mut self) {
         let Pane::Thread(t) = &mut self.pane else { return };
         t.streaming.settle();
@@ -3987,7 +3250,6 @@ impl Dirigent {
         }
     }
 
-    /// Sent: the composer and the saved draft of the thread in view are done with.
     fn clear_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.attachments.clear();
         self.composer.update(cx, |input, cx| {
@@ -4000,7 +3262,6 @@ impl Dirigent {
 
     fn prompt(&mut self, host: &str, thread_id: &str, text: String, images: &[Attachment], mode: PromptMode, cx: &mut Context<Self>) {
         let id = self.next_id();
-        // A thread's first prompt also names it (see `config.toml` `[title]`).
         let first = mode == PromptMode::Prompt && self.summary(host, thread_id).is_some_and(|s| s.entry_count == 0);
         let title: Option<TitleGen> = first.then(|| self.config.title.clone());
         if first {
@@ -4027,8 +3288,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Show a sent message in the open thread's tail until the host's persisted entry
-    /// replaces it.
     fn echo(&mut self, host: &str, thread_id: &str, text: String, mode: PromptMode) {
         let Pane::Thread(t) = &mut self.pane else { return };
         if t.host != host || t.id != thread_id {
@@ -4037,7 +3296,6 @@ impl Dirigent {
         t.streaming.echo.push((text, mode));
         let tail = t.timeline.items.len();
         t.list.remeasure_items(tail..tail + 1);
-        // An open log follows the new run; the one it showed keeps where the user left it.
         if t.log.is_some() {
             self.stash_log();
             let Pane::Thread(t) = &mut self.pane else { return };
@@ -4046,8 +3304,6 @@ impl Dirigent {
         }
     }
 
-    /// Escape: close the image preview, the open menu or a modal, drop the text selection,
-    /// else close the log panel or leave the Projects page. Never stops the agent.
     pub fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
         if self.preview.is_some() {
             self.set_preview(None, cx);
@@ -4064,8 +3320,6 @@ impl Dirigent {
         if self.add_project.is_some() {
             return self.close_add_project(cx);
         }
-        // The setup stays until it's finished or skipped (its project browser is closed
-        // above).
         if self.onboarding_open() {
             return;
         }
@@ -4094,11 +3348,7 @@ impl Dirigent {
         }
     }
 
-    // ---- sidebar ----
-
-    /// `[`: toggles the sidebar, unless it types a bracket (`typed_bracket`).
     pub fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        // Under the setup nothing would show it.
         if self.typed_bracket("[", window, cx) || self.onboarding_open() {
             return;
         }
@@ -4111,7 +3361,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// `]`: toggle the right panel (see `toggle_panel`).
     pub fn toggle_log_key(&mut self, _: &ToggleLog, window: &mut Window, cx: &mut Context<Self>) {
         if self.typed_bracket("]", window, cx) || self.onboarding_open() {
             return;
@@ -4119,8 +3368,6 @@ impl Dirigent {
         self.toggle_panel(cx);
     }
 
-    /// A bracket key types itself, instead of acting, in a focused input other than the
-    /// composer, or in the composer once it has text.
     fn typed_bracket(&mut self, bracket: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut inputs = vec![
             self.composer.clone(),
@@ -4144,8 +3391,6 @@ impl Dirigent {
             inputs.extend(t.asks.iter().flat_map(|f| f.custom.iter().flatten().cloned()));
         }
         for input in inputs {
-            // The composer is focused almost always, so an empty one lets the key act;
-            // any other input is focused on purpose and types it.
             let typing = input != self.composer || !input.read(cx).text().is_empty();
             if input.focus_handle(cx).is_focused(window) && typing {
                 input.update(cx, |i, cx| i.replace_text_in_range(None, bracket, window, cx));
@@ -4182,10 +3427,8 @@ impl Dirigent {
             return;
         }
         match self.resizing {
-            // Widths are in design pixels (`theme::u`), so they zoom with the text.
             Some(Resize::Sidebar) => self.sidebar_width = (f32::from(ev.position.x) / theme::zoom()).max(SIDEBAR_MIN),
             Some(Resize::Log) => {
-                // The panel's right edge is the window's.
                 let width = window.viewport_size().width - ev.position.x;
                 self.log_width = (f32::from(width) / theme::zoom()).max(LOG_MIN);
             }
@@ -4194,13 +3437,10 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A press that no text block took (see `select::Block`) drops the selection.
     fn on_mouse_down(&mut self, _: &gpui::MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         if std::mem::take(&mut self.caption_press) {
             return;
         }
-        // A press outside the rename field (which stops its own) saves the rename, like a
-        // blur; the press then does whatever it does (focus included).
         if self.renaming.is_some() {
             self.finish_rename(false, cx);
         }
@@ -4230,10 +3470,7 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Extend the selection to the mouse, scrolling its document when the mouse is past
-    /// the document's edge.
     fn drag_selection(&mut self, p: Point<Pixels>, cx: &mut Context<Self>) {
-        // The transcript and the log scroll along; the changelog modal doesn't.
         let list = match (self.selection.doc(), &self.pane) {
             (Some(Doc::Thread), Pane::Thread(t)) => Some(&t.list),
             (Some(Doc::Log), Pane::Thread(t)) => Some(&t.log_list),
@@ -4252,9 +3489,7 @@ impl Dirigent {
         }
     }
 
-    /// The selected transcript / log text. The blocks register their text when they are
-    /// constructed, so the selected items are constructed again here, layout-free, to read
-    /// the off-screen ones too.
+    // MUST KILL: rearchitect: read the selected text from the timeline, not by re-rendering items to harvest their blocks
     fn selected_text(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let (start, end) = self.selection.range()?;
         self.selection.collect();
@@ -4280,15 +3515,12 @@ impl Dirigent {
         Some(self.selection.text()).filter(|t| !t.is_empty())
     }
 
-    /// ctrl+C with no input selection to copy (see `TextInput::copy`).
     fn copy_selection(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = self.selected_text(cx) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
 
-    /// A copy button (a message's, a code block's, the header's copy id, a project path's):
-    /// `text` to the clipboard, and a check on button `id` for a moment.
     pub fn copy_item(&mut self, id: ElementId, text: String, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
         *self.copied_mut() = Some(id.clone());
@@ -4314,9 +3546,6 @@ impl Dirigent {
         }
     }
 
-    /// A ruler mark was pressed or dragged to: scroll the transcript so that item is in the
-    /// middle of the viewport. It goes to the top now; `settle_jump` centers it once it's
-    /// measured. Focus stays where it was (the ruler keeps its press from taking it).
     pub fn jump_to(&mut self, ix: usize, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &mut self.pane else { return };
         t.list.scroll_to(ListOffset { item_ix: ix, offset_in_item: px(0.) });
@@ -4324,9 +3553,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The jump-to-latest button (`thread::jump_button`): back to the transcript's end,
-    /// following it again. Focus stays where it was: the button blocks the mouse, so its
-    /// click doesn't blur the composer (or an ask's field).
     pub fn jump_to_end(&mut self, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &mut self.pane else { return };
         t.center_on = None;
@@ -4334,10 +3560,8 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Each frame after a `jump_to`: shift the item to the viewport's middle (a tall one
-    /// stays at its top). Items above it may be unmeasured (0px to `scroll_by`) until
-    /// they've been laid out, so this nudges and re-checks until it lands, a few frames
-    /// at most.
+    /// Items above it may be unmeasured (0px to `scroll_by`) until they've been laid out, so
+    /// this nudges and re-checks until it lands, a few frames at most.
     fn settle_jump(&mut self, window: &Window) {
         let Pane::Thread(t) = &mut self.pane else { return };
         let Some((ix, tries)) = t.center_on.take() else { return };
@@ -4356,9 +3580,6 @@ impl Dirigent {
         }
     }
 
-    /// A message's pin button: toggle it (the ruler shows pinned marks in amber). The host
-    /// keeps the pin, by the entry id behind the item; the open thread's set and the
-    /// summary are updated ahead of its `Threads` push.
     pub fn toggle_pin(&mut self, ix: usize, cx: &mut Context<Self>) {
         let id = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
@@ -4378,11 +3599,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    // ---- edit and fork ----
-
-    /// A user bubble's message as a composer draft: its text without the image links its
-    /// host appended (`view::split_image_refs`), and its images under the `[image-N]` they
-    /// had (as `thread::image_links` pairs them). An image not loaded yet is left out.
     fn bubble_draft(&self, text: &str, images: &[String]) -> Draft {
         let (body, refs) = view::split_image_refs(text);
         let ns = if refs.is_empty() { input::image_numbers(body) } else { refs };
@@ -4390,9 +3606,6 @@ impl Dirigent {
         (body.to_owned(), images)
     }
 
-    /// A user bubble's edit button: the bubble takes the composer, filled with its message,
-    /// model and effort chips and all (`thread::edit_bubble`); the composer's own text and
-    /// images wait in the stash. Not while the thread runs: its host refuses edits then.
     pub fn start_edit(&mut self, ix: usize, cx: &mut Context<Self>) {
         if self.is_running() {
             return self.toast("The thread is running; stop it first", cx);
@@ -4401,7 +3614,6 @@ impl Dirigent {
         let Some(entry_id) = t.typed_message(ix).map(|e| e.id.clone()) else { return };
         let Some(Item::User { text, images, .. }) = t.timeline.items.get(ix) else { return };
         let (text, images) = self.bubble_draft(text, images);
-        // Moving from another bubble's edit, that one's stash is still the draft.
         let (stash, stash_images) = match t.editing.as_ref() {
             Some(e) => (e.stash.clone(), e.images.clone()),
             None => (self.composer.read(cx).content(), self.attachments.clone()),
@@ -4415,7 +3627,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The edit bubble's `Cancel`.
     pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
         if self.end_edit(cx) {
             self.focus_composer(cx);
@@ -4423,8 +3634,6 @@ impl Dirigent {
         }
     }
 
-    /// Leave an edit without sending it (Esc, `Cancel`, the pane changing): the composer
-    /// gets its own text and images back. False when no edit was going on.
     fn end_edit(&mut self, cx: &mut Context<Self>) -> bool {
         let Pane::Thread(t) = &mut self.pane else { return false };
         let Some(e) = t.editing.take() else { return false };
@@ -4433,9 +3642,6 @@ impl Dirigent {
         true
     }
 
-    /// Send the edit: `EditMessage` with the composer's text, images, model and effort.
-    /// The transcript drops the message and all after it at once, the new text echoed in
-    /// its place (`Rewound`), and the composer gets its own text back.
     fn send_edit(&mut self, text: String, images: Vec<Attachment>, window: &mut Window, cx: &mut Context<Self>) {
         if self.model.is_none() {
             self.toast("Pick a model first", cx);
@@ -4452,7 +3658,6 @@ impl Dirigent {
         if let Some(why) = self.not_ready(&t.host, &t.id) {
             return self.toast(why, cx);
         }
-        // A request to an offline host is dropped: the edit stays open instead.
         if !self.connected(&t.host) {
             return self.toast(format!("{} is offline", t.host), cx);
         }
@@ -4465,8 +3670,6 @@ impl Dirigent {
         };
         t.timeline = timeline;
         t.relist();
-        // The edit is the newest message now: show it and the run it starts, even if the
-        // transcript was scrolled up to reach its bubble (where `relist` alone keeps it).
         t.list.set_follow_mode(FollowMode::Tail);
         t.rewound = Some(Rewound { request: id, entry_id: e.entry_id.clone(), text: text.clone(), images: images.clone() });
         let (host, thread_id) = (t.host.clone(), t.id.clone());
@@ -4490,9 +3693,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A sent edit failed (its host refused it, or its run ended before the new branch
-    /// started): the transcript shows the thread as it is again, and the edit is back in
-    /// its bubble as it was sent, to try again or cancel.
     fn unrewind(&mut self, cx: &mut Context<Self>) {
         if self.open().is_none_or(|t| t.rewound.is_none()) {
             return;
@@ -4509,8 +3709,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// An edit whose message has left the transcript (another client's edit branched the
-    /// thread before it) ends: there is no bubble to hold the composer any more.
     fn end_stale_edit(&mut self, cx: &mut Context<Self>) {
         let Some(t) = self.open() else { return };
         let Some(e) = &t.editing else { return };
@@ -4519,10 +3717,6 @@ impl Dirigent {
         }
     }
 
-    /// A message's fork button: a new thread with the history up to here (`ForkThread`),
-    /// opened once its host has made it. From a reply: up to and with the reply. From a
-    /// user message: up to just before it, the message in the fork's composer to send as
-    /// it was or changed.
     pub fn fork_at(&mut self, ix: usize) {
         let Some((host, thread_id, entry_id, draft)) = self.open().and_then(|t| {
             let (entry_id, draft) = match (t.typed_message(ix), t.timeline.items.get(ix)) {
@@ -4538,8 +3732,6 @@ impl Dirigent {
         self.net.send(&host, ClientMessage::ForkThread { id, thread_id, entry_id, fork_id: None });
     }
 
-    /// The header's fork button: open the thread this one was forked from, at the message
-    /// it was forked at: now if the cache has its entries, and again once the host's are in.
     pub fn open_fork_source(&mut self, host: &str, from: &ForkedFrom, cx: &mut Context<Self>) {
         self.select_thread(host, &from.thread_id, cx);
         let Pane::Thread(t) = &mut self.pane else { return };
@@ -4549,8 +3741,6 @@ impl Dirigent {
         }
     }
 
-    /// Drop a queued steer / follow-up the model hasn't seen yet. The host confirms with an
-    /// `Event::Queue`; the echo goes now so the row doesn't linger for the round trip.
     pub fn cancel_queued(&mut self, text: String, cx: &mut Context<Self>) {
         let id = self.next_id();
         if let Pane::Thread(t) = &mut self.pane {
@@ -4564,7 +3754,6 @@ impl Dirigent {
         }
     }
 
-    /// Stop the open thread's run.
     pub fn stop(&mut self, cx: &mut Context<Self>) {
         if let Pane::Thread(t) = &self.pane
             && self.is_running()
@@ -4576,7 +3765,6 @@ impl Dirigent {
         }
     }
 
-    /// A trigger click: open `menu`, or close it if it's the one open.
     pub fn toggle_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         if self.menu.as_ref() == Some(&menu) {
             self.close_menu(cx);
@@ -4585,21 +3773,15 @@ impl Dirigent {
         }
     }
 
-    /// Open `menu` from a trigger click. Every menu opens through here: a click that just
-    /// dismissed a menu (`menu_dismissed`, which includes a press on that menu's own
-    /// trigger) opens nothing and returns false.
     pub fn open_menu(&mut self, menu: Menu, cx: &mut Context<Self>) -> bool {
         if self.menu_dismissed {
             return false;
         }
-        // The workspace menus say whether there is uncommitted work: ask again as they open.
         if matches!(menu, Menu::Workspace | Menu::Base)
             && let Some((host, id)) = self.open().map(|t| (t.host.clone(), t.id.clone()))
         {
             self.request_thread_vcs(&host, &id);
         }
-        // A menu in place of one with a search (All models' back button): the composer gets
-        // the keys back, as on `close_menu`; the search's input is gone.
         match self.menu {
             Some(Menu::AllModels | Menu::Base | Menu::Target) => self.focus_composer(cx),
             Some(Menu::Link { .. }) => self.focus_root(cx),
@@ -4610,11 +3792,9 @@ impl Dirigent {
         true
     }
 
-    /// Close the open menu. Leaving the model search hands focus back to the composer.
     pub fn close_menu(&mut self, cx: &mut Context<Self>) {
         match self.menu.take() {
             Some(Menu::AllModels | Menu::Base | Menu::Target) => self.focus_composer(cx),
-            // No composer on the Projects page: the root gets the keys, so Esc still works.
             Some(Menu::Link { .. }) => self.focus_root(cx),
             Some(_) => {}
             None => return,
@@ -4622,17 +3802,13 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A press outside the open menu: close it and swallow this click's `toggle_menu`.
     pub fn dismiss_menu(&mut self, cx: &mut Context<Self>) {
         self.menu_dismissed = self.menu.is_some();
         self.close_menu(cx);
     }
 
-    /// Clicking a work line: show its log in the panel (opening it, and the log section if
-    /// hidden), or close the panel if that log is the one showing.
     pub fn toggle_log(&mut self, key: usize, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &mut self.pane else { return };
-        // A log only ever shows in an open panel (`close_panel` drops it).
         if t.log == Some(key) {
             self.close_panel();
         } else {
@@ -4647,15 +3823,11 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Point the panel's log section at a work: where the user left it (`stash_log`), else
-    /// at its end, following it as it grows. Scrolling back down to the end follows again.
     fn show_log(&mut self, key: usize) {
         self.stash_log();
         let Pane::Thread(t) = &mut self.pane else { return };
         t.log = Some(key);
         let top = self.logs.get(&t.id).and_then(|m| m.tops.get(&key)).copied();
-        // The list gets its steps now (`log_body` keeps the count in step after), or
-        // `scroll_to` has no item to land on.
         let n = thread::shown_work(self).map_or(0, |(w, _)| w.steps.len().max(1));
         let Pane::Thread(t) = &self.pane else { return };
         t.log_list.reset(n);
@@ -4665,10 +3837,6 @@ impl Dirigent {
         }
     }
 
-    /// Remember how the open thread's log is left: which tool calls are open, and where
-    /// the shown work is scrolled to if the user scrolled up from its end (forgotten once
-    /// they scroll back down). Called before the log or the pane changes. The live tail
-    /// (`thread::TAIL`) isn't kept: its key moves on to the next run.
     fn stash_log(&mut self) {
         let Pane::Thread(t) = &self.pane else { return };
         let m = self.logs.entry(t.id.clone()).or_default();
@@ -4684,7 +3852,6 @@ impl Dirigent {
         }
     }
 
-    /// Show / hide a tool call's arguments and output in the log panel.
     pub fn toggle_expanded(&mut self, key: (usize, usize), cx: &mut Context<Self>) {
         if let Pane::Thread(t) = &mut self.pane {
             if !t.expanded.remove(&key) {
@@ -4693,9 +3860,7 @@ impl Dirigent {
             if t.log == Some(key.0) {
                 t.log_list.remeasure_items(key.1..key.1 + 1);
             }
-            // The images in its output are fetched now that they show.
             self.fetch_blobs();
-            // Clicking in the panel blurs the composer; keep typing working.
             self.focus_composer(cx);
             cx.notify();
         }
@@ -4712,11 +3877,8 @@ fn now_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
-/// The cache key of the new-thread draft's composer state (threads use their host and id).
 const DRAFT_KEY: (&str, &str) = ("", "");
 
-/// Whose state the composer shows on `pane`: the open thread's, the new-thread draft's,
-/// or nobody's (the composer isn't on screen).
 fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
     match pane {
         Pane::Thread(t) => Some((&t.host, &t.id)),
@@ -4725,11 +3887,6 @@ fn composer_key(pane: &Pane) -> Option<(&str, &str)> {
     }
 }
 
-/// A `Thread` reply against the entries the open thread has folded in (`have`), in two
-/// parts: the snapshot up to where `have` ends, plus what `have` holds past the snapshot's
-/// end but not up to `stale` (see `Dirigent::fetch_open`), and the snapshot's entries past
-/// `have` (`fresh`, for `OpenThread::fold`). A host interleaves replies and pushes in no
-/// particular order, so either can be ahead.
 fn merge_snapshot(mut snapshot: Vec<Entry>, have: Vec<Entry>, stale: Option<u64>) -> (Vec<Entry>, Vec<Entry>) {
     let end = have.last().map(|e| e.seq);
     let fresh = snapshot.split_off(snapshot.partition_point(|e| end.is_some_and(|end| e.seq <= end)));
@@ -4739,7 +3896,6 @@ fn merge_snapshot(mut snapshot: Vec<Entry>, have: Vec<Entry>, stale: Option<u64>
     (snapshot, fresh)
 }
 
-/// Attachments as a prompt carries them.
 fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
     images
         .iter()
@@ -4751,16 +3907,13 @@ fn wire_images(images: &[Attachment]) -> Vec<ImageAttachment> {
         .collect()
 }
 
-/// A message that wasn't sent (`back`) and what its composer holds now (`typed`) as one
-/// draft: `back` first, a blank line, then `typed`. Both number their images from 1, so
-/// `back`'s move past `typed`'s, tokens and all.
 fn rejoin(back: Draft, typed: Draft) -> Draft {
     let ((mut text, mut images), (typed, typed_images)) = (back, typed);
     if typed.trim().is_empty() {
         return (text, images);
     }
     let shift = typed_images.iter().map(|a| a.n).max().unwrap_or(0);
-    // The highest first: a token renumbered is then never taken for one still to do.
+    // MUST KILL: rearchitect: renumber tokens in one pass so no descending order is needed to avoid collisions
     images.sort_by_key(|a| std::cmp::Reverse(a.n));
     for a in images.iter_mut().filter(|_| shift > 0) {
         text = text.replace(&image_token(a.n), &image_token(a.n + shift));
@@ -4771,34 +3924,24 @@ fn rejoin(back: Draft, typed: Draft) -> Draft {
     (format!("{text}\n\n{typed}"), images)
 }
 
-/// The cache's rows of a draft's images as attachments; one gpui can't decode is left out.
 fn attachments_from(rows: Vec<crate::cache::DraftImage>) -> Vec<Attachment> {
     rows.into_iter().filter_map(|(n, mime, bytes)| Some(Attachment { n, blob: blob_from(&mime, bytes)? })).collect()
 }
 
-/// Attachments as the cache stores them.
 fn image_rows(images: &[Attachment]) -> Vec<(u32, &str, &[u8])> {
     images.iter().map(|a| (a.n, a.blob.image.format.mime_type(), a.blob.image.bytes.as_slice())).collect()
 }
 
-/// A renderable image from stored bytes; `None` for formats gpui can't decode.
 pub fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     let format = gpui::ImageFormat::from_mime_type(mime)?;
     let id = gpui::hash(&bytes);
     Some(Arc::new(gpui::Image { format, bytes, id }))
 }
 
-/// A model's id, from how a build named one while hosts ran pi: `provider/id`
-/// (`cliproxyapi/claude-opus-5-5`). Everything after the first `/`, as in the hosts' own
-/// conversion (`dirigent_agent::import::model_id`): a proxy's id may hold more of them.
 fn model_id(model: &str) -> &str {
     model.split_once('/').map_or(model, |(_, id)| id)
 }
 
-/// What this desktop kept of models while hosts ran pi names them `provider/id`: the cached
-/// thread summaries, the remembered model, the presets (two providers' presets for one
-/// model become one) and the title model. All are made the id, once (`MODEL_IDS_KEY`): an
-/// id may hold a `/` of its own. True if `config` changed, which the caller saves.
 fn name_models_by_id(cache: &Cache, config: &mut config::Config) -> bool {
     if cache.get(MODEL_IDS_KEY).is_some() {
         return false;
@@ -4826,16 +3969,13 @@ fn name_models_by_id(cache: &Cache, config: &mut config::Config) -> bool {
     changed
 }
 
-/// `effort` as a model that takes `efforts` (lowest first) runs it: itself if it is one of
-/// them, else its lowest for what pi had below them all (`off`, `minimal`) and `high`, or
-/// its highest, for any other. None for a model that doesn't reason.
+// MUST KILL: rearchitect: migrate stored pi efforts (off, minimal) once instead of mapping them on every hold
 fn held_effort(effort: &str, efforts: &[String]) -> Option<String> {
     let named = |name: &str| efforts.iter().find(|e| *e == name);
     let nearest = if matches!(effort, "off" | "minimal") { efforts.first() } else { named("high").or(efforts.last()) };
     named(effort).or(nearest).cloned()
 }
 
-/// A host as the cache last saw it; the connection fills in the rest.
 fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
     HostState {
         name: name.to_owned(),
@@ -4849,7 +3989,6 @@ fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
     }
 }
 
-/// A blob's image and its upright size; `None` for formats gpui can't decode.
 fn blob_from(mime: &str, bytes: Vec<u8>) -> Option<Blob> {
     let size = upright_size(&bytes);
     Some(Blob { image: image_from(mime, bytes)?, size })
@@ -4913,6 +4052,7 @@ fn track_mouse(cx: &mut Context<Dirigent>) -> impl IntoElement {
 /// listener rather than the root's `capture_any_mouse_down`: that one only fires while the
 /// root is hovered, and an occluding overlay (the Add project modal) unhovers it, which
 /// left the flag stuck and swallowed every later menu-trigger click.
+// MUST KILL: rename: reset_press_flags, it clears caption_press too
 fn reset_menu_dismissed(cx: &mut Context<Dirigent>) -> impl IntoElement {
     let this = cx.entity().downgrade();
     gpui::canvas(
@@ -4947,15 +4087,11 @@ impl Render for Dirigent {
         self.redraw_field(false, cx);
         let toasts = self.toasts.iter().map(|(m, _)| m.clone()).collect::<Vec<_>>();
         let docked = !self.sidebar_hidden;
-        // The main pane fills the window right of the sidebar, edge to edge. With the
-        // background pattern under it (`Reach::Full`) its fill lets some of it through.
         let bg = self.config.background;
         let mut fill = theme::t().panel;
         if bg.pattern != Pattern::Off && bg.reach == Reach::Full {
             fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE).round() as u32);
         }
-        // The sidebar and the pane, in one box: none of it under the setup (`onboarding.rs`),
-        // fading in as the setup leaves.
         let shown = self.app_shown();
         if self.onboarding.as_ref().is_some_and(|s| s.leaving.is_some()) {
             window.request_animation_frame();
@@ -4985,16 +4121,11 @@ impl Render for Dirigent {
                 .child(panel)
                 .when(!docked, |d| d.child(sidebar::peek(self, cx)))
         });
-        // The background pattern, on the canvas under everything (`ambient.rs`); behind the
-        // sidebar only, the sidebar draws it itself, clipped to it. The setup has it across
-        // the window.
         let field = self.field.layer(px(0.));
         let field = match &self.onboarding {
             Some(_) => field.map(|l| onboarding::curtain(self, l)),
             None => field.filter(|_| bg.reach == Reach::Full).map(IntoElement::into_any_element),
         };
-        // With a menu open, the arrows and Enter are its (`menu::key_bindings`); else in the
-        // setup, Enter continues.
         let key_context = match &self.menu {
             Some(_) => format!("{KEY_CONTEXT} {}", menu::KEY_CONTEXT),
             None if self.onboarding_open() => format!("{KEY_CONTEXT} {}", onboarding::KEY_CONTEXT),
@@ -5033,7 +4164,6 @@ impl Render for Dirigent {
             .text_size(text::base())
             .children(field)
             .children(app)
-            // The setup's project step has the Add project browser in it.
             .children(self.onboarding.is_some().then(|| onboarding::render(self, cx)))
             .children(self.add_project.as_ref().filter(|_| self.onboarding.is_none()).map(|s| add_project::render(self, s, cx)))
             .children(self.modal.map(|m| match m {
@@ -5059,7 +4189,6 @@ impl Render for Dirigent {
                         .border_color(rgba(theme::t().line))
                         .shadow_md()
                         .child(div().size(u(6.)).rounded_full().bg(rgba(theme::t().error)).flex_shrink_0())
-                        // Shrinkable, so a long message wraps inside `max_w`.
                         .child(div().flex_1().min_w_0().child(m))
                 }))
             }))
@@ -5080,8 +4209,6 @@ mod tests {
         entries.iter().map(|e| e.seq).collect()
     }
 
-    /// A message given back goes in front of what was typed since, its images renumbered
-    /// past that text's (3 → 5 before 1 → 3, or `[image-1]` would end up as `[image-5]` too).
     #[test]
     fn a_message_given_back_joins_what_was_typed_since() {
         let image = |n: u32, byte: u8| Attachment { n, blob: Blob { image: image_from("image/png", vec![byte]).unwrap(), size: None } };
@@ -5126,19 +4253,13 @@ mod tests {
             let (kept, fresh) = merge_snapshot(snapshot, have, stale);
             (seqs(&kept), seqs(&fresh))
         };
-        // The snapshot is ahead: what it adds is folded in, as its pushes will be skipped.
         assert_eq!(merge(range(0, 4), range(0, 2), None), (vec![0, 1], vec![2, 3]));
         assert_eq!(merge(range(0, 2), vec![], None), (vec![], vec![0, 1]));
-        // Entries pushed after it was read arrived first: they stay.
         assert_eq!(merge(range(0, 2), range(0, 4), None), (vec![0, 1, 2, 3], vec![]));
-        // ... unless we held them when asking: then the host lost them.
         assert_eq!(merge(range(0, 2), range(0, 4), Some(2)), (vec![0, 1, 3], vec![]));
-        // A gap in what we had (a cache that missed pushes) is filled.
         assert_eq!(merge(range(0, 4), vec![entry(0), entry(3)], None), (vec![0, 1, 2, 3], vec![]));
     }
 
-    /// An edit's first entry branches the transcript; while a sent edit waits for it,
-    /// entries still on the old branch stay out of view.
     #[test]
     fn edits_branch_the_timeline() {
         let mut t = OpenThread::new("h", "t", vec![]);
@@ -5157,15 +4278,12 @@ mod tests {
         assert_eq!(texts(&t), ["hi", "hello"]);
         assert_eq!(t.typed_message(0).map(|e| e.id.as_str()), Some("u1"));
         assert!(t.typed_message(1).is_none());
-        // u1 rewritten: u2 is a second root, and the transcript is its branch alone.
         assert_eq!(t.fold(user(2, "u2", None, "hey")), (2, Some(0)));
         assert_eq!(texts(&t), ["hey"]);
         t.fold(reply(3, "r2", Some("u2"), "howdy"));
         assert_eq!(texts(&t), ["hey", "howdy"]);
         assert_eq!(t.item_at("r2"), Some(1));
         assert_eq!(t.item_at("r1"), None);
-        // An edit of u2 on its way: the old branch's next entry stays out, the new one's
-        // first entry ends the wait.
         t.timeline = Timeline::default();
         t.rewound = Some(Rewound { request: 1, entry_id: "u2".into(), text: "yo".into(), images: vec![] });
         assert_eq!(t.fold(reply(4, "r3", Some("r2"), "still here")), (0, None));
@@ -5175,7 +4293,6 @@ mod tests {
         assert_eq!(texts(&t), ["yo"]);
     }
 
-    /// What a build from when hosts ran pi kept, as the first start after it finds it.
     #[test]
     fn models_kept_as_provider_and_id_become_ids_once() {
         let mut cache = Cache::in_memory().unwrap();
@@ -5196,13 +4313,11 @@ mod tests {
         config.title.model = "anthropic/claude-haiku-5-5".into();
 
         assert!(name_models_by_id(&cache, &mut config));
-        // Everything after the first slash, as the hosts convert theirs.
         assert_eq!(models(&cache), ["claude-opus-5-5", "vendor/model"]);
         assert_eq!(cache.get(LAST_MODEL_KEY).as_deref(), Some("claude-opus-5-5"));
         assert!(presets(&cache) == [preset("claude-opus-5-5", "high"), preset("gpt-5", "low")]);
         assert_eq!(config.title.model, "claude-haiku-5-5");
 
-        // From then on an id with a slash is an id: nothing is cut again.
         config.title.model = "vendor/model".into();
         cache.set(LAST_MODEL_KEY, "vendor/model").unwrap();
         assert!(!name_models_by_id(&cache, &mut config));
@@ -5214,18 +4329,13 @@ mod tests {
     fn an_effort_is_held_to_what_the_model_takes() {
         let claude = ["low", "medium", "high", "xhigh", "max"].map(String::from);
         assert_eq!(held_effort("medium", &claude).as_deref(), Some("medium"));
-        // pi's levels below the model's lowest.
         assert_eq!(held_effort("off", &claude).as_deref(), Some("low"));
         assert_eq!(held_effort("minimal", &claude).as_deref(), Some("low"));
-        // One only another model takes.
         assert_eq!(held_effort("xhigh", &claude[..3]).as_deref(), Some("high"));
         assert_eq!(held_effort("high", &claude[..2]).as_deref(), Some("medium"));
-        // A model that doesn't reason.
         assert_eq!(held_effort("high", &[]), None);
     }
 
-    /// A rebuilt timeline (the host's snapshot landing on the cached entries) leaves the
-    /// transcript where it was: at its end, or at the item the user scrolled up to.
     #[test]
     fn relisting_keeps_the_scroll_position() {
         let entries = vec![
@@ -5239,17 +4349,14 @@ mod tests {
             let top = t.list.logical_scroll_top();
             (top.item_ix, top.offset_in_item)
         };
-        // Opened at its end, it follows it.
         t.relist();
         assert!(t.list.is_following_tail());
-        // Scrolled up into the reply, then the snapshot brings the next turn.
         t.list.scroll_to(ListOffset { item_ix: 1, offset_in_item: px(12.) });
         t.timeline = timeline_of(&entries);
         t.relist();
         assert_eq!(t.list.item_count(), 5);
         assert!(!t.list.is_following_tail());
         assert_eq!(top(&t), (1, px(12.)));
-        // The item it was at is gone (a cache ahead of its host): the end it is.
         t.list.scroll_to(ListOffset { item_ix: 3, offset_in_item: px(12.) });
         t.timeline = timeline_of(&entries[..1]);
         t.relist();

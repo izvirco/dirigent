@@ -1,16 +1,9 @@
-//! Pi's data into ours, for the one migration away from it: a thread's pi entries as
-//! `transcript::Entry`s (`entries`), a model named `provider/id` as its id (`model_id`),
-//! and pi's agent dir as `agent.toml`, `AGENTS.md` and `skills/` (`agent_dir`). The host
-//! does the rest (`dirigent_service`'s storage: the databases). Nothing here changes what
-//! it reads.
-
 use crate::config::{Compaction, Config, Dirs};
 use dirigent_protocol::transcript::{Api, Assistant, Block, Body, Cost, Entry, Notice, Stop, ToolResult, Usage};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 
-/// A thread's pi entries as ours (`entries`).
 #[derive(Debug, Default, PartialEq)]
 pub struct Converted {
     pub entries: Vec<Entry>,
@@ -26,14 +19,11 @@ pub struct Converted {
     pub unreadable: Vec<String>,
 }
 
-/// What a pi entry comes to. One that can't be read is an `Err` saying why.
 enum Outcome {
     Keep(Body),
-    /// Left out, and counted under this name.
     Drop(String),
 }
 
-/// How pi told the model of a branch it came back from (`/tree`).
 const BRANCH_SUMMARY: &str = "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 
 /// A thread's pi entries, in `seq` order and as `service.db` has them (an image is
@@ -42,10 +32,8 @@ const BRANCH_SUMMARY: &str = "The following is a summary of a branch that this c
 /// an entry that is left out hang on its nearest ancestor that isn't.
 pub fn entries(pi: &[Value]) -> Converted {
     let mut out = Converted::default();
-    // Every pi entry's parent, and for those left out the entry their children hang on instead.
     let mut parents: HashMap<&str, Option<&str>> = HashMap::new();
     let mut moved: HashMap<&str, Option<String>> = HashMap::new();
-    // The model of the latest reply: the one a compaction after it was written by.
     let mut replied: Option<String> = None;
     let mut at = 0;
     for (i, e) in pi.iter().enumerate() {
@@ -107,7 +95,6 @@ fn convert(e: &Value, out: &mut Converted, replied: &mut Option<String>) -> Resu
         }
         "custom_message" => Body::Notice(notice(e)),
         "custom" => match s("customType") {
-            // One pi can't read is one it skips.
             Some("codemode-store") => match stored(e.get("data")) {
                 Some(values) => Body::Store { values },
                 None => return Ok(Outcome::Drop("custom:codemode-store".into())),
@@ -134,11 +121,7 @@ fn convert(e: &Value, out: &mut Converted, replied: &mut Option<String>) -> Resu
             out.effort = s("thinkingLevel").map(str::to_owned).or(out.effort.take());
             return Ok(Outcome::Drop(kind.into()));
         }
-        // The thread's name is on its row; a label is pi's TUI's; `usage` is a cache warm,
-        // which the old db never counted either.
         "session_info" | "label" | "usage" => return Ok(Outcome::Drop(kind.into())),
-        // Not one pi wrote under dirigent (`context_edit`, a newer pi's): what it meant to
-        // the model is lost.
         other => return Err(format!("an entry of a type we don't know, {other:?}")),
     }))
 }
@@ -176,13 +159,11 @@ fn message(m: &Value) -> Result<Outcome, String> {
             is_error: m.get("isError").and_then(Value::as_bool).unwrap_or(false),
             duration_ms,
         }),
-        // Pi's snapshots of its system prompt and tools: ours is made for every request.
         Some("system") => return Ok(Outcome::Drop("message:system".into())),
         other => return Err(format!("a message of role {:?}", other.unwrap_or_default())),
     }))
 }
 
-/// A message's content: a string, or blocks.
 fn blocks(content: Option<&Value>) -> Result<Vec<Block>, String> {
     match content {
         Some(Value::String(text)) => Ok(vec![Block::text(text.as_str())]),
@@ -202,8 +183,6 @@ fn block(b: &Value) -> Result<Block, String> {
             mime: s("mimeType").unwrap_or("application/octet-stream").to_owned(),
             blob: s("blob").ok_or("an image whose bytes are not in a blob")?.to_owned(),
         },
-        // Its signature was the old wire's proof: the new one has no use for it, so a
-        // migrated thread goes on without its reasoning.
         Some("thinking") => Block::Thinking {
             text: s("thinking").unwrap_or_default().to_owned(),
             signature: None,
@@ -229,8 +208,7 @@ fn usage(u: &Value) -> Usage {
     let dollars = |k: &str| u.get("cost").and_then(|c| c.get(k)).and_then(Value::as_f64);
     let part = |k: &str| dollars(k).unwrap_or(0.0);
     let mut cost = Cost { input: part("input"), output: part("output"), cache_read: part("cacheRead"), cache_write: part("cacheWrite") };
-    // Pi's total is what was counted so far. Where a provider gave it and the parts don't
-    // add up to it, they are scaled until they do.
+    // MUST KILL: extract: scale_to_total(cost, total) out of usage, so rescaling the parts to pi's total has a name
     let sum = cost.total();
     if let Some(total) = dollars("total").filter(|total| (total - sum).abs() > 1e-9) {
         let scale = |part: f64| part * total / sum;
@@ -248,8 +226,6 @@ fn usage(u: &Value) -> Usage {
     Usage { input: tokens("input"), output: tokens("output"), cache_read: tokens("cacheRead"), cache_write: tokens("cacheWrite"), cost }
 }
 
-/// A `custom_message`: what its host told the model. The ones dirigent wrote carry what
-/// clients show as `details`, under the names of the `Notice`'s own fields.
 fn notice(e: &Value) -> Notice {
     let text = match e.get("content") {
         Some(Value::String(text)) => text.clone(),
@@ -263,7 +239,6 @@ fn notice(e: &Value) -> Notice {
         Some("dirigent:job") => "job",
         Some("dirigent:child") => "child",
         Some("dirigent:answer") => "answer",
-        // `dirigent:workspace`, and whatever an extension said.
         _ => return Notice::Info { text },
     };
     let mut fields = e.get("details").and_then(Value::as_object).cloned().unwrap_or_default();
@@ -272,12 +247,9 @@ fn notice(e: &Value) -> Notice {
     if let Some(error) = fields.remove("error") {
         fields.insert("failed".into(), error);
     }
-    // Details that aren't what the runtime wrote: the model's text is all there is to keep.
     serde_json::from_value(Value::Object(fields)).unwrap_or(Notice::Info { text })
 }
 
-/// What a codemode script stored (`{set: {key: value}, delete: [key]}`), as `Body::Store`
-/// has it: by key, `null` for one deleted.
 fn stored(data: Option<&Value>) -> Option<BTreeMap<String, Value>> {
     let set = data?.get("set")?.as_object()?;
     let deleted = data?.get("delete")?.as_array()?.iter().map(|key| Some((key.as_str()?.to_owned(), Value::Null)));
@@ -286,9 +258,6 @@ fn stored(data: Option<&Value>) -> Option<BTreeMap<String, Value>> {
     Some(values)
 }
 
-/// The entry a compaction keeps the history from: pi's (`first`), or, where that one was
-/// left out, the next one toward the compaction `id` that wasn't (the compaction itself,
-/// when there is none: it keeps nothing).
 fn first_kept_entry(
     first: &str,
     id: &str,
@@ -296,7 +265,6 @@ fn first_kept_entry(
     parents: &HashMap<&str, Option<&str>>,
     moved: &HashMap<&str, Option<String>>,
 ) -> String {
-    // The compaction's ancestors up to `first`, nearest first.
     let mut path = vec![];
     let mut next = parent;
     while let Some(entry) = next
@@ -312,17 +280,15 @@ fn first_kept_entry(
     path.iter().rev().find(|entry| !moved.contains_key(*entry)).copied().unwrap_or(id).to_owned()
 }
 
-/// Unix millis of a timestamp as JavaScript writes them (`2026-01-02T03:04:05.678Z`).
+// MUST KILL: extract: days_from_civil(y, m, d) out of iso_ms, so its era/March-year arithmetic has a name
 fn iso_ms(s: &str) -> Option<i64> {
     let (date, time) = s.trim_end_matches('Z').split_once('T')?;
-    // Two digits each, the year four: nothing here grows past what the sums below hold.
     let number = |n: &str| n.parse::<u16>().ok().map(i64::from);
     let mut date = date.splitn(3, '-').map(number);
     let (y, m, d) = (date.next()??, date.next()??, date.next()??);
     let mut time = time.splitn(3, ':');
     let (h, min) = (number(time.next()?)?, number(time.next()?)?);
     let s = time.next()?.parse::<f64>().ok().filter(|s| (0.0..61.0).contains(s))?;
-    // Days since 1970 (Howard Hinnant's `days_from_civil`): years start in March there.
     let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
     let era = y.div_euclid(400);
     let year = y - era * 400;
@@ -354,7 +320,6 @@ pub fn provider(model: &str, pi: &str) -> String {
     made_by.to_owned()
 }
 
-/// What `agent_dir` made of pi's agent dir, a line each.
 #[derive(Debug, Default, PartialEq)]
 pub struct Imported {
     /// What it brought over: for the log.
@@ -387,12 +352,11 @@ pub fn agent_dir(pi: &Path, dirs: &Dirs, config: &mut Config) -> Imported {
     let settings = read_json(&pi.join("settings.json"), left);
     if let Some(theirs) = settings.as_ref().and_then(|s| s.get("compaction")) {
         let tokens = |of: &Value, key: &str| of.get(key).and_then(Value::as_u64);
-        // Ours at its defaults is ours not set.
+        // MUST KILL: type: make Config.compaction an Option, so agent_dir needn't treat "equal to the defaults" as "not set"
         if config.compaction == Compaction::default() {
             config.compaction.reserve = tokens(theirs, "reserveTokens").unwrap_or(config.compaction.reserve);
             config.compaction.keep_recent = tokens(theirs, "keepRecentTokens").unwrap_or(config.compaction.keep_recent);
         }
-        // By `provider/id` there; the first of a model's that says so sets ours.
         for (model, over) in theirs.get("modelOverrides").and_then(Value::as_object).into_iter().flatten() {
             if let Some(reserve) = tokens(over, "reserveTokens") {
                 config.models.entry(model_id(model)).or_default().reserve.get_or_insert(reserve);
@@ -402,7 +366,6 @@ pub fn agent_dir(pi: &Path, dirs: &Dirs, config: &mut Config) -> Imported {
             notes.push("compaction is set as in pi's settings.json".into());
         }
     }
-    // (Without the directory the copies say what is wrong.)
     let _ = std::fs::create_dir_all(&dirs.config);
     for name in ["AGENTS.md", "skills"] {
         let (from, to) = (pi.join(name), dirs.config.join(name));
@@ -410,7 +373,6 @@ pub fn agent_dir(pi: &Path, dirs: &Dirs, config: &mut Config) -> Imported {
         if from.symlink_metadata().is_err() || to.symlink_metadata().is_ok() {
             continue;
         }
-        // Through a `.new` that is renamed once whole: half a copy would count as there.
         let staging = dirs.config.join(format!("{name}.new"));
         remove(&staging);
         if let Err(e) = copy(&from, &staging, true).and_then(|()| std::fs::rename(&staging, &to)) {
@@ -428,8 +390,6 @@ pub fn agent_dir(pi: &Path, dirs: &Dirs, config: &mut Config) -> Imported {
     imported
 }
 
-/// A JSON file of pi's, if it is there. One that can't be read is a line for the user:
-/// the rest still comes along.
 fn read_json(path: &Path, notes: &mut Vec<String>) -> Option<Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -442,16 +402,12 @@ fn read_json(path: &Path, notes: &mut Vec<String>) -> Option<Value> {
     serde_json::from_str::<Value>(&text).map_err(|e| notes.push(format!("{} not read: {e}", path.display()))).ok()
 }
 
-/// Copy a file or a directory with all in it. A symlink stays one (on unix; elsewhere it
-/// is followed): home-manager keeps pointing them. A relative one `at_top` moves to
-/// another directory, so it is pointed at what it led to, and not by way of the directory
-/// it was in: pi's, which goes. Those below move along with what they point to.
+// MUST KILL: extract: copy's unix symlink branch into a #[cfg(unix)] fn, so this allow(unused_variables) can go
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn copy(from: &Path, to: &Path, at_top: bool) -> std::io::Result<()> {
     if cfg!(unix) && from.symlink_metadata()?.is_symlink() {
         let target = std::fs::read_link(from)?;
         let target = if at_top && target.is_relative() {
-            // (Nothing before the `..` is a link, with the directory the real one.)
             let led_to = from.parent().unwrap_or(Path::new("")).canonicalize()?.join(target);
             let mut tidy = PathBuf::new();
             for part in led_to.components() {
@@ -479,7 +435,6 @@ fn copy(from: &Path, to: &Path, at_top: bool) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Remove what a copy that failed left: a file, a link or a directory.
 fn remove(path: &Path) {
     if path.symlink_metadata().is_ok_and(|m| m.is_dir()) {
         let _ = std::fs::remove_dir_all(path);
@@ -496,7 +451,6 @@ mod tests {
     use dirigent_protocol::transcript::branch;
     use serde_json::json;
 
-    /// A pi entry: `fields` with an id, a parent and a time.
     fn pi(id: &str, parent: Option<&str>, mut fields: Value) -> Value {
         fields["id"] = id.into();
         fields["parentId"] = parent.into();
@@ -554,7 +508,7 @@ mod tests {
             (
                 "a",
                 Some("u2"),
-                3700, // when it ended
+                3700,
                 Body::Assistant(Assistant {
                     content: vec![
                         Block::Thinking { text: "hm".into(), signature: None, redacted: false },
@@ -616,7 +570,6 @@ mod tests {
         assert!(got.unreadable.is_empty());
     }
 
-    /// A total the provider gave is kept, whatever the parts say.
     #[test]
     fn a_cost_adds_up_to_pis_total() {
         let cost = |cost: Value| usage(&json!({"input": 1, "cost": cost})).cost;
@@ -646,7 +599,6 @@ mod tests {
             custom("d", "dirigent:answer", json!({"ask_id":"q2","questions":[],"answers":null})),
             custom("w", "dirigent:workspace", Value::Null),
             custom("o", "other-extension", json!({"x":1})),
-            // Details the runtime never wrote: the text is kept.
             custom("broken", "dirigent:job", json!({"job_id":7})),
             pi("s", None, json!({"type":"branch_summary","fromId":"x","summary":"tried A"})),
         ]);
@@ -713,8 +665,6 @@ mod tests {
         assert!(got.unreadable.is_empty());
     }
 
-    /// An edit branched the thread: both branches survive, each on its nearest ancestor
-    /// that was kept, and the current one is the same messages as before.
     #[test]
     fn the_tree_stays_whole() {
         let user = |id: &str, parent: Option<&str>| message(id, parent, json!({"role":"user","content":id,"timestamp":1}));
@@ -726,7 +676,6 @@ mod tests {
             system("s1", "u1"),
             pi("n", Some("s1"), json!({"type":"session_info","name":"A title"})),
             user("u2", Some("n")),
-            // An edit of u2: pi goes back to its parent, and writes its prompt again.
             system("s2", "n"),
             user("u3", Some("s2")),
         ]);
@@ -754,12 +703,9 @@ mod tests {
             message("s", Some("a"), json!({"role":"system","content":"","timestamp":1})),
             user("u", "s"),
             compaction("c1", "u", "u"),
-            // Pi kept from an entry we left out: the next one after it is the first kept.
             compaction("c2", "c1", "s"),
-            // ... and there is none after this one.
             pi("l", Some("c2"), json!({"type":"label","targetId":"u","label":"x"})),
             compaction("c3", "l", "l"),
-            // Keeping nothing is pi's own id there, and stays.
             compaction("c4", "c3", "c4"),
         ]);
         let first_kept = |e: &Entry| match &e.body {
@@ -772,7 +718,6 @@ mod tests {
         assert_eq!(got.entries[2].body, want);
     }
 
-    /// What can't be read is kept as an entry of no kind, in its place in the tree, and said.
     #[test]
     fn an_entry_that_cant_be_read_locks_the_thread() {
         let got = entries(&[
@@ -811,7 +756,6 @@ mod tests {
         assert_eq!([iso_ms("yesterday"), iso_ms("2024-02-29T23:59:1e300Z")], [None, None]);
     }
 
-    /// Pi's dir goes once it is brought over: what a link of its led to stays reachable.
     #[cfg(unix)]
     #[test]
     fn a_relative_link_leads_where_it_did_without_pis_dir() {
@@ -850,7 +794,6 @@ mod tests {
             std::os::unix::fs::symlink("SKILL.md", pi.join("skills/commit/alias.md")).unwrap();
         }
 
-        // As the service does it: what it sets is saved with the rest brought over.
         let import = |pi: &Path| {
             let mut imported = Imported::default();
             let saved = Config::update(&dirs, |config| {
@@ -871,12 +814,10 @@ mod tests {
             assert_eq!(std::fs::read_link(dirs.config.join("skills/commit/alias.md")).unwrap(), Path::new("SKILL.md"));
         }
         assert!(!dirs.config.join("mcp.json").exists() && !dirs.config.join("skills.new").exists());
-        // What pi had and we have no place for is the user's to move.
         assert_eq!(left.len(), 1, "{left:?}");
         assert!(left[0].contains("APPEND_SYSTEM.md is not carried over"), "{left:?}");
         assert!(done.iter().chain(&left).all(|n| !n.contains("sk-secret")), "{done:?} {left:?}");
 
-        // What is ours by now stays ours, and pi's dir is as it was.
         Config::update(&dirs, |c| {
             c.proxy.url = "http://proxy:1".into();
             c.compaction.reserve = 5;
@@ -890,11 +831,9 @@ mod tests {
         assert_eq!((config.proxy.url.as_str(), config.compaction.reserve), ("http://proxy:1", 5));
         assert_eq!(std::fs::read_to_string(dirs.config.join("skills/commit/SKILL.md")).unwrap(), "mine");
         assert_eq!(std::fs::read_to_string(pi.join("skills/commit/SKILL.md")).unwrap(), "how");
-        // No pi dir at all: nothing to bring, nothing wrong.
         assert_eq!(import(&tmp.path().join("nowhere")), Imported::default());
     }
 
-    /// What can't be copied is said, for the user to do, and the rest still comes.
     #[cfg(unix)]
     #[test]
     fn what_does_not_come_along_is_left_to_the_user() {
@@ -905,7 +844,6 @@ mod tests {
         std::fs::write(pi.join("AGENTS.md"), "Be brief.").unwrap();
         std::fs::write(pi.join("cliproxyapi.json"), r#"{"baseUrl":"http://127.0.0.1:8317","apiKey":"k"}"#).unwrap();
         std::fs::write(pi.join("settings.json"), "{ not json").unwrap();
-        // A file that can't be copied: a socket.
         let _listening = std::os::unix::net::UnixListener::bind(pi.join("skills/commit/socket")).unwrap();
 
         let mut config = Config::default();
@@ -913,7 +851,6 @@ mod tests {
         assert_eq!(config.proxy.url, "http://127.0.0.1:8317");
         assert_eq!(std::fs::read_to_string(dirs.config.join("AGENTS.md")).unwrap(), "Be brief.");
         assert_eq!(done.len(), 2, "{done:?}");
-        // Nothing half there: a copy that failed is none.
         assert!(!dirs.config.join("skills").exists() && !dirs.config.join("skills.new").exists());
         let (settings, skills) = (pi.join("settings.json"), pi.join("skills"));
         assert_eq!(left.len(), 2, "{left:?}");

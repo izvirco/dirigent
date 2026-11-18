@@ -24,20 +24,14 @@ CALLER=$PWD
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
-# Everything the script writes goes under one directory per user: /tmp is shared, and a
-# directory another user made can't be written to. Nor trusted: `$ENV` below is sourced.
 BASE=/tmp/dirigent-ui-$(id -un)
 mkdir -p "$BASE"
 [ -O "$BASE" ] || { echo "$BASE belongs to another user" >&2; exit 1; }
 
-# Tools (xdotool, sqlite, imagemagick, lavapipe, setsid, ss, pgrep; Lilex for the build)
-# and the app's runtime libs come from the dev shell, not from the caller's PATH, which differs
-# from user to user. `nix develop` costs seconds per call, so its environment is cached
-# until flake.nix / flake.lock change. Always sourced: a shell the caller entered before the
-# flake last changed may lack newer tools.
 NIX=(nix develop --option warn-dirty false "$ROOT" -c)
 NIX_BUILD=("${NIX[@]}")
-[ -n "${DIRIGENT_UI_VK_ICD:-}" ] && NIX_BUILD=() # already inside a dev shell: build right here
+# MUST KILL: rearchitect: detect the dev shell by an explicit marker, not by DIRIGENT_UI_VK_ICD being set
+[ -n "${DIRIGENT_UI_VK_ICD:-}" ] && NIX_BUILD=()
 ENV=$BASE/devenv-$(cat flake.nix flake.lock | sha256sum | cut -c1-16).sh
 if [ ! -s "$ENV" ]; then
   # shellcheck disable=SC2016
@@ -46,11 +40,8 @@ if [ ! -s "$ENV" ]; then
 fi
 # shellcheck disable=SC1090
 source "$ENV"
-# `UI_PATH`: directories put before the dev shell's PATH, for fakes the app should run instead
-# (`ssh`, `xdg-open`; see testing.md).
 [ -n "${UI_PATH:-}" ] && PATH="$UI_PATH:$PATH"
 
-# One session per agent thread unless told otherwise, so parallel agents never share one.
 if [ -n "${UI_SESSION:-}" ]; then
   SESSION=$UI_SESSION
 elif [ -n "${DIRIGENT_THREAD_ID:-}" ]; then
@@ -59,24 +50,17 @@ else
   SESSION=default
 fi
 DIR=$BASE/$SESSION
-# The checkout's own target dir, the one `cargo test` uses. Never share one across checkouts:
-# cargo maps every checkout's crates onto the same files and judges freshness by mtime, so
-# one checkout would run another's build. The dev shell's sccache warms a fresh one.
 BIN=$ROOT/target/debug/dirigent_desktop
 mkdir -p "$DIR"
 
-# The session's app by its command line (absolute binary, then the session's data dir): an
-# app that restarted itself (`update.rs`) has a new pid and process group. An update installs
-# into the session's own prefix (DIRIGENT_PREFIX, never ~/.local) and starts from there.
 PREFIX=$DIR/prefix
 APP_CMD="^($BIN|$PREFIX/lib/dirigent(-nightly)?/dirigent) --data-dir $DIR/data( |$)"
+# MUST KILL: extract: one app_pids lookup (pid file, else APP_CMD) shared by alive and kill_app
 alive() {
   [ -f "$DIR/app.pid" ] && kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null && return
   pgrep -f "$APP_CMD" >/dev/null
 }
-# The app is started with setsid, so pid == process group: this also takes down what its
-# embedded service started, and nothing outside the session. A restarted app is signalled
-# by its command line.
+# MUST KILL: extract: a kill_group helper naming the setsid process-group kill
 kill_app() {
   if alive; then
     [ -f "$DIR/app.pid" ] && { kill -TERM -- "-$(cat "$DIR/app.pid")" 2>/dev/null || true; }
@@ -87,7 +71,6 @@ kill_app() {
   fi
   rm -f "$DIR/app.pid"
 }
-# The session's display is up and a private screen: an Xvfb of this user's serves it.
 private_screen() {
   ss -Hxlp 2>/dev/null | grep -F "/tmp/.X11-unix/X$1 " | grep -q '"Xvfb"'
 }
@@ -100,11 +83,9 @@ need_display() {
 need_app() {
   alive || { echo "the app of session '$SESSION' isn't running; run: scripts/ui.sh start DISPLAY" >&2; exit 1; }
 }
-# The service port: every live private screen has its own display number, so no two collide.
 port() { echo $((7800 + $(cat "$DIR/display"))); }
 rpc() { node "$ROOT/scripts/ui-rpc.mjs" "$(port)" "$@"; }
 
-# Only errors are printed; the last line says what happened.
 build() {
   if ! "${NIX_BUILD[@]}" cargo build -q -p dirigent_desktop --message-format short 2>"$DIR/build.log"; then
     grep -E 'error' "$DIR/build.log" | grep -v '^error: could not compile' | head -30 || true
@@ -113,9 +94,7 @@ build() {
   fi
 }
 
-# The first-run setup (`onboarding.rs`) would cover the app: a session has it marked done,
-# and a fresh one this version kept too (else the app takes the db for an old install and
-# opens the changelog). UI_ONBOARDING=1 brings it back.
+# MUST KILL: rearchitect: have the desktop skip first-run on request instead of seeding its kv rows
 onboarding() {
   local sql version
   version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
@@ -127,11 +106,7 @@ onboarding() {
   sqlite3 "$DIR/data/desktop.db" "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); $sql"
 }
 
-# Launch the app on the session's display (it must be up), filling it: the screen's pixels are
-# the window's. Dirs as flags, not XDG_*, so the agents it runs keep the real git / jj config.
-# Not the caller's DIRIGENT_THREAD_ID or UI_SESSION: the app's own agents would take them
-# for theirs (a nix dev shell they capture carries them into their commands), and their
-# `ui.sh` would act on this session, the app they run in.
+# MUST KILL: extract: a named list of the vars the test app must not inherit, out of launch
 launch() {
   DISPLAY=:$(cat "$DIR/display"); export DISPLAY
   read -r W H < <(xdotool getdisplaygeometry)
@@ -152,7 +127,6 @@ launch() {
 
 case "${1:-}" in
   start)
-    # No default: the caller's DISPLAY is the user's desktop.
     D=${2:-}; D=${D#:}
     private_screen "$D" || {
       echo "not a private screen: '${2:-}'. Open one with the computer tool (screen: private) and pass the display it names: scripts/ui.sh start :N" >&2
@@ -165,7 +139,7 @@ case "${1:-}" in
     echo "session '$SESSION' ready: ${W}x$H on $DISPLAY, service :$PORT, dir $DIR"
     ;;
   setup)
-    # The desktop reads its cache (`app.rs`'s kv keys) at launch only, hence the restart.
+    # MUST KILL: rearchitect: set model and target over rpc, not by writing desktop.db kv across a restart
     need_display; need_app
     PROJECT=${2:-$DIR/scratch}
     case $PROJECT in /*) ;; *) PROJECT=$CALLER/$PROJECT ;; esac
@@ -183,11 +157,9 @@ case "${1:-}" in
     ;;
   wait-idle)
     need_app
-    # Idle for 5 polls in a row (~2 s): a prompt just sent takes a moment to show up as
-    # running, and a parent picks its next turn up shortly after a sub-agent ends. A running
-    # async_bash job counts as busy (its end wakes the thread).
     LIMIT=${2:-300}; IDLE=0; SECONDS=0
     [ "$LIMIT" -gt 0 ] 2>/dev/null || { echo "usage: scripts/ui.sh wait-idle [SECS]" >&2; exit 1; }
+    # MUST KILL: extract: name the 5-poll settle count (SETTLE_POLLS)
     while [ $IDLE -lt 5 ]; do
       BUSY=$(rpc '{"type":"list_threads"}' 'r.threads.filter(t => t.running_since != null || t.jobs > 0).map(t => t.id + " " + t.name).join(", ")')
       if [ -n "$BUSY" ]; then IDLE=0; else IDLE=$((IDLE + 1)); fi
@@ -204,7 +176,6 @@ case "${1:-}" in
   run)
     shift
     [ $# -ge 1 ] || { echo "usage: scripts/ui.sh run CMD..." >&2; exit 1; }
-    # Never the caller's DISPLAY, the user's desktop: what CMD opens is on the session's screen or nowhere.
     unset DISPLAY
     if [ -s "$DIR/display" ] && private_screen "$(cat "$DIR/display")"; then DISPLAY=:$(cat "$DIR/display"); export DISPLAY; fi
     UI_DIR=$DIR UI_PORT=$(port 2>/dev/null || true) exec "$@"

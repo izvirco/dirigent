@@ -1,29 +1,3 @@
-//! Sqlite persistence, `<data dir>/service.db`: the host's source of truth for threads and
-//! their entries (`dirigent_protocol::transcript`). `entries.seq` is append order; a thread
-//! is `SELECT ... ORDER BY seq`, `json` the entry's `Body` and `kind` its `type`. Images
-//! are not in there: an entry names them by their id in the content-addressed `blobs`
-//! (`put_blob`).
-//!
-//! Three things are derived from an entry as it is appended (`append_entry`): a `usage`
-//! row for what a reply or a compaction used, so spend over time is one indexed query
-//! (the rows outlive their thread: the money was spent); the same on its thread's row
-//! (`spend_*`); and what a message says in `entries_fts`, the full-text index behind
-//! `SearchThreads`.
-//!
-//! `asks` holds the model's open questions to the user (`ask_user`) until they are
-//! answered. `meta` holds the service's own settings, like its id (`service_id`).
-//! `api_keys` holds the public listener's API keys, as hashes (`auth.rs`). `proxy_samples`
-//! is the history of the CLIProxyAPI accounts' limits (`proxy.rs`), a row per account and
-//! limit for every five minutes the service looked (the proxy's key is not in here).
-//!
-//! A db from when Dirigent ran pi has the same name and another schema (`from_pi`): the
-//! first start of a build with its own agent converts it where it is (`migrate`).
-//!
-//! From here on schema changes are additive and self-applying, so an existing db upgrades
-//! on open: a new table through `CREATE TABLE IF NOT EXISTS` in `SCHEMA`, a new column
-//! through an `ALTER TABLE ... ADD COLUMN` that `init` runs unless the column is there.
-//! Nothing is dropped or renamed, and no version is kept.
-
 use anyhow::{Context, Result};
 use dirigent_agent::import;
 use dirigent_protocol::transcript::{self, Body, Entry, Stop, Usage, text_of};
@@ -48,40 +22,26 @@ CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
     project_id TEXT,
     cwd TEXT NOT NULL,
-    -- Its isolated workspace directory (see `vcs`), while attached.
     workspace TEXT,
     name TEXT,
-    -- Named by hand or by a retitle (`set_name`): a generated title no longer applies.
     renamed INTEGER NOT NULL DEFAULT 0,
-    -- What its last prompt ran with: the model's id, the effort, and the tool switches
-    -- that were on, as JSON (`[\"async_bash\", ...]`).
     model TEXT,
     effort TEXT,
     tools TEXT,
-    -- The thread that spawned this one as a sub-agent (`dirigent` tool), and its `Report` /
-    -- `Notify` (snake_case names): what that parent hears when it ends, and when. NULL: the
-    -- defaults.
     parent_id TEXT,
     report TEXT,
     notify TEXT,
-    -- A fork's source thread and the last entry it copied (`fork_thread`).
     forked_from TEXT,
     forked_at TEXT,
-    -- Migrated from pi with entries that could not be converted: read-only.
     locked INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    -- When it was last given a task (a `Prompt` that started a turn).
     prompted_at INTEGER,
     last_run_ms INTEGER,
     archived_at INTEGER,
-    -- On top of its status group in the clients' lists.
     pinned INTEGER NOT NULL DEFAULT 0,
-    -- `updated_at` as of when it was snoozed: snoozed while `updated_at` hasn't moved past it.
     snoozed_at INTEGER,
-    -- `updated_at` as of the user's last look (unread tracking, shared by every client).
     seen_at INTEGER,
-    -- What its agent has consumed (`ThreadSummary::spend`).
     spend_cost REAL NOT NULL DEFAULT 0,
     spend_input INTEGER NOT NULL DEFAULT 0,
     spend_output INTEGER NOT NULL DEFAULT 0,
@@ -165,15 +125,13 @@ impl Storage {
         Ok(Self { conn })
     }
 
-    /// Live (not soft-deleted) projects.
     pub fn list_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare("SELECT id, path, origin, created_at FROM projects WHERE deleted_at IS NULL ORDER BY path")?;
         let rows = stmt.query_map([], |r| Ok(Project { id: r.get(0)?, path: r.get(1)?, origin: r.get(2)?, created_at: r.get(3)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Register `path` as project `id`. A path that already is a (live) project stays that
-    /// one: adding it again returns it, so a retried or repeated add makes no second row.
+    // MUST KILL: rename: add_project returns the existing project for a known path; call it add_or_get_project
     pub fn add_project(&self, id: &str, path: &str, origin: Option<&str>, now: i64) -> Result<Project> {
         // `C:\Work\x` and `c:\work\x` are one directory on Windows.
         let same = if cfg!(windows) { "path = ?1 COLLATE NOCASE" } else { "path = ?1" };
@@ -203,8 +161,7 @@ impl Storage {
         Ok(self.conn.query_row("SELECT path FROM projects WHERE id = ?1 AND deleted_at IS NULL", [id], |r| r.get(0)).optional()?)
     }
 
-    /// The project directory a thread was created in, even if the project was removed since
-    /// (its workspace still belongs to that repo).
+    // MUST KILL: rename: thread_project_path → thread_project_path_incl_deleted
     pub fn thread_project_path(&self, thread_id: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -212,7 +169,6 @@ impl Storage {
             .optional()?)
     }
 
-    /// Point the thread at `cwd`; `workspace` records the isolated directory it owns, if any.
     pub fn set_cwd(&self, id: &str, cwd: &str, workspace: Option<&str>) -> Result<()> {
         let n = self.conn.execute("UPDATE threads SET cwd = ?2, workspace = ?3 WHERE id = ?1", params![id, cwd, workspace])?;
         anyhow::ensure!(n == 1, "no such thread");
@@ -225,8 +181,6 @@ impl Storage {
         Ok(ws.flatten())
     }
 
-    /// Id of the thread's last entry, the end of its current branch: what the next one is a
-    /// child of.
     pub fn last_entry_id(&self, thread_id: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -234,9 +188,6 @@ impl Storage {
             .optional()?)
     }
 
-    /// Threads ordered by most recently updated. What only a live session knows
-    /// (`running_since`, the job counts, ...) is unset here; the caller fills it in.
-    /// `project_id` is cleared for threads whose project was removed.
     pub fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
         let mut asks: HashMap<String, Vec<Ask>> = HashMap::new();
         let mut stmt = self.conn.prepare("SELECT thread_id, json FROM asks ORDER BY created_at, rowid")?;
@@ -293,20 +244,17 @@ impl Storage {
                     .zip(r.get::<_, Option<String>>(22)?)
                     .map(|(thread_id, entry_id)| ForkedFrom { thread_id, entry_id }),
                 locked: r.get(23)?,
-                // The rest is runtime state, never stored.
                 ..Default::default()
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Remember the tool switches the client had on, for the thread's next load.
     pub fn set_tools(&self, id: &str, tools: &[String]) -> Result<()> {
         self.conn.execute("UPDATE threads SET tools = ?2 WHERE id = ?1", params![id, serde_json::to_string(tools)?])?;
         Ok(())
     }
 
-    /// The tools of the thread's last prompt; none for a thread that never had one.
     pub fn thread_tools(&self, id: &str) -> Result<Vec<String>> {
         let json: Option<Option<String>> = self.conn.query_row("SELECT tools FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         Ok(json.flatten().and_then(|j| serde_json::from_str(&j).ok()).unwrap_or_default())
@@ -320,7 +268,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Remove the ask and return it, if it was still open.
     pub fn take_ask(&self, thread_id: &str, ask_id: &str) -> Result<Option<Ask>> {
         let json: Option<String> = self
             .conn
@@ -330,9 +277,7 @@ impl Storage {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    /// A `Prompt` with `text` started a turn at `now`; `model` (its id) and `effort` are
-    /// what the run will use: the thread's from now on, where given. A thread with no name
-    /// yet is named after the prompt (`prompt_title`) until its title lands.
+    // MUST KILL: extract: set_prompted also names an unnamed thread after the prompt; split that out
     pub fn set_prompted(&self, id: &str, text: &str, model: Option<&str>, effort: Option<&str>, now: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE threads SET prompted_at = ?2, name = COALESCE(name, ?3), model = COALESCE(?4, model), effort = COALESCE(?5, effort)
@@ -342,8 +287,6 @@ impl Storage {
         Ok(())
     }
 
-    /// The model and effort the thread's next run uses, as they were before a message that
-    /// was then refused (`set_prompted` sets them ahead of the run).
     pub fn set_model(&self, id: &str, model: Option<&str>, effort: Option<&str>) -> Result<()> {
         self.conn.execute("UPDATE threads SET model = ?2, effort = ?3 WHERE id = ?1", params![id, model, effort])?;
         Ok(())
@@ -360,14 +303,11 @@ impl Storage {
         Ok(())
     }
 
-    /// Restore the thread if it is archived; false when it wasn't (nothing to push). Archive
-    /// holds threads at rest: a message or a run brings one back, for good.
     pub fn unarchive(&self, id: &str) -> Result<bool> {
         let n = self.conn.execute("UPDATE threads SET archived_at = NULL WHERE id = ?1 AND archived_at IS NOT NULL", [id])?;
         Ok(n == 1)
     }
 
-    /// Snooze as of the thread's current `updated_at` (its next run wakes it), or wake it.
     pub fn set_snoozed(&self, id: &str, snoozed: bool) -> Result<()> {
         let sql = if snoozed {
             "UPDATE threads SET snoozed_at = updated_at WHERE id = ?1"
@@ -385,15 +325,13 @@ impl Storage {
         Ok(())
     }
 
-    /// A name given by hand or by a retitle. It sticks: a first prompt's title (`set_title`),
-    /// which may still be on its way, no longer applies.
     pub fn set_name(&self, id: &str, name: &str) -> Result<()> {
         let n = self.conn.execute("UPDATE threads SET name = ?2, renamed = 1 WHERE id = ?1", params![id, name])?;
         anyhow::ensure!(n == 1, "no such thread");
         Ok(())
     }
 
-    /// The title generated from the thread's first prompt. A name given since (`set_name`) wins.
+    // MUST KILL: rename: set_title → set_title_unless_renamed
     pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
         self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1 AND renamed = 0", params![id, title])?;
         Ok(())
@@ -410,8 +348,6 @@ impl Storage {
         Ok(())
     }
 
-    /// Move the thread's `seen_at` forward to `updated_at`; false when it was already there
-    /// (or further), so a client re-marking what it already saw causes no push.
     pub fn set_seen(&self, id: &str, updated_at: i64) -> Result<bool> {
         let n = self
             .conn
@@ -419,19 +355,16 @@ impl Storage {
         Ok(n == 1)
     }
 
-    /// The thread that spawned this one, if any.
     pub fn thread_parent(&self, id: &str) -> Result<Option<String>> {
         let p: Option<Option<String>> =
             self.conn.query_row("SELECT parent_id FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?;
         Ok(p.flatten())
     }
 
-    /// The thread is read-only (`ThreadSummary::locked`): it takes no prompt.
     pub fn thread_locked(&self, id: &str) -> Result<bool> {
         Ok(self.conn.query_row("SELECT locked FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?.unwrap_or(false))
     }
 
-    /// How the sub-agent's parent is told it ended (see `report`).
     pub fn set_report(&self, id: &str, report: Report, notify: Notify) -> Result<()> {
         let name = |v: Value| v.as_str().map(str::to_owned);
         self.conn.execute(
@@ -441,8 +374,6 @@ impl Storage {
         Ok(())
     }
 
-    /// What the sub-agent's parent hears when it ends, and when; the defaults for a thread
-    /// spawned without them.
     pub fn report(&self, id: &str) -> Result<(Report, Notify)> {
         let (report, notify): (Option<String>, Option<String>) =
             self.conn.query_row("SELECT report, notify FROM threads WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -452,7 +383,6 @@ impl Storage {
         Ok((parse(report), parse(notify)))
     }
 
-    /// The thread and its sub-agents, at any depth.
     pub fn family(&self, id: &str) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             "WITH RECURSIVE f(id) AS (SELECT ?1 UNION SELECT t.id FROM threads t JOIN f ON t.parent_id = f.id) SELECT id FROM f",
@@ -460,7 +390,6 @@ impl Storage {
         Ok(stmt.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// How many ancestors the thread has (0 for a root).
     pub fn depth(&self, id: &str) -> Result<usize> {
         let mut depth = 0;
         let mut cur = self.thread_parent(id)?;
@@ -474,17 +403,12 @@ impl Storage {
         Ok(depth)
     }
 
-    /// The text of the reply that ended the thread's last run, if one did: after the latest
-    /// user message there is none while the run goes on, or when it was aborted or failed.
     pub fn last_reply(&self, thread_id: &str) -> Result<Option<String>> {
         let Some(entries) = self.get_thread(thread_id)? else { return Ok(None) };
         let reply = current_branch(&entries).into_iter().rev().take_while(|e| !matches!(e.body, Body::User { .. })).find_map(final_reply);
         Ok(reply.filter(|text| !text.trim().is_empty()))
     }
 
-    /// What a retitle reads (`title::digest`): the text of the user messages on the
-    /// thread's current branch (an edited one's old messages are gone from it), oldest
-    /// first, and of its latest final reply (whether or not a run came after it).
     pub fn conversation(&self, thread_id: &str) -> Result<(Vec<String>, Option<String>)> {
         let entries = self.get_thread(thread_id)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
         let branch = current_branch(&entries);
@@ -497,8 +421,6 @@ impl Storage {
         Ok((prompts.collect(), reply))
     }
 
-    /// Full-text search: the best-matching passage per thread, best thread first. Every
-    /// word of `query` must match (as a prefix), in any message of the thread.
     pub fn search(&self, query: &str, limit: u64) -> Result<Vec<SearchHit>> {
         // Quote each word so punctuation in the query can't break FTS5's syntax.
         let terms: Vec<String> = query.split_whitespace().map(|w| format!("\"{}\"*", w.replace('"', "\"\""))).collect();
@@ -562,12 +484,6 @@ impl Storage {
         })
     }
 
-    /// Start thread `id` as a fork of `src`: a top-level thread with `src`'s project,
-    /// directory (not its workspace: that stays `src`'s), name, model, effort and tools, and
-    /// a copy of the branch ending at `entry_id`. The copy is history, not activity: it
-    /// counts toward neither usage nor the fork's spend, but search finds it. A locked
-    /// thread's fork is locked too, unless it forks off before what could not be converted.
-    /// Returns the fork's summary as `list_threads` has it.
     pub fn fork_thread(&self, src: &str, entry_id: &str, id: &str, now: i64) -> Result<ThreadSummary> {
         let entries = self.get_thread(src)?.ok_or_else(|| anyhow::anyhow!("no such thread"))?;
         let branch = transcript::branch(&entries, entry_id);
@@ -580,8 +496,6 @@ impl Storage {
             params![id, unread, now, entry_id, src],
         )?;
         for (seq, e) in branch.iter().enumerate() {
-            // The row as it is, not as this build reads it: an entry of a kind only a newer
-            // build knows stays whole.
             tx.execute(
                 "INSERT INTO entries (thread_id, seq, id, parent_id, at, kind, json)
                  SELECT ?1, ?2, id, parent_id, at, kind, json FROM entries WHERE thread_id = ?3 AND seq = ?4",
@@ -593,7 +507,6 @@ impl Storage {
         self.list_threads()?.into_iter().find(|t| t.id == id).ok_or_else(|| anyhow::anyhow!("fork vanished"))
     }
 
-    /// The entry is a message the user typed in the thread: what `EditMessage` rewrites.
     pub fn is_user_message(&self, thread_id: &str, entry_id: &str) -> Result<bool> {
         Ok(self.conn.query_row(
             "SELECT EXISTS (SELECT 1 FROM entries WHERE thread_id = ?1 AND id = ?2 AND kind = 'user')",
@@ -602,7 +515,6 @@ impl Storage {
         )?)
     }
 
-    /// The model (its id) and the effort the thread last ran with.
     pub fn thread_model(&self, id: &str) -> Result<(Option<String>, Option<String>)> {
         let row = self.conn.query_row("SELECT model, effort FROM threads WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)));
         Ok(row.optional()?.unwrap_or_default())
@@ -612,8 +524,6 @@ impl Storage {
         Ok(self.conn.query_row("SELECT cwd FROM threads WHERE id = ?1", [id], |r| r.get(0)).optional()?)
     }
 
-    /// All the thread's entries, in order. One this build can't read (a newer one wrote
-    /// it) is a `Body::Unknown`.
     pub fn get_thread(&self, id: &str) -> Result<Option<Vec<Entry>>> {
         if self.thread_cwd(id)?.is_none() {
             return Ok(None);
@@ -631,11 +541,6 @@ impl Storage {
         Ok(Some(entries.collect::<rusqlite::Result<_>>()?))
     }
 
-    /// Append an entry; returns it with its `seq`. Counts what it used and indexes what it
-    /// says (see the module doc), and bumps `updated_at` to `now` for what the transcript
-    /// shows, so a script's stored values don't mark the thread unread or move it up the inbox.
-    /// An entry that was on its way when its thread was deleted is refused: nothing of a
-    /// thread is kept without it (a search would find it).
     pub fn append_entry(&self, thread_id: &str, mut entry: Entry, now: i64) -> Result<Entry> {
         let tx = self.conn.unchecked_transaction()?;
         let exists: bool = tx.query_row("SELECT EXISTS (SELECT 1 FROM threads WHERE id = ?1)", [thread_id], |r| r.get(0))?;
@@ -648,6 +553,7 @@ impl Storage {
             add_usage(&tx, entry.at, &provider, model, usage)?;
             add_spend(&tx, thread_id, usage)?;
         }
+        // MUST KILL: extract: a moves_updated_at(&Body) helper instead of the inline Store exception to the updated_at bump
         if !matches!(entry.body, Body::Store { .. }) {
             tx.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
         }
@@ -655,7 +561,6 @@ impl Storage {
         Ok(entry)
     }
 
-    /// Keep an API key (`auth.rs`) by the sha256 of its text; the text itself is never stored.
     pub fn add_key(&self, name: &str, hash: &str, at: i64) -> Result<()> {
         anyhow::ensure!(!name.trim().is_empty(), "a key needs a name");
         let added =
@@ -664,33 +569,26 @@ impl Storage {
         Ok(())
     }
 
-    /// The name of the key whose text hashes to `hash`, if it hasn't been revoked.
     pub fn key_name(&self, hash: &str) -> Result<Option<String>> {
         Ok(self.conn.query_row("SELECT name FROM api_keys WHERE hash = ?1", [hash], |r| r.get(0)).optional()?)
     }
 
-    /// Every key: name and when it was made (unix ms), oldest first.
     pub fn keys(&self) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare("SELECT name, created_at FROM api_keys ORDER BY created_at")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Forget a key; false if there was none by that name.
     pub fn revoke_key(&self, name: &str) -> Result<bool> {
         Ok(self.conn.execute("DELETE FROM api_keys WHERE name = ?1", [name])? == 1)
     }
 
-    /// This service's id (`ServerMessage::Hello`): random, made on first use and kept.
     pub fn service_id(&self) -> Result<String> {
         let id = uuid::Uuid::new_v4().simple().to_string();
         self.conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('service_id', ?1)", [&id])?;
         Ok(self.conn.query_row("SELECT value FROM meta WHERE key = 'service_id'", [], |r| r.get(0))?)
     }
 
-    /// Keep what the proxy's limits stood at (`(account, limit, used)`) for the slot `at`
-    /// starts: a later look in the same slot replaces it. Slots from before `keep_from`
-    /// are dropped.
     pub fn add_proxy_samples(&self, at: i64, samples: &[(&str, &str, f64)], keep_from: i64) -> Result<()> {
         let mut add = self.conn.prepare_cached("INSERT OR REPLACE INTO proxy_samples (at, account, name, used) VALUES (?1, ?2, ?3, ?4)")?;
         for (account, name, used) in samples {
@@ -700,8 +598,6 @@ impl Storage {
         Ok(())
     }
 
-    /// The limits' history in `since..until`: the highest use per `bucket`-wide slot from
-    /// `since`, account and limit, oldest slot first.
     pub fn proxy_samples(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<ProxySample>> {
         anyhow::ensure!(bucket > 0, "bucket must be positive");
         let mut stmt = self.conn.prepare(
@@ -715,8 +611,6 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Usage in `since..until`, summed per `bucket`-wide slot from `since` and per
-    /// provider (who makes the model) + model, oldest slot first.
     pub fn usage(&self, since: i64, until: i64, bucket: i64) -> Result<Vec<UsageBucket>> {
         anyhow::ensure!(bucket > 0, "bucket must be positive");
         let mut stmt = self.conn.prepare(
@@ -741,8 +635,6 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Keep an image's bytes; returns their id (their sha256, hex), what entries name them
-    /// by. Identical images share one row.
     pub fn put_blob(&self, mime: &str, bytes: &[u8]) -> Result<String> {
         let id = format!("{:x}", Sha256::digest(bytes));
         self.conn.execute("INSERT OR IGNORE INTO blobs (id, mime, bytes) VALUES (?1, ?2, ?3)", params![id, mime, bytes])?;
@@ -754,12 +646,10 @@ impl Storage {
     }
 }
 
-/// The thread's current branch: its last entry and that one's ancestors, oldest first.
 fn current_branch(entries: &[Entry]) -> Vec<&Entry> {
     entries.last().map(|last| transcript::branch(entries, &last.id)).unwrap_or_default()
 }
 
-/// The text of a reply that ended a run: the model was done, or out of room.
 fn final_reply(entry: &Entry) -> Option<String> {
     match &entry.body {
         Body::Assistant(a) if matches!(a.stop, Stop::End | Stop::MaxTokens) => Some(text_of(&a.content)),
@@ -775,7 +665,6 @@ fn insert_entry(conn: &Connection, thread_id: &str, entry: &Entry) -> Result<()>
     Ok(())
 }
 
-/// Index what a message says for `search`: a user's and an assistant's text.
 fn index_text(conn: &Connection, thread_id: &str, body: &Body) -> Result<()> {
     let text = match body {
         Body::User { content } => text_of(content),
@@ -788,21 +677,16 @@ fn index_text(conn: &Connection, thread_id: &str, body: &Body) -> Result<()> {
     Ok(())
 }
 
-/// What the request behind an entry used, and the provider and model that is summed
-/// under: a reply's, and a compaction's.
 fn used(body: &Body) -> Option<(String, &str, &Usage)> {
     match body {
-        // A turn the agent closed itself (a stopped run, one that failed outside a
-        // request) is no model's message: nobody made it and it used nothing.
+        // MUST KILL: type: agent-closed turns are told by empty provider and zero usage; give them a marker of their own
         Body::Assistant(a) if a.provider.is_empty() && a.usage == Usage::default() => None,
         Body::Assistant(a) => Some((a.provider.clone(), &a.model, &a.usage)),
-        // A compaction doesn't say who makes its model: the id has to.
         Body::Compaction { model, usage, .. } => Some((import::provider(model, ""), model, usage)),
         _ => None,
     }
 }
 
-/// Count `usage` as used at `at`, under who makes `model`: a row of the `usage` table.
 fn add_usage(conn: &Connection, at: i64, provider: &str, model: &str, usage: &Usage) -> Result<()> {
     conn.prepare_cached(
         "INSERT INTO usage (at, provider, model, input, output, cache_read, cache_write, cost) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -820,7 +704,6 @@ fn add_usage(conn: &Connection, at: i64, provider: &str, model: &str, usage: &Us
     Ok(())
 }
 
-/// Add `usage` to what the thread has consumed (`ThreadSummary::spend`).
 fn add_spend(conn: &Connection, thread_id: &str, usage: &Usage) -> Result<()> {
     conn.prepare_cached(
         "UPDATE threads SET spend_cost = spend_cost + ?2, spend_input = spend_input + ?3, spend_output = spend_output + ?4,
@@ -831,23 +714,15 @@ fn add_spend(conn: &Connection, thread_id: &str, usage: &Usage) -> Result<()> {
     Ok(())
 }
 
-/// What `migrate` did.
 #[derive(Debug, Default, PartialEq)]
 pub struct Migration {
     pub threads: usize,
-    /// Pi's entries, and how many of them are entries here.
     pub entries: usize,
     pub kept: usize,
-    /// The others, counted by what they were (`import::Converted::dropped`).
     pub dropped: BTreeMap<String, usize>,
-    /// The threads that could not be converted whole, read-only now, each by its name (its
-    /// id, without one) with why (`import::Converted::unreadable`).
     pub locked: Vec<(String, Vec<String>)>,
 }
 
-/// Whether `db` is pi's: a `service.db` from before the agent was Dirigent's own, which
-/// `migrate` converts. Told by its schema (a thread of pi's has a `thinking_level`); a
-/// file that isn't there is nobody's.
 pub fn from_pi(db: &Path) -> Result<bool> {
     if !db.exists() {
         return Ok(false);
@@ -862,7 +737,6 @@ pub fn from_pi(db: &Path) -> Result<bool> {
 /// A Dirigent that runs on the db would go on writing into a file that is no longer there.
 pub fn settle(db: &Path) -> Result<()> {
     let conn = Connection::open(db)?;
-    // No waiting: one that runs on it doesn't go away.
     conn.busy_timeout(std::time::Duration::ZERO)?;
     let left = match conn.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get::<_, String>(0)) {
         Ok(mode) => mode == "delete",
@@ -874,13 +748,6 @@ pub fn settle(db: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Convert `db`, pi's `service.db` (`from_pi`; `None` for any other), where it is.
-/// Everything comes along: the entries converted (`import::entries`), the rest as it is.
-/// The new db is built under another name and takes the old one's place once whole, so a
-/// migration that dies leaves pi's and the next start runs it again. `progress` is told
-/// how many threads are done, of how many. Call it with the db settled (`settle`: nobody
-/// else is on it) and one migration at a time (`migration.rs`, which has also copied what
-/// was there before).
 pub fn migrate(db: &Path, progress: impl FnMut(usize, usize)) -> Result<Option<Migration>> {
     if !from_pi(db)? {
         return Ok(None);
@@ -893,7 +760,6 @@ pub fn migrate(db: &Path, progress: impl FnMut(usize, usize)) -> Result<Option<M
     let building = beside(".migrating");
     let _ = std::fs::remove_file(&building);
     let built = build(db, &building, progress).and_then(|migration| {
-        // What sqlite left beside pi's db while it was read is not the new one's.
         for suffix in ["-wal", "-shm"] {
             let _ = std::fs::remove_file(beside(suffix));
         }
@@ -908,25 +774,18 @@ pub fn migrate(db: &Path, progress: impl FnMut(usize, usize)) -> Result<Option<M
 
 fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Result<Migration> {
     let conn = Connection::open(new)?;
-    // No journal: a build cut short is thrown away whole, and the one commit syncs the file.
     conn.pragma_update(None, "journal_mode", "OFF")?;
     conn.execute_batch(SCHEMA)?;
     conn.execute("ATTACH DATABASE ?1 AS old", [read_only_uri(old)])?;
     conn.execute_batch("BEGIN")?;
-    // As they are, inside sqlite (the blobs are most of the file). `usage` too, not counted
-    // again from the entries: its rows outlive deleted threads. (What the old db never
-    // counted, the compactions, is added below.)
     for table in ["projects", "threads", "blobs", "usage", "asks", "message_pins", "meta", "api_keys", "proxy_samples"] {
         let theirs = columns(&conn, "old", table)?;
         let both: Vec<String> = columns(&conn, "main", table)?.into_iter().filter(|c| theirs.contains(c)).collect();
-        // The columns both have: an older build's db is without the later ones, and
-        // without the later tables. In its order: asks and pins are listed in it.
         if !both.is_empty() {
             let (both, order) = (both.join(", "), if table == "proxy_samples" { "at" } else { "rowid" });
             conn.execute(&format!("INSERT INTO main.{table} ({both}) SELECT {both} FROM old.{table} ORDER BY {order}"), [])?;
         }
     }
-    // Usage is summed under who makes the model now, not under how pi reached it.
     let models: Vec<(String, String)> = {
         let mut stmt = conn.prepare("SELECT DISTINCT provider, model FROM main.usage")?;
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?
@@ -937,7 +796,6 @@ fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Resu
             params![import::provider(&model, &provider), provider, model],
         )?;
     }
-    // Derived from the entries, as they are converted.
     conn.execute("UPDATE main.threads SET spend_cost = 0, spend_input = 0, spend_output = 0, spend_cached = 0", [])?;
     let threads: Vec<String> = {
         let mut stmt = conn.prepare("SELECT id FROM main.threads")?;
@@ -955,18 +813,12 @@ fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Resu
         let pi = read.query_map([&id], |r| r.get::<_, String>(0))?;
         let pi: Vec<Value> = pi.map(|json| Ok(serde_json::from_str(&json?).unwrap_or(Value::Null))).collect::<rusqlite::Result<_>>()?;
         let converted = import::entries(&pi);
-        // A fork's entries up to where it forked are its source's history, not what it
-        // spent itself (`fork_thread`). Told by pi's entries: where it forked is one of
-        // those, and may be none of ours (a `model_change`, a `session_info`).
         let forked = forked_at.as_deref().and_then(|at| pi.iter().position(|e| pi_id(e) == Some(at)));
         let theirs: HashSet<&str> = forked.map(|at| pi[..=at].iter().filter_map(pi_id).collect()).unwrap_or_default();
         let copied = converted.entries.iter().take_while(|e| theirs.contains(e.id.as_str())).count();
-        // Where it forked is an entry of ours from here on: the last one it copied.
         if let Some(last) = copied.checked_sub(1).map(|last| &converted.entries[last]) {
             conn.execute("UPDATE main.threads SET forked_at = ?2 WHERE id = ?1", params![id, last.id])?;
         }
-        // Who makes the model at work: what a compaction is counted under when its
-        // model's id doesn't say, as that model's replies are.
         let mut made_by = String::new();
         for (i, entry) in converted.entries.iter().enumerate() {
             insert_entry(&conn, &id, entry)?;
@@ -978,11 +830,7 @@ fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Resu
                 continue;
             }
             match &entry.body {
-                // Its `usage` row came with the old db's (copied above).
                 Body::Assistant(a) => add_spend(&conn, &id, &a.usage)?,
-                // What a compaction used the old db never counted, there or on its thread:
-                // it is from here on, as `append_entry` counts a new one. (Not one of a
-                // thread that is gone, though a fork may hold its copy.)
                 Body::Compaction { model, usage, .. } if *usage != Usage::default() => {
                     add_usage(&conn, entry.at, &import::provider(model, &made_by), model, usage)?;
                     add_spend(&conn, &id, usage)?;
@@ -990,7 +838,6 @@ fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Resu
                 _ => {}
             }
         }
-        // The row has what the next run uses (a prompt sets it ahead of pi's change entries).
         let model = model.or(converted.model).map(|m| import::model_id(&m));
         conn.execute(
             "UPDATE main.threads SET model = ?2, effort = ?3, locked = ?4 WHERE id = ?1",
@@ -1014,12 +861,10 @@ fn build(old: &Path, new: &Path, mut progress: impl FnMut(usize, usize)) -> Resu
     Ok(migration)
 }
 
-/// The id of an entry of pi's.
 fn pi_id(entry: &Value) -> Option<&str> {
     entry.get("id").and_then(Value::as_str)
 }
 
-/// The columns of `schema`'s `table`; none when it has no such table.
 fn columns(conn: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(&format!("PRAGMA {schema}.table_info({table})"))?;
     Ok(stmt.query_map([], |r| r.get(1))?.collect::<rusqlite::Result<_>>()?)
@@ -1038,8 +883,6 @@ fn read_only_uri(path: &Path) -> String {
     format!("file:{path}?mode=ro")
 }
 
-/// A `service.db` as a build from before `api_keys`, `proxy_samples` and a thread's
-/// `renamed` left it, with a column and a table of features long gone.
 #[cfg(test)]
 pub(crate) const PI_SCHEMA: &str = "
     CREATE TABLE projects (id TEXT PRIMARY KEY, path TEXT NOT NULL, origin TEXT, created_at INTEGER NOT NULL, deleted_at INTEGER);
@@ -1076,7 +919,6 @@ mod tests {
         entry(id, parent, 1, Body::User { content: vec![Block::text(text)] })
     }
 
-    /// A reply by model `m` of `anthropic` that used `input` tokens for `cost` dollars.
     fn reply(id: &str, parent: &str, at: i64, stop: Stop, text: &str, input: u64, cost: f64) -> Entry {
         let usage = Usage { input, output: 10, cache_read: 100, cache_write: 5, cost: Cost { input: cost, ..Cost::default() } };
         let content = vec![Block::Thinking { text: "hm".into(), signature: None, redacted: false }, Block::text(text)];
@@ -1123,7 +965,6 @@ mod tests {
         let first = s.add_project("p1", "/x", None, 1).unwrap();
         assert_eq!(s.add_project("p2", "/x", None, 2).unwrap(), first);
         assert_eq!(s.list_projects().unwrap(), [first]);
-        // A removed project doesn't hold its path.
         s.remove_project("p1", 3).unwrap();
         assert_eq!(s.add_project("p3", "/x", None, 4).unwrap().id, "p3");
     }
@@ -1133,11 +974,9 @@ mod tests {
         let s = Storage::in_memory().unwrap();
         s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
         s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
-        // Named after its first prompt until a title arrives; the model and effort are the prompt's.
         s.set_prompted("t1", "  hello  \nworld", Some("claude-opus-5-5"), Some("high"), 10).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("hello"));
         s.set_prompted("t1", "later", None, Some("low"), 10).unwrap();
-        // An image is a blob, named by the hash of its bytes; the same bytes are the same blob.
         let blob = s.put_blob("image/png", &[1, 2, 3]).unwrap();
         assert_eq!(blob, "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81");
         assert_eq!(s.put_blob("image/png", &[1, 2, 3]).unwrap(), blob);
@@ -1168,7 +1007,6 @@ mod tests {
         for (seq, e) in appended.iter().enumerate() {
             assert_eq!(s.append_entry("t1", e.clone(), 12).unwrap(), Entry { seq: seq as u64, ..e.clone() });
         }
-        // They come back as they went in (a tool call's input with its keys in their order).
         let entries = s.get_thread("t1").unwrap().unwrap();
         assert_eq!(entries.iter().map(|e| Entry { seq: 0, ..e.clone() }).collect::<Vec<_>>(), appended);
         let Body::Assistant(a) = &entries[1].body else { panic!("not a reply") };
@@ -1189,20 +1027,16 @@ mod tests {
         assert_eq!(threads[0].project_id.as_deref(), Some("p1"));
         assert_eq!((threads[0].entry_count, threads[0].updated_at, threads[0].locked), (4, 12, false));
         assert!(s.get_thread("nope").unwrap().is_none());
-        // The generated title replaces the prompt's first line.
         s.set_title("t1", "Greeting").unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("Greeting"));
-        // What a script stored is no news: `updated_at` stays put.
         s.append_entry("t1", entry("w", Some("d"), 21, Body::Store { values: [("k".to_owned(), json!(1))].into() }), 21).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].updated_at, 12);
 
-        // A workspace moves the thread's cwd; the project path is still known afterwards.
         s.set_cwd("t1", "/ws/t1", Some("/ws/t1")).unwrap();
         assert_eq!(s.thread_workspace("t1").unwrap().as_deref(), Some("/ws/t1"));
         assert_eq!(s.list_threads().unwrap()[0].cwd, "/ws/t1");
         assert_eq!(s.last_entry_id("t1").unwrap().as_deref(), Some("w"));
 
-        // Removing the project orphans the thread but keeps it.
         s.remove_project("p1", 13).unwrap();
         assert!(s.list_projects().unwrap().is_empty());
         assert_eq!(s.list_threads().unwrap()[0].project_id, None);
@@ -1212,7 +1046,6 @@ mod tests {
         assert!(s.list_threads().unwrap()[0].archived);
         s.set_archived("t1", false, 15).unwrap();
         assert!(!s.list_threads().unwrap()[0].archived);
-        // A message to an archived thread restores it.
         assert!(!s.unarchive("t1").unwrap());
         s.set_archived("t1", true, 16).unwrap();
         assert!(s.unarchive("t1").unwrap());
@@ -1223,7 +1056,6 @@ mod tests {
         assert!(s.delete_thread("t1").is_err());
     }
 
-    /// A fork copies the branch up to its entry, and counts none of the copied spend.
     #[test]
     fn fork_copies_a_branch() {
         let s = Storage::in_memory().unwrap();
@@ -1232,7 +1064,6 @@ mod tests {
         s.set_prompted("src", "find the bug", Some("x"), Some("high"), 2).unwrap();
         s.append_entry("src", user("u1", None, "find the bug"), 3).unwrap();
         s.append_entry("src", reply("r1", "u1", 4, Stop::End, "found it", 5, 0.5), 4).unwrap();
-        // An edit of u1: u2 is a root too; r2 is the current branch's reply.
         s.append_entry("src", user("u2", None, "find the other bug"), 5).unwrap();
         s.append_entry("src", reply("r2", "u2", 6, Stop::End, "found it", 5, 0.5), 6).unwrap();
         assert!(s.is_user_message("src", "u1").unwrap() && !s.is_user_message("src", "r1").unwrap());
@@ -1251,7 +1082,6 @@ mod tests {
         assert_eq!(s.usage(0, 100, 100).unwrap()[0].messages, 2);
         assert!(s.fork_thread("src", "nope", "g", 10).is_err());
 
-        // A locked thread's fork is locked, unless it forks off before what couldn't be read.
         s.append_entry("src", entry("x", Some("r2"), 7, Body::Unknown), 7).unwrap();
         s.conn.execute("UPDATE threads SET locked = 1 WHERE id = 'src'", []).unwrap();
         assert!(s.thread_locked("src").unwrap() && by_id(&s, "src").locked && !s.thread_locked("f").unwrap());
@@ -1273,7 +1103,6 @@ mod tests {
         assert_eq!(family, ["grandkid", "kid", "root"]);
         assert_eq!(s.family("grandkid").unwrap(), ["grandkid"]);
 
-        // Snoozed until the thread's next entry moves `updated_at`.
         s.set_snoozed("root", true).unwrap();
         assert!(by_id(&s, "root").snoozed);
         s.append_entry("root", user("u", None, "find the sqlite bug"), 50).unwrap();
@@ -1282,7 +1111,6 @@ mod tests {
         s.set_snoozed("root", false).unwrap();
         assert!(!by_id(&s, "root").snoozed);
 
-        // Pins and seen marks live with the thread; `seen_at` only moves forward.
         s.set_pinned("root", true).unwrap();
         s.set_message_pin("root", "u", true).unwrap();
         s.set_message_pin("root", "u", true).unwrap();
@@ -1295,31 +1123,25 @@ mod tests {
         s.set_message_pin("root", "u", false).unwrap();
         assert!(by_id(&s, "root").pinned_entries.is_empty());
 
-        // Search covers user and assistant text; the last final reply is what a parent reads.
         s.append_entry("root", reply("a1", "u", 51, Stop::ToolUse, "looking at storage.rs", 0, 0.), 51).unwrap();
         s.append_entry("root", reply("a2", "a1", 52, Stop::End, "The bug is a missing index on usage.at", 0, 0.), 52).unwrap();
         s.append_entry("kid", user("k", None, "write docs"), 53).unwrap();
         assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
         assert_eq!(s.last_reply("kid").unwrap(), None);
         assert_eq!(s.last_reply("nope").unwrap(), None);
-        // Named by its spawner: its first prompt doesn't rename it.
         s.set_prompted("kid", "write docs", None, None, 60).unwrap();
         assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
         assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
-        // A new prompt without a reply yet (or aborted): no reply to report.
         s.append_entry("root", user("u2", Some("a2"), "and again"), 54).unwrap();
         s.append_entry("root", reply("a3", "u2", 55, Stop::Aborted, "The bug is", 0, 0.), 55).unwrap();
         assert_eq!(s.last_reply("root").unwrap(), None);
-        // A retitle reads every user message and the latest final reply, a run after it or not.
         let (prompts, reply) = s.conversation("root").unwrap();
         assert_eq!(prompts, ["find the sqlite bug", "and again"]);
         assert_eq!(reply.as_deref(), Some("The bug is a missing index on usage.at"));
-        // An edit of u2 drops it from the branch a retitle reads.
         s.append_entry("root", user("u3", Some("a2"), "once more"), 56).unwrap();
         assert_eq!(s.conversation("root").unwrap().0, ["find the sqlite bug", "once more"]);
         s.set_name("root", "Missing usage index").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
-        // A first title landing after it doesn't replace it.
         s.set_title("root", "Sqlite bug").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
         assert!(s.set_name("nope", "x").is_err());
@@ -1328,13 +1150,11 @@ mod tests {
         assert_eq!(hits[0].thread_id, "root");
         assert!(hits[0].snippet.contains("sqlite"));
         assert_eq!(s.search("docs", 10).unwrap()[0].thread_id, "kid");
-        // Thinking is not what was said.
         assert!(s.search("hm", 10).unwrap().is_empty());
         assert!(s.search("\"weird) syntax", 10).unwrap().is_empty());
         assert_eq!(s.search("", 10).unwrap().len(), 0);
         s.delete_thread("root").unwrap();
         assert!(s.search("index", 10).unwrap().is_empty());
-        // Nor does an entry that was still on its way bring any of it back.
         s.append_entry("root", user("late", None, "the index again"), 60).unwrap_err();
         assert!(s.search("index", 10).unwrap().is_empty());
     }
@@ -1351,14 +1171,12 @@ mod tests {
     fn proxy_samples_keep_the_slots_peak() {
         let s = Storage::in_memory().unwrap();
         s.add_proxy_samples(100, &[("a", "5h", 0.2), ("a", "7d", 0.1)], 0).unwrap();
-        // A second look in the same slot replaces the first.
         s.add_proxy_samples(100, &[("a", "5h", 0.3)], 0).unwrap();
         s.add_proxy_samples(200, &[("a", "5h", 0.9)], 0).unwrap();
         s.add_proxy_samples(1100, &[("a", "5h", 0.)], 0).unwrap();
         let got = s.proxy_samples(0, 2000, 1000).unwrap();
         let row = |start: i64, limit: &str, used: f64| ProxySample { start, account: "a".into(), limit: limit.into(), used };
         assert_eq!(got, [row(0, "5h", 0.9), row(0, "7d", 0.1), row(1000, "5h", 0.)]);
-        // Old slots go as new ones come.
         s.add_proxy_samples(1200, &[("a", "5h", 0.5)], 1000).unwrap();
         assert_eq!(s.proxy_samples(0, 2000, 1000).unwrap(), [row(1000, "5h", 0.5)]);
     }
@@ -1370,13 +1188,11 @@ mod tests {
         s.append_entry("t1", user("u", None, "hi"), 1).unwrap();
         s.append_entry("t1", reply("a", "u", 1000, Stop::ToolUse, "", 1, 0.5), 1).unwrap();
         s.append_entry("t1", reply("b", "a", 1500, Stop::ToolUse, "", 2, 0.25), 1).unwrap();
-        // What a compaction used counts too, under its model and who makes it.
         let usage = Usage { input: 4, output: 10, cache_read: 100, cache_write: 5, cost: Cost { output: 1.0, ..Cost::default() } };
         let compaction =
             Body::Compaction { summary: "so far".into(), first_kept: "b".into(), tokens_before: 9, model: "claude-x".into(), usage };
         s.append_entry("t1", entry("c", Some("b"), 2500, compaction), 1).unwrap();
-        s.append_entry("t1", reply("d", "c", 9000, Stop::End, "done", 8, 1.0), 1).unwrap(); // past `until`
-        // A turn the agent closed itself is nobody's message.
+        s.append_entry("t1", reply("d", "c", 9000, Stop::End, "done", 8, 1.0), 1).unwrap();
         let mut closed = reply("e", "d", 2600, Stop::Aborted, "", 0, 0.);
         if let Body::Assistant(a) = &mut closed.body {
             (a.provider, a.usage) = (String::new(), Usage::default());
@@ -1390,10 +1206,8 @@ mod tests {
             (b[1].start, b[1].provider.as_str(), b[1].model.as_str(), b[1].input, b[1].cache_read),
             (2000, "anthropic", "claude-x", 4, 100)
         );
-        // The thread's totals: every prompt token (fresh + cache), output, dollars.
         let want = Spend { input: 15 + 4 * 105, output: 40, cached: 400, cost: 2.75 };
         assert_eq!(s.list_threads().unwrap()[0].spend, want);
-        // Spend outlives the thread.
         s.delete_thread("t1").unwrap();
         assert_eq!(s.usage(0, 10_000, 10_000).unwrap().iter().map(|b| b.messages).sum::<u64>(), 4);
     }
@@ -1401,15 +1215,12 @@ mod tests {
     #[test]
     fn a_service_db_is_migrated() {
         let dir = tempfile::tempdir().unwrap();
-        // (A data dir sqlite's URIs have to spell out.)
         let dir = dir.path().join("50% #1?");
         std::fs::create_dir(&dir).unwrap();
         let live = dir.join("service.db");
-        // Nothing to migrate: nothing happens.
         assert_eq!(migrate(&live, |_, _| {}).unwrap(), None);
         assert!(!live.exists() && !from_pi(&live).unwrap());
 
-        // As a service has it while it runs: in WAL mode, the latest of it not in the file yet.
         let conn = Connection::open(&live).unwrap();
         conn.pragma_update(None, "journal_mode", "WAL").unwrap();
         conn.execute_batch(PI_SCHEMA).unwrap();
@@ -1450,12 +1261,10 @@ mod tests {
             ("t", named.clone()),
             ("t", compaction.clone()),
             ("t", level.clone()),
-            // The fork's copy of that, and what it did itself.
             ("fork", json!({"type":"model_change","id":"m","parentId":null,"provider":"cliproxyapi","modelId":"gpt-9"})),
             ("fork", said()),
             ("fork", message("a", Some("u"), pi_reply(3000))),
             ("fork", message("b", Some("a"), pi_reply(6000))),
-            // One that forked later, from an entry that is none of ours, with the compaction in its copy.
             ("late", model),
             ("late", said()),
             ("late", message("a", Some("u"), pi_reply(3000))),
@@ -1468,7 +1277,6 @@ mod tests {
         for (seq, (thread, json)) in pi.iter().enumerate() {
             conn.execute("INSERT INTO entries VALUES (?1, ?2, '', NULL, '', ?3)", params![thread, seq as i64, json.to_string()]).unwrap();
         }
-        // As that service leaves it when it is killed: the files as they are now.
         let killed = dir.join("killed");
         std::fs::create_dir(&killed).unwrap();
         for suffix in ["", "-wal", "-shm"] {
@@ -1488,7 +1296,6 @@ mod tests {
         let dropped = [("model_change", 3), ("session_info", 2), ("thinking_level_change", 2)].map(|(what, n)| (what.to_owned(), n));
         assert_eq!(migration.dropped, dropped.into());
         assert_eq!(migration.locked, [("odd".to_owned(), vec!["entry x (message): a message of role \"bashExecution\"".to_owned()])]);
-        // The db is pi's no more: it doesn't run again, and nothing is left of the build.
         assert!(!from_pi(&db).unwrap());
         assert_eq!(migrate(&db, |_, _| {}).unwrap(), None);
         let left: Vec<_> = std::fs::read_dir(&killed).unwrap().map(|entry| entry.unwrap().file_name()).collect();
@@ -1509,42 +1316,26 @@ mod tests {
         assert_eq!(entries[0].body, Body::User { content: vec![Block::text("find the bug"), image] });
         assert_eq!(s.blob("ab").unwrap(), Some(("image/png".to_owned(), vec![1, 2, 3])));
         assert_eq!(s.service_id().unwrap(), "the-id");
-        // Spend is counted from the entries again: a thread's own, not what a fork copied.
-        // What its compaction used is in it, which pi left out.
         let spend = Spend { input: 8, output: 2, cached: 3, cost: 0.5 };
         assert_eq!((t.spend, by_id(&s, "fork").spend), (Spend { input: 18, output: 22, cached: 3, cost: 2.5 }, spend));
-        // Nor what a fork copied up to an entry that is none of ours: it forked at the
-        // last one it copied.
         let late = by_id(&s, "late");
         assert_eq!((late.spend, late.entry_count), (spend, 4));
         assert_eq!(late.forked_from, Some(ForkedFrom { thread_id: "t".into(), entry_id: "c".into() }));
-        // The fork's model was only in its entries.
         assert_eq!(by_id(&s, "fork").model.as_deref(), Some("gpt-9"));
         assert_eq!(by_id(&s, "fork").forked_from, Some(ForkedFrom { thread_id: "t".into(), entry_id: "a".into() }));
-        // Usage is what the old db had counted and what the compaction used (once, whoever
-        // copied it), under who makes the model.
         let usage = s.usage(0, 10_000, 10_000).unwrap();
         let mut by: Vec<_> = usage.iter().map(|b| (b.provider.as_str(), b.model.as_str(), b.messages, b.cost)).collect();
         by.sort_by_key(|by| by.0);
         assert_eq!(by, [("anthropic", "claude-opus-5-5", 2, 2.5), ("cliproxyapi", "qwen3", 1, 9.0)]);
         assert_eq!(s.search("bug", 10).unwrap().len(), 3);
-        // What could not be read is there, as an entry of no kind, and its thread is locked.
         assert!(by_id(&s, "odd").locked);
         assert_eq!(s.get_thread("odd").unwrap().unwrap()[0].body, Body::Unknown);
-        // The db works from here on.
         s.append_entry("t", reply("r", "a", 4000, Stop::End, "and another", 1, 0.5), 10).unwrap();
         assert_eq!(by_id(&s, "t").spend.cost, 3.0);
     }
 
-    /// The migration of a real `service.db`, checked against it. Never the live one: take
-    /// a snapshot with sqlite, and give its path (a copy of it is what is migrated):
-    ///
-    /// ```sh
-    /// sqlite3 "file:$HOME/.local/share/dirigent/service.db?mode=ro" "VACUUM INTO '/tmp/snapshot/service.db'"
-    /// DIRIGENT_MIGRATE=/tmp/snapshot/service.db cargo test -p dirigent_service --release a_real_service_db -- --ignored --nocapture
-    /// ```
     #[test]
-    #[ignore]
+    #[ignore = "needs a snapshot of a real service.db: see testing.md"]
     fn a_real_service_db_is_migrated() {
         let old = std::env::var("DIRIGENT_MIGRATE").expect("DIRIGENT_MIGRATE: the path of a snapshot of a service.db");
         let old = Path::new(&old);
@@ -1571,7 +1362,6 @@ mod tests {
             stmt.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
         };
 
-        // Every thread and every entry is accounted for.
         assert_eq!(strings("SELECT id FROM main.threads ORDER BY id"), strings("SELECT id FROM old.threads ORDER BY id"));
         assert_eq!(migration.threads as i64, count("SELECT COUNT(*) FROM old.threads"));
         assert_eq!(migration.entries as i64, count("SELECT COUNT(*) FROM old.entries"), "entries of threads that are gone?");
@@ -1602,24 +1392,18 @@ mod tests {
             ("compaction", "compaction"),
             ("compaction_failed", "custom:dirigent:compaction_failed"),
         ] {
-            // Short of pi's only by what could not be read.
             let (ours, pis) = (n(&after, ours), n(&before, pis));
             assert!(ours <= pis && pis - ours <= unread, "{ours} of {pis}");
         }
-        // A script's stored values are kept, but for those pi itself would not read.
         assert_eq!(n(&after, "store") + dropped("custom:codemode-store"), n(&before, "custom:codemode-store"));
         for what in migration.dropped.keys().filter(|what| *what != "custom:codemode-store") {
             assert_eq!(dropped(what), n(&before, what), "{what}");
         }
-        // A thread is locked for the entries that could not be read, and only for those.
         assert_eq!(
             strings("SELECT id FROM main.threads WHERE locked ORDER BY id"),
             strings("SELECT DISTINCT thread_id FROM main.entries WHERE kind = 'unknown' ORDER BY 1")
         );
 
-        // What was counted is counted, the usage rows by model and each thread's spend, and
-        // so is what the old db left out: what a thread's own compactions used (not those a
-        // fork copied).
         let mut compacted: HashMap<String, Vec<(String, Usage)>> = HashMap::new();
         for thread in s.list_threads().unwrap() {
             let entries = s.get_thread(&thread.id).unwrap().unwrap();
@@ -1632,7 +1416,6 @@ mod tests {
                 }
             }
         }
-        // Rows, input, output, cache read, cache write, cost.
         type Sums = (i64, i64, i64, i64, i64, f64);
         let by_model = |schema: &str| -> BTreeMap<String, Sums> {
             let sql = format!(
@@ -1688,7 +1471,6 @@ mod tests {
             compactions.len()
         );
 
-        // The rest came along as it was.
         for table in ["projects", "blobs", "asks", "message_pins", "meta", "api_keys", "proxy_samples"] {
             let rows = |schema: &str| count(&format!("SELECT COUNT(*) FROM {schema}.{table}"));
             assert_eq!(rows("main"), rows("old"), "{table}");
@@ -1704,7 +1486,6 @@ mod tests {
             rows.replace("{effort}", "thinking_level").replace("{model}", "substr(model, instr(model, '/') + 1)").replace("{db}", "old");
         assert_eq!(strings(&ours), strings(&pis));
 
-        // Pins, forks, parents and images still point at what exists.
         let dangling = [
             "SELECT COUNT(*) FROM main.message_pins p
               WHERE NOT EXISTS (SELECT 1 FROM main.entries e WHERE e.thread_id = p.thread_id AND e.id = p.entry_id)",
@@ -1723,9 +1504,6 @@ mod tests {
             assert_eq!(count(sql), 0, "{sql}");
         }
 
-        // A thread's current branch is the messages and notices it was, in their order (an
-        // edited message leaves it shorter than the thread), and what refers to an entry
-        // finds it.
         let mut edited = 0;
         for thread in s.list_threads().unwrap() {
             let ours = s.get_thread(&thread.id).unwrap().unwrap();
@@ -1756,7 +1534,6 @@ mod tests {
                 .filter(|e| !matches!(e.body, Body::Store { .. } | Body::CompactionFailed { .. }))
                 .map(|e| e.id.as_str())
                 .collect();
-            // (A locked thread's branch has what could not be read too, whatever that was.)
             if !thread.locked {
                 assert_eq!(is, was, "thread {}", thread.id);
             }
@@ -1785,10 +1562,6 @@ mod tests {
         }
         println!("{edited} threads with an edited message");
 
-        // Search. The old index had every message's content as its raw JSON: thinking,
-        // signatures and tool calls' arguments with what was said, and a word after a line
-        // break (`\nword`) as the word `nword`. Ours has what was said: it finds the threads
-        // whose messages say a word. Where the old one missed one of those, that is why.
         s.conn
             .execute_batch(
                 "CREATE VIRTUAL TABLE temp.said USING fts5 (thread_id UNINDEXED, text);

@@ -1,25 +1,12 @@
-//! The system prompt: who the model is here, the tools it has and the rules they bring,
-//! the user's and the project's instructions (`AGENTS.md`), the skills it can load, and
-//! the directory it works in.
-//!
-//! What it is made of is read once, when a session starts (`Prompt::load`), and the text is
-//! put together anew for every request from the tools declared then (`Prompt::system`):
-//! the same tools give the same text, byte for byte, which the provider's prompt cache
-//! lives on. So nothing in it changes by itself: no date, no clock.
-
 use crate::config::Dirs;
 use crate::tool::ToolSpec;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// What a thread with codemode is told of the MCP servers its scripts reach.
 const SERVERS: &str = "These MCP servers' tools are not declared to you: call them from codemode scripts. In a script, \
 `describeNamespace(\"<server>\")` says how to use a server and names its tools, `searchTools(query)` finds tools, and \
 `describeTool(name)` has a tool's arguments.";
 
-/// How replies show images, and where attached ones are. The host reads the linked file into
-/// its blobs when the reply is kept (`session::link_images`); the last paragraph is about
-/// `session::attach`.
 const IMAGES: &str = "## Showing images
 Your replies are rendered as markdown in a desktop app. To show the user an image file on this machine (a screenshot you took, a \
 chart you rendered), put it in your reply as a markdown image with its path: `![what it shows](/absolute/path.png)`. It appears \
@@ -28,13 +15,9 @@ inline in the reply. png, jpg, gif, webp and bmp work; a relative path is taken 
 Images the user attaches to a message are also saved as files on this machine: the `[image-N]: /path` lines at the end of the \
 message give the file of each `[image-N]`, for when you need the image itself (to upload, edit or attach it).";
 
-/// What the working directory is to the tools, said right under its path. Without it a
-/// model begins most of its commands with a `cd` to the directory they run in anyway. (The
-/// fact alone is not enough: it then writes `cd . &&`.)
 const CWD: &str = "Every tool call starts in this directory: bash commands run in it, and relative paths are taken from it. So no \
 command needs a `cd` to it first; `cd` is for running something in another directory.";
 
-/// A skill: instructions for a kind of task, in a file the model reads when a task matches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Skill {
     pub name: String,
@@ -42,19 +25,14 @@ pub struct Skill {
     pub path: PathBuf,
 }
 
-/// What a session's system prompt is made of, besides its tools.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Prompt {
-    /// The instruction files, outermost first: the user's own, then the project's.
     instructions: Vec<(PathBuf, String)>,
     skills: Vec<Skill>,
     cwd: PathBuf,
 }
 
 impl Prompt {
-    /// Read the instructions and skills for a thread in `cwd`: `<config dir>/AGENTS.md`, the
-    /// `AGENTS.md` (or `CLAUDE.md`) of `cwd` and of every directory above it, and
-    /// `<config dir>/skills/`.
     pub fn load(dirs: &Dirs, cwd: &Path) -> Self {
         let mut instructions: Vec<(PathBuf, String)> = instructions_in(&dirs.config).into_iter().collect();
         let above: Vec<_> =
@@ -63,8 +41,6 @@ impl Prompt {
         Self { instructions, skills: skills(&dirs.config.join("skills")), cwd: cwd.to_owned() }
     }
 
-    /// The system prompt for a request that declares `tools`. `servers`: the MCP servers
-    /// whose tools only codemode scripts call, each with what it offers.
     pub fn system(&self, tools: &[ToolSpec], servers: &[(String, Option<String>)]) -> String {
         let mut out = String::from(
             "You are a coding agent running in Dirigent, a desktop app for working with coding agents. You work on the user's \
@@ -83,7 +59,6 @@ impl Prompt {
         }
         rules.extend(tools.iter().flat_map(|t| t.guidelines.iter().map(String::as_str)));
         rules.extend(["Be concise in your responses", "Show file paths clearly when working with files"]);
-        // Said once, whichever tools bring a rule.
         let mut seen = HashSet::new();
         let rules: Vec<String> = rules.into_iter().filter(|r| seen.insert(*r)).map(|r| format!("- {r}")).collect();
         section("rules", &rules.join("\n"));
@@ -117,7 +92,6 @@ impl Prompt {
                 .collect();
             section("project_context", &format!("Project-specific instructions and guidelines:\n\n{}", files.join("\n\n")));
         }
-        // A skill is a file: without a tool that reads files there is no loading one.
         let reader = if has("read") {
             Some("Use the read tool to load")
         } else if has("bash") {
@@ -149,7 +123,6 @@ impl Prompt {
     }
 }
 
-/// The instruction file of a directory, if it has one.
 fn instructions_in(dir: &Path) -> Option<(PathBuf, String)> {
     ["AGENTS.override.md", "AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"].iter().find_map(|name| {
         let path = dir.join(name);
@@ -162,9 +135,6 @@ fn xml(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
-/// The skills under `dir`, by name. A directory with a `SKILL.md` is a skill (and nothing
-/// below it is looked at); a markdown file right in `dir` is one too, if it describes
-/// itself. The first skill of a name wins.
 fn skills(dir: &Path) -> Vec<Skill> {
     let mut found = vec![];
     collect(dir, true, &mut found);
@@ -195,9 +165,6 @@ fn collect(dir: &Path, top: bool, found: &mut Vec<Skill>) {
     }
 }
 
-/// The skill in the file at `path`: one with a description in its frontmatter, and not one
-/// the model isn't to load by itself (`disable-model-invocation`). Its name is the
-/// frontmatter's, else its directory's.
 fn skill(path: &Path) -> Option<Skill> {
     let text = std::fs::read_to_string(path).ok()?;
     let fields = frontmatter(&text);
@@ -210,9 +177,6 @@ fn skill(path: &Path) -> Option<Skill> {
     Some(Skill { name: field("name").map(str::to_owned).or(dir_name)?, description, path: path.to_owned() })
 }
 
-/// The `key: value` pairs of a file's frontmatter (the YAML between `---` lines at its
-/// top), as far as skills use YAML: plain and quoted values on one line, and values that
-/// go on over indented lines (after `|`, `>`, or just wrapped).
 fn frontmatter(text: &str) -> Vec<(String, String)> {
     let mut lines = text.trim_start_matches('\u{FEFF}').lines();
     if lines.next().map(str::trim_end) != Some("---") {
@@ -287,7 +251,6 @@ mod tests {
         )));
         assert!(system.contains("<description>Use when asked to ship &lt;changes&gt;</description>"));
         assert!(system.ends_with(&format!("<cwd>\n{}\n\n{CWD}\n</cwd>", cwd.display())));
-        // The same tools, the same text: what the prompt cache needs.
         assert_eq!(
             system,
             prompt.system(
@@ -302,7 +265,6 @@ mod tests {
                 &[]
             )
         );
-        // The servers whose tools only scripts call are named, each with a line on what it offers.
         let servers = [("mcp__docs".to_owned(), Some("Our docs.\nAll of them.".to_owned())), ("mcp__sentry".to_owned(), None)];
         assert!(prompt.system(&[], &servers).contains("\n\n- mcp__docs: Our docs.\n- mcp__sentry\n</mcp_servers>"));
     }

@@ -1,14 +1,3 @@
-//! Tests against a real proxy. They need one running and spend tokens, so `cargo test`
-//! leaves them out; run them with
-//!
-//! ```sh
-//! cargo test -p dirigent_agent proxy::live -- --ignored
-//! ```
-//!
-//! against the proxy `DIRIGENT_PROXY_URL` and `DIRIGENT_PROXY_KEY` name, else the one of this
-//! machine's install (`[proxy]` in `~/.config/dirigent/agent.toml`). They ask
-//! `claude-haiku-5-5` for little.
-
 use super::tests::{dirs, point_at};
 use super::*;
 use dirigent_protocol::transcript::text_of;
@@ -16,7 +5,6 @@ use serde_json::json;
 
 const HAIKU: &str = "claude-haiku-5-5";
 
-/// A client of the test proxy, with directories of its own.
 fn proxy() -> (tempfile::TempDir, Proxy) {
     let from_env = std::env::var("DIRIGENT_PROXY_URL").ok().zip(std::env::var("DIRIGENT_PROXY_KEY").ok());
     let (url, key) = from_env.unwrap_or_else(|| {
@@ -38,7 +26,6 @@ fn user(text: &str) -> Message {
     Message::User(vec![Part::Text(text.into())])
 }
 
-/// One request: the reply and what streamed.
 async fn ask(proxy: &Proxy, model: &Model, messages: &[Message], tools: &[ToolSpec], effort: Option<&str>) -> (Reply, Vec<Chunk>) {
     let request =
         Request { model, system: "You are terse.", messages, tools, effort, max_output: Some(2000), cache_key: "dirigent-live-test" };
@@ -48,7 +35,6 @@ async fn ask(proxy: &Proxy, model: &Model, messages: &[Message], tools: &[ToolSp
     (reply, chunks)
 }
 
-/// A prompt, a tool call, its result, an answer: what every wire has to carry, there and back.
 async fn calls_a_tool_and_reads_its_result(proxy: &Proxy, model: &Model) {
     let add = ToolSpec::new(
         "add",
@@ -83,7 +69,6 @@ async fn calls_a_tool_and_reads_its_result(proxy: &Proxy, model: &Model) {
     assert_eq!(streamed, text);
 }
 
-/// Thinking streams as text, comes signed, and is taken back with the next request.
 async fn thinks_aloud_and_takes_it_back(proxy: &Proxy, model: &Model) {
     let puzzle = "A farmer has 17 pens with 23 sheep each, sells 40 sheep, then splits the rest evenly among 3 children. \
                   How many per child, how many left over? Reason carefully, answer in one line.";
@@ -113,10 +98,7 @@ async fn thinks_aloud_and_takes_it_back(proxy: &Proxy, model: &Model) {
     assert!(text_of(&reply.message.content).contains("87"), "{:?}", reply.message.content);
 }
 
-/// A conversation that grows by a tool call and by a user's turn reads what came before from
-/// the prompt cache: what a long thread costs hangs on it.
 async fn reads_its_past_from_the_cache(proxy: &Proxy, model: &Model) {
-    // A system prompt nobody has cached, long enough to be cached at all.
     let rules: Vec<String> = (0..150).map(|i| format!("Rule {i} of run {}: the answer to question {i} is {}.", now_ms(), i * 7)).collect();
     let system = format!("You are terse.\n{}", rules.join("\n"));
     let tools = [ToolSpec::new(
@@ -141,8 +123,6 @@ async fn reads_its_past_from_the_cache(proxy: &Proxy, model: &Model) {
         assert_eq!(reply.message.error, None);
         eprintln!("{:?} request {step}: {:?}", model.api, reply.message.usage);
         usages.push(reply.message.usage);
-        // The conversation goes on as scripted, whatever the model said: a call and its
-        // result, then a reply and the user's next turn.
         if step == 0 {
             let call = Block::ToolCall { id: "toolu_01A".into(), name: "bash".into(), input: json!({"command": "echo hi"}) };
             messages.push(Message::Assistant { content: vec![call], api: model.api });
@@ -159,7 +139,7 @@ async fn reads_its_past_from_the_cache(proxy: &Proxy, model: &Model) {
 }
 
 #[tokio::test]
-#[ignore = "needs the proxy: see this file's first lines"]
+#[ignore = "needs the proxy: see testing.md"]
 async fn the_proxy_lists_its_models_with_prices() {
     let (tmp, proxy) = proxy();
     let models = proxy.models().await.unwrap();
@@ -169,7 +149,6 @@ async fn the_proxy_lists_its_models_with_prices() {
         haiku.efforts.iter().any(|effort| effort == "medium") && haiku.context_window >= 200_000 && haiku.max_output >= 8_000,
         "{haiku:?}"
     );
-    // From models.dev, which this needs to reach.
     assert!(haiku.price.input > 0.0 && haiku.price.output > haiku.price.input && haiku.price.cache_read > 0.0, "{:?}", haiku.price);
     assert!(tmp.path().join("data/models.json").exists() && tmp.path().join("data/prices.json").exists());
     assert_eq!(proxy.model(HAIKU).await.unwrap(), *haiku);
@@ -177,7 +156,7 @@ async fn the_proxy_lists_its_models_with_prices() {
 }
 
 #[tokio::test]
-#[ignore = "needs the proxy: see this file's first lines"]
+#[ignore = "needs the proxy: see testing.md"]
 async fn the_anthropic_wire_carries_a_conversation() {
     let (_tmp, proxy) = proxy();
     let model = proxy.model(HAIKU).await.unwrap();
@@ -187,10 +166,8 @@ async fn the_anthropic_wire_carries_a_conversation() {
     reads_its_past_from_the_cache(&proxy, &model).await;
 }
 
-/// The proxy has no OpenAI account: Claude through the `codex` wire, which the proxy
-/// translates, shows that the wire is spoken right.
 #[tokio::test]
-#[ignore = "needs the proxy: see this file's first lines"]
+#[ignore = "needs the proxy: see testing.md"]
 async fn the_codex_wire_carries_a_conversation() {
     let (_tmp, proxy) = proxy();
     let model = Model { api: Api::Codex, ..proxy.model(HAIKU).await.unwrap() };
@@ -200,7 +177,7 @@ async fn the_codex_wire_carries_a_conversation() {
 }
 
 #[tokio::test]
-#[ignore = "needs the proxy: see this file's first lines"]
+#[ignore = "needs the proxy: see testing.md"]
 async fn a_completion_and_an_abort() {
     let (_tmp, proxy) = proxy();
     let model = proxy.model(HAIKU).await.unwrap();
@@ -209,7 +186,6 @@ async fn a_completion_and_an_abort() {
     assert!(text_of(&reply.content).contains("Paris"), "{reply:?}");
     assert!(reply.usage.cost.total() > 0.0);
 
-    // Stopped once text streams: what came is the reply.
     let stop = CancellationToken::new();
     let mut streamed = String::new();
     let mut on = |chunk| {
@@ -227,7 +203,7 @@ async fn a_completion_and_an_abort() {
 }
 
 #[tokio::test]
-#[ignore = "needs the proxy: see this file's first lines"]
+#[ignore = "needs the proxy: see testing.md"]
 async fn failures_are_told_apart() {
     let (_tmp, proxy) = proxy();
     let haiku = proxy.model(HAIKU).await.unwrap();
@@ -240,7 +216,6 @@ async fn failures_are_told_apart() {
         (reply.failure.unwrap(), reply.message.error.unwrap())
     };
 
-    // A key the proxy doesn't know.
     let url = Config::load(&proxy.inner.dirs).unwrap().proxy.url;
     let (_tmp, stranger) = proxy_at(&url, "not-a-key");
     let (kind, message) = failure(&stranger, &haiku, "hi").await;
@@ -248,13 +223,11 @@ async fn failures_are_told_apart() {
     assert!(message.contains("Settings › Proxy"), "{message}");
     assert_eq!(stranger.models().await.unwrap_err().downcast_ref::<Error>().unwrap().failure, Failure::Unauthorized);
 
-    // A model nobody serves, on either wire.
     for api in [Api::Anthropic, Api::Codex] {
         let (kind, message) = failure(&proxy, &Model { id: "claude-nope-9".into(), api, ..haiku.clone() }, "hi").await;
         assert_eq!(kind, Failure::Other, "{message}");
     }
 
-    // More than a 200k window holds, on either wire: turned down before any model reads it.
     let small = proxy.model("claude-haiku-4-5-20251001").await.unwrap();
     let long = "word zeta ".repeat(150_000);
     for api in [Api::Anthropic, Api::Codex] {

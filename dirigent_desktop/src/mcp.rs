@@ -1,26 +1,3 @@
-//! Settings › MCP servers: the MCP servers a host's agent gives its sessions, the
-//! `[mcp.<name>]` entries of its `agent.toml` (`dirigent_agent::mcp`): add, edit and remove
-//! one, turn it off and on, pick how its tools reach the model, and sign in to one that
-//! uses OAuth.
-//!
-//! The host lists the servers without connecting to them; each enabled one is then checked
-//! (the host connects to it as a session would, and lets go) and its row says how that went:
-//! its tools, a sign-in it wants, that it failed. Clicking a row unfolds it: the server's
-//! description, why it failed, its tools, and what can be done to it. A change is saved on
-//! the host at once (a switch or the exposure chip shows it before the host confirms), then
-//! the list is asked for anew and the changed server checked again. The host unloads its idle
-//! sessions, so their next prompt sees the change.
-//!
-//! The form adds or edits a server: its name, then a command (split into words as a shell
-//! would, without running one) or an `http(s)://` URL, the command's environment or the
-//! URL's headers (a line each), and a description. A URL also takes a client name: who its
-//! OAuth sign-in says the app is (`oauth.clientName`), for a server that only lets clients it
-//! knows register (Figma's takes "Claude Code"). An edit keeps the entry's other fields
-//! (`cwd`, `timeout`, the rest of `oauth`), which only a hand edit of the file sets.
-//!
-//! The host is the one the tabs about one host share (`login.host`, its chip). A server's
-//! sign-in (`login.rs`) shows here in place of the list.
-
 use crate::app::{Dirigent, Menu, Modal};
 use crate::input::{self, Submitted, TextInput};
 use crate::login::{Login, action, hint, host_chip, login_panel, too_old};
@@ -35,15 +12,11 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// A server row's height, in design px.
 const ROW_H: f32 = 38.;
 
-/// The most of a tool's description its row is given (`summary`).
 const SUMMARY_CHARS: usize = 300;
 
-/// How a server's tools can reach the model: an entry's `exposure`, one of
-/// `dirigent_agent::mcp::Exposure` as the file spells it, with what that means. The first is
-/// the default.
+// MUST KILL: type: EXPOSURES as an enum with a Default, not a tuple array whose first entry is the default
 const EXPOSURES: [(&str, &str); 2] =
     [("codemode", "only scripts call them; declared when codemode is off"), ("direct", "declared to the model, as built-in tools are")];
 
@@ -52,49 +25,34 @@ const ENV_PLACEHOLDER: &str = "KEY=value, a line each";
 const HEADERS_PLACEHOLDER: &str = "Authorization: Bearer ${TOKEN}, a line each";
 const CLIENT_PLACEHOLDER: &str = "Claude Code, if the server refuses unknown clients";
 
-/// The tab's state, on `Dirigent`.
 pub struct State {
-    /// The shown host's (`login.host`) servers and the file they're in, as last listed,
-    /// or why listing failed.
+    // MUST KILL: type: list as an enum (Unlisted / Listed { servers, path } / Failed), not an Option of a Result of a tuple
     list: Option<Result<(Vec<McpServer>, String), String>>,
     list_request: Option<u64>,
-    /// Each server's check, running or done. A server without one gets checked when the
-    /// list comes (`check_servers`).
     checks: HashMap<String, Check>,
-    /// Changes in flight (a row's switch or exposure, a remove, a sign-out): by request id,
-    /// the server and what a toast says if it doesn't go through.
+    // MUST KILL: type: changes' (server, failure toast) as a struct, not a tuple
     changes: HashMap<u64, (String, String)>,
-    /// The row unfolded.
     open: Option<String>,
     pub form: Option<Form>,
     name: Entity<TextInput>,
-    /// The command line, or the URL.
     run: Entity<TextInput>,
-    /// The command's environment, or the URL's headers.
+    // MUST KILL: rename: pairs -> env_or_headers
     pairs: Entity<TextInput>,
-    /// The name a URL's OAuth sign-in registers the app under, when not "Dirigent".
     client: Entity<TextInput>,
     description: Entity<TextInput>,
 }
 
-/// A server's check.
 enum Check {
-    /// The request, not answered yet.
     Running(u64),
-    /// What it found (`Err`: the request failed).
     Done(Result<McpServerStatus, String>),
 }
 
-/// The open form.
 pub struct Form {
-    /// The server it edits, as listed; `None`: a new one.
     editing: Option<McpServer>,
-    /// Why the last save didn't go through, until the next edit.
     error: Option<String>,
-    /// The save the host hasn't answered yet, and the server's name.
+    // MUST KILL: type: saving's (request id, server name) as a struct, not a tuple
     saving: Option<(u64, String)>,
-    /// The command field holds a URL (`is_url`): the labels say so. Kept here rather than
-    /// read from the field as the form renders.
+    // MUST KILL: rename: url -> run_is_url
     url: bool,
 }
 
@@ -106,7 +64,6 @@ impl State {
         let client = cx.new(|cx| TextInput::new(cx, CLIENT_PLACEHOLDER, true));
         let description = cx.new(|cx| TextInput::new(cx, "What it offers, in a sentence (optional)", true));
         for input in [&name, &run, &pairs, &client, &description] {
-            // Enter saves (ctrl+Enter in the multiline one).
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.save_mcp_form(cx)).detach();
             cx.subscribe(input, |this, _, _: &input::Changed, cx| {
                 if let Some(form) = this.mcp.form.as_mut().filter(|f| f.error.is_some()) {
@@ -116,8 +73,6 @@ impl State {
             })
             .detach();
         }
-        // The form's labels and the second field's placeholder follow what's typed: a command
-        // or a URL.
         cx.subscribe(&run, |this, run, _: &input::Changed, cx| {
             let url = is_url(run.read(cx).text());
             if let Some(form) = this.mcp.form.as_mut().filter(|f| f.url != url) {
@@ -146,12 +101,10 @@ impl State {
         [self.name.clone(), self.run.clone(), self.pairs.clone(), self.client.clone(), self.description.clone()]
     }
 
-    /// The server whose check is request `id`, still running.
     fn checked_by(&self, id: u64) -> Option<String> {
         self.checks.iter().find(|(_, c)| matches!(c, Check::Running(r) if *r == id)).map(|(name, _)| name.clone())
     }
 
-    /// What the last check of server `name` found, once it is done.
     fn found(&self, name: &str) -> Option<&Result<McpServerStatus, String>> {
         match self.checks.get(name)? {
             Check::Done(found) => Some(found),
@@ -159,7 +112,6 @@ impl State {
         }
     }
 
-    /// Another host shows: nothing of the last one's stays (answers from it are dropped).
     pub(crate) fn reset(&mut self) {
         self.list = None;
         self.list_request = None;
@@ -171,9 +123,6 @@ impl State {
 }
 
 impl Dirigent {
-    /// The tab shows (or its host changed): a host since removed gives way to `local`, the
-    /// servers are listed and checked anew (what one says may have changed since; checks
-    /// still running stay), and the keys go where the tab wants them.
     pub(crate) fn enter_mcp(&mut self, cx: &mut Context<Self>) {
         if self.host(&self.login.host).is_none() {
             self.show_host(hosts::LOCAL.to_owned());
@@ -183,12 +132,10 @@ impl Dirigent {
         self.focus_mcp(cx);
     }
 
-    /// Settings › MCP servers is showing.
     pub(crate) fn mcp_open(&self) -> bool {
         self.modal == Some(Modal::Settings) && self.settings.tab == settings::Tab::Mcp
     }
 
-    /// Ask the shown host for its servers.
     fn request_mcp(&mut self) {
         let host = self.login.host.clone();
         if self.connected(&host) {
@@ -196,7 +143,6 @@ impl Dirigent {
         }
     }
 
-    /// The shown host connected (asked again) or dropped (no answer is coming).
     pub(crate) fn mcp_status(&mut self, status: HostStatus, cx: &mut Context<Self>) {
         let m = &mut self.mcp;
         if status == HostStatus::Disconnected {
@@ -219,14 +165,12 @@ impl Dirigent {
         if host != self.login.host || self.mcp.list_request.take_if(|r| *r == reply_to).is_none() {
             return;
         }
-        // A server gone (removed, renamed by hand) takes its check along.
         self.mcp.checks.retain(|name, _| servers.iter().any(|s| s.name == *name));
         self.mcp.list = Some(Ok((servers, path)));
         self.check_servers();
         cx.notify();
     }
 
-    /// Check every enabled server with a usable entry that has no check yet.
     fn check_servers(&mut self) {
         let Some(Ok((servers, _))) = &self.mcp.list else { return };
         let due: Vec<String> = servers
@@ -241,7 +185,6 @@ impl Dirigent {
         }
     }
 
-    /// `Check again`: connect to the server anew.
     pub fn recheck_mcp(&mut self, name: &str, cx: &mut Context<Self>) {
         self.mcp.checks.remove(name);
         self.check_servers();
@@ -252,14 +195,12 @@ impl Dirigent {
         if host != self.login.host {
             return;
         }
-        // An answer to a check since dropped (asked again) is stale.
         if let Some(name) = self.mcp.checked_by(reply_to) {
             self.mcp.checks.insert(name, Check::Done(Ok(status)));
         }
     }
 
-    /// The reply to one of the tab's requests (`Err`: an `Error` reply). False when the
-    /// request is none of them.
+    // MUST KILL: rename: on_mcp_reply -> take_mcp_reply, false when the reply is none of the tab's
     pub(crate) fn on_mcp_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
         let shown = host == self.login.host;
         let m = &mut self.mcp;
@@ -291,15 +232,12 @@ impl Dirigent {
             if let Err(e) = outcome {
                 self.toast(format!("{failure}: {}", too_old(e)), cx);
             }
-            // Also after a failure: a switch flipped ahead of the host goes back.
             self.mcp_changed(host, Some(&name), cx);
             return true;
         }
         false
     }
 
-    /// Server `name` changed on `host` (saved, removed, signed in or out): the list anew,
-    /// and the server checked again. `None`: one this side doesn't know, so all of them.
     pub(crate) fn mcp_changed(&mut self, host: &str, name: Option<&str>, cx: &mut Context<Self>) {
         if host != self.login.host {
             return;
@@ -314,8 +252,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Send the shown host a change to server `name` (`make` builds it around an id and the
-    /// name); `failure` is what a toast calls it if it doesn't go through.
     fn change_mcp(&mut self, name: &str, failure: String, make: impl FnOnce(u64, String) -> ClientMessage, cx: &mut Context<Self>) {
         let host = self.login.host.clone();
         if !self.connected(&host) {
@@ -326,7 +262,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A row's change of the server's entry: shown at once, the host's list confirms it.
     fn save_mcp_entry(&mut self, name: &str, config: Value, failure: String, cx: &mut Context<Self>) {
         if !self.connected(&self.login.host) {
             return self.toast(format!("{} is offline", self.login.host), cx);
@@ -339,7 +274,6 @@ impl Dirigent {
         self.change_mcp(name, failure, |id, name| ClientMessage::SaveMcpServer { id, name, config }, cx);
     }
 
-    /// The row's switch: sessions connect to the server, or leave it be.
     pub fn toggle_mcp(&mut self, server: &McpServer, cx: &mut Context<Self>) {
         let on = !enabled(&server.config);
         let config = with(&server.config, "enabled", (!on).then_some(Value::Bool(false)));
@@ -352,7 +286,6 @@ impl Dirigent {
         if exposure == self::exposure(&server.config) {
             return cx.notify();
         }
-        // The default goes unsaid, as the host writes it.
         let config = with(&server.config, "exposure", (exposure != EXPOSURES[0].0).then(|| json!(exposure)));
         self.save_mcp_entry(&server.name, config, format!("Couldn't change how {}'s tools are reached", server.name), cx);
     }
@@ -365,14 +298,11 @@ impl Dirigent {
         self.change_mcp(name, format!("Couldn't sign out of {name}"), |id, name| ClientMessage::McpLogout { id, name }, cx);
     }
 
-    /// `Sign in`: the host runs the server's OAuth sign-in, a login shown in the list's place.
     pub fn start_mcp_login(&mut self, name: &str, cx: &mut Context<Self>) {
         let host = self.login.host.clone();
         if !self.connected(&host) {
             return self.toast(format!("{host} is offline"), cx);
         }
-        // One login at a time: one left running on another tab goes. The form would hide
-        // under the sign-in (and take an Esc meant for it).
         self.cancel_login(cx);
         self.drop_mcp_form();
         let request = self.request(&host, |id| ClientMessage::McpLogin { id, name: name.to_owned() });
@@ -381,14 +311,12 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A row's click: unfold it, or fold it again.
     pub fn toggle_mcp_row(&mut self, name: &str, cx: &mut Context<Self>) {
         self.menu = None;
         self.mcp.open = if self.mcp.open.as_deref() == Some(name) { None } else { Some(name.to_owned()) };
         cx.notify();
     }
 
-    /// `Add server`, or an unfolded row's `Edit`: the form, empty or filled in.
     pub fn open_mcp_form(&mut self, editing: Option<McpServer>, cx: &mut Context<Self>) {
         self.menu = None;
         self.drop_mcp_form();
@@ -406,7 +334,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Enter or Save: the host saves the form's server, or what's wrong shows.
     pub fn save_mcp_form(&mut self, cx: &mut Context<Self>) {
         let Some(form) = &self.mcp.form else { return };
         if form.saving.is_some() {
@@ -448,7 +375,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Cancel, Esc or a save: the form goes.
     pub fn close_mcp_form(&mut self, cx: &mut Context<Self>) {
         if self.mcp.form.is_some() {
             self.drop_mcp_form();
@@ -458,15 +384,14 @@ impl Dirigent {
         }
     }
 
-    /// The form goes; a save of it the host hasn't answered becomes a change like a row's,
-    /// so its answer still refreshes the list (or says why it failed).
+    // MUST KILL: rename: drop_mcp_form -> drop_mcp_form_keeping_save, an unanswered save becomes a tracked change
     pub(crate) fn drop_mcp_form(&mut self) {
         if let Some((id, name)) = self.mcp.form.take().and_then(|f| f.saving) {
             self.mcp.changes.insert(id, (name.clone(), format!("Couldn't save {name}")));
         }
     }
 
-    /// Esc: closes the form if the tab shows one (and says so; else the modal closes).
+    // MUST KILL: rename: mcp_form_escape -> close_mcp_form_on_escape, true when it handled the Esc
     pub fn mcp_form_escape(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.mcp_open() || self.mcp.form.is_none() {
             return false;
@@ -475,8 +400,6 @@ impl Dirigent {
         true
     }
 
-    /// Keys go where the tab wants them: a sign-in's question, else the form's first field
-    /// (the name, or the command of a server being edited), else the modal, so Esc closes it.
     pub(crate) fn focus_mcp(&self, cx: &mut Context<Self>) {
         if !self.mcp_open() {
             return;
@@ -492,22 +415,18 @@ impl Dirigent {
     }
 }
 
-/// Sessions connect to it: `enabled` isn't false.
 fn enabled(config: &Value) -> bool {
     config.get("enabled") != Some(&Value::Bool(false))
 }
 
-/// How its tools reach the model: `exposure`, the default when unsaid.
 fn exposure(config: &Value) -> &str {
     config.get("exposure").and_then(Value::as_str).unwrap_or(EXPOSURES[0].0)
 }
 
-/// The command line or URL it runs as.
 fn transport(config: &Value) -> String {
     fields_of(config).0
 }
 
-/// What's typed in the command field is a URL: the server is an HTTP one.
 fn is_url(run: &str) -> bool {
     let run = run.trim_start();
     run.starts_with("https://") || run.starts_with("http://")
@@ -517,7 +436,6 @@ fn pairs_placeholder(url: bool) -> &'static str {
     if url { HEADERS_PLACEHOLDER } else { ENV_PLACEHOLDER }
 }
 
-/// `config` with `key` set to `value`, or gone (`None`).
 fn with(config: &Value, key: &str, value: Option<Value>) -> Value {
     let mut config = config.clone();
     if let Some(obj) = config.as_object_mut() {
@@ -529,14 +447,11 @@ fn with(config: &Value, key: &str, value: Option<Value>) -> Value {
     config
 }
 
-/// The name its OAuth sign-in registers the app under (`oauth.clientName`), if it sets one.
 fn client_name(config: &Value) -> &str {
     config.pointer("/oauth/clientName").and_then(Value::as_str).unwrap_or_default()
 }
 
-/// The form's fields for an entry: its command line (or URL), its environment (or headers),
-/// its description (the client name is `client_name`'s). What isn't of the right type shows
-/// as nothing.
+// MUST KILL: type: fields_of returns a struct (run, pairs, description), not a tuple
 fn fields_of(config: &Value) -> (String, String, String) {
     let str_of = |key: &str| config.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
     let pairs = |key: &str, sep: &str| {
@@ -552,14 +467,10 @@ fn fields_of(config: &Value) -> (String, String, String) {
     (if words[0].is_empty() { String::new() } else { join_words(&words) }, pairs("env", "="), description)
 }
 
-/// The entry the form's fields make, from `base` (an edit's: its other fields stay), or
-/// what's wrong with them. `client` is a URL's alone: a command doesn't sign in. The host
-/// checks the rest when it saves the entry (`dirigent_agent::mcp::save`).
 fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, description: &str) -> Result<Value, String> {
     let mut config = base.and_then(Value::as_object).cloned().unwrap_or_default();
-    // Implied by `command` or `url`; one left from the other kind would contradict it.
+    // MUST KILL: extract: the "type" removal in config_from into a named step that clears the other transport's keys
     config.remove("type");
-    // The client name goes into the entry's `oauth`, whose other fields stay.
     let mut oauth = config.get("oauth").and_then(Value::as_object).cloned().unwrap_or_default();
     match client.trim() {
         "" => oauth.remove("clientName"),
@@ -596,8 +507,6 @@ fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, descr
     Ok(Value::Object(config))
 }
 
-/// `KEY=value` / `Name: value` lines (split at the first `sep`) as an object; blank lines
-/// are skipped. `what` and `shape` name them in an error.
 fn parse_pairs(text: &str, sep: char, what: &str, shape: &str) -> Result<Map<String, Value>, String> {
     let mut map = Map::new();
     for (i, line) in text.lines().enumerate().filter(|(_, l)| !l.trim().is_empty()) {
@@ -609,9 +518,7 @@ fn parse_pairs(text: &str, sep: char, what: &str, shape: &str) -> Result<Map<Str
     Ok(map)
 }
 
-/// A command line's words, as a shell splits them (nothing is run or expanded): whitespace
-/// parts them, quotes ('…' or "…") keep what they hold as it is and join the text around
-/// them. Backslashes are plain characters, so Windows paths need no quoting.
+// MUST KILL: rename: split_words -> split_command_line, backslashes stay literal unlike a shell
 fn split_words(line: &str) -> Result<Vec<String>, String> {
     let mut words = vec![];
     let mut word: Option<String> = None;
@@ -636,7 +543,6 @@ fn split_words(line: &str) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-/// Words as a command line `split_words` gives them back from, quoted where they need it.
 fn join_words(words: &[String]) -> String {
     let quote = |w: &String| {
         if !w.is_empty() && !w.chars().any(|c| c.is_whitespace() || c == '\'' || c == '"') {
@@ -646,14 +552,12 @@ fn join_words(words: &[String]) -> String {
         } else if !w.contains('"') {
             format!("\"{w}\"")
         } else {
-            // Both quotes: single-quoted runs, each ' between them double-quoted.
             format!("'{}'", w.replace('\'', "'\"'\"'"))
         }
     };
     words.iter().map(quote).collect::<Vec<_>>().join(" ")
 }
 
-/// The tab: what it's for and the host chip, then the servers, or a sign-in in progress.
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
     let mut out = vec![section("MCP servers", body(this, cx))];
     if let Some(Ok((_, path))) = &this.mcp.list {
@@ -672,7 +576,6 @@ fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         (None, Some(Err(e))) => div().text_size(text::sm()).text_color(rgba(theme::t().error)).child(e.clone()),
         (None, Some(Ok((servers, _)))) => list(servers, this, cx),
     };
-    // Not during a sign-in: it is the host's it started on.
     let chip = this.hosts.len() > 1 && login.is_none();
     let header = div()
         .flex()
@@ -685,8 +588,6 @@ fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     theme::stack().gap_3().child(header).child(content)
 }
 
-/// The rows (the unfolded one with its details under it, the edited one as the form), then
-/// `Add server`, or the form adding one.
 fn list(servers: &[McpServer], this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let m = &this.mcp;
     let form = m.form.as_ref();
@@ -703,7 +604,6 @@ fn list(servers: &[McpServer], this: &Dirigent, cx: &mut Context<Dirigent>) -> D
             }
         }
     }
-    // A new server's form, or one whose server left the file meanwhile, goes under the rows.
     let in_rows = editing.is_some_and(|e| servers.iter().any(|s| s.name == e));
     let below =
         match form {
@@ -717,7 +617,6 @@ fn list(servers: &[McpServer], this: &Dirigent, cx: &mut Context<Dirigent>) -> D
     theme::stack().children(empty).children(rows).children(below)
 }
 
-/// `● name   command or URL   state   [Sign in]   (switch)`: one line, whatever its state.
 fn row(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     let (dot, word, color) = state(&this.mcp, s);
@@ -762,7 +661,7 @@ fn row(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Stateful<D
         }))
 }
 
-/// The row's dot colour, its state word, and the word's colour.
+// MUST KILL: type: state returns a struct (dot, word, word colour), not a tuple
 fn state(m: &State, s: &McpServer) -> (u32, String, u32) {
     let t = theme::t();
     if s.error.is_some() {
@@ -791,8 +690,6 @@ fn state(m: &State, s: &McpServer) -> (u32, String, u32) {
     }
 }
 
-/// An unfolded row: the server's description, why it doesn't work, its tools, then how they
-/// reach the model and what can be done to it.
 fn details(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let mono = this.fonts.mono.clone();
@@ -869,7 +766,6 @@ fn summary(description: &str) -> String {
     words.collect::<Vec<_>>().join(" ").chars().take(SUMMARY_CHARS).collect()
 }
 
-/// `Tools  codemode ▾`: how the server's tools reach the model, changeable.
 fn exposure_chip(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let open = this.menu == Some(Menu::McpExposure);
     let current = exposure(&s.config).to_owned();
@@ -889,8 +785,6 @@ fn exposure_chip(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> 
         .children(menu)
 }
 
-/// The form: its title, the fields (labelled for a command or a URL, as typed), then what's
-/// wrong (if anything) beside Cancel and Save.
 fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let m = &this.mcp;
@@ -953,7 +847,6 @@ mod tests {
         assert_eq!(words(r#"uvx 'my tool' --name="a b" C:\bin\x.exe"#), ["uvx", "my tool", "--name=a b", r"C:\bin\x.exe"]);
         assert_eq!(words("a '' b"), ["a", "", "b"]);
         assert!(split_words("say 'hi").is_err());
-        // What joining quotes comes back as it was.
         for w in [vec!["npx", "-y", "x"], vec!["a b", "it's", r#"say "hi""#, r#"it's "x""#, "", r"C:\a b\x"]] {
             let w: Vec<String> = w.into_iter().map(String::from).collect();
             assert_eq!(words(&join_words(&w)), w, "{}", join_words(&w));
@@ -969,7 +862,6 @@ mod tests {
         assert_eq!(c, json!({"url": "https://x.dev/mcp", "headers": {"Authorization": "Bearer ${T}"}}));
         assert!(config_from(None, " ", "", "", "").is_err());
         assert!(config_from(None, "srv", "no separator", "", "").is_err());
-        // An edit keeps what the form doesn't show, but not the other kind's fields.
         let base =
             json!({"command": "old", "args": ["x"], "env": {"A": "1"}, "cwd": "/w", "timeout": 5, "exposure": "direct", "type": "stdio"});
         let c = config_from(Some(&base), "new", "", "", "").unwrap();
@@ -984,7 +876,6 @@ mod tests {
         let c = config_from(None, url, "", " Claude Code ", "").unwrap();
         assert_eq!(c, json!({"url": url, "oauth": {"clientName": "Claude Code"}}));
         assert_eq!(client_name(&c), "Claude Code");
-        // Set or cleared, the rest of `oauth` stays; an `oauth` left empty goes.
         let base = json!({"url": url, "oauth": {"clientName": "Old", "scope": "read"}});
         let c = config_from(Some(&base), url, "", "New", "").unwrap();
         assert_eq!(c, json!({"url": url, "oauth": {"clientName": "New", "scope": "read"}}));
@@ -993,7 +884,6 @@ mod tests {
         assert_eq!(config_from(Some(&c), url, "", "", "").unwrap(), c);
         let c = config_from(Some(&json!({"url": url, "oauth": {"clientName": "Old"}})), url, "", "", "").unwrap();
         assert_eq!(c, json!({"url": url}));
-        // A command doesn't sign in.
         assert_eq!(config_from(Some(&base), "srv", "", "Claude Code", "").unwrap(), json!({"command": "srv"}));
     }
 

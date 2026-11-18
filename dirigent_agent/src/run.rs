@@ -1,10 +1,3 @@
-//! One run: the model works on the thread until it has nothing left to do. A loop of
-//! turns: what waits for the model goes in, a request streams its reply, the tools it calls
-//! run side by side and their results go back, until a reply calls none and nothing waits.
-//!
-//! A turn's request is retried when the provider says it is worth it, and the context is
-//! compacted when it nears the model's window (or the provider says it is past it).
-
 use crate::Out;
 use crate::config::Config;
 use crate::context::{self, Plan};
@@ -21,22 +14,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-/// How often a request that failed for a passing reason is made again.
 const MAX_RETRIES: u32 = 3;
-/// The wait before the first retry; twice as long before each one after.
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
-/// How long a tool gets to end what it does once the run is stopped, before it is left behind.
 const TOOL_STOP_GRACE: Duration = Duration::from_secs(3);
-/// How much of a tool call's arguments that were no JSON the model is shown again.
 const BAD_INPUT_CHARS: usize = 300;
 
-/// Work on the session's thread until the model is done, the user stops it or it fails.
-/// A panic on the way is a failure like another: the run ends and the thread says why,
-/// where it would otherwise be left running for good, with nothing to stop.
 pub(crate) async fn run(session: Arc<Session>, cancel: CancellationToken) {
     match AssertUnwindSafe(session.turns(&cancel)).catch_unwind().await {
-        // Ended in `finish`, with the lock that keeps a message from slipping in unseen.
         Ok(Ok(true)) => return,
         Ok(Ok(false)) => {}
         Ok(Err(e)) => session.close_turn(Some(format!("{e:#}"))),
@@ -45,9 +30,6 @@ pub(crate) async fn run(session: Arc<Session>, cancel: CancellationToken) {
     session.stop();
 }
 
-/// Make `request` until it comes to something other than a passing failure, or has been
-/// retried `MAX_RETRIES` times; `on_retry` is told of each retry (its number, the wait
-/// before it, why). Stopped while it waits, the reply is `Stop::Aborted`.
 pub(crate) async fn with_retries<Fut>(
     cancel: &CancellationToken,
     mut on_retry: impl FnMut(u32, Duration, &str),
@@ -79,8 +61,7 @@ where
 }
 
 impl Session {
-    /// The turns of a run. `true`: the model was done and the run is ended; `false`: it
-    /// stopped short (a failed request, the user) and is still to be ended.
+    // MUST KILL: type: turns returns a bool for "the run already ended in finish"; an enum (Ended / StoppedShort) says it
     async fn turns(self: &Arc<Self>, cancel: &CancellationToken) -> Result<bool> {
         loop {
             self.take_steers();
@@ -109,22 +90,18 @@ impl Session {
                 }
             }
             if cancel.is_cancelled() {
-                // Stopped while the tools ran: no reply follows their results, and a turn
-                // left open there would take the user's next message for a part of it.
                 self.close_turn(None);
                 return Ok(false);
             }
         }
     }
 
-    /// The steers that came in go to the model now, all of them.
     fn take_steers(&self) {
         let mut state = self.state.lock().unwrap();
         if state.steering.is_empty() {
             return;
         }
-        // The queue says they left it before they are entries: a client that shows both
-        // never shows one twice.
+        // MUST KILL: extract: take_steers' emit-the-queue-then-append order into a fn of its own, so clients never see a message twice
         let taken = std::mem::take(&mut state.steering);
         self.emit_queue(&state);
         for queued in taken {
@@ -139,9 +116,6 @@ impl Session {
         };
     }
 
-    /// The model is done: end the run, unless something waits for it. A steer goes in with
-    /// the next turn; of the follow-ups, the first one does. Decided under the lock a new
-    /// message is queued under, so none comes in between the look and the end.
     fn finish(&self) -> bool {
         let mut state = self.state.lock().unwrap();
         if !state.steering.is_empty() {
@@ -157,10 +131,7 @@ impl Session {
         true
     }
 
-    /// End a run that stopped short. The user's messages that still waited for it are
-    /// dropped (clients show them gone when a run ends). The notices that did are kept as
-    /// entries, which the next request has, also from a session loaded anew: nothing else
-    /// remembers a job's end or the user's answers. No run starts for them.
+    // MUST KILL: rename: stop -> end_run_keeping_notices, it drops queued messages but keeps queued notices as entries
     fn stop(&self) {
         let mut state = self.state.lock().unwrap();
         let state = &mut *state;
@@ -173,10 +144,7 @@ impl Session {
         self.emit(Out::Event(Event::RunEnd));
     }
 
-    /// Close the turn with an entry in place of the reply that didn't come. With `error`, a
-    /// failure that is no reply of the model's (it isn't served any more, the config
-    /// doesn't parse), kept the way a failed request is, so the thread shows it. Without,
-    /// the user's stop, kept the way a stopped request is.
+    // MUST KILL: rename: close_turn -> append_stand_in_reply, it writes an Assistant entry in place of the reply that didn't come
     fn close_turn(&self, error: Option<String>) {
         let mut state = self.state.lock().unwrap();
         let closing = Assistant {
@@ -193,13 +161,10 @@ impl Session {
         self.append(&mut state, Body::Assistant(closing));
     }
 
-    /// The part of the branch the model sees: a copy, so nothing is locked while a request
-    /// is built from it.
     fn window(&self) -> Vec<dirigent_protocol::transcript::Entry> {
         context::window(&self.state.lock().unwrap().branch).to_vec()
     }
 
-    /// One turn: a request for the model's next reply, which is kept as an entry and returned.
     async fn turn(&self, cancel: &CancellationToken) -> Result<Assistant> {
         let (model, effort) = {
             let state = self.state.lock().unwrap();
@@ -207,7 +172,6 @@ impl Session {
         };
         let model = self.llm.model(&model).await?;
         let config = Config::load(&self.env.dirs)?;
-        // The model's default effort when the thread's is none of its own.
         let effort = effort.filter(|e| model.efforts.contains(e));
         let limit = model.context_window.saturating_sub(config.reserve(&model.id));
         let mut compacted = context::tokens(&self.window()) > limit && self.compact(&model, effort.as_deref(), &config, cancel).await;
@@ -241,8 +205,6 @@ impl Session {
                 self.llm.stream(&request, &mut on_chunk, cancel).await
             })
             .await;
-            // Too long for the window after all (the estimate was low, or the window isn't
-            // what the catalog says): compacted, it gets one more try.
             if reply.failure == Some(Failure::Overflow) && !compacted {
                 compacted = true;
                 if self.compact(&model, effort.as_deref(), &config, cancel).await {
@@ -261,8 +223,6 @@ impl Session {
         }
     }
 
-    /// Replace the older part of the context by a summary of it. `false`: nothing was
-    /// compacted, because there was nothing to, or it failed (which the thread then says).
     async fn compact(&self, model: &Model, effort: Option<&str>, config: &Config, cancel: &CancellationToken) -> bool {
         let window = self.window();
         let Some(plan) = Plan::new(&window, config.compaction.keep_recent) else { return false };
@@ -281,7 +241,6 @@ impl Session {
                 self.append(&mut self.state.lock().unwrap(), body);
                 self.keep_images(&self.window());
             }
-            // Stopped by the user: no failure to tell of.
             Err(_) if cancel.is_cancelled() => {}
             Err(e) => {
                 self.append(&mut self.state.lock().unwrap(), Body::CompactionFailed { error: format!("Compaction failed: {e:#}") });
@@ -291,14 +250,10 @@ impl Session {
         done
     }
 
-    /// Run a reply's tool calls, side by side, and return their results in the calls'
-    /// order. `cut_off`: the reply hit the output limit, so any of its calls may have lost
-    /// the end of its input: none is run, each is answered with why.
     async fn call_tools(&self, calls: Vec<(String, String, Value)>, cut_off: bool, cancel: &CancellationToken) -> Vec<ToolResult> {
         futures_util::future::join_all(calls.into_iter().map(|call| self.answer_call(call, cut_off, cancel))).await
     }
 
-    /// One call's result, whatever became of it.
     async fn answer_call(&self, (id, name, input): (String, String, Value), cut_off: bool, cancel: &CancellationToken) -> ToolResult {
         self.emit(Out::Event(Event::ToolStart { id: id.clone() }));
         let started = Instant::now();
@@ -308,7 +263,6 @@ impl Session {
                  truncated. Re-issue the tool call with complete arguments."
             )),
             None => ToolOutput::error(format!("Tool {name} not found")),
-            // The proxy's client hands over arguments it could not parse as a string of what came.
             Some(_) if !input.is_object() => {
                 let came = input.as_str().map_or_else(|| input.to_string(), str::to_owned);
                 ToolOutput::error(format!(
@@ -329,10 +283,6 @@ impl Session {
         }
     }
 
-    /// A result's content as an entry's. Every image is made fit to send first, whichever
-    /// tool it is from (an MCP server's and a script's come as they were made): one a
-    /// provider refuses would fail every later request of the thread. An image that can't
-    /// be made fit is a note saying so.
     async fn blocks(&self, content: Vec<Content>) -> Vec<Block> {
         let mut blocks = vec![];
         for content in content {
@@ -343,7 +293,6 @@ impl Session {
                 }
                 Content::Image { mime, data } => (mime, data),
             };
-            // Decoding and scaling block: off the async workers.
             match tokio::task::spawn_blocking(move || images::process(&data, &mime)).await {
                 Ok(Ok(image)) => {
                     blocks.push(Block::Image { blob: self.env.host.put_blob(&image.mime, &image.data), mime: image.mime });
@@ -356,12 +305,8 @@ impl Session {
         blocks
     }
 
-    /// Call one tool, for the model or for a script. A failure is a result too: the caller reads why.
     pub(crate) async fn call_tool(&self, tool: &Arc<dyn Tool>, name: &str, input: Value, call: &Call) -> ToolOutput {
-        // `wait` lets the host's calls of the same batch end before it looks for sub-agents.
-        // Counted until the call ends, or is let go of with the script that made it.
         let _host_call = self.is_host_tool(name).then(|| Counted::new(&self.host_calls));
-        // A script reaches every server's tools, also those of one that was still connecting.
         if name == crate::session::CODEMODE {
             self.servers_ready(true).await;
         }
@@ -372,10 +317,8 @@ impl Session {
         tokio::select! {
             output = AssertUnwindSafe(tool.call(input, call)).catch_unwind() => match output {
                 Ok(output) => output.unwrap_or_else(|e| ToolOutput::error(format!("{e:#}"))),
-                // A tool that panics fails its call, not the run the call is one of.
                 Err(panic) => ToolOutput::error(format!("Tool {name} hit a bug in the agent: {}", crate::panic_message(&*panic))),
             },
-            // A stopped tool ends itself; one that doesn't is left to it.
             _ = stopped => ToolOutput::error("Operation aborted"),
         }
     }
@@ -415,7 +358,6 @@ mod tests {
                 "assistant: done",
             ]
         );
-        // Each entry is the child of the one before; the second request had the results.
         let entries = host.entries();
         assert!(entries.windows(2).all(|w| w[1].parent_id.as_deref() == Some(w[0].id.as_str())));
         assert!(script.requests.lock().unwrap()[1].0.contains("Command exited with code 3"));
@@ -424,8 +366,6 @@ mod tests {
         assert_eq!(events, [Out::Event(Event::RunStart), Out::Event(Event::RunEnd)]);
     }
 
-    /// A steer goes in after the tool calls in progress, a follow-up once the model would
-    /// stop, a notice the same ways; an idle model is given a run for either.
     #[tokio::test]
     async fn what_comes_in_during_a_run_waits_its_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -437,7 +377,6 @@ mod tests {
         ]);
         let (host, session) = session(dir.path(), script);
         session.prompt(prompt("go")).await.unwrap();
-        // The model has called its tool, which runs for a while.
         host.until(|outs| outs.iter().any(|o| matches!(o, Out::Event(Event::ToolStart { .. })))).await;
         session.prompt(Prompt { mode: Some(PromptMode::FollowUp), ..prompt("and then?") }).await.unwrap();
         session.prompt(Prompt { mode: Some(PromptMode::Steer), ..prompt("this way") }).await.unwrap();
@@ -460,8 +399,6 @@ mod tests {
                 "assistant: noticed",
             ]
         );
-        // Clients were told what waited (steers, follow-ups), and that a message no longer
-        // does before it is an entry: one that shows both never shows a message twice.
         let order: Vec<String> = host
             .outs
             .lock()
@@ -485,19 +422,14 @@ mod tests {
         session.prompt(Prompt { mode: Some(PromptMode::FollowUp), ..prompt("never mind") }).await.unwrap();
         session.abort();
         host.settled(1).await;
-        // A message it can't run with is refused, and nothing is kept of it.
         let refused = session.prompt(Prompt { model: Some("unserved".into()), ..prompt("x") }).await;
         assert_eq!(refused.unwrap_err().to_string(), "unserved is not a model the proxy serves");
         session.prompt(prompt("again")).await.unwrap();
         host.settled(2).await;
         assert_eq!(host.transcript(), ["user: go", "assistant: half a [aborted]", "user: again", "assistant: fresh"]);
-        // Half a reply is no part of the conversation that goes on.
         assert!(!script.requests.lock().unwrap()[1].0.contains("half a"));
     }
 
-    /// A run stopped while a tool runs ends its turn after the tool's result, with a reply
-    /// that says so: the next message starts a turn of its own, and its request has the
-    /// call and what came of it, and nothing of that reply.
     #[tokio::test]
     async fn a_run_stopped_while_a_tool_runs_closes_its_turn() {
         let dir = tempfile::tempdir().unwrap();
@@ -524,8 +456,6 @@ mod tests {
         assert!(request.contains("Command aborted") && request.matches("Assistant {").count() == 1, "{request}");
     }
 
-    /// A notice that waited for a run that was stopped is an entry from then on: no run
-    /// starts for it, and the next request has it, as would one of a session loaded anew.
     #[tokio::test]
     async fn a_notice_that_waited_for_a_stopped_run_is_kept() {
         let dir = tempfile::tempdir().unwrap();
@@ -543,8 +473,6 @@ mod tests {
         assert!(script.requests.lock().unwrap()[1].0.contains("the tests passed"));
     }
 
-    /// A panic inside a run ends it as a failure does, said in the thread, which takes the
-    /// next message; a tool that panics fails its call alone.
     #[tokio::test]
     async fn a_panic_fails_the_run_and_a_panicking_tool_only_its_call() {
         let dir = tempfile::tempdir().unwrap();
@@ -573,8 +501,6 @@ mod tests {
         );
     }
 
-    /// Whichever tool an image is from, it is in the thread fit to send: scaled down, with
-    /// a note of that, or left out with a note of why.
     #[tokio::test]
     async fn the_images_of_a_tool_result_are_made_fit_to_send() {
         let dir = tempfile::tempdir().unwrap();
@@ -603,7 +529,6 @@ mod tests {
     #[tokio::test]
     async fn a_call_whose_arguments_are_no_json_is_answered_and_not_run() {
         let dir = tempfile::tempdir().unwrap();
-        // As the proxy's client hands such a call over: what came, as a string.
         let came = format!(r#"{{"command": "touch ran; echo {}"#, "x".repeat(400));
         let script = Script::new(vec![Step::Say(vec![call("c1", "bash", json!(came))]), Step::Say(vec![text("done")])]);
         let (host, session) = session(dir.path(), script);
@@ -634,14 +559,11 @@ mod tests {
         assert_eq!(retries, 1);
     }
 
-    /// A context near the model's window is summarized before the next request, which then
-    /// has the summary in place of what it stands for.
     #[tokio::test]
     async fn a_context_near_the_window_is_compacted() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("config")).unwrap();
         std::fs::write(dir.path().join("config/agent.toml"), "[compaction]\nreserve = 50\nkeep_recent = 1\n").unwrap();
-        // Every scripted reply says its request was 110 tokens: over the 100 this window leaves.
         let script = Script::with_window(
             vec![Step::Say(vec![bash("c1", "echo out")]), Step::Say(vec![text("what was asked")]), Step::Say(vec![text("done")])],
             150,
@@ -662,8 +584,6 @@ mod tests {
         assert!(requests[2].0.contains("echo out"));
     }
 
-    /// A compaction that fails is told in the thread, and the request goes out with the
-    /// context as it is.
     #[tokio::test]
     async fn a_failed_compaction_is_told_and_the_run_goes_on() {
         let dir = tempfile::tempdir().unwrap();
@@ -678,8 +598,6 @@ mod tests {
         assert!(script.requests.lock().unwrap()[2].0.contains("the first question"));
     }
 
-    /// A thread's MCP servers: their tools are the model's own in a thread without
-    /// codemode; in one with it they are its scripts', and the prompt names the servers.
     #[cfg(unix)]
     #[tokio::test]
     async fn mcp_tools_are_the_models_or_its_scripts() {
@@ -716,14 +634,12 @@ mod tests {
         assert!(session.prompt(Prompt { edit: Some(host.entries()[1].id.clone()), ..prompt("x") }).await.is_err());
         session.prompt(Prompt { edit: Some(second.id.clone()), ..prompt("second, reworded") }).await.unwrap();
         host.settled(3).await;
-        // The new message is a sibling of the one it replaces: the old one stays in the history, off the branch.
         let entries = host.entries();
         assert_eq!(entries[4].parent_id, second.parent_id);
         let last = &script.requests.lock().unwrap()[2].0;
         assert!(last.contains("first") && last.contains("second, reworded") && !last.contains("two"));
     }
 
-    /// A script calls the thread's tools, and what it stores is there for the next one.
     #[tokio::test]
     async fn scripts_call_tools_and_keep_values() {
         let dir = tempfile::tempdir().unwrap();
@@ -738,11 +654,9 @@ mod tests {
         host.settled(1).await;
         let transcript = host.transcript();
         assert_eq!(transcript.len(), 7, "{transcript:#?}");
-        // What a script stored is kept as it ends, before its result.
         assert_eq!(transcript[2], r#"store: {"seen":"hi"}"#);
         assert!(transcript[3].starts_with("result: Script completed") && transcript[3].ends_with("\n0"), "{}", transcript[3]);
         assert!(transcript[5].ends_with("\nhi!"), "{}", transcript[5]);
-        // The model was told of the tool, and got its result back: the kept values are no part of that.
         let requests = script.requests.lock().unwrap();
         assert!(requests[0].2.iter().any(|t| t == "codemode"), "{:?}", requests[0].2);
         assert!(requests[1].0.ends_with(r#"Output:\n0")], is_error: false }]"#), "{}", requests[1].0);

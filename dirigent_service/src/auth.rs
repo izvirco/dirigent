@@ -1,28 +1,3 @@
-//! The public listener and who may use it.
-//!
-//! `<config dir>/service.toml` (optional; absent = no public listener) adds a listener for a
-//! TLS reverse proxy (Caddy etc.) to forward to:
-//!
-//! ```toml
-//! [public]
-//! listen = "127.0.0.1:7778"
-//! url = "wss://dirigent.example.com/ws"   # the address clients use, through the proxy
-//! ```
-//!
-//! Auth is a property of the listener, not of the peer: the proxy connects from loopback
-//! too. Every upgrade on the public listener carries `Authorization: Bearer <token>`
-//! (`authorize`, before the upgrade); the loopback and tailscale listeners stay open.
-//! A token is one of, told apart by its form:
-//! - an API key (`dk_…`, `dirigent_service key add`), kept as its sha256 in `service.db`.
-//!   A revoked key is refused from its next connect; live connections stay.
-//! - a forge JWT (`header.payload.signature`), taken while this service is signed in to the
-//!   forge (`forge.rs`) and only of that same account: the forge's signature (`Gate`'s
-//!   JWKS), `iss` the forge, `aud` this service's `[public] url`, `client_id` Dirigent's app,
-//!   `sub` the account this service is signed in with, not expired. Clients mint it for the
-//!   host's url in their `hosts.toml`; both sides normalize it (`hosts::normalize`), so
-//!   `[public] url` must be the address clients use, in any spelling of it. A token stays
-//!   good for up to ten minutes after the account revokes Dirigent on the forge.
-
 use crate::Service;
 use crate::storage::Storage;
 use anyhow::{Context, Result};
@@ -34,7 +9,6 @@ use sha2::{Digest, Sha256};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-/// What API keys start with: a bearer that does is looked up as one.
 const KEY_PREFIX: &str = "dk_";
 
 #[derive(Deserialize, Default)]
@@ -44,14 +18,10 @@ pub struct ServiceToml {
 
 #[derive(Deserialize)]
 pub struct Public {
-    /// Where the proxy forwards to. Any address: every connection must authenticate.
     pub listen: SocketAddr,
-    /// The url clients reach it at, through the proxy: what forge tokens must be issued for
-    /// (their audience). Without it, only API keys.
     pub url: Option<String>,
 }
 
-/// `<config dir>/service.toml`; a missing file is the default (no public listener).
 pub fn load() -> Result<ServiceToml> {
     let path = crate::config_dir().join("service.toml");
     match std::fs::read_to_string(&path) {
@@ -61,12 +31,9 @@ pub fn load() -> Result<ServiceToml> {
     }
 }
 
-/// What the public listener checks forge tokens with.
 pub struct Gate {
-    /// `[public] url`, normalized: the audience forge tokens must name; or why there's none.
     audience: Result<String, String>,
     forge: dirigent_auth::Forge,
-    /// The forge's signing keys, fetched when first needed.
     keys: Keys,
 }
 
@@ -81,18 +48,14 @@ impl Gate {
         Self { audience, forge, keys }
     }
 
-    /// The audience forge tokens must name, or why none are taken.
     pub fn audience(&self) -> Result<&str, &str> {
         self.audience.as_deref().map_err(String::as_str)
     }
 }
 
-/// Who a public connection authenticated as.
 #[derive(Debug, PartialEq)]
 pub enum Principal {
-    /// An API key, by its name.
     Key(String),
-    /// A forge token of the account this service is signed in with, by username.
     Forge(String),
 }
 
@@ -105,9 +68,6 @@ impl std::fmt::Display for Principal {
     }
 }
 
-/// Whether a request on a listener may upgrade: anyone on an open one (no gate: `None`),
-/// only a valid bearer on the public one. Off the async threads: checking a forge token
-/// may fetch the forge's keys.
 pub async fn admit(gate: Option<Arc<Gate>>, svc: Arc<Service>, headers: HeaderMap) -> Result<Option<Principal>, String> {
     let Some(gate) = gate else { return Ok(None) };
     let account = || crate::forge::status().signed_in().map(|a| a.sub.clone());
@@ -117,9 +77,6 @@ pub async fn admit(gate: Option<Arc<Gate>>, svc: Arc<Service>, headers: HeaderMa
         .map(Some)
 }
 
-/// The bearer token of a request on the public listener, checked: whose it is, or why not
-/// (said to the client: what to fix, nothing about this service's account). `account` is
-/// the forge account this service is signed in with, asked for only for a forge token.
 fn authorize(
     gate: &Gate,
     storage: &Mutex<Storage>,
@@ -157,7 +114,6 @@ fn now() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// A new API key's text: `dk_` and 32 random bytes, base64url.
 fn new_key() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("random: {e}"))?;
@@ -210,7 +166,6 @@ mod tests {
     const FORGE: &str = "https://forge.example";
     const NOW: i64 = 1_800_000_000;
 
-    /// A gate for `url`, with the test signer's keys.
     fn test_gate(url: Option<&str>, signer: &Signer) -> Gate {
         let public = Public { listen: "127.0.0.1:0".parse().unwrap(), url: url.map(String::from) };
         let jwks = signer.jwks();
@@ -259,7 +214,6 @@ mod tests {
     fn forge_tokens_of_the_services_own_account_for_its_url() {
         let s = Mutex::new(Storage::in_memory().unwrap());
         let signer = Signer::new();
-        // Written another way than clients normalize it: still the same audience.
         let gate = test_gate(Some("WSS://d.example:443/ws"), &signer);
         let jwt = |sub: &str, aud: &str| format!("Bearer {}", signer.sign(&claims(FORGE, sub, aud, "app", NOW + 600)));
         let check = |auth: &str, account: Option<&str>| authorize(&gate, &s, &headers(Some(auth)), || account.map(String::from), NOW);
@@ -269,9 +223,7 @@ mod tests {
         let wrong_aud = refused(&jwt("u1", "wss://other.example/ws"), Some("u1"));
         assert!(wrong_aud.contains("wss://d.example/ws"), "{wrong_aud}");
         assert!(refused(&jwt("u1", "wss://d.example/ws"), None).contains("isn't signed in"));
-        // The service's sub isn't said.
         assert!(!refused(&jwt("u2", "wss://d.example/ws"), Some("u1")).contains("u1"));
-        // No public url: no audience to check, so no forge tokens.
         let no_url = test_gate(None, &signer);
         let e = authorize(&no_url, &s, &headers(Some(&jwt("u1", "wss://d.example/ws"))), || Some("u1".into()), NOW).unwrap_err();
         assert!(e.contains("[public] url"), "{e}");

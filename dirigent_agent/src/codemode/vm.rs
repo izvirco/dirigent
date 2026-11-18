@@ -1,16 +1,3 @@
-//! One script in one QuickJS VM, on a thread of its own: a script may spin, and must never
-//! hold a tokio worker. The thread makes the VM, runs the script until it waits on its tool
-//! calls, and sleeps until one is settled. All that leaves the VM goes out as `Event`s, in
-//! order, so whoever runs the script has its output even when the VM never comes back.
-//!
-//! The VM has `MEMORY_BYTES` of heap (past it the script gets `InternalError: out of memory`,
-//! or `null` when not even that error fits: `out_of_memory`) and `STACK_BYTES` of stack
-//! (`RangeError`). It is stopped through QuickJS's interrupt handler, which the engine asks
-//! every ten thousand calls and loop turns: a `while (true) {}` ends at once, a loop of long
-//! built-ins (`JSON.parse` of megabytes) only after that many of them. A thread cannot be
-//! killed, so a stopped VM's thread goes on until then, with its place among the VMs
-//! (`SLOTS`); who ran the script does not wait for it.
-
 use super::Namespace;
 use super::declare::{identifier, sample};
 use super::output::Item;
@@ -29,11 +16,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tokio::sync::{Semaphore, SemaphorePermit};
 
-/// What makes the globals of a script, on top of the one function that leaves the VM.
 const PRELUDE: &str = include_str!("prelude.js");
 
 const MEMORY_BYTES: usize = 256 * 1024 * 1024;
-/// Some 2000 calls deep, as far as pi's VM went.
 const STACK_BYTES: usize = 4 * 1024 * 1024;
 /// The thread's own stack: QuickJS checks its limit only now and then, native code runs past it.
 const THREAD_STACK_BYTES: usize = 2 * STACK_BYTES;
@@ -44,48 +29,29 @@ fn out_of_memory() -> String {
     format!("Error: null was thrown: the script most likely ran out of memory (it has {} MB)", MEMORY_BYTES / (1024 * 1024))
 }
 
-/// The VMs that may live at once in this process, whatever threads they are of: each can
-/// take `MEMORY_BYTES`, and a thread.
 pub static SLOTS: Semaphore = Semaphore::const_new(32);
 
-/// What a VM runs, and what its script can find out about the tools.
 pub struct Script {
-    /// The body of an async function.
     pub code: String,
     pub tools: Vec<ToolSpec>,
-    /// What is known of the tools' namespaces.
     pub namespaces: Vec<Namespace>,
-    /// What `load()` reads.
     pub stored: BTreeMap<String, Value>,
 }
 
-/// What leaves a VM.
 pub enum Event {
     Output(Item),
-    /// The script called a tool, with the JSON of its arguments: `Vm::settle` answers by `id`.
-    Call {
-        id: u32,
-        name: String,
-        args: Option<String>,
-    },
-    /// The script's end: the JSON of what it stored (`{ key: JSON text, null to forget }`), or
-    /// its error. Nothing follows it.
+    Call { id: u32, name: String, args: Option<String> },
     Done(Result<String, String>),
-    /// The VM failed, not the script.
     Crash(String),
 }
 
-/// A running VM. Dropping it stops the script.
 pub struct Vm {
     pub events: UnboundedReceiver<Event>,
-    /// A call's id, and the JSON of what it resolves to or the message it rejects with.
     results: Sender<(u32, Result<String, String>)>,
     interrupt: Arc<AtomicBool>,
 }
 
 impl Vm {
-    /// `slot` is the VM's place among those that may live at once: held until its thread
-    /// ends, so a VM that was stopped while a built-in still computes keeps counting.
     pub fn start(script: Script, slot: SemaphorePermit<'static>) -> std::io::Result<Self> {
         let (events_out, events) = unbounded_channel();
         let (results, results_in) = channel();
@@ -93,7 +59,6 @@ impl Vm {
         let stop = interrupt.clone();
         std::thread::Builder::new().name("codemode".into()).stack_size(THREAD_STACK_BYTES).spawn(move || {
             let _slot = slot;
-            // A stopped VM fails with the interrupt: nobody listens any more.
             if let Err(message) = run(script, &events_out, &results_in, &stop)
                 && !stop.load(Ordering::Relaxed)
             {
@@ -103,15 +68,13 @@ impl Vm {
         Ok(Self { events, results, interrupt })
     }
 
-    /// Settle the script's call `id`.
     pub fn settle(&self, id: u32, result: Result<String, String>) {
         let _ = self.results.send((id, result));
     }
 }
 
+// MUST KILL: extract: a Vm::stop that sets the flag and drops `results`, so waking the waiting thread is explicit
 impl Drop for Vm {
-    /// The engine sees the flag at its next poll; a thread waiting on a result wakes because
-    /// `results` is gone.
     fn drop(&mut self) {
         self.interrupt.store(true, Ordering::Relaxed);
     }
@@ -132,8 +95,6 @@ fn run(
     context.with(|ctx| drive(&ctx, script, events, results, interrupt).map_err(|error| explain(&ctx, error)))
 }
 
-/// Run the script to its end: its code and the promise jobs it queues, then, while it waits
-/// on tool calls, their results as they come.
 fn drive<'js>(
     ctx: &Ctx<'js>,
     script: Script,
@@ -148,8 +109,6 @@ fn drive<'js>(
     let tools_json = catalog.tools_json();
     let done = Rc::new(Cell::new(false));
 
-    // `prelude.js` is a module: its default export makes the globals and hands back what
-    // drives the script.
     let bridge = Function::new(ctx.clone(), bridge(events.clone(), catalog, done.clone()))?;
     let (prelude, loaded) = Module::declare(ctx.clone(), "codemode-prelude.js", PRELUDE)?.eval()?;
     loaded.finish::<()>()?;
@@ -157,10 +116,9 @@ fn drive<'js>(
     let api: Object = prelude.call((bridge, tools_json, Value::Object(stored).to_string(), out_of_memory()))?;
     let (settle, start, stalled): (Function, Function, Function) = (api.get("settle")?, api.get("run")?, api.get("stalled")?);
 
-    // The script is the body of an async function, not in strict mode (as pi ran it). The
-    // wrapper shares the script's first line, so the lines errors name are the script's.
     let mut options = EvalOptions::default();
     (options.strict, options.filename) = (false, Some("codemode.js".into()));
+    // MUST KILL: extract: a wrap_script(code) fn that visibly keeps the script on the wrapper's first line
     let main: Function = match ctx.eval_with_options(format!("(async (tools, console) => {{{code}\n}})"), options) {
         Ok(main) => main,
         Err(error) => {
@@ -170,8 +128,6 @@ fn drive<'js>(
     };
     start.call::<_, ()>((main,))?;
     loop {
-        // The promise jobs, until none is left: `while (true) await null` always leaves one,
-        // so a stopped VM runs no more of them.
         while !interrupt.load(Ordering::Relaxed) && ctx.execute_pending_job() {}
         if done.get() || interrupt.load(Ordering::Relaxed) {
             return Ok(());
@@ -195,7 +151,6 @@ fn drive<'js>(
     }
 }
 
-/// The prelude's `bridge(kind, ...)`: see `prelude.js` for what each kind carries.
 fn bridge<'js>(
     events: UnboundedSender<Event>,
     catalog: Catalog,
@@ -225,7 +180,6 @@ fn bridge<'js>(
     }
 }
 
-/// A failed evaluation as text: the exception as `Name: message` over its stack.
 fn explain(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
     if !error.is_exception() {
         return error.to_string();
@@ -243,23 +197,18 @@ fn explain(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {
     format!("{head}\n{stack}").trim_end().to_string()
 }
 
-/// What a script can find out about the tools beyond `ALL_TOOLS`.
 struct Catalog {
     tools: Vec<ToolSpec>,
     namespaces: Vec<Namespace>,
 }
 
 impl Catalog {
-    /// `[{ name, jsName, description }]` for the prelude: every tool with what a script reads of it.
     fn tools_json(&self) -> String {
         let tools =
             self.tools.iter().map(|tool| json!({ "name": tool.name, "jsName": identifier(&tool.name), "description": sample(tool) }));
         Value::Array(tools.collect()).to_string()
     }
 
-    /// The tools of the namespace a script names: by its name, the same as an identifier
-    /// (`dev-radius` and `dev_radius`), or an MCP server's own name (`radius` for its
-    /// `mcp__radius`), which is what a user calls it.
     fn of<'a>(&'a self, namespace: &str) -> impl Iterator<Item = &'a ToolSpec> {
         let asked = identifier(namespace);
         let matches = move |name: &str| {
@@ -273,7 +222,6 @@ impl Catalog {
         self.namespaces.iter().find(|known| known.name == namespace)
     }
 
-    /// `searchTools()`: the JSON list of the best tools' names.
     fn search(&self, query: &str, limit: usize, namespace: Option<&str>) -> String {
         let tools: Vec<&ToolSpec> = match namespace.filter(|namespace| !namespace.is_empty()) {
             Some(namespace) => self.of(namespace).collect(),
@@ -284,7 +232,6 @@ impl Catalog {
         json!(rank(query, &documents, limit)).to_string()
     }
 
-    /// `describeNamespace()`: the JSON of `{ name, description?, instructions?, tools }`.
     fn namespace(&self, query: &str) -> Option<String> {
         let tools: Vec<&ToolSpec> = self.of(query).collect();
         let name = tools.first()?.namespace.as_deref()?;

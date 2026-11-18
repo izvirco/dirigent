@@ -1139,8 +1139,6 @@ mod tests {
         );
     }
 
-    /// Fields added after a host or client shipped are optional on the wire, so the two
-    /// keep talking across an upgrade.
     #[test]
     fn added_fields_are_optional() {
         let t: ThreadSummary = serde_json::from_value(json!({
@@ -1235,7 +1233,6 @@ mod tests {
             servers: vec![McpServer { name: "fs".into(), config: json!({"command": "npx"}), error: None, signed_in: false }],
             path: "/home/x/.config/dirigent/agent.toml".into(),
         });
-        // A state from a newer host is no error.
         let status: McpServerStatus =
             serde_json::from_value(json!({"state":"needs_auth","tools":[{"name":"search"}],"error":"401"})).unwrap();
         assert_eq!(status.state, McpState::NeedsAuth);
@@ -1245,7 +1242,6 @@ mod tests {
         assert_eq!(newer.state, McpState::Other);
         let step: LoginStep = serde_json::from_value(json!({"type":"prompt","n":2,"message":"Paste it"})).unwrap();
         assert_eq!(step, LoginStep::Prompt { n: 2, message: "Paste it".into(), placeholder: None });
-        // What a newer host may send.
         let newer: LoginStep = serde_json::from_value(json!({"type":"qr_code","data":"x"})).unwrap();
         assert_eq!(newer, LoginStep::Unknown);
         for step in [
@@ -1264,7 +1260,6 @@ mod tests {
             body: transcript::Body::User { content: vec![transcript::Block::text("hi")] },
         };
         roundtrip(ServerMessage::Hello { host_name: "h".into(), version: "0".into(), service_id: "s".into(), protocol: PROTOCOL });
-        // A host from before the number speaks the first protocol.
         let old: ServerMessage = serde_json::from_value(json!({"type":"hello","host_name":"h","version":"0.0.10"})).unwrap();
         assert!(matches!(old, ServerMessage::Hello { protocol: 1, .. }));
         roundtrip(ServerMessage::Threads { reply_to: None, threads: vec![t.clone()] });
@@ -1317,7 +1312,6 @@ mod tests {
             }],
         });
         let limit = ProxyLimit { name: "7d_oi".into(), used: 0.42, resets_at: Some(2000) };
-        // Used up to its reset, started over from then on.
         assert_eq!((limit.used_at(1999), limit.used_at(2000)), (0.42, 0.));
         roundtrip(ServerMessage::Proxy {
             reply_to: 7,
@@ -1339,7 +1333,6 @@ mod tests {
                 samples: vec![ProxySample { start: 0, account: "a.json".into(), limit: "7d_oi".into(), used: 0.42 }],
             },
         });
-        // A host that has none answers with the url alone.
         assert_eq!(serde_json::from_value::<Proxy>(json!({"url": ""})).unwrap(), Proxy::default());
     }
 }

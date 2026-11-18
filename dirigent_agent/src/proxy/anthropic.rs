@@ -1,5 +1,3 @@
-//! The `anthropic` wire: Anthropic's Messages API (`/v1/messages`), for Claude.
-//!
 //! The prompt cache, which makes a long conversation affordable, keeps a request's start up
 //! to the breakpoints the request sets (`cache_control`), four at most. CLIProxyAPI (8.0.63,
 //! tried from outside) sets its own where a request has none, keeps every one for an hour
@@ -15,12 +13,10 @@ pub(super) const PATH: &str = "/v1/messages";
 
 pub(super) fn headers(request: &Request<'_>) -> Vec<(&'static str, String)> {
     let mut headers = vec![("anthropic-version", "2023-06-01".to_owned())];
-    // The API has no name for a conversation; the proxy takes one to keep it on one account.
     headers.extend(super::session(request).map(|id| ("x-session-id", id.to_owned())));
     headers
 }
 
-/// The request as the API takes it.
 pub(super) fn body(request: &Request<'_>) -> Value {
     let model = request.model;
     let mut body = json!({
@@ -52,7 +48,6 @@ pub(super) fn body(request: &Request<'_>) -> Value {
     body
 }
 
-/// End the cached part of a request after `block`.
 fn breakpoint(block: &mut Value) {
     block["cache_control"] = json!({"type": "ephemeral"});
 }
@@ -73,10 +68,8 @@ fn tool(spec: &crate::tool::ToolSpec) -> Value {
     json!({"name": spec.name, "description": spec.description, "input_schema": schema})
 }
 
-/// The conversation as the API's turns: a user's and an assistant's in turn.
 fn messages(request: &Request<'_>) -> Value {
     let images = request.model.images;
-    // Each turn's role and blocks.
     let mut turns: Vec<(&str, Vec<Value>)> = vec![];
     // What follows a user's turn joins it: tool results and what the user said meanwhile are
     // one turn to the API.
@@ -105,7 +98,6 @@ fn messages(request: &Request<'_>) -> Value {
                 }
                 let content = match blocks.as_slice() {
                     [] => json!("(no output)"),
-                    // Text alone goes as a string.
                     blocks if blocks.iter().all(|block| block["type"] == "text") => {
                         blocks.iter().filter_map(|block| block["text"].as_str()).collect::<Vec<_>>().join("\n").into()
                     }
@@ -129,8 +121,7 @@ fn messages(request: &Request<'_>) -> Value {
             }
         }
     }
-    // The conversation grows at its end: a breakpoint there, and one where the request before
-    // had its last (the user's turn before), which is then found whatever came between.
+    // MUST KILL: extract: a cache_breakpoints_on_last_two_user_turns(turns) fn out of messages
     for (_, blocks) in turns.iter_mut().rev().filter(|(role, _)| *role == "user").take(2) {
         if let Some(last) = blocks.last_mut() {
             breakpoint(last);
@@ -153,7 +144,6 @@ fn blocks(parts: &[Part], images: bool) -> Vec<Value> {
     parts.iter().filter_map(block).collect()
 }
 
-/// A block of an earlier reply as it goes back, or none when it doesn't.
 fn assistant(block: &Block, api: Api) -> Option<Value> {
     match block {
         Block::Text { text, .. } if !text.trim().is_empty() => Some(json!({"type": "text", "text": text})),
@@ -173,18 +163,14 @@ fn assistant(block: &Block, api: Api) -> Option<Value> {
     }
 }
 
-/// A reply as its stream's events put it together.
 #[derive(Default)]
 pub(super) struct Stream {
     partial: Partial,
-    /// The blocks that are streaming, by the stream's index for them.
     open: HashMap<u64, Open>,
 }
 
 struct Open {
-    /// Its place in the reply's content.
     at: usize,
-    /// A tool call's input, which comes as pieces of JSON text.
     input: String,
 }
 
@@ -211,7 +197,6 @@ impl Wire for Stream {
                     },
                     // Reasoning the provider keeps to itself: all of it is the data to send back.
                     "redacted_thinking" => Block::Thinking { text: String::new(), signature: Some(text("data")), redacted: true },
-                    // Its input is null until all of it is here.
                     "tool_use" => Block::ToolCall { id: text("id"), name: text("name"), input: Value::Null },
                     _ => return Ok(false),
                 };
@@ -276,7 +261,6 @@ impl Wire for Stream {
             }
             "message_stop" => return Ok(true),
             "error" => return Err(Error::in_stream(&data)),
-            // An error in a shape of the proxy's own.
             _ if !data["error"].is_null() => return Err(Error::in_stream(&data)),
             _ => {}
         }
@@ -341,7 +325,6 @@ mod tests {
                 "tools": [
                     {"name": "bash", "description": "Run a command.",
                      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-                    // Of a schema's top level only what the API takes; the script-only tool is not declared.
                     {"name": "mcp__docs__find", "description": "Find.",
                      "input_schema": {"type": "object", "properties": {}, "required": [], "$defs": {"q": {"type": "string"}}}, "cache_control": cached},
                 ],
@@ -350,17 +333,13 @@ mod tests {
                         {"type": "text", "text": "Look at this."},
                         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "aW1n"}},
                     ]},
-                    // Its own signed thinking goes back; the unsigned and the empty text don't.
                     {"role": "assistant", "content": [
                         {"type": "thinking", "thinking": "Two calls.", "signature": "sig"},
                         {"type": "redacted_thinking", "data": "opaque"},
                         {"type": "text", "text": "Running both."},
                         {"type": "tool_use", "id": "call_1", "name": "bash", "input": {"command": "ls"}},
-                        // The call whose arguments were no object goes back without any.
                         {"type": "tool_use", "id": "call_2", "name": "bash", "input": {}},
                     ]},
-                    // Both results and what the user said after are one turn, the results first; a
-                    // failed call's image moves behind them.
                     {"role": "user", "content": [
                         {"type": "tool_result", "tool_use_id": "call_1", "content": "a\nb"},
                         {"type": "tool_result", "tool_use_id": "call_2", "content": "boom\n(images follow the tool results)", "is_error": true},
@@ -368,7 +347,6 @@ mod tests {
                         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "c2hvdA=="}},
                         {"type": "text", "text": "And then?", "cache_control": cached},
                     ]},
-                    // The other wire's reasoning is nothing this one can read.
                     {"role": "assistant", "content": [{"type": "text", "text": "Done."}]},
                     {"role": "user", "content": [{"type": "text", "text": "Thanks.", "cache_control": cached}]},
                 ],
@@ -378,7 +356,6 @@ mod tests {
         );
         assert_eq!(headers(&request), [("anthropic-version", "2023-06-01".to_owned()), ("x-session-id", "thread-1".to_owned())]);
 
-        // A model that doesn't reason or see: no thinking, and a note where an image was.
         let plain = Model { efforts: vec![], images: false, ..claude() };
         let request = Request {
             model: &plain,
@@ -416,7 +393,6 @@ mod tests {
         let request = Request { model: &model, system, messages: &messages, tools: &tools, effort: None, max_output: None, cache_key: "" };
         let body = body(&request);
         assert_eq!(body.to_string().matches("cache_control").count(), 4);
-        // The last two user turns have theirs: where this request ends, and where the one before did.
         let marked: Vec<&str> = body["messages"]
             .as_array()
             .unwrap()
@@ -427,9 +403,6 @@ mod tests {
         assert_eq!(marked, ["four", "five"]);
     }
 
-    /// The stream of a reply with thinking, text and two tool calls, as the proxy sent it (the
-    /// signature cut short). The proxy gives the tools other names on the way to the model,
-    /// which its thinking lets slip.
     #[test]
     fn a_recorded_stream_becomes_the_reply() {
         let (partial, chunks, outcome) = replay(Stream::default(), include_str!("fixtures/anthropic_tools.sse"));
@@ -453,7 +426,6 @@ mod tests {
         );
         assert_eq!(partial.usage, Usage { input: 2, output: 280, cache_read: 627, cache_write: 25, ..Usage::default() });
         assert_eq!((partial.stop, partial.cache_write_1h), (Some(Stop::ToolUse), 25));
-        // What streamed adds up to the same, and each call came once, whole.
         let streamed = |of: fn(&Chunk) -> Option<&str>| chunks.iter().filter_map(of).collect::<String>();
         assert_eq!(streamed(|c| if let Chunk::Thinking { index: 0, delta } = c { Some(delta) } else { None }), thinking);
         assert_eq!(streamed(|c| if let Chunk::Text { index: 1, delta } = c { Some(delta) } else { None }), text);
@@ -469,7 +441,6 @@ mod tests {
 
     #[test]
     fn a_stream_that_breaks_keeps_what_came() {
-        // Cut off by the output limit in the middle of a call's input.
         let cut = concat!(
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"bash\",\"input\":{}}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\": \\\"ec\"}}\n\n",
@@ -479,15 +450,12 @@ mod tests {
         );
         let (partial, chunks, outcome) = replay(Stream::default(), cut);
         assert_eq!((outcome, partial.stop), (Ok(true), Some(Stop::MaxTokens)));
-        // The call is one still, with what came of its input as text.
         let input = json!("{\"command\": \"ec");
         assert_eq!(partial.content, [Block::ToolCall { id: "t1".into(), name: "bash".into(), input: input.clone() }]);
         assert_eq!(chunks, [Chunk::ToolCall { index: 0, id: "t1".into(), name: "bash".into(), input }]);
-        // One whose input never ended is none.
         let open = &cut[..cut.find("event: content_block_stop").unwrap()];
         assert!(matches!(replay(Stream::default(), open).0.content.as_slice(), [Block::ToolCall { input: Value::Null, .. }]));
 
-        // The provider gives up in the middle of the text.
         let overloaded = concat!(
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
             "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Half a\"}}\n\n",

@@ -1,21 +1,3 @@
-//! Self-update. Release builds ask the update api (`dirigent_api`) for their channel's
-//! release every `CHECK_EVERY`; a newer one is downloaded to `<data dir>/updates/`, checked
-//! against its minisign signature, and only then offered: the sidebar's update button
-//! (`sidebar.rs`), whose menu restarts into it now, or once no local agent is working.
-//!
-//! Restarting runs the downloaded installer (`start_installer`): on Windows the setup exe
-//! (`packaging/windows/dirigent.iss`), on Linux the tarball's `install.sh`
-//! (`packaging/linux/install.sh`). It waits for this process to exit, replaces the install
-//! and starts Dirigent again. So each update is installed by the new version's own
-//! installer, and this file ships with every version too: both the app and its updater can
-//! change in any release. What must stay put for installs in the field: the api's url and
-//! `Release`, how `start_installer` runs an installer, and the signing keys
-//! (`release::KEYS`).
-//!
-//! Dev and nix builds have no update url and never check. Tests point `DIRIGENT_UPDATE_URL`
-//! at a test api (`dirigent_api serve` with an `S3_PREFIX`) and, in debug builds,
-//! `DIRIGENT_UPDATE_KEY` at their own signing key.
-
 use crate::app::Dirigent;
 use anyhow::{Context as _, Result, bail};
 use dirigent_protocol::release::{self, Release};
@@ -27,46 +9,35 @@ use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
-/// "Restart when idle" waits for the local agents to be quiet this long: a sub-agent that
-/// finishes hands its parent a new turn right after.
+// MUST KILL: rename: IDLE_FOR → SUB_AGENT_HANDOFF_GRACE
 const IDLE_FOR: Duration = Duration::from_secs(3);
 
-/// A verified installer, ready to run.
+// MUST KILL: rename: Ready → VerifiedInstaller, apply_update runs it unchecked
 #[derive(Clone)]
 pub struct Ready {
     pub version: String,
-    /// In `<data dir>/updates/`: the setup exe (Windows) or the tarball (Linux).
     pub installer: PathBuf,
 }
 
-/// The update button's state, on `Dirigent`.
 #[derive(Default)]
 pub struct State {
     pub ready: Option<Ready>,
-    /// The user picked "Restart when idle".
     pub when_idle: bool,
-    /// Since when no local agent has been working, while `when_idle`.
     idle_since: Option<Instant>,
 }
 
-/// The channel's update endpoint, `…/api/v0/updates/{channel}`: baked in by the release
-/// workflow (`DIRIGENT_BUILD_UPDATE_URL` at compile time; a name of its own, so a test's
-/// run-time variable can't end up in a build), overridden by `DIRIGENT_UPDATE_URL` at run
-/// time. `None`: updates are off.
+// MUST KILL: rename: endpoint's two env vars → a baked BUILD_UPDATE_URL const and a run-time override fn
 fn endpoint() -> Option<String> {
     let url = std::env::var("DIRIGENT_UPDATE_URL").ok().or_else(|| option_env!("DIRIGENT_BUILD_UPDATE_URL").map(str::to_owned));
     url.filter(|u| !u.is_empty()).map(|u| u.trim_end_matches('/').to_owned())
 }
 
-/// Start checking, on a thread of its own (downloads block): at once, then every
-/// `CHECK_EVERY`. Each new verified download lands in `Dirigent::updater.ready`.
 pub fn start(cx: &mut Context<Dirigent>) {
     let Some(endpoint) = endpoint() else { return };
     info!(%endpoint, "checking for updates");
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     std::thread::spawn(move || {
         let mut offered: Option<String> = None;
-        // Offline, every check fails: logged once until one works again.
         let mut failing = false;
         loop {
             match check(&endpoint, offered.as_deref()) {
@@ -101,9 +72,6 @@ pub fn start(cx: &mut Context<Dirigent>) {
     .detach();
 }
 
-/// One check: the channel's release, downloaded and verified if it is newer than this build
-/// (`release::VERSION`: on nightly both are prereleases, ordered by their build time).
-/// `offered`: the version already handed to the UI, not looked at again.
 fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
     let platform = release::platform();
     let agent = ureq::Agent::new_with_config(
@@ -115,7 +83,6 @@ fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
     let url = format!("{endpoint}/{platform}");
     let release: Release = match agent.get(&url).call() {
         Ok(mut res) => serde_json::from_str(&res.body_mut().read_to_string()?).with_context(|| format!("{url}: not a release"))?,
-        // Nothing released on this channel for this platform.
         Err(ureq::Error::StatusCode(404)) => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("GET {url}")),
     };
@@ -130,11 +97,9 @@ fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
         return Ok(None);
     }
     let signature = agent.get(format!("{}.minisig", release.url)).call()?.body_mut().read_to_string()?;
-    // Tests sign with their own key (debug builds only).
     let test_key = std::env::var("DIRIGENT_UPDATE_KEY").ok().filter(|_| cfg!(debug_assertions));
     let keys: Vec<String> = release::KEYS.iter().map(|k| k.to_string()).chain(test_key).collect();
     let verify = |file: &Path| verify(file, &signature, &release.version, &platform, &keys);
-    // A download from an earlier check may be here already.
     if !installer.exists() || verify(&installer).is_err() {
         info!(version = %release.version, "downloading update");
         std::fs::create_dir_all(&dir)?;
@@ -148,7 +113,6 @@ fn check(endpoint: &str, offered: Option<&str>) -> Result<Option<Ready>> {
     Ok(Some(Ready { version: release.version, installer }))
 }
 
-/// Whether `file` is `version` for `platform`, signed by one of `keys`.
 fn verify(file: &Path, signature: &str, version: &str, platform: &str, keys: &[String]) -> Result<()> {
     let signature = minisign_verify::Signature::decode(signature)?;
     if signature.trusted_comment() != release::trusted_comment(version, platform) {
@@ -173,8 +137,6 @@ fn verify(file: &Path, signature: &str, version: &str, platform: &str, keys: &[S
     bail!("{} isn't signed by a release key", file.display())
 }
 
-/// Remove what earlier checks and updates left in `dir` (downloads, an unpacked tarball):
-/// everything but `keep`.
 fn clean(dir: &Path, keep: Option<&Path>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -185,8 +147,6 @@ fn clean(dir: &Path, keep: Option<&Path>) {
     }
 }
 
-/// Start the installer, which waits for this process to exit, installs and starts Dirigent
-/// again. Windows: the setup exe, silent; `/UPDATE` makes it relaunch the app.
 #[cfg(windows)]
 fn start_installer(installer: &Path) -> Result<()> {
     std::process::Command::new(installer)
@@ -197,9 +157,6 @@ fn start_installer(installer: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Linux: unpack the tarball next to it and run its `dirigent/install.sh --update <pid>`,
-/// with this app's `--data-dir` / `--config-dir` to start it again on. Its output goes to
-/// `<data dir>/logs/install.log`.
 #[cfg(unix)]
 fn start_installer(installer: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
@@ -227,16 +184,12 @@ fn start_installer(installer: &Path) -> Result<()> {
 }
 
 impl Dirigent {
-    /// Local threads a restart would cut off: working, still being set up, or running
-    /// `async_bash` jobs they wait on. (Waiting on an answer is fine: asks are kept by the
-    /// service. Jobs left running, `free_jobs`, would hold an update off for good: the
-    /// restart stops them.)
+    // MUST KILL: rename: local_busy → threads_a_restart_would_cut_off (jobs and setup count, asks don't)
     pub fn local_busy(&self) -> usize {
         let Some(host) = self.host(dirigent_service::hosts::LOCAL) else { return 0 };
         host.threads.iter().filter(|t| t.running() || t.jobs > 0 || t.setup.is_some()).count()
     }
 
-    /// The update menu's restart: now if no local agent is working, else once none is.
     pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         if self.local_busy() == 0 {
@@ -254,7 +207,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Every second (`tick`): restart once the local agents have been idle `IDLE_FOR`.
     pub fn tick_update(&mut self, cx: &mut Context<Self>) {
         if !self.updater.when_idle {
             return;
@@ -267,14 +219,10 @@ impl Dirigent {
         }
     }
 
-    /// Install the ready update and start again: start the installer (`start_installer`),
-    /// which waits for this process to exit, then quit. Taken from `ready` meanwhile, so a
-    /// second restart can't start another installer over the first one.
+    // MUST KILL: type: apply_update takes updater.ready as its in-flight guard → an explicit Installing state
     fn apply_update(&mut self, cx: &mut Context<Self>) {
         let Some(ready) = self.updater.ready.take() else { return };
         info!(version = %ready.version, "restarting to update");
-        // Off the app's borrow and thread: unpacking takes a moment, and on Windows starting
-        // a process can pump window messages, which would re-enter the app.
         cx.spawn(async move |this, cx| {
             let installer = ready.installer.clone();
             let started = cx.background_executor().spawn(async move { start_installer(&installer) }).await;
@@ -301,7 +249,6 @@ impl Dirigent {
 mod tests {
     use super::*;
 
-    /// Made with the minisign CLI: `minisign -S -m payload -t "dirigent 1.2.3 test-platform"`.
     const KEY: &str = "RWRe9G0q34tFvBAF73zIZUL9dKvcm2lxf6ZaGGrgte90weV+749I+VZ5";
     const PAYLOAD: &[u8] = b"dirigent update test payload\n";
     const SIGNATURE: &str = "untrusted comment: signature from minisign secret key
@@ -320,11 +267,9 @@ trusted comment: dirigent 1.2.3 test-platform
         let keys = [KEY.to_owned()];
         let check = |file: &Path, version: &str, platform: &str, keys: &[String]| verify(file, SIGNATURE, version, platform, keys);
         assert!(check(&good, "1.2.3", "test-platform", &keys).is_ok());
-        // The trusted comment pins version and platform: no replaying an old signature.
         assert!(check(&good, "1.2.4", "test-platform", &keys).is_err());
         assert!(check(&good, "1.2.3", "other-platform", &keys).is_err());
         assert!(check(&bad, "1.2.3", "test-platform", &keys).is_err());
-        // The real release keys didn't sign it.
         let release_keys: Vec<String> = release::KEYS.iter().map(|k| k.to_string()).collect();
         assert!(check(&good, "1.2.3", "test-platform", &release_keys).is_err());
         std::fs::remove_dir_all(&dir).unwrap();

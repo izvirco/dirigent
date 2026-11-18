@@ -1,11 +1,3 @@
-//! The move from pi, shown: the first start of a build with its own agent opens on this
-//! window, not on the app. It makes the migration (`dirigent_service::migration`: the
-//! dbs and the config dir copied, the threads converted, pi's settings brought over) and
-//! shows how far it is, then what could not be brought over and where the backups are. It
-//! stays until Continue, which starts the app as on any other day.
-//!
-//! Nothing else of the app runs meanwhile: the desktop's own db is one of those copied.
-
 use crate::config::Config;
 use crate::icons::icon;
 use crate::lists::scroll;
@@ -18,21 +10,15 @@ use gpui::{
 };
 use std::time::Duration;
 
-/// The window's size: a dialog's, with room for what could not be brought over. (Where
-/// the window is made larger, tiled or maximized, what it shows stays a column this wide.)
 const SIZE: (f32, f32) = (640., 620.);
 
-/// The app is to start with the migration: this install is as pi left it, and no service
-/// runs on it (one that does has made the migration, or is pi's still and has the data).
+// MUST KILL: extract: the port probe in needed() into a named service_running() check
 pub fn needed() -> bool {
     let local = std::net::SocketAddr::from(([127, 0, 0, 1], dirigent_service::port()));
     dirigent_service::migration::pending() && std::net::TcpStream::connect_timeout(&local, Duration::from_millis(300)).is_err()
 }
 
-/// Open the window and make the migration. `start` starts the app, once it is through and
-/// Continue was clicked.
 pub fn open(config: &Config, start: impl FnOnce(&mut App) + 'static, cx: &mut App) {
-    // As the app will look (it sets both again when it starts).
     if let Ok(theme) = theme::load(&config.theme) {
         theme::set(theme);
     }
@@ -51,15 +37,12 @@ pub fn open(config: &Config, start: impl FnOnce(&mut App) + 'static, cx: &mut Ap
     cx.activate(true);
 }
 
-/// What the migration has told so far.
 #[derive(Default)]
 struct Told {
     steps: Vec<Step>,
-    /// How many of `steps` are done.
     done: usize,
-    /// Threads converted, of how many.
+    // MUST KILL: type: threads as a struct (converted, total), not a tuple
     threads: (usize, usize),
-    /// What it came to, once it is through.
     report: Option<Report>,
 }
 
@@ -69,13 +52,11 @@ impl Told {
             Event::Steps(steps) => self.steps = steps,
             Event::Step(step) => self.done = self.steps.iter().position(|s| *s == step).unwrap_or(self.done),
             Event::Progress { done, total } => self.threads = (done, total),
-            // In the report, which comes last.
             Event::Done(_) | Event::Left(_) => {}
         }
     }
 
-    /// How far it is, 0 to 1 (and stays, where it stopped). The threads are most of it; a
-    /// step is all or nothing but for them.
+    // MUST KILL: extract: the threads' weight 8 in fraction() as a named const
     fn fraction(&self) -> f32 {
         if self.report.as_ref().is_some_and(|report| report.error.is_none()) {
             return 1.;
@@ -91,13 +72,11 @@ impl Told {
     }
 }
 
-/// What starts the app.
 type Start = Box<dyn FnOnce(&mut App)>;
 
 struct Migration {
     told: Told,
     font: SharedString,
-    /// Continue's.
     start: Option<Start>,
 }
 
@@ -108,7 +87,6 @@ impl Migration {
             Report(Report),
         }
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        // On a thread of its own: it copies and converts whole dbs.
         let spawned = std::thread::Builder::new().name("migration".into()).spawn(move || {
             let report = dirigent_service::migration::run(|event| drop(tx.unbounded_send(Heard::Event(event))));
             let _ = tx.unbounded_send(Heard::Report(report));
@@ -122,7 +100,6 @@ impl Migration {
                     match heard {
                         Heard::Event(event) => this.told.event(event),
                         Heard::Report(report) => {
-                            // For the log too: the window is gone with a click.
                             match &report.error {
                                 Some(error) => tracing::error!("the migration from pi stopped: {error}"),
                                 None => tracing::info!("the migration from pi is made"),
@@ -142,8 +119,7 @@ impl Migration {
         Self { told: Told::default(), font, start: Some(start) }
     }
 
-    /// Continue: the app starts, and this window goes once its own is there (the last
-    /// window to close would take the app with it).
+    // MUST KILL: extract: go_on's start-then-remove order into a named fn: the app's window must open before this one closes, or the app quits
     fn go_on(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(start) = self.start.take() else { return };
         let this = window.window_handle();
@@ -168,7 +144,6 @@ impl Render for Migration {
         let steps = told.steps.iter().enumerate().map(|(ix, step)| {
             let state = match (report, &failed) {
                 (Some(_), None) => State::Done,
-                // The step it stopped in.
                 (Some(_), Some(_)) if ix == told.done => State::Failed,
                 _ if ix < told.done => State::Done,
                 _ if ix == told.done && report.is_none() => State::Going,
@@ -222,7 +197,6 @@ impl Render for Migration {
                         .text_color(rgba(t.fg_2))
                         .child("What was there before, and this report (migration.txt), is in:")
                         .children(backups.into_iter().map(|backup| div().text_color(rgba(t.fg_1)).child(backup)))
-                        // (One that stopped goes on with them.)
                         .children(failed.is_none().then_some("Delete those once you have no use for them."))
                 }))
         });
@@ -275,7 +249,6 @@ enum State {
     Failed,
 }
 
-/// A step: its state's mark, what it is, and how far it is.
 fn step_row(state: State, label: &'static str, detail: Option<String>) -> impl IntoElement {
     let t = theme::t();
     let mark = match state {
@@ -307,13 +280,11 @@ mod tests {
         told.event(Event::Steps(vec![Step::Backup, Step::Threads, Step::Settings]));
         told.event(Event::Step(Step::Backup));
         assert_eq!(told.fraction(), 0.);
-        // The threads are eight of its ten parts.
         told.event(Event::Step(Step::Threads));
         told.event(Event::Progress { done: 24, total: 96 });
         assert_eq!(told.fraction(), 0.3);
         told.event(Event::Step(Step::Settings));
         assert_eq!(told.fraction(), 0.9);
-        // One that stopped stays where it is; one that is through is all of it.
         told.report = Some(Report { error: Some("no room".into()), ..Default::default() });
         assert_eq!(told.fraction(), 0.9);
         told.report = Some(Report::default());

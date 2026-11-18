@@ -1,19 +1,11 @@
-//! What a script is told of the tools: their names as identifiers, their TypeScript
-//! declarations made from their JSON Schemas (as pi-codemode's `declarations.js` made them), and
-//! the `codemode` tool's description built from those.
-
 use super::Namespace;
 use crate::tool::ToolSpec;
 use serde_json::{Map, Number, Value};
 use std::collections::BTreeMap;
 
-/// The longest input type a declaration shows, in characters; a longer one is `unknown`.
 const INPUT_MAX_CHARS: usize = 16_000;
-/// Local `$ref`s followed per rendered schema, so shared definitions cannot blow up the output.
 const MAX_REF_EXPANSIONS: u32 = 32;
-/// The longest property tag; longer ones (large defaults, long patterns) are left out.
 const MAX_TAG_CHARS: usize = 80;
-/// What the tools listed in the description may cost together, in estimated tokens.
 const INLINE_BUDGET: usize = 3000;
 const CHARS_PER_TOKEN: usize = 4;
 
@@ -27,38 +19,24 @@ Globals:
 - `store(key, value)` and `load(key)` keep small JSON values across codemode calls, when the script succeeds.
 - `ALL_TOOLS` (every tool as `{ name, description }`), `await searchTools(query, { limit?, namespace? })` (the best matches among them), `await describeTool(name)` (a tool's description and declaration), `await describeNamespace(name)` (an MCP server's `{ name, description?, instructions?, tools }`, `tools` being its tools' names): find the tools that are not listed here, such as MCP tools."#;
 
-/// The identifier a script uses for a tool: characters that are not valid in a JavaScript
-/// identifier become `_`. `mcp__docs__search` stays as is, `my-tool` becomes `my_tool`.
 pub fn identifier(name: &str) -> String {
     let valid = |i: usize, c: char| c == '_' || c == '$' || c.is_ascii_alphabetic() || (i > 0 && c.is_ascii_digit());
     let id: String = name.chars().enumerate().map(|(i, c)| if valid(i, c) { c } else { '_' }).collect();
     if id.is_empty() { "_".into() } else { id }
 }
 
-/// What a script reads of a tool (`describeTool`, `ALL_TOOLS`): its description, its rules
-/// (the system prompt only has those of the tools declared to the model) and its declaration.
 pub fn sample(tool: &ToolSpec) -> String {
     let rules: Vec<String> = tool.guidelines.iter().map(|g| g.trim()).filter(|g| !g.is_empty()).map(|g| format!("- {g}")).collect();
     let about = if rules.is_empty() { tool.description.clone() } else { format!("{}\n\n{}", tool.description.trim(), rules.join("\n")) };
     format!("{}\n\ncodemode tool declaration:\n```ts\ndeclare const tools: {{ {} }};\n```", about.trim(), signature(tool, true))
 }
 
-/// A tool as a member of `tools`: `name(args: T): Promise<R>;`. `comments`: with what its
-/// schema says of each argument.
 fn signature(tool: &ToolSpec, comments: bool) -> String {
     let returns = tool.returns.as_deref().unwrap_or("string");
     format!("{}(args: {}): Promise<{returns}>;", identifier(&tool.name), schema_type(&tool.input, comments, Some(INPUT_MAX_CHARS)))
 }
 
-/// The `codemode` tool's description: what a script is, its globals, and the declarations of
-/// the tools the model has (`deferred` ones are never listed: the text stays the same while
-/// MCP servers connect), grouped by namespace, as many as fit `INLINE_BUDGET`.
-///
-/// The listed tools are declared to the model as well, with their descriptions and schemas,
-/// so a tool is listed by its signature alone: the name a script calls it by, its arguments
-/// in short, and what a call resolves to.
 pub fn description(tools: &[ToolSpec], namespace: impl Fn(&str) -> Option<Namespace>) -> String {
-    // Tools without a namespace first, then the namespaces by name.
     let mut groups: BTreeMap<Option<&str>, Vec<(usize, String)>> = BTreeMap::new();
     for tool in tools.iter().filter(|tool| !tool.deferred) {
         let id = identifier(&tool.name);
@@ -91,12 +69,9 @@ pub fn description(tools: &[ToolSpec], namespace: impl Fn(&str) -> Option<Namesp
     sections.join("\n\n")
 }
 
-/// Which tools fit the budget, by group: in each round every group places its cheapest
-/// remaining tool; a group whose next tool does not fit drops out while the others go on. So
-/// every namespace is represented before any is complete.
+// MUST KILL: rename: `select` → `fill_round_robin` (every namespace is represented before any is complete)
 fn select(groups: &[Vec<usize>], budget: usize) -> Vec<Vec<bool>> {
     let mut shown: Vec<Vec<bool>> = groups.iter().map(|costs| vec![false; costs.len()]).collect();
-    // Each group's tools, cheapest first (ties in their own order).
     let mut queues: Vec<std::collections::VecDeque<usize>> = groups
         .iter()
         .map(|costs| {
@@ -122,7 +97,6 @@ fn select(groups: &[Vec<usize>], budget: usize) -> Vec<Vec<bool>> {
     shown
 }
 
-/// `text` as the rest of a `//` comment: nothing in it ends the line.
 fn comment_line(text: &str) -> String {
     text.chars().map(|c| if is_line_terminator(c) { ' ' } else { c }).collect()
 }
@@ -131,12 +105,6 @@ fn is_line_terminator(c: char) -> bool {
     matches!(c, '\r' | '\n' | '\u{2028}' | '\u{2029}')
 }
 
-/// A JSON Schema as a TypeScript type: objects on one line (`{ a: string; b?: number; }`) with
-/// the properties sorted by name, or, with `comments`, one property per line under `//`
-/// comments when one has a description or constraints the type cannot say
-/// (`// @integer @minimum 1 @default 20`); `Array<T>` for arrays. Local references
-/// (`#/$defs/...`) are followed; recursive and remote ones are `unknown`. A type longer than
-/// `max_chars` is rendered again without the constraints, and is `unknown` if still too long.
 pub fn schema_type(schema: &Value, comments: bool, max_chars: Option<usize>) -> String {
     let render = |tags: bool| Render { root: schema, resolving: vec![], expansions: 0, comments, tags }.ty(schema);
     let fits = |ty: &str| max_chars.is_none_or(|max| ty.chars().count() <= max);
@@ -150,7 +118,6 @@ pub fn schema_type(schema: &Value, comments: bool, max_chars: Option<usize>) -> 
 
 struct Render<'a> {
     root: &'a Value,
-    /// The references being followed: one met again is recursive.
     resolving: Vec<&'a str>,
     expansions: u32,
     comments: bool,
@@ -200,7 +167,6 @@ impl<'a> Render<'a> {
         }
     }
 
-    /// `schema` read as being of JSON Schema type `ty`.
     fn of_type(&mut self, schema: &'a Map<String, Value>, ty: Option<&Value>) -> String {
         let has = |keys: &[&str]| keys.iter().any(|key| schema.contains_key(*key));
         match ty {
@@ -274,7 +240,6 @@ impl<'a> Render<'a> {
         lines.join("\n")
     }
 
-    /// The `//` lines over a property: its description, then its constraints.
     fn comment(&self, property: &Value) -> Vec<String> {
         let description = property.get("description").and_then(Value::as_str).unwrap_or_default();
         let mut lines: Vec<String> =
@@ -287,8 +252,6 @@ impl<'a> Render<'a> {
     }
 }
 
-/// The subschema a local `$ref` (`#`, `#/$defs/Item`) names in `root`; `None` for remote
-/// references and ones that name nothing.
 pub fn resolve_ref<'a>(reference: &str, root: &'a Value) -> Option<&'a Value> {
     if reference != "#" && !reference.starts_with("#/") {
         return None;
@@ -301,7 +264,6 @@ pub fn resolve_ref<'a>(reference: &str, root: &'a Value) -> Option<&'a Value> {
     (current.is_boolean() || current.is_object()).then_some(current)
 }
 
-/// `%41` → `A`; `None` for a malformed escape.
 fn percent_decode(segment: &str) -> Option<String> {
     let mut bytes = Vec::with_capacity(segment.len());
     let mut rest = segment.as_bytes();
@@ -318,7 +280,6 @@ fn percent_decode(segment: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// The types as a union, each once; `unknown` if one of them is.
 fn union(types: impl Iterator<Item = String>) -> String {
     let mut unique: Vec<String> = vec![];
     for ty in types {
@@ -332,8 +293,6 @@ fn union(types: impl Iterator<Item = String>) -> String {
     if unique.is_empty() { "never".into() } else { unique.join(" | ") }
 }
 
-/// Constraints of a property that its TypeScript type cannot say, as JSDoc-style tags:
-/// `@integer @minimum 1 @maximum 100 @default 20`. Empty when there are none.
 fn constraint_tags(property: &Value) -> String {
     let Some(property) = property.as_object() else { return String::new() };
     // An optional field such as Pydantic's `int | None` keeps its constraints in the branch
@@ -388,7 +347,6 @@ fn constraint_tags(property: &Value) -> String {
     ] {
         let values: Vec<Value> = schemas.iter().filter_map(|schema| keyword(schema, name)).collect();
         match bound {
-            // Bounds all hold at once: the tightest one matters.
             Some(lower) => {
                 let numbers = values.iter().filter_map(Value::as_number);
                 let tightest = numbers.reduce(|a, b| if (a.as_f64() > b.as_f64()) == lower { a } else { b });
@@ -413,7 +371,6 @@ fn constraint_tags(property: &Value) -> String {
     if schemas.iter().any(|schema| is(schema, "uniqueItems")) {
         tags.push("@uniqueItems".into());
     }
-    // Annotations, unlike constraints, are the property's own.
     if let Some(default) = property.get("default").filter(|default| !default.is_null()) {
         tags.push(format!("@default {}", json(default)));
     }
@@ -469,21 +426,17 @@ mod tests {
         }
     }
 
-    /// The expected types are what pi-codemode 1.5.2's `schemaToType` gives for the same schemas.
     #[test]
     fn schemas_become_types_as_pi_made_them() {
         let cases = [
-            // Optional fields, sorted by name; no comments: one line.
             (
                 json!({ "type": "object", "properties": { "path": { "type": "string" }, "limit": { "type": "number" }, "offset": { "type": ["number", "null"] } }, "required": ["path"] }),
                 "{ limit?: number; offset?: number | null; path: string; }",
             ),
-            // Enums, a const, a key that is no identifier.
             (
                 json!({ "type": "object", "properties": { "mode": { "enum": ["steer", "follow_up", 3, null] }, "kind": { "const": "a\"b" }, "content-type": { "type": "boolean" } }, "required": ["mode", "kind"] }),
                 r#"{ "content-type"?: boolean; kind: "a\"b"; mode: "steer" | "follow_up" | 3 | null; }"#,
             ),
-            // Nested objects and arrays; a property's description makes the object multi-line.
             (
                 json!({ "type": "object", "required": ["edits"], "properties": {
                     "edits": { "type": "array", "description": "One or more replacements.\nIn order.", "items": { "type": "object", "properties": { "oldText": { "type": "string", "description": "Exact text." }, "newText": { "type": "string" } }, "required": ["oldText", "newText"], "additionalProperties": false } },
@@ -493,7 +446,6 @@ mod tests {
                 } }),
                 "{\n  any?: unknown[];\n  // One or more replacements.\n  // In order.\n  edits: Array<{\n    newText: string;\n    // Exact text.\n    oldText: string;\n  }>;\n  pair?: [string, number];\n  tags?: Array<string>;\n}",
             ),
-            // Unions, intersections, open objects.
             (
                 json!({ "type": "object", "properties": {
                     "a": { "anyOf": [{ "type": "string" }, { "type": "null" }] },
@@ -508,7 +460,6 @@ mod tests {
                 } }),
                 "{ a?: string | null; b?: unknown; c?: { x?: number; } & (string | number); d?: { [key: string]: string; }; e?: { [key: string]: unknown; }; f?: {}; g?: { y?: string; [key: string]: unknown; }; h?: unknown; i?: never; }",
             ),
-            // Constraints the type cannot say, as tags.
             (
                 json!({ "type": "object", "properties": {
                     "limit": { "type": "integer", "minimum": 1, "maximum": 100.0, "default": 20, "description": "How many." },
@@ -519,7 +470,6 @@ mod tests {
                 } }),
                 "{\n  // @integer @exclusiveMinimum 0\n  count?: number | null;\n  // @minItems 1 @uniqueItems @default [\"a\"]\n  ids?: Array<string>;\n  // How many.\n  // @integer @minimum 1 @maximum 100 @default 20\n  limit?: number;\n  long?: string;\n  // @minLength 1 @pattern ^[a-z]+$ @format hostname @deprecated\n  name?: string;\n}",
             ),
-            // References: local ones are followed, recursive and remote ones are unknown.
             (
                 json!({ "type": "object", "properties": { "item": { "$ref": "#/$defs/Item" }, "node": { "$ref": "#/$defs/Node" }, "far": { "$ref": "https://example.com/x.json" }, "odd": { "$ref": "#/$defs/a~1b%20c" } },
                     "$defs": { "Item": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }, "Node": { "type": "object", "properties": { "next": { "$ref": "#/$defs/Node" } } }, "a/b c": { "type": "boolean" } } }),
@@ -554,7 +504,6 @@ mod tests {
             sample(&spec),
             "About my-tool.\n\n- Use it sparingly.\n\ncodemode tool declaration:\n```ts\ndeclare const tools: { my_tool(args: {\n  // What to find.\n  q: string;\n}): Promise<{ hits: string[] }>; };\n```"
         );
-        // Without `returns` a call resolves to the tool's text.
         let plain = tool("plain", json!({ "type": "object", "properties": {}, "additionalProperties": false }));
         assert!(sample(&plain).ends_with("plain(args: {}): Promise<string>; };\n```"));
     }
@@ -583,7 +532,6 @@ mod tests {
              ## mcp__docs\nThe docs.\n\n\
              ```ts\ndeclare const tools: {\n  mcp__docs__search_all(args: { q?: string; }): Promise<string>; // mcp__docs__search-all\n};\n```"
         );
-        // The same tools give the same text, and deferred ones change nothing.
         assert_eq!(description(&tools, namespace), text);
         assert_eq!(description(&[search, bash], namespace), text);
         assert_eq!(description(&[deferred], namespace), INTRO);
@@ -591,8 +539,6 @@ mod tests {
 
     #[test]
     fn the_listing_keeps_to_its_budget() {
-        // 80 characters a line: 20 tokens. The budget is spent round by round, a tool of each
-        // group at a time, so the small namespace is whole and the big group is cut.
         let named = |i: usize, namespace: Option<&str>| {
             let name = format!("tool_{i:03}_{}", "x".repeat(41));
             let mut spec = tool(&name, json!({ "type": "object", "properties": {}, "additionalProperties": false }));

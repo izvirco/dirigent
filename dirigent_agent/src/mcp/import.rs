@@ -1,6 +1,3 @@
-//! pi's MCP files as ours, for the one time a host moves from pi to this agent: its
-//! `mcp.json` (`mcpServers`, the shape `Server` keeps) and its `mcp-auth.json`.
-
 use super::config::{self, Reach, Server};
 use super::oauth::{Login, Store, Tokens};
 use crate::config::Dirs;
@@ -8,7 +5,6 @@ use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-/// What `import_pi` made of pi's files.
 #[derive(Debug, Default, PartialEq)]
 pub struct Imported {
     /// pi's servers as entries of `agent.toml` (`Config::mcp`), for the caller to save.
@@ -37,10 +33,8 @@ pub fn import_pi(agent_dir: &Path, dirs: &Dirs, sign_ins: bool) -> Imported {
             servers.insert(name.clone(), server);
         }
     }
-    // As a session takes them: an entry it would skip isn't worth having.
     for (name, server, reach) in config::checked(&servers) {
         match reach {
-            // `type` said what `command` and `url` do.
             Ok(_) => drop(imported.servers.insert(name.to_owned(), Server { kind: None, ..server.clone() })),
             Err(why) => imported.notes.push(format!("MCP server {name} is left out: {why}")),
         }
@@ -51,7 +45,6 @@ pub fn import_pi(agent_dir: &Path, dirs: &Dirs, sign_ins: bool) -> Imported {
     imported
 }
 
-/// A JSON file of pi's; `None` without one, or with one that can't be read (a note).
 fn read(path: &Path, notes: &mut Vec<String>) -> Option<Value> {
     let parsed = match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(text.trim_start_matches('\u{feff}')).map_err(|e| e.to_string()),
@@ -61,9 +54,6 @@ fn read(path: &Path, notes: &mut Vec<String>) -> Option<Value> {
     parsed.map_err(|e| notes.push(format!("{} not read: {e}", path.display()))).ok()
 }
 
-/// An entry of pi's as ours, without what only pi had: `deferred` exposure (there is no
-/// tool search) and `hidden` (a server nobody reaches is one switched off), an exposure per
-/// tool, a provider's credentials, pi's own client id.
 fn server_of(name: &str, entry: &Value, notes: &mut Vec<String>) -> Option<Server> {
     let mut fields = entry.as_object().cloned().unwrap_or_default();
     if let Some(provider) = fields.remove("auth") {
@@ -92,7 +82,6 @@ fn server_of(name: &str, entry: &Value, notes: &mut Vec<String>) -> Option<Serve
         Some("codemode-deferred") => drop(fields.remove("exposure")),
         _ => {}
     }
-    // Whole seconds here.
     if let Some(seconds) = fields.get("timeout").and_then(Value::as_f64) {
         fields.insert("timeout".into(), json!(seconds.ceil().max(0.) as u64));
     }
@@ -106,9 +95,7 @@ fn server_of(name: &str, entry: &Value, notes: &mut Vec<String>) -> Option<Serve
     serde_json::from_value(Value::Object(fields)).map_err(|e| notes.push(format!("MCP server {name} is left out: {}", wrong(&e)))).ok()
 }
 
-/// What is wrong with an entry, without the value that is: a note is kept, sent to the
-/// desktops and shown, and an entry holds tokens. ("invalid type: string \"Bearer …\",
-/// expected a map": what was expected names no value.)
+// MUST KILL: rename: `wrong` → `error_without_value` (a note must never quote an entry's value: it may be a token)
 fn wrong(error: &serde_json::Error) -> String {
     let message = error.to_string();
     match message.rsplit_once(", expected ") {

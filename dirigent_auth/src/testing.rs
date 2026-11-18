@@ -1,12 +1,8 @@
-//! For tests (feature `testing`): a fixed RSA key that signs access tokens the way the
-//! forge does, and the JWKS that verifies them. No network.
-
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
 use ring::signature::{KeyPair, RSA_PKCS1_SHA256, RsaKeyPair, RsaPublicKeyComponents};
 use serde_json::{Value, json};
 
-/// A 2048-bit key made with `openssl genpkey` for these tests, PKCS#8 DER.
 const KEY: &[u8] = include_bytes!("test_key.der");
 
 pub struct Signer {
@@ -28,7 +24,6 @@ impl Signer {
         "test-key"
     }
 
-    /// The JWKS with the key's public half, as `/api/oauth/jwks` serves it.
     pub fn jwks(&self) -> String {
         let public: RsaPublicKeyComponents<Vec<u8>> = self.key.public_key().into();
         let b64 = |b: &[u8]| BASE64_URL_SAFE_NO_PAD.encode(b);
@@ -36,7 +31,6 @@ impl Signer {
             .to_string()
     }
 
-    /// `claims` as an RS256 `at+jwt`.
     pub fn sign(&self, claims: &Value) -> String {
         let header = json!({ "alg": "RS256", "typ": "at+jwt", "kid": self.kid() });
         let input = format!("{}.{}", BASE64_URL_SAFE_NO_PAD.encode(header.to_string()), BASE64_URL_SAFE_NO_PAD.encode(claims.to_string()));

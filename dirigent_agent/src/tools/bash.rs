@@ -1,10 +1,3 @@
-//! `bash` runs a command and gives its output; `async_bash` runs one in the background and
-//! tells the model when it ends, so it can keep working (or `wait`, instead of sleeping).
-//! Both run their command as a `Job` (`shell.rs`). With `async_bash` and its option
-//! `bash_background` on, a `bash` command still running after `BASH_GRACE` becomes a
-//! background job too: the call ends with the job's id, and the command's output comes as
-//! the job's notice once it ends.
-
 use super::shell::{Job, Tell};
 use super::truncate;
 use crate::session::Session;
@@ -21,16 +14,10 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-/// An `async_bash` command that ends within this long is answered inline, with no notice.
 const START_GRACE: Duration = Duration::from_secs(2);
-/// A `bash` command still running after this long moves to the background. (Sooner under
-/// test, which has no ten seconds to wait.)
 const BASH_GRACE: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 10_000 });
-/// How long `wait` blocks when the model gives no `timeout`, in seconds.
 const WAIT_S: f64 = 600.;
-/// The longest `timeout` a command takes, in seconds.
 const MAX_TIMEOUT_S: f64 = 2_147_483.647;
-/// How much of a command's output a codemode script gets: more than the model would.
 const SCRIPT_OUTPUT_BYTES: u64 = 1024 * 1024;
 
 fn session(weak: &Weak<Session>) -> Result<Arc<Session>> {
@@ -101,7 +88,6 @@ impl Tool for Bash {
             }
         };
         tokio::pin!(deadline);
-        // A script waits for its commands: only the model can take a job's notice later.
         let may_background = !call.script && session.is_on("async_bash") && session.is_on("bash_background");
         let grace = async {
             match may_background {
@@ -110,7 +96,6 @@ impl Tool for Bash {
             }
         };
         let ended = tokio::select! {
-            // Killed: the run was stopped (`Session::abort`), which this call hears of as well.
             code = job.exited() => if job.killed() { Ended::Aborted } else { Ended::Exit(code) },
             _ = call.cancel.cancelled() => {
                 job.kill();
@@ -130,7 +115,6 @@ impl Tool for Bash {
                      with its output; `async_bash wait` if you have nothing else to do.",
                     BASH_GRACE.as_secs(), job.id, job.log.display()
                 );
-                // Its `timeout` holds in the background too; what it came to is the notice.
                 let remaining = timeout.map(|t| Duration::from_secs_f64(t).saturating_sub(BASH_GRACE));
                 tokio::spawn(async move {
                     let ended = match remaining {
@@ -146,7 +130,6 @@ impl Tool for Bash {
                     };
                     session.report_jobs();
                     if !job.killed() {
-                        // The model has the log's path: the log stays.
                         let output = match finish(&job, ended, false, true) {
                             Ok(output) => output.as_text(),
                             Err(e) => e.to_string(),
@@ -162,16 +145,12 @@ impl Tool for Bash {
     }
 }
 
-/// How a `bash` command's run ended.
 enum Ended {
     Exit(i32),
     Aborted,
     TimedOut(f64),
 }
 
-/// A command's result from its log: the end of its output, what happened to it, and where
-/// the whole output is if that isn't all of it. A log that is all in the result is removed,
-/// unless the model was told where it is (`keep_log`: the command went to the background).
 fn finish(job: &Job, ended: Ended, script: bool, keep_log: bool) -> Result<ToolOutput> {
     let output = Output::read(&job.log).with_context(|| format!("read {}", job.log.display()))?;
     let cut = &output.tail;
@@ -217,24 +196,19 @@ fn finish(job: &Job, ended: Ended, script: bool, keep_log: bool) -> Result<ToolO
         Ended::Aborted => Err(anyhow!(status(text, "Command aborted".into()))),
         Ended::TimedOut(secs) => Err(anyhow!(status(text, format!("Command timed out after {secs} seconds")))),
     };
-    // The whole output is in the result: the log has nothing more to say.
     if cut.by.is_none() && !keep_log {
         let _ = std::fs::remove_file(&job.log);
     }
     result
 }
 
-/// What a command wrote, as far as the model is shown it.
 struct Output {
-    /// Its end, cut to the limits; `total_lines` is of the whole output.
     tail: truncate::Truncated,
     bytes: u64,
     last_line_bytes: usize,
 }
 
 impl Output {
-    /// Read a log without holding more of it than can be shown: its lines are counted, its
-    /// end is read.
     fn read(log: &Path) -> std::io::Result<Self> {
         let mut file = std::fs::File::open(log)?;
         let bytes = file.metadata()?.len();
@@ -256,13 +230,11 @@ impl Output {
             }
         }
         let total_lines = newlines + usize::from(!ends_with_newline);
-        // Twice the byte limit holds whatever the cut can keep.
         let window = (2 * truncate::MAX_BYTES as u64).min(bytes);
         file.seek(std::io::SeekFrom::Start(bytes - window))?;
         let mut end = vec![];
         file.read_to_end(&mut end)?;
         let mut text = String::from_utf8_lossy(&end).into_owned();
-        // A window that starts midway starts mid-line: that line goes, unless it is all there is.
         if window < bytes
             && let Some(newline) = text.find('\n')
         {
@@ -275,8 +247,6 @@ impl Output {
         Ok(Self { tail, bytes, last_line_bytes })
     }
 
-    /// The output for a codemode script: all of it up to `SCRIPT_OUTPUT_BYTES`, else its
-    /// start and end around a note of how much is left out. And whether that was cut.
     fn for_script(&self, log: &Path) -> Result<(String, bool)> {
         let mut file = std::fs::File::open(log)?;
         if self.bytes <= SCRIPT_OUTPUT_BYTES {
@@ -294,7 +264,6 @@ impl Output {
     }
 }
 
-/// The notice of a background job's end; `text` says how it went.
 fn job_notice(job: &Job, text: String) -> Notice {
     Notice::Job {
         text,
@@ -331,7 +300,6 @@ impl Tool for AsyncBash {
         ToolSpec {
             snippet: Some("Run commands in the background while you keep working, or leave servers and watchers running".into()),
             guidelines: vec![
-                // True with `bash_background` off too: then bash never returns a job id.
                 "If a bash call returns a job id instead of output, the command moved to the background: its output comes in a message when it ends.".into(),
                 "To wait for async_bash jobs or sub-agents, call async_bash `wait` instead of `sleep` / polling: it returns the moment one ends.".into(),
             ],
@@ -411,9 +379,6 @@ impl Tool for AsyncBash {
     }
 }
 
-/// `async_bash start`: a job, answered inline if it ends within `START_GRACE`. Until then
-/// it is its call's, and ends with it when the run is stopped, whatever its `tell`: the
-/// model was not told of it yet.
 async fn start(session: &Arc<Session>, command: &str, tell: Tell, cancel: &CancellationToken) -> Result<String> {
     if cancel.is_cancelled() {
         bail!("Command aborted");
@@ -454,8 +419,6 @@ async fn start(session: &Arc<Session>, command: &str, tell: Tell, cancel: &Cance
     Ok(text)
 }
 
-/// `ask_user` puts questions in front of the user as a form; their answers come later, as
-/// a message (`Session::answer`).
 pub struct AskUser {
     session: Weak<Session>,
 }
@@ -566,8 +529,6 @@ mod tests {
         assert!(bash(&session, json!({"command": "true", "timeout": -1}), CancellationToken::new()).await.is_err());
     }
 
-    /// A job is its session's from its start, not only once the call that started it has
-    /// answered: a run stopped in its first seconds takes it along, and the call says so.
     #[tokio::test]
     async fn a_job_just_started_ends_with_the_run_that_is_stopped() {
         let dir = tempfile::tempdir().unwrap();
@@ -583,8 +544,6 @@ mod tests {
         assert!(session.jobs.all().is_empty() && !session.busy());
     }
 
-    /// A `bash` command that moved to the background keeps its log, which the model was
-    /// told of, though all it wrote is in the notice of its end.
     #[tokio::test]
     async fn a_command_that_moved_to_the_background_keeps_its_log() {
         let dir = tempfile::tempdir().unwrap();
@@ -603,7 +562,6 @@ mod tests {
         assert_eq!(std::fs::read_to_string(log).unwrap(), "late\n");
     }
 
-    /// A job that outlives its call ends as a notice, which a waiting model wakes on.
     #[tokio::test]
     async fn a_background_job_tells_of_its_end() {
         let dir = tempfile::tempdir().unwrap();
@@ -624,7 +582,6 @@ mod tests {
                 && transcript[5].contains(" succeeded after ")
                 && transcript[5].ends_with("last lines:\nlate")
         );
-        // The host heard of the job while it ran, and of its end.
         let jobs: Vec<u32> = host
             .outs
             .lock()

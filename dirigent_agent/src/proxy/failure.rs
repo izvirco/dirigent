@@ -1,6 +1,3 @@
-//! A request that failed: what to tell the user, and what its caller can do about it
-//! (`Failure`), told from the HTTP status and the provider's words.
-
 use super::Failure;
 use serde_json::Value;
 use std::time::Duration;
@@ -33,23 +30,19 @@ impl Error {
         Self { failure: Failure::Other, message: message.into() }
     }
 
-    /// `agent.toml` names no proxy, or no key for it.
     pub(super) fn not_set_up() -> Self {
         let message = format!("No model proxy is set up. Enter your CLIProxyAPI's address and key {SETTINGS}.");
         Self { failure: Failure::Unauthorized, message }
     }
 
-    /// Something answers at the proxy's address, but not the way the proxy does.
     pub(super) fn not_a_proxy() -> Self {
         Self::other(format!("The proxy's address answers, but not as a CLIProxyAPI does. Check it {SETTINGS}."))
     }
 
-    /// The request never got an answer: `error` is reqwest's.
     pub(super) fn unreachable(url: &str, error: &reqwest::Error) -> Self {
         Self::transient(format!("Could not reach the proxy at {url}: {}", cause(error)))
     }
 
-    /// The proxy answered with `status`, not a success, and `body`.
     pub(super) fn http(status: u16, retry_after: Option<Duration>, body: &str) -> Self {
         let words = serde_json::from_str::<Value>(body).ok().and_then(|json| words(&json)).unwrap_or_else(|| short(body));
         let words = if words.is_empty() { "no details".into() } else { words };
@@ -63,7 +56,6 @@ impl Error {
         }
     }
 
-    /// An error the provider sent in the middle of a stream: `event` is its JSON.
     pub(super) fn in_stream(event: &Value) -> Self {
         let message = words(event).unwrap_or_else(|| short(&event.to_string()));
         // What the error says of itself decides, not the event around it: a failed response
@@ -74,7 +66,6 @@ impl Error {
             Some(error) => ["message", "detail", "code", "type"].iter().filter_map(|key| error[key].as_str()).collect::<Vec<_>>().join(" "),
             None => String::new(),
         };
-        // An error in no shape we know: all of the event is what there is to go by.
         let said = if said.is_empty() { event.to_string() } else { said };
         Self { failure: classify(None, &said), message }
     }
@@ -89,14 +80,12 @@ pub(super) fn cause(error: &dyn std::error::Error) -> String {
     innermost.to_string()
 }
 
-/// What an error's JSON says went wrong: every provider nests its message differently.
 fn words(json: &Value) -> Option<String> {
     let error = [&json["error"], &json["response"]["error"], json].into_iter().find(|v| !v.is_null())?;
     let message = match error {
         Value::String(message) => message.as_str(),
         _ => error["message"].as_str().or(error["detail"].as_str())?,
     };
-    // A code or type says what the message may not: `overloaded_error: Overloaded`.
     let kind = error["code"].as_str().or(error["type"].as_str()).filter(|kind| !matches!(*kind, "error" | "invalid_request_error"));
     Some(match kind {
         Some(kind) if !message.contains(kind) => format!("{message} ({kind})"),
@@ -104,7 +93,6 @@ fn words(json: &Value) -> Option<String> {
     })
 }
 
-/// A body that is no JSON we know, cut to what fits a message.
 fn short(text: &str) -> String {
     let text = text.trim();
     match text.char_indices().nth(300) {
@@ -113,7 +101,6 @@ fn short(text: &str) -> String {
     }
 }
 
-/// The context is too long for the model, in the words of the providers behind either wire.
 const OVERFLOW: &[&str] = &[
     "prompt is too long", // Anthropic: "prompt is too long: 213462 tokens > 200000 maximum"
     "prompt too long",
@@ -131,8 +118,7 @@ const OVERFLOW: &[&str] = &[
     "token limit exceeded",
 ];
 
-/// An account that has run out: the same request fails again until someone pays or a
-/// limit resets, however the status reads.
+// MUST KILL: rename: SPENT -> QUOTA_EXHAUSTED, an account that fails again whatever the status
 const SPENT: &[&str] = &[
     "insufficient_quota",
     "quota exceeded",
@@ -144,7 +130,6 @@ const SPENT: &[&str] = &[
     "credit balance",
 ];
 
-/// Worth another try, when no status says so: a provider's error in the middle of a stream.
 const TRANSIENT: &[&str] = &[
     "overloaded",
     "rate limit",
@@ -171,8 +156,6 @@ const TRANSIENT: &[&str] = &[
     "retry your request",
 ];
 
-/// What a failure is to the caller, from its HTTP `status` (none: it came in a stream) and
-/// its text: the body as it came, or what a stream's error says of itself.
 pub(super) fn classify(status: Option<u16>, text: &str) -> Failure {
     let text = text.to_lowercase();
     let says = |words: &[&str]| words.iter().any(|word| text.contains(word));
@@ -195,8 +178,6 @@ pub(super) fn classify(status: Option<u16>, text: &str) -> Failure {
     if transient { Failure::Transient { retry_after: None } } else { Failure::Other }
 }
 
-/// When a response's headers say to try again: `retry-after-ms`, or `retry-after` in seconds.
-/// A number that is no time to wait (negative, or more than a `Duration` holds) is none.
 pub(super) fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let wait = |name: &str, per_second: f64| {
         let number = headers.get(name)?.to_str().ok()?.trim().parse::<f64>().ok()?;
@@ -214,7 +195,6 @@ mod tests {
 
     #[test]
     fn failures_are_told_apart() {
-        // The proxy's own answers, as recorded.
         let key = Error::http(401, None, r#"{"error":"Invalid API key"}"#);
         assert_eq!(key.failure, Failure::Unauthorized);
         assert_eq!(
@@ -235,7 +215,6 @@ mod tests {
             (Failure::Other, "unknown provider for model x (model_not_found) (HTTP 400)")
         );
 
-        // By status, with the wait the provider asks for.
         let wait = Some(Duration::from_secs(7));
         for status in [408, 429, 500, 502, 503, 504, 529] {
             assert_eq!(Error::http(status, wait, "").failure, Failure::Transient { retry_after: wait }, "{status}");
@@ -247,17 +226,14 @@ mod tests {
         assert_eq!(Error::http(403, None, "").failure, Failure::Unauthorized);
         assert_eq!(Error::http(413, None, "").failure, Failure::Overflow);
         assert_eq!(Error::http(400, None, "<html>bad gateway timeout</html>").failure, Failure::Other);
-        // An account out of quota is not worth another try, a busy one is.
         assert_eq!(
             classify(Some(429), r#"{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}"#),
             Failure::Other
         );
         assert_eq!(classify(Some(429), "ThrottlingException: Too many tokens, rate limit reached"), TRANSIENT);
-        // A 429 is a wait, whatever its words: these are also those of a context that is too long.
         assert_eq!(classify(Some(429), "Too many tokens, please wait before trying again."), TRANSIENT);
         assert_eq!(classify(Some(400), "Too many tokens, please wait before trying again."), Failure::Overflow);
 
-        // Each wire's words for a context that is too long.
         for text in [
             "input length and `max_tokens` exceed context limit: 197202 + 21333 > 200000",
             "Your input exceeds the context window of this model. Please adjust your input and try again.",
@@ -284,7 +260,6 @@ mod tests {
             Error { failure: Failure::Other, message: "tools.0.name: String should match pattern".into() }
         );
 
-        // A failed response echoes the request: its words are not the error's.
         let echo = |error: Value| {
             json!({"type": "response.failed", "response": {
                 "status": "failed",
@@ -310,7 +285,6 @@ mod tests {
         assert_eq!(retry_after(&headers(&[("retry-after", "12")])), Some(Duration::from_secs(12)));
         assert_eq!(retry_after(&headers(&[("retry-after", "30"), ("retry-after-ms", "1500")])), Some(Duration::from_millis(1500)));
         assert_eq!(retry_after(&headers(&[("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")])), None);
-        // A number that is no wait is as good as not there: more than a `Duration` holds, below zero.
         assert_eq!(retry_after(&headers(&[("retry-after", "1e30")])), None);
         assert_eq!(retry_after(&headers(&[("retry-after", "3"), ("retry-after-ms", "-1")])), Some(Duration::from_secs(3)));
         assert_eq!(retry_after(&headers(&[])), None);

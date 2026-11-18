@@ -1,14 +1,3 @@
-//! The api: what the desktop's update check asks, and the download link for testers.
-//!
-//! ```text
-//! GET /api/v0/updates/{channel}/{platform}    the channel's `Release` (JSON), 404 if none
-//! GET /api/v0/download/{channel}/{platform}   307 to that release's installer
-//! ```
-//!
-//! Both read the channel file from the bucket, cached for a minute: publishing shows up
-//! within one desktop check interval. The leaderboard's endpoints come along when it's on
-//! (`leaderboard.rs`).
-
 use crate::bucket::{self, Bucket};
 use crate::leaderboard::{self, Leaderboard};
 use anyhow::{Result, anyhow};
@@ -28,7 +17,6 @@ const CACHE_FOR: Duration = Duration::from_secs(60);
 
 struct Api {
     bucket: Bucket,
-    /// Channel file path → when it was read and what it said (`None`: no release).
     cache: Mutex<HashMap<String, (Instant, Option<Release>)>>,
 }
 
@@ -48,7 +36,6 @@ pub async fn run(bucket: Bucket, bind: SocketAddr, board: Option<Arc<Leaderboard
 }
 
 async fn updates(State(api): State<Arc<Api>>, Path((channel, platform)): Path<(String, String)>, headers: HeaderMap) -> Response {
-    // The desktop's user agent is `Dirigent/{version}`: who runs what, from the log.
     let client = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or("-");
     info!(%channel, %platform, %client, "update check");
     match current(&api, &channel, &platform).await {
@@ -66,7 +53,6 @@ async fn download(State(api): State<Arc<Api>>, Path((channel, platform)): Path<(
     }
 }
 
-/// The channel's release, from the cache or the bucket. A failed read is a 502.
 async fn current(api: &Arc<Api>, channel: &str, platform: &str) -> Result<Option<Release>, StatusCode> {
     if !valid_name(channel) || !valid_name(platform) {
         return Ok(None);

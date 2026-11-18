@@ -1,14 +1,3 @@
-//! Left pane on the window canvas, top to bottom: the title row (Projects page folder, new
-//! thread `+`); the pinned projects; the Inbox (threads waiting on the user, not snoozed)
-//! with its cards hanging below it; the Workpool's cards (working threads) stacked up on
-//! its row; the hide/show, usage and settings buttons. Inbox and Workpool fold (the Workpool
-//! starts folded: out of sight, out of mind) and leave the sidebar while they have no
-//! thread at all.
-//! Docked it has a drag handle on its right edge; hidden (`[` or the button) it slides in
-//! as a floating panel while the mouse rests on the left edge. Either way the background
-//! pattern (`ambient.rs`) is behind it: docked it has no fill and shows the window's (or,
-//! behind the sidebar only, draws its own), floating it has its own copy.
-
 use crate::ambient::Reach;
 use crate::app::{ArchiveAt, Dirigent, DragProject, Menu, PANE_MIN, Pane, Renaming, Resize, Section, Target};
 use crate::hosts;
@@ -24,28 +13,18 @@ use gpui::{
     Stateful, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
 };
 
-/// Default width; the user can drag it from `app::SIDEBAR_MIN` up to all of the window but
-/// `app::PANE_MIN`.
+// MUST KILL: rename: WIDTH → DEFAULT_WIDTH, the user drags it between app::SIDEBAR_MIN and the window minus app::PANE_MIN
 pub const WIDTH: f32 = 240.;
-/// Width of the invisible strip along the window's left edge that reveals a hidden sidebar.
-/// Narrower than the ruler's inset (`ruler::INSET`), so it never covers the ruler's marks.
+// MUST KILL: extract: PEEK_ZONE → derived from ruler::INSET, so it stays narrower than the ruler's marks
 const PEEK_ZONE: f32 = 6.;
-/// A sidebar row's height and the gap between rows: the pitch a dragged project snaps to.
 const ROW: f32 = 28.;
 const GAP: f32 = 4.;
-/// A thread card's height (`thread_card`): its lines (11 / 13 / 11px text at gpui's default
-/// line height, φ × size rounded), `gap_0p5` between them and `py_1p5`. The branch line
-/// only shows when there is a `vcs` label. Computed, not measured, so `cards` knows a
-/// list's natural height; keep it in sync with `thread_card`.
+// MUST KILL: extract: card_height's numbers → constants thread_card lays its lines out with
 fn card_height(vcs: &str) -> f32 {
     let two_lines = 18. + 21. + 2. + 2. * 6.;
     if vcs.is_empty() { two_lines } else { two_lines + 2. + 18. }
 }
 
-/// What follows the cursor while a project row is dragged (here and on the Projects page):
-/// the row's name on a popup-coloured box of the row's size (design px), the name `indent`
-/// in as on the row, lifted by a shadow. Painted as its own root, so it carries its own
-/// font and size.
 #[derive(Clone)]
 pub struct Ghost {
     pub name: String,
@@ -77,7 +56,6 @@ impl Render for Ghost {
     }
 }
 
-/// The sidebar in the layout, with its resize handle.
 pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let handle = div()
         .id("sidebar-resize")
@@ -89,8 +67,6 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .cursor_col_resize()
         .hover(|d| d.bg(rgba(theme::t().line)))
         .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.start_resize(Resize::Sidebar, cx)));
-    // A hairline on its right edge parts it from the main pane. It shrinks, whatever is in
-    // it, when the window is too narrow for its width and the pane's `app::PANE_MIN`.
     div()
         .relative()
         .w(u(this.sidebar_width))
@@ -98,20 +74,12 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .h_full()
         .border_r_1()
         .border_color(rgba(theme::t().line_soft))
-        // Behind the sidebar only, the pattern is drawn here, inside the border: the picture
-        // runs wider (sized for the floating sidebar) and a clear main pane would show it.
         .when(this.config.background.reach == Reach::Edge, |d| d.children(this.field.layer(px(0.))))
         .child(content(this, cx))
         .child(handle)
 }
 
-/// Hidden sidebar: a hot zone on the left edge that, while hovered, grows into a floating
-/// copy of the sidebar. One element handles both so the hover never flickers between them.
-/// The copy is on the canvas colour made solid, so the pane under it never shows through
-/// (a translucent theme's canvas would let it).
 pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
-    // A card's right-click menu or rename holds it open: the menu floats past its edge
-    // (taking the hover from it), a rename waits on the keyboard.
     let held = matches!(this.menu, Some(Menu::ThreadActions { .. })) || matches!(this.renaming, Some(Renaming::Thread { .. }));
     let open = this.sidebar_peek || held;
     div()
@@ -120,16 +88,11 @@ pub fn peek(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .left_0()
         .top_0()
         .h_full()
-        // Open, it is as wide as the sidebar and its gutters, up to all of the window but
-        // `PANE_MIN`: a strip to move the mouse to stays, which closes it.
         .map(|d| if open { d.right(u(PANE_MIN)).max_w(u(this.sidebar_width + 2. * theme::GUTTER)) } else { d.w(u(PEEK_ZONE)) })
         .on_hover(cx.listener(|this, hovered, _, cx| this.set_peek(*hovered, cx)))
-        // Open, it hides the main pane's grab strip (`titlebar.rs`), which would otherwise
-        // take the presses on its title's buttons; its title drags the window instead. Only
-        // the whole copy can occlude: an occluding child would unhover it, and it would close.
+        // Only the whole copy can occlude: an occluding child would unhover it, and it would close.
         .when(open, |d| d.occlude())
         .when(open, |d| {
-            // `rounded_lg`, inside its border.
             let radius = u(8.) - px(1.);
             d.p(u(theme::GUTTER)).child(
                 div()
@@ -153,19 +116,15 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let inbox = this.inbox_threads();
     let working = this.busy_threads();
 
-    // Beside the title: the version, which a nightly's is too long for. It says `nightly`
-    // there, and its tooltip the version.
     let version = release::VERSION;
     let short = if release::nightly() { "nightly" } else { version };
     let title_row = div()
         .flex()
         .flex_row()
         .items_center()
-        .h(u(titlebar::HEIGHT)) // same as `lists::header`, so the title aligns with the main pane's
+        .h(u(titlebar::HEIGHT))
         .pl_4()
         .pr_2()
-        // The title drags the window (`titlebar.rs`): the name and the space after the
-        // version. The version (the changelog) and the buttons are beside those, not over them.
         .child(
             div()
                 .h_full()
@@ -191,17 +150,12 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
                 .child(short),
         )
         .child(div().flex_1().h_full().when(titlebar::CUSTOM, |d| titlebar::grab(d, cx)))
-        // The folder opens the Projects page (lit while it's open); `+` a new thread.
         .child(
             theme::icon_button("projects", "folder", cx, |this, cx| this.show_projects(cx))
                 .when(matches!(this.pane, Pane::Projects), |d| d.bg(rgba(theme::t().hover))),
         )
         .child(theme::icon_button("new-thread", "plus", cx, |this, cx| this.new_draft(None, cx)));
 
-    // The pinned projects, right under the title. They reorder by drag: the dragged row
-    // leaves a gap that follows the cursor row by row (`move_project`, one order with the
-    // Projects page), so the others shuffle around it as it goes. A wider gap parts them
-    // from the Inbox.
     let dragging = this.dragging.clone().filter(|d| d.sidebar && cx.has_active_drag()).map(|d| d.key);
     let pinned: Vec<AnyElement> = projects::pinned(&groups, &this.pinned_projects)
         .into_iter()
@@ -224,10 +178,6 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         ))
     });
 
-    // Inbox and Workpool rows are fixed; the Inbox's cards hang below its row, the
-    // Workpool's stack up on its row. The two card lists share the room left (`share`);
-    // what neither needs goes above the Workpool's cards. A row
-    // with nothing at all behind it (no thread, snoozed ones included) is left out.
     let (n_inbox, n_working) = (inbox.len(), working.len());
     let show_inbox = !this.inbox_all().is_empty();
     let n_snoozed = this.inbox_all().len() - n_inbox;
@@ -253,15 +203,11 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         this,
         cx,
     );
-    // The seam only exists while both lists show cards; `seam` paints it once they meet.
     let both = !this.collapsed.contains(&Section::Inbox) && !this.collapsed.contains(&Section::Workpool) && n_inbox > 0 && n_working > 0;
     let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, now, this, cx).track_scroll(&this.inbox_scroll);
     let working_cards =
         cards("workpool-cards", Section::Workpool, working, false, now, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
 
-    // Bottom bar: hide / show the sidebar on the left, the Usage and Settings modals on the
-    // right (the chart and the gear, side by side like the title row's folder and `+`),
-    // with the update button before them while an update waits.
     let hidden = this.sidebar_hidden;
     let panel_icon = if hidden { "panel-left-open" } else { "panel-left-close" };
     let bottom = div()
@@ -269,9 +215,6 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .flex_row()
         .items_center()
         .justify_between()
-        // Mirrors the title row: same height and right padding so the gear sits under the
-        // `+`; on the left the button's 6px inner inset is taken off so the glyph starts
-        // at the title's x.
         .h(u(40.))
         .pl(u(10.))
         .pr_2()
@@ -300,9 +243,6 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         .child(bottom.flex_shrink_0())
 }
 
-/// The update button, while a downloaded update waits (`update.rs`), and its menu: restart
-/// into the update, or with local agents at work, restart once they're done. Armed, it
-/// shows an hourglass and the menu cancels.
 fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let ready = this.updater.ready.as_ref()?;
     let armed = this.updater.when_idle;
@@ -323,9 +263,7 @@ fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyEleme
     Some(button.children(menu).into_any_element())
 }
 
-/// A selectable sidebar row (`ROW` tall). `selected` lifts the background. It has no right
-/// padding: the trailing child supplies it (a `trailing` box, placed so icons line up with
-/// the title's `+`; text in it keeps an inset).
+// MUST KILL: rearchitect: row leaves its right padding to the trailing box → a row that takes its trailing control
 fn row(
     id: impl Into<SharedString>,
     selected: bool,
@@ -348,13 +286,7 @@ fn row(
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
 }
 
-/// Inbox / Workpool row: opens the page. Label and count are in the section's `color`
-/// (amber for the Inbox, the working blue for the Workpool); the count is the section's
-/// cards. `counts` is (cards, snoozed): the snoozed threads (Inbox only), not among the
-/// cards, get a faint moon and their own number after it, so a row always shows a
-/// number. The chevron at the end folds the cards.
-/// `chevrons` is its icon while folded / open: right while folded, open they point to
-/// where the cards go.
+// MUST KILL: type: header's (n, snoozed) and chevrons [folded, open] → named fields of a section spec
 #[allow(clippy::too_many_arguments)]
 fn header(
     id: &'static str,
@@ -379,7 +311,6 @@ fn header(
         .when(snoozed > 0, |d| {
             d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(u(11.))).child(snoozed.to_string()))
         });
-    // Centered like the title's `+`.
     let fold = trailing(SharedString::from(format!("fold/{id}")))
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
@@ -394,22 +325,12 @@ fn header(
     )
 }
 
-/// A list that shares the sidebar's free height with the other lists: it grows (`flex_1`)
-/// up to its `natural` height and scrolls past it. Lists in one column so split the room
-/// fairly (all long: equal parts; a short one keeps its height, the others share the
-/// rest) with nothing measured: `natural` comes from known row heights.
 fn share(id: &'static str, natural: f32) -> Stateful<Div> {
     div().id(id).flex_1().min_h_0().max_h(u(natural)).overflow_y_scroll()
 }
 
-/// Where the Inbox's and the Workpool's cards meet: a hairline inset from the sides, fading
-/// out toward them, so the lists don't run into each other. Painted only while either list
-/// is clipped (they have met; apart, it would float in empty space). That is read off
-/// their scroll handles at paint time, after this frame's layout, so it is never a frame
-/// late; a pixel's slack keeps sub-pixel rounding at fractional scales from tripping it.
-/// While the lists are apart it sits under the Inbox's cards, unseen.
+// MUST KILL: extract: seam's px(1.) threshold → a named slack for sub-pixel rounding
 fn seam(this: &Dirigent) -> impl IntoElement {
-    /// How far each end of the line fades in.
     const FADE: f32 = 48.;
     let (inbox, workpool) = (this.inbox_scroll.clone(), this.workpool_scroll.clone());
     let paint = move |b: Bounds<Pixels>, _: (), window: &mut Window, _: &mut App| {
@@ -428,9 +349,6 @@ fn seam(this: &Dirigent) -> impl IntoElement {
     canvas(|_, _, _| {}, paint).flex_shrink_0().h(px(1.)).mx_4()
 }
 
-/// A section's thread cards (none while folded, `card_height` tall), each with how long its
-/// agent has run (live) or ran (last run). `below` says the cards hang below their header
-/// (Inbox) rather than stack up on it (Workpool), which side the gap to the header goes.
 fn cards(
     id: &'static str,
     section: Section,
@@ -459,20 +377,6 @@ fn cards(
     share(id, natural).flex().flex_col().gap(u(GAP)).px_2().when(n > 0, |d| if below { d.pt(u(GAP)) } else { d.py(u(GAP)) }).children(cards)
 }
 
-/// A thread under Inbox / Workpool: `project ... elapsed` / title / `branch ... [server]
-/// logo`, the last line being its workspace name or branch (`vcs`, from `vcs_label`).
-/// Outside version control there is no branch, so the card drops that line and the server
-/// icon and logo end the title line instead (`card_height`). The title is amber while the
-/// model waits on an answer, accent while the thread is unread, and led by an amber pin
-/// while pinned. A thread waiting on sub-agents or jobs has an hourglass before its run
-/// time. The server icon shows when the thread lives on another host, the logo is the
-/// model's lab. Hovering a `snoozable` thread swaps
-/// its run time for snooze (drops it from the sidebar until its next run) and archive
-/// buttons (archiving a workspace thread asks under the button, `thread::archive_confirm`);
-/// hovering any card opens `specs` to its right, unless a menu is open or it is being
-/// renamed. A right click opens its menu at the click: `Rename thread` turns the title
-/// into a field (`Renaming::Thread`), `Regenerate title` titles it from its whole
-/// conversation (`Dirigent::retitle`).
 fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (h, id) = (host.to_owned(), t.id.clone());
     let selected = this.open().is_some_and(|o| o.host == host && o.id == t.id);
@@ -484,7 +388,6 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
     let titling = this.titling(host, &t.id);
     let title_id = SharedString::from(format!("title/{h}/{id}"));
     let place = this.project_name(host, t);
-    // Idle on sub-agents or jobs: its run time is stuck, so an hourglass says it isn't done.
     let waiting = this.status(host, t) == Status::Waiting;
     let marks = || {
         let server = (host != hosts::LOCAL).then(|| icon("server", theme::t().fg_2).size(u(12.)));
@@ -492,7 +395,6 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
     };
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(text::xs()).text_color(rgba(color)).child(text);
     let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Sidebar, Side::Below(20.), this, cx);
-    // The buttons stay (and the run time stays hidden) while the archive popup is open.
     let asking = archive_confirm.is_some();
     type Action = Box<dyn Fn(&mut Dirigent, &mut Context<Dirigent>)>;
     let button = |id: String, name: &'static str, on_click: Action| {
@@ -510,10 +412,8 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
             }))
             .child(icon(name, theme::t().fg_1))
     };
-    // Run time and the buttons are stacked so swapping them on hover doesn't shift layout.
     let actions = this.snoozable(host, t).then(|| {
         let (h1, id1, h2, id2) = (h.clone(), id.clone(), h.clone(), id.clone());
-        // Asking with sub-agents still at it: snoozable, but not at rest, so no archive.
         let at_rest = this.at_rest(host, t);
         div()
             .absolute()
@@ -553,9 +453,6 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         }
         _ => None,
     };
-    // While renaming, the title is a field: pulled out by its padding and border so the text
-    // stays put, and no taller than the title (the card's height is fixed). Presses in it
-    // don't open the thread.
     let title_line = if renaming {
         div()
             .mx(u(-4.) - px(1.))
@@ -638,9 +535,6 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         .children(context_menu)
 }
 
-/// The thread's place in version control: its workspace name (also its git branch / jj
-/// workspace, see the service's `workspace_name`), else the branch (git) or change id (jj)
-/// of its directory as last probed (`Dirigent::request_sidebar_vcs`); "" until known.
 fn vcs_label(host: &str, t: &ThreadSummary, this: &Dirigent) -> String {
     match &t.workspace {
         Some(w) => projects::basename(w).to_owned(),
@@ -648,8 +542,6 @@ fn vcs_label(host: &str, t: &ThreadSummary, this: &Dirigent) -> String {
     }
 }
 
-/// Icon of the lab behind a model: by the vendor its id starts with, if a proxy names it
-/// `vendor/model-id`, else by its family, else a generic spark.
 fn lab_logo(model: &str) -> &'static str {
     let (vendor, name) = model.split_once('/').unwrap_or(("", model));
     if vendor == "anthropic" || name.contains("claude") {
@@ -661,9 +553,6 @@ fn lab_logo(model: &str) -> &'static str {
     }
 }
 
-/// The hovered card's popup: the title, then one row each for what the card abbreviates:
-/// `project, host` / model (effort) / workspace name or branch / run time, plus the jobs it
-/// left running, if any.
 fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dirigent) -> Vec<AnyElement> {
     let model = match (&t.model, &t.effort) {
         (Some(m), Some(e)) => format!("{m} ({e})"),
@@ -675,13 +564,11 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
         (false, true) => format!("running for {elapsed}"),
         (false, false) => format!("last run {elapsed}"),
     };
-    // Servers and watchers the agent left running: archiving the thread stops them.
     let free = match t.free_jobs {
         0 => String::new(),
         1 => "1 job left running".into(),
         n => format!("{n} jobs left running"),
     };
-    // Rows wrap at 360px rather than truncate: the popup is there to show what the card cuts off.
     let row = |value: String| div().px_2().py_0p5().max_w(u(360.)).child(value);
     let line = |value: String| row(value).text_size(text::sm()).into_any();
     let mut rows = vec![
@@ -692,9 +579,7 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
     rows
 }
 
-/// Trailing control box on a `row`: a 20px square centered where the title's 26px `+`
-/// button is (3px in from the nav padding), so a centered icon lines up with it.
-/// Highlights on hover.
+// MUST KILL: extract: trailing's mr(u(3.)) → derived from the title's 26px button around this 20px box
 fn trailing(id: SharedString) -> Stateful<Div> {
     div()
         .id(id)
@@ -709,9 +594,6 @@ fn trailing(id: SharedString) -> Stateful<Div> {
         .hover(|d| d.bg(rgba(theme::t().line)))
 }
 
-/// A pinned project: its name, and on hover a `+` (flush right, under the title's) that
-/// opens a draft for it. Grab it to reorder: a `Ghost` follows the cursor and the row
-/// itself is a gap (`dragged`). Pinning, linking and removing are on the Projects page.
 fn project_row(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let selected = matches!(&this.pane, Pane::Project { group_key } if *group_key == key);
@@ -726,7 +608,7 @@ fn project_row(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirig
             this.new_draft(Some(target.clone()), cx)
         }))
         .child(icon("plus", theme::t().fg_1));
-    // The ghost is as wide as the row: the sidebar minus its border and the list's padding.
+    // MUST KILL: extract: the ghost's `- 1. - 16.` → the sidebar's named border and list padding
     let ghost = Ghost {
         name: g.name.clone(),
         width: this.sidebar_width - 1. - 16.,

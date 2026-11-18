@@ -1,33 +1,10 @@
-; Dirigent's Windows installer (Inno Setup 6), which is also how Dirigent updates: the app
-; downloads the next version's installer and runs it with
-;   /SILENT /SUPPRESSMSGBOXES /NORESTART /UPDATE /WAITPID=<its pid>
-; then quits (dirigent_desktop/src/update.rs). Setup waits for that process to exit,
-; replaces the files (closing whatever still has them open), and with /UPDATE starts
-; Dirigent again. Every update thus runs the new version's installer: the files, registry
-; entries and this script itself can all change in any release.
-;
-; Never change: the AppIds (each is how an update finds its install), the flags above.
-;
-; A nightly (a Version with "-nightly." in it, as the app itself tells: dirigent_protocol's
-; release.rs) installs as an app of its own, Dirigent Nightly, next to a stable one: its own
-; AppId, directory, shortcuts, right-click entry and command (dirigent-nightly), so neither
-; touches the other. Its exes are nightly builds, with their own data dirs and icon.
-;
-; Built by the release workflow (.github/workflows/release.yml):
-;   iscc /DVersion=0.1.0 /DDist=<dir> packaging\windows\dirigent.iss
-; <dir> holds dirigent_desktop.exe (the app), dirigent.exe (the command line: `dirigent [dir]`,
-; `dirigent key`; on the user's PATH unless the task is unticked), cua-driver.exe (computer use:
-; packaging/cua-driver.sh) and licenses\;
-; the installer is written there as Dirigent-Setup-<version>.exe.
-
 #ifndef Version
   #define Version "0.0.0"
 #endif
 #ifndef Dist
   #define Dist "..\..\dist"
 #endif
-; Name: what the user sees. Key: the right-click entry's registry key. Cli: the command on
-; PATH. Data: the data dir's name in %LOCALAPPDATA%, which the app picks (release::app).
+; MUST KILL: rename: Key/Cli/Data to ShellKey/PathCommand/DataDirName
 #if Pos("-nightly.", Version) > 0
   #define Id "{{92A54733-5874-4F63-BB88-EDBA04F3B7EE}"
   #define Name "Dirigent Nightly"
@@ -67,7 +44,6 @@ Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; Files still in use once Dirigent has exited (a driver it started, shutting down) are closed.
 CloseApplications=force
 RestartApplications=no
 ; Tells running programs (Explorer, so new terminals) that PATH changed, on install and uninstall.
@@ -81,11 +57,7 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 Name: addtopath; Description: "Add the {#Cli} command to PATH"
 
 [InstallDelete]
-; What earlier versions ran their agents with (pi, as a bun runtime): the agent is built
-; into the app now.
 Type: filesandordirs; Name: "{app}\runtime"
-; The app's name in the first releases; dirigent.exe is the command line now (the same name on NTFS).
-; A nightly never had one.
 Type: files; Name: "{app}\Dirigent.exe"
 
 [Files]
@@ -99,9 +71,6 @@ Name: "{autoprograms}\{#Name}"; Filename: "{app}\dirigent_desktop.exe"
 Name: "{autodesktop}\{#Name}"; Filename: "{app}\dirigent_desktop.exe"; Tasks: desktopicon
 
 [Registry]
-; "Open in Dirigent" on a folder, on a folder's background (inside it) and on a drive. The
-; app takes the folder as its argument and hands it to the running instance if there is one.
-; Windows 11 lists these under "Show more options".
 Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
@@ -113,12 +82,10 @@ Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; Val
 Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 
 [Run]
-; A first install offers to start it; an update starts it again.
 Filename: "{app}\dirigent_desktop.exe"; Description: "Start {#Name}"; Flags: nowait postinstall skipifsilent
 Filename: "{app}\dirigent_desktop.exe"; Flags: nowait; Check: IsUpdate
 
 [UninstallDelete]
-; Downloaded updates. Threads, settings and logs (%LOCALAPPDATA%\dirigent, %APPDATA%\dirigent) stay.
 Type: filesandordirs; Name: "{localappdata}\{#Data}\updates"
 
 [Code]
@@ -143,8 +110,7 @@ begin
       Result := True;
 end;
 
-{ Where the agent looks for bash: Git for Windows in Program Files, else a bash.exe on PATH
-  that isn't WSL's. }
+{ MUST KILL: extract: an IsWslBash check for the system-dir prefix test, apart from the Git lookup }
 function BashFound(): Boolean;
 var
   OnPath: String;
@@ -155,8 +121,7 @@ begin
     or ((OnPath <> '') and (Pos(LowerCase(ExpandConstant('{sys}')), LowerCase(OnPath)) <> 1));
 end;
 
-{ Puts the install dir on the user's PATH (HKCU\Environment, where a per-user install may write) or
-  takes it off, leaving the other entries as they are. A Path that isn't a string is left alone. }
+{ MUST KILL: extract: a ReadUserPath that skips a non-string Path, out of SetOnPath }
 procedure SetOnPath(Add: Boolean);
 var
   Paths, Dir, Padded: String;
@@ -183,7 +148,6 @@ begin
   end
   else if P <> 0 then
   begin
-    { Drop ';<dir>' and the padding again. }
     Delete(Padded, P, Length(Dir) + 1);
     Paths := Copy(Padded, 2, Length(Padded) - 2);
     if Paths = '' then
@@ -210,7 +174,7 @@ var
   Pid: Cardinal;
   Handle: Cardinal;
 begin
-  { An update: let the Dirigent that started us exit first (it quits right after). }
+  { MUST KILL: extract: a WaitForUpdater(Pid) out of InitializeSetup }
   Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
   if Pid <> 0 then
   begin

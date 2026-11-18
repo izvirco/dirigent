@@ -1,18 +1,3 @@
-//! The setup, over the whole window: a welcome, then a look (theme, background, text size),
-//! the proxy the models come through (Settings › Proxy's fields, `proxy.rs`), a first project
-//! (the Add project browser, `add_project.rs`), and out into a first thread. It opens at
-//! launch until this data dir has finished or skipped it once (`needed`), so installs from
-//! before it see it too. Each step is one centered column: its title, what it asks, and
-//! Back / Continue under it.
-//!
-//! While it's up the app isn't drawn at all: the setup lies on the window's own canvas with
-//! the background pattern across it (`curtain`), so a translucent theme stays see-through.
-//!
-//! Motion: one title card as it opens (the pattern comes up, the name's letters fade in as
-//! the word closes up, then the rest: `welcome`), and the rest answers what the user did: a
-//! step glides in from the side they went (`enter`), and finishing lifts the setup away as
-//! the app fades in under it (`State::leaving`, `Dirigent::app_shown`).
-
 use crate::ambient::{Pattern, Reach};
 use crate::app::{Dirigent, Target};
 use crate::cache::Cache;
@@ -32,26 +17,16 @@ use tracing::warn;
 
 actions!(onboarding, [Continue]);
 
-/// The key context while the setup is open (on the root, with no menu open): Enter
-/// continues, unless an input takes it first.
 pub const KEY_CONTEXT: &str = "Onboarding";
-/// `kv`: set once the setup was finished or skipped.
 const DONE_KEY: &str = "onboarded";
-/// The content column's width at most.
 const COLUMN_W: f32 = 560.;
-/// The title card, from the setup opening to its buttons showing, in ms.
 const TITLE_MS: f32 = 2250.;
-/// How long the pattern takes to come up as the setup opens.
 const CURTAIN_MS: f32 = 1800.;
-/// A step gliding in, and how far it comes from.
 const STEP_MS: f32 = 520.;
 const STEP_FROM: f32 = 36.;
-/// The step's content follows its title by this much.
 const STEP_STAGGER: f32 = 70.;
-/// The way out: the setup lifting away, then the app fading in.
 const LEAVE_MS: f32 = 900.;
 
-/// Whether this data dir still has the setup to go through.
 pub fn needed(cache: &Cache) -> bool {
     cache.get(DONE_KEY).is_none()
 }
@@ -76,21 +51,15 @@ impl Step {
     }
 }
 
-/// The setup while it's open (`Dirigent::onboarding`).
 pub struct State {
     pub step: Step,
-    /// Every theme with its palette, for the swatches; read as the setup opens.
     themes: Vec<(String, Theme)>,
-    /// The last step change went back: the step comes in from the left.
     back: bool,
-    /// The title card has played (it does once, on the first look at the welcome).
     titled: bool,
-    /// Finished or skipped at this moment: the setup is on its way out (`LEAVE_MS`), then gone.
     pub leaving: Option<Instant>,
 }
 
 impl State {
-    /// How far the way out has got (0 to 1), once it has started.
     fn leave(&self) -> Option<f32> {
         self.leaving.map(|at| (at.elapsed().as_secs_f32() * 1000. / LEAVE_MS).min(1.))
     }
@@ -113,13 +82,12 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// The setup is up and taking input: open, and not on its way out.
+    // MUST KILL: rename: onboarding_open → onboarding_taking_input, false once it is leaving
     pub fn onboarding_open(&self) -> bool {
         self.onboarding.as_ref().is_some_and(|s| s.leaving.is_none())
     }
 
-    /// How much of the app shows (0 to 1): none under the setup, all without it, coming in as
-    /// the setup leaves.
+    // MUST KILL: rename: app_shown → app_shown_fraction, 0 under the setup to 1 without it
     pub fn app_shown(&self) -> f32 {
         match &self.onboarding {
             None => 1.,
@@ -127,8 +95,6 @@ impl Dirigent {
         }
     }
 
-    /// Go to `step` (its business put away, `leave_onboarding_step`; the project browser
-    /// reopens by itself on a step with no project yet).
     fn set_onboarding_step(&mut self, step: Step, cx: &mut Context<Self>) {
         let Some(s) = self.onboarding.as_mut().filter(|s| s.step != step && s.leaving.is_none()) else { return };
         s.back = step < s.step;
@@ -143,8 +109,6 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// Leaving a step (for another, or the way out) puts its business away: its menu and
-    /// the project browser.
     fn leave_onboarding_step(&mut self, cx: &mut Context<Self>) {
         self.menu = None;
         if self.add_project.is_some() {
@@ -152,8 +116,6 @@ impl Dirigent {
         }
     }
 
-    /// `Continue` (and Enter): the next step, or out from the last, into a first thread once
-    /// there is a project for it.
     pub(crate) fn onboarding_next(&mut self, cx: &mut Context<Self>) {
         let Some(s) = self.onboarding.as_ref().filter(|s| s.leaving.is_none()) else { return };
         match s.step.next() {
@@ -162,15 +124,11 @@ impl Dirigent {
         }
     }
 
-    /// Enter, where no input takes it (the proxy's fields save on it).
     pub fn onboarding_continue(&mut self, _: &Continue, _: &mut Window, cx: &mut Context<Self>) {
         self.onboarding_next(cx);
     }
 
-    /// Done for good, finished or skipped: `start` opens a new-thread draft, in the project
-    /// `new_draft` picks itself (the one in view, else the last used) while there is one,
-    /// else the one added last. The app is set up under the setup at once; the setup takes
-    /// `LEAVE_MS` to go (none with reduced motion).
+    // MUST KILL: rename: finish_onboarding's `start` → open_first_thread
     fn finish_onboarding(&mut self, start: bool, cx: &mut Context<Self>) {
         if !self.onboarding_open() {
             return;
@@ -207,18 +165,11 @@ impl Dirigent {
         cx.notify();
     }
 
-    /// A proxy is set up somewhere: a host offers models.
     fn has_models(&self) -> bool {
         self.hosts.iter().any(|h| !h.models.is_empty())
     }
 }
 
-// ---- the page ----
-
-/// The setup over everything, on the window's canvas (no fill of its own; the app isn't
-/// drawn under it): the step in a column in the middle. `Skip setup` top right on the steps
-/// between the welcome (which has its own) and the last (whose way on is the way out). On
-/// its way out it lifts and fades, and takes no more presses.
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let Some(s) = &this.onboarding else { return div().into_any() };
     let skip = (s.step != Step::Welcome && s.step.next().is_some()).then(|| {
@@ -242,7 +193,6 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     };
     let body = div().flex_1().min_h_0().flex().flex_row().justify_center().px_8().child(step);
     let gone = s.leave().map_or(0., |k| smooth(span(k, 0., 0.45)));
-    // Lifting: the whole box moves up (top and bottom together), nothing stretches.
     let lift = u(24. * gone);
     div()
         .id("onboarding")
@@ -254,15 +204,10 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .child(top)
         .child(body)
         .when(gone > 0., |d| d.opacity(1. - gone).top(-lift).bottom(lift))
-        // On the way out a press goes nowhere, neither to the setup nor to the app coming in.
         .when(s.leaving.is_some(), |d| d.child(div().absolute().inset_0().occlude()))
         .into_any()
 }
 
-/// The background pattern across the window while the setup is up (`layer`, from
-/// `ambient::Field`): it comes up as the setup opens (or as a pattern is picked), and with
-/// the pattern behind the sidebar only, its main pane part goes as the app comes in (the
-/// sidebar draws its own).
 pub fn curtain(this: &Dirigent, layer: impl IntoElement + 'static) -> AnyElement {
     let edge = this.config.background.reach == Reach::Edge;
     let keep = if edge { 1. - this.app_shown() } else { 1. };
@@ -275,8 +220,6 @@ pub fn curtain(this: &Dirigent, layer: impl IntoElement + 'static) -> AnyElement
         .into_any_element()
 }
 
-/// The mark, the conductor (two colours: an image, not an `icons` mask), in a nightly build
-/// its nightly colours: the app's icon either way.
 fn logo_svg() -> &'static str {
     if dirigent_protocol::release::nightly() {
         include_str!("../assets/dirigent_nightly.svg")
@@ -284,8 +227,6 @@ fn logo_svg() -> &'static str {
         include_str!("../assets/dirigent.svg")
     }
 }
-/// Its size on the welcome, in design px: the height of the words beside it (the name's
-/// line, the tagline, the buttons).
 const LOGO: f32 = 176.;
 
 /// The mark as an image `size` px across. gpui draws an svg image at twice the size it
@@ -305,8 +246,6 @@ fn logo(size: u32) -> Arc<Image> {
     }
 }
 
-/// `svg` declared `size` px square: its opening tag's `width` and `height` (the `viewBox`
-/// keeps the drawing as it is).
 fn sized(svg: &str, size: u32) -> String {
     let (tag, rest) = svg.split_at(svg.find('>').unwrap_or(0));
     let set = |tag: String, name: &str| match tag.find(&format!(" {name}=\"")) {
@@ -320,11 +259,6 @@ fn sized(svg: &str, size: u32) -> String {
     set(set(tag.to_owned(), "width"), "height") + rest
 }
 
-/// The first page: the mark, and beside it the name, its tagline, and the way in or past,
-/// the pair in the middle of the window. The first time it shows, it is a title card
-/// (`TITLE_MS`): the mark rises in, then the letters of the name fade in one by one, each
-/// from a little lower, while the word closes up from wide tracking; then the version, the
-/// tagline and the buttons. Come back to, it glides in like any step.
 fn welcome(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let (title_size, title_line, version_size, version_line) = (u(64.), u(72.), u(18.), u(24.));
@@ -339,13 +273,11 @@ fn welcome(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
             .relative()
             .with_animation(("onboarding-letter", i), Animation::new(ms(TITLE_MS)), move |d, p| {
                 let shown = ease_out(at(p, TITLE_MS, 350. + 80. * n, 650.));
-                // Letter spacing closing up: the later the letter, the further it starts out.
                 let spread = 1. - ease_out(at(p, TITLE_MS, 150., 1900.));
                 d.opacity(shown).left(u(10. * n * spread)).top(u(10. * (1. - shown)))
             })
             .into_any_element()
     });
-    // The rest, in order: shows from `from` ms for `len`, rising by `rise`.
     let after = |d: Div, id: &'static str, from: f32, len: f32, rise: f32| {
         if !card {
             return d.into_any_element();
@@ -392,26 +324,17 @@ fn welcome(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
     let words = div()
         .flex()
         .flex_col()
-        // The name, with the version small on its baseline (as by the sidebar's title).
         .child(div().flex().flex_row().items_start().gap_3().child(name).child(after(version, "onboarding-version", 1250., 500., 0.)))
         .child(after(tagline, "onboarding-tagline", 1400., 600., 8.))
         .child(after(buttons, "onboarding-buttons", 1700., 550., 0.));
-    // The mark beside the words, as tall as they are.
     let stack = div().flex().flex_row().items_center().gap(u(48.)).child(after(mark, "onboarding-mark", 0., 700., 14.)).child(words);
-    div()
-        .flex_shrink_1()
-        .min_w_0()
-        .h_full()
-        .flex()
-        .flex_col()
-        .justify_center()
-        // Level with the window's middle, not the middle under the top bar.
-        .pb(u(titlebar::HEIGHT))
-        .child(if card { stack.into_any_element() } else { enter(stack, "onboarding-enter", s, 0.) })
+    div().flex_shrink_1().min_w_0().h_full().flex().flex_col().justify_center().pb(u(titlebar::HEIGHT)).child(if card {
+        stack.into_any_element()
+    } else {
+        enter(stack, "onboarding-enter", s, 0.)
+    })
 }
 
-/// `d` gliding in as its step shows: from the right going on, from the left going back,
-/// `delay` ms after the step changed.
 fn enter(d: Div, id: &'static str, s: &State, delay: f32) -> AnyElement {
     let from = if s.back { -STEP_FROM } else { STEP_FROM };
     let total = STEP_MS + delay;
@@ -423,37 +346,28 @@ fn enter(d: Div, id: &'static str, s: &State, delay: f32) -> AnyElement {
         .into_any_element()
 }
 
-// ---- timing ----
-
 fn ms(ms: f32) -> Duration {
     Duration::from_millis(ms as u64)
 }
 
-/// Where an animation `p` of the way (0 to 1) through `total` ms is in the part of it from
-/// `from` ms for `len` ms: 0 before, 1 after.
 fn at(p: f32, total: f32, from: f32, len: f32) -> f32 {
     span(p, from / total, len / total)
 }
 
-/// Where `k` (0 to 1) is in the part from `from` for `len` (both fractions): 0 before, 1 after.
 fn span(k: f32, from: f32, len: f32) -> f32 {
     ((k - from) / len).clamp(0., 1.)
 }
 
-/// Fast, then settling.
 fn ease_out(x: f32) -> f32 {
     1. - (1. - x).powi(4)
 }
 
-/// Slow at both ends.
 fn smooth(x: f32) -> f32 {
     x * x * (3. - 2. * x)
 }
 
-/// A step after the welcome: its `title`, what it asks (`content`), and the way on.
 fn column(title: &'static str, content: impl IntoElement, this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
     let header = div().text_size(u(26.)).line_height(u(34.)).font_weight(FontWeight::SEMIBOLD).text_color(rgba(theme::t().fg)).child(title);
-    // The footer stays put: Continue doesn't move under the mouse.
     let body = div().flex_1().min_h_0().mt_7().flex().flex_col().child(content);
     div()
         .w(u(COLUMN_W))
@@ -469,9 +383,7 @@ fn column(title: &'static str, content: impl IntoElement, this: &Dirigent, s: &S
         .child(footer(this, s.step, cx))
 }
 
-/// `Back`, a note on what is still missing, and the way on.
 fn footer(this: &Dirigent, step: Step, cx: &mut Context<Dirigent>) -> Div {
-    // Its text in line with the column's.
     let back = step.prev().map(|prev| {
         quiet("onboarding-back", "Back").ml(-u(10.)).on_click(cx.listener(move |this, _, _, cx| this.set_onboarding_step(prev, cx)))
     });
@@ -498,9 +410,6 @@ fn footer(this: &Dirigent, step: Step, cx: &mut Context<Dirigent>) -> Div {
         .child(next)
 }
 
-// ---- the steps ----
-
-/// Themes as swatches, the background pattern, the text size.
 fn look(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
     let swatches: Vec<_> = s.themes.iter().map(|(name, palette)| swatch(name, palette, *name == this.config.theme, cx)).collect();
     let current = this.config.background.pattern;
@@ -521,7 +430,6 @@ fn look(this: &Dirigent, s: &State, cx: &mut Context<Dirigent>) -> Div {
     )
 }
 
-/// What a proxy is to Dirigent, then Settings › Proxy's fields.
 fn proxy_step(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let about = div().text_color(rgba(theme::t().fg_1)).child(
         "Dirigent reaches its models through a CLIProxyAPI you run, with the accounts you signed in to there. Enter its \
@@ -530,8 +438,6 @@ fn proxy_step(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     div().flex().flex_col().gap_4().pb_2().child(about).child(proxy::body(this, cx))
 }
 
-/// A theme as a little window: its sidebar on the canvas, the pane with a title and a
-/// couple of lines, the send button in its accent. A click makes it the theme.
 fn swatch(name: &str, p: &Theme, selected: bool, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let t = theme::t();
     let bar = |w: f32, h: f32, color: u32| div().w(u(w)).h(u(h)).rounded_full().bg(rgba(color));
@@ -579,7 +485,6 @@ fn swatch(name: &str, p: &Theme, selected: bool, cx: &mut Context<Dirigent>) -> 
         .flex_col()
         .gap_1p5()
         .cursor_pointer()
-        // The longer names don't fit under it.
         .tooltip(theme::tooltip(name.to_owned()))
         .on_click(cx.listener(move |this, _, _, cx| this.set_theme(pick.clone(), cx)))
         .child(
@@ -596,8 +501,6 @@ fn swatch(name: &str, p: &Theme, selected: bool, cx: &mut Context<Dirigent>) -> 
         )
 }
 
-/// The Add project browser while it's open; under it the projects there are, and a button
-/// for another.
 fn project(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let groups = this.groups().0;
@@ -625,7 +528,6 @@ fn project(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     div().flex_1().min_h_0().flex().flex_col().gap_6().children(adding).child(scroll("onboarding-projects", below))
 }
 
-/// `▢ name  path  host`.
 fn project_row(g: &Group) -> Div {
     let t = theme::t();
     let m = &g.members[0];
@@ -642,9 +544,6 @@ fn project_row(g: &Group) -> Div {
         .children((!hosts.is_empty()).then(|| div().flex_shrink_0().text_size(text::sm()).text_color(rgba(t.fg_2)).child(hosts.join(", "))))
 }
 
-// ---- small parts ----
-
-/// A part of a step under its name.
 fn labeled(label: &'static str, body: impl IntoElement) -> Div {
     let t = theme::t();
     div()
@@ -655,7 +554,6 @@ fn labeled(label: &'static str, body: impl IntoElement) -> Div {
         .child(body)
 }
 
-/// The way on: the accent's fill, like send.
 pub fn primary(id: &'static str, label: &'static str) -> Stateful<Div> {
     let t = theme::t();
     div()
@@ -674,7 +572,6 @@ pub fn primary(id: &'static str, label: &'static str) -> Stateful<Div> {
         .child(label)
 }
 
-/// A text button that only shows itself on hover: Back, the skips.
 fn quiet(id: &'static str, label: &'static str) -> Stateful<Div> {
     let t = theme::t();
     div()
@@ -691,7 +588,6 @@ fn quiet(id: &'static str, label: &'static str) -> Stateful<Div> {
         .child(label)
 }
 
-/// One option of a row of them: lit when `on`.
 fn segment(id: String, label: &'static str, on: bool) -> Stateful<Div> {
     let t = theme::t();
     div()
@@ -715,7 +611,6 @@ fn segment(id: String, label: &'static str, on: bool) -> Stateful<Div> {
 mod tests {
     use super::*;
 
-    /// The mark is declared at the size it shows at, its drawing left alone.
     #[test]
     fn the_mark_is_sized() {
         assert!(sized(logo_svg(), 96).starts_with(r#"<svg width="96" height="96" viewBox="0 0 1000 1000""#));

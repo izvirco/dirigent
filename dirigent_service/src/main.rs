@@ -1,8 +1,3 @@
-//! Standalone `dirigent_service` binary (for remote hosts). The desktop embeds the lib instead.
-//! Takes `--data-dir` / `--config-dir` (see `dirigent_service::init_dirs`), and instead of
-//! running: `key add <name> | key list | key revoke <name>` for the public listener's API
-//! keys (`auth.rs`), `login | logout | whoami` for its forge account (`forge.rs`).
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let operands = dirigent_service::init_dirs()?;
@@ -27,15 +22,12 @@ async fn main() -> anyhow::Result<()> {
         }
         () = told_to_stop() => {
             tracing::info!("told to stop");
-            // It blocks: off the async workers.
             let _ = tokio::task::spawn_blocking(dirigent_service::shutdown).await;
         }
     }
     Ok(())
 }
 
-/// Resolves when the process is told to stop: ctrl-c, or SIGTERM where there is one. What
-/// the agent started runs in process groups of its own, which neither reaches.
 async fn told_to_stop() {
     let ctrl_c = async {
         if tokio::signal::ctrl_c().await.is_err() {

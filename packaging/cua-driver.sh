@@ -1,18 +1,9 @@
 #!/bin/sh
-# Puts Cua Driver (https://github.com/trycua/cua, MIT), which computer use runs, into DEST:
-#
-#   packaging/cua-driver.sh DEST
-#
-# `cua-driver[.exe]`, out of the driver's release for this platform, checked against the
-# sha256 pinned here, and its license as `cua-driver-LICENSE.md`. The release workflow runs it
-# for the Linux tarball and the Windows installer, which ship the driver next to the binaries
-# (packaging/README.md). Not for macOS: the system gives screen and accessibility access to a
-# signed app, which a bare executable in our tarball isn't, so computer use there runs the
-# user's own install.
-#
-# `flake.nix` (`cuaDriver`) names the same version: bump both together.
+# No macOS case: the system gives screen and accessibility access to a signed app, which a
+# bare executable in our tarball isn't, so computer use there runs the user's own install.
 set -eu
 
+# MUST KILL: rearchitect: one Cua Driver pin that this script and flake.nix's cuaDriver both read
 version=0.51.3
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)

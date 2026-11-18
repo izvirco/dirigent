@@ -1,9 +1,3 @@
-//! Commands: the shell they run in and the jobs they run as. Every command, a `bash` call
-//! or an `async_bash` job, is a `Job`: a shell in its own process group, its output (both
-//! streams, in the order written) going to a log file under `<data dir>/jobs/<thread>/`.
-//! A file, not a pipe: the command may outlive the call that started it, and what a
-//! process it left behind still writes holds nothing up.
-
 use super::Env;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
@@ -14,19 +8,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::watch;
 
-/// How long a stopped job gets to end by itself before it is killed.
 #[cfg(unix)]
 const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-/// How often it is looked at meanwhile.
 #[cfg(unix)]
 const STOP_POLL: std::time::Duration = std::time::Duration::from_millis(50);
-/// How much of the end of its log a job is described with.
 const TAIL_LINES: usize = 30;
 const TAIL_CHARS: usize = 4000;
-/// How much of a log is read for that.
 const TAIL_BYTES: u64 = 64 * 1024;
 
-/// The shell commands run in: bash, with how it takes the command.
 #[derive(Debug, Clone, PartialEq)]
 struct Shell {
     program: PathBuf,
@@ -35,9 +24,7 @@ struct Shell {
     stdin: bool,
 }
 
-/// Bash on this machine: `/bin/bash`, else the one on PATH, else `sh`. On Windows, Git
-/// Bash where it installs, else a `bash.exe` on PATH (Cygwin, MSYS2, WSL). Looked for until
-/// one is found: a bash installed because the error said so works without a restart.
+// MUST KILL: extract: a cache that only keeps a found shell, so a lookup that failed visibly runs again next time
 fn shell() -> Result<Shell> {
     static SHELL: OnceLock<Shell> = OnceLock::new();
     if let Some(shell) = SHELL.get() {
@@ -71,17 +58,13 @@ fn find_shell() -> Result<Shell> {
     Ok(if wsl { Shell { program: bash, args: vec!["-s"], stdin: true } } else { arg(bash) })
 }
 
-/// A command that runs, or ran. It is its session's: when that goes, so does the process.
 #[derive(Debug)]
 pub struct Job {
     pub id: String,
     pub command: String,
-    /// Where its output goes; the file outlives the job.
     pub log: PathBuf,
     pid: Option<u32>,
-    /// Unix millis.
     pub started: i64,
-    /// Its exit code, once it ended.
     exit: watch::Receiver<Option<i32>>,
     state: Mutex<State>,
 }
@@ -89,16 +72,11 @@ pub struct Job {
 #[derive(Debug, Default)]
 struct State {
     ended: Option<i64>,
-    /// Stopped on purpose (the model killed it, the user stopped the run, its session went):
-    /// nobody is told of its end.
     killed: bool,
-    /// When its end reaches the model, once it runs in the background. `None`: the call
-    /// that started it still waits for it, and answers with its end.
     tell: Option<Tell>,
 }
 
 impl Job {
-    /// Run `command` in `cwd`, as a job of the thread in `env` (`Jobs::spawn` keeps it).
     fn spawn(env: &Env, command: &str, cwd: &Path) -> Result<Arc<Job>> {
         let shell = shell()?;
         if !cwd.exists() {
@@ -108,7 +86,6 @@ impl Job {
         let dir = env.dirs.data.join("jobs").join(&env.thread_id);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let log = dir.join(format!("{id}.log"));
-        // One file for both streams, so their lines interleave in the order they were written.
         let out = std::fs::File::create(&log).with_context(|| format!("create {}", log.display()))?;
         let mut cmd = tokio::process::Command::new(&shell.program);
         cmd.args(&shell.args).current_dir(cwd).stdout(Stdio::from(out.try_clone()?)).stderr(Stdio::from(out));
@@ -118,7 +95,6 @@ impl Job {
         } else {
             cmd.arg(command).stdin(Stdio::null());
         }
-        // Its own process group, so stopping it reaches everything it started.
         #[cfg(unix)]
         cmd.process_group(0);
         // No console window for it, or for the console programs it starts.
@@ -146,12 +122,10 @@ impl Job {
         Ok(job)
     }
 
-    /// Its exit code, if it ended.
     pub fn exit(&self) -> Option<i32> {
         *self.exit.borrow()
     }
 
-    /// Wait for it to end.
     pub async fn exited(&self) -> i32 {
         let mut exit = self.exit.clone();
         loop {
@@ -168,8 +142,6 @@ impl Job {
         self.state.lock().unwrap().killed
     }
 
-    /// It outlived the call that started it: it runs on in the background, as a job the
-    /// model knows.
     pub fn background(&self, tell: Tell) {
         self.state.lock().unwrap().tell = Some(tell);
     }
@@ -178,19 +150,15 @@ impl Job {
         self.state.lock().unwrap().tell
     }
 
-    /// How long it ran (so far), in millis.
     pub fn duration_ms(&self) -> i64 {
         self.state.lock().unwrap().ended.unwrap_or_else(crate::now) - self.started
     }
 
-    /// Stop it for good. No notice comes of its end.
     pub fn kill(&self) {
         self.state.lock().unwrap().killed = true;
         self.stop();
     }
 
-    /// `kill` for a process that is about to exit, which no task outlives to end what
-    /// lingers after a grace: its processes are ended at once (SIGKILL to the group).
     pub fn kill_now(&self) {
         self.state.lock().unwrap().killed = true;
         let Some(pid) = self.pid.filter(|_| self.exit().is_none()) else { return };
@@ -200,9 +168,8 @@ impl Job {
         taskkill(pid);
     }
 
-    /// End its processes: asked to (SIGTERM to the group), then made to if they linger. On
-    /// Windows `taskkill /T /F` ends the whole tree at once: console programs have no
-    /// gentler stop to send them.
+    /// On Windows `taskkill /T /F` ends the whole tree at once: console programs have no gentler
+    /// stop to send them.
     pub fn stop(&self) {
         let Some(pid) = self.pid.filter(|_| self.exit().is_none()) else { return };
         #[cfg(unix)]
@@ -226,7 +193,6 @@ impl Job {
         taskkill(pid);
     }
 
-    /// One line on how it stands, for a listing; with the end of its log for a single one.
     pub fn describe(&self, with_tail: bool) -> String {
         let ran = duration(self.duration_ms());
         let head = match self.exit() {
@@ -250,15 +216,12 @@ impl Job {
     }
 }
 
-/// The last lines of a log. Only its end is read (a log can be gigabytes): far more than
-/// is shown of those lines, so they come out as from the whole.
 fn tail(log: &Path) -> String {
     let read = || -> std::io::Result<Vec<u8>> {
         let mut file = std::fs::File::open(log)?;
         let from = file.metadata()?.len().saturating_sub(TAIL_BYTES);
         file.seek(std::io::SeekFrom::Start(from))?;
         let mut end = vec![];
-        // No more than that, however much a running command writes meanwhile.
         file.take(TAIL_BYTES).read_to_end(&mut end)?;
         Ok(end)
     };
@@ -272,18 +235,14 @@ fn tail(log: &Path) -> String {
     }
 }
 
-/// Send `sig` to the process group the shell with `pid` leads (0: none, only look).
-/// `false`: the group has no member left.
 #[cfg(unix)]
 fn signal(pid: u32, sig: libc::c_int) -> bool {
     // SAFETY: `killpg` only sends a signal; a group that is gone is an error it returns.
     unsafe { libc::killpg(pid as libc::pid_t, sig) == 0 }
 }
 
-/// End the process `pid` and all it started. A process of its own: it outlives ours.
 #[cfg(windows)]
 fn taskkill(pid: u32) {
-    // From System32, not whatever `taskkill` the PATH has.
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let taskkill = PathBuf::from(root).join("System32").join("taskkill.exe");
     let mut cmd = std::process::Command::new(taskkill);
@@ -300,40 +259,28 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-/// `42s`, `3m 07s`.
 pub fn duration(ms: i64) -> String {
     let s = (ms as f64 / 1000.).round() as i64;
     if s < 60 { format!("{s}s") } else { format!("{}m {:02}s", s / 60, s % 60) }
 }
 
-/// When a job's end reaches the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tell {
-    /// After its current tool calls.
     Asap,
-    /// Once its turn has ended.
     WhenIdle,
-    /// Not at all: a server or watcher it leaves running.
     Never,
 }
 
-/// A session's jobs. Every command is one from its start, so that it ends when its session
-/// does; those that outlived the call that started them (`Job::background`) are what the
-/// model knows as jobs.
 #[derive(Default)]
 pub struct Jobs {
-    /// By id.
     jobs: Mutex<HashMap<String, Arc<Job>>>,
-    /// The host is going (`kill_now`): no job is kept any more. Read and set under `jobs`.
+    // MUST KILL: type: move `closed` inside the `jobs` Mutex so it can only be read and set under that lock
     closed: AtomicBool,
 }
 
 impl Jobs {
-    /// `Job::spawn`, kept from then on: its call's own, until the call hands it to the
-    /// background (`Job::background`) or has said how it ended (`forget`).
     pub fn spawn(&self, env: &Env, command: &str, cwd: &Path) -> Result<Arc<Job>> {
         let job = Job::spawn(env, command, cwd)?;
-        // Under the lock `kill_now` kills under: it finds the job here, or the job finds it came.
         let mut jobs = self.jobs.lock().unwrap();
         if self.closed.load(Ordering::Relaxed) {
             job.kill_now();
@@ -343,29 +290,24 @@ impl Jobs {
         Ok(job)
     }
 
-    /// `job` ended within its call, whose answer is all there is to it.
     pub fn forget(&self, job: &Job) {
         self.jobs.lock().unwrap().remove(&job.id);
     }
 
-    /// The background jobs, each with when its end reaches the model.
     fn in_background(&self) -> Vec<(Arc<Job>, Tell)> {
         self.jobs.lock().unwrap().values().filter_map(|job| Some((job.clone(), job.tell()?))).collect()
     }
 
-    /// The background job `id`.
     pub fn get(&self, id: &str) -> Option<Arc<Job>> {
         self.jobs.lock().unwrap().get(id).filter(|job| job.tell().is_some()).cloned()
     }
 
-    /// Every background job, oldest first.
     pub fn all(&self) -> Vec<Arc<Job>> {
         let mut jobs: Vec<Arc<Job>> = self.in_background().into_iter().map(|(job, _)| job).collect();
         jobs.sort_by_key(|j| j.started);
         jobs
     }
 
-    /// The running jobs whose end the model will hear of: what it can wait on.
     pub fn awaited(&self) -> Vec<Arc<Job>> {
         let running = |(job, tell): (Arc<Job>, Tell)| (job.exit().is_none() && !job.killed() && tell != Tell::Never).then_some(job);
         let mut awaited: Vec<Arc<Job>> = self.in_background().into_iter().filter_map(running).collect();
@@ -373,17 +315,12 @@ impl Jobs {
         awaited
     }
 
-    /// How many run: those the model hears the end of (the thread waits on them), and those
-    /// it left running (`Tell::Never`).
     pub fn running(&self) -> (u32, u32) {
         let jobs = self.in_background();
         let live = jobs.iter().filter(|(job, _)| job.exit().is_none() && !job.killed());
         live.fold((0, 0), |(awaited, free), (_, tell)| if *tell == Tell::Never { (awaited, free + 1) } else { (awaited + 1, free) })
     }
 
-    /// Kill the running jobs: all of them when the session goes; only those the run waits
-    /// on (`awaited_only`) when the user stops it, which are its calls' own and those whose
-    /// end would wake the model right back up, while a server it left running stays.
     pub fn kill(&self, awaited_only: bool) {
         for job in self.jobs.lock().unwrap().values() {
             if job.exit().is_none() && !(awaited_only && job.tell() == Some(Tell::Never)) {
@@ -392,8 +329,6 @@ impl Jobs {
         }
     }
 
-    /// The host is about to exit: kill every job at once (`Job::kill_now`), and any that
-    /// starts after this as it does.
     pub fn kill_now(&self) {
         let jobs = self.jobs.lock().unwrap();
         self.closed.store(true, Ordering::Relaxed);
@@ -412,23 +347,18 @@ mod tests {
         let lines: Vec<String> = (1..=20_000).map(|n| format!("line {n}")).collect();
         std::fs::write(&log, lines.join("\n") + "\n").unwrap();
         assert_eq!(tail(&log), lines[lines.len() - TAIL_LINES..].join("\n"));
-        // One line, longer than what is read of the log: its end.
         std::fs::write(&log, "x".repeat(3 * TAIL_BYTES as usize) + "y\n").unwrap();
         assert_eq!(tail(&log), format!("…{}y", "x".repeat(TAIL_CHARS - 1)));
     }
 
-    /// A shell that dies of SIGTERM leaves the children that ignore it: they are killed
-    /// once the grace is over, though the shell is long gone.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_stopped_job_takes_what_ignores_the_signal_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let jobs = Jobs::default();
-        // Bounded, so that a child nothing killed ends by itself.
         let command = "(trap '' TERM; for i in $(seq 100); do echo $i; sleep 0.1; done) & wait";
         let job = jobs.spawn(&Env::test(dir.path()), command, dir.path()).unwrap();
         let written = || std::fs::metadata(&job.log).unwrap().len();
-        // The child writes: it has set its trap.
         while written() == 0 {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

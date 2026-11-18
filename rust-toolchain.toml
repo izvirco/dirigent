@@ -1,8 +1,5 @@
 [toolchain]
-# A dated nightly: rustup (the release workflow) and rust-overlay (flake.nix) both read this
-# file, so releases build with the dev shell's compiler, not the day's nightly. To bump it,
-# `nix flake update rust` first if flake.lock's rust-overlay is older than the new date.
-# Not to nightly-2026-11-13 or later: there rustc ICEs on pathfinder_simd 0.5.6 (gpui's
+# No nightly-2026-11-13 or later: there rustc ICEs on pathfinder_simd 0.5.6 (gpui's
 # fonts), which on a nightly aarch64 compiler declares `llvm.*` intrinsics as `extern "C"`.
 # Only the macOS release job shows it. Going past needs a fixed pathfinder_simd or stable.
 channel = "nightly-2026-10-28"

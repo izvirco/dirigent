@@ -1,9 +1,3 @@
-//! What the service knows of its threads' work that isn't stored: which run (and since
-//! when), have jobs, capture a nix dev shell or compact their context. Kept from what the
-//! agent says of its sessions (`Service::on_out`), and from the service itself where it
-//! knows sooner: a thread counts as running from its prompt, not from the session's
-//! `RunStart` (`begin_run`).
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
@@ -14,15 +8,9 @@ pub struct Live {
 
 #[derive(Default)]
 struct Inner {
-    /// Threads with a run in progress, with its start (unix ms): from the prompt being
-    /// handed over (`begin_run`) or the session's `RunStart`, until `settle`.
     running: HashMap<String, i64>,
-    /// Running `async_bash` jobs per thread: those it waits on, and those it left running.
-    /// Absent: none.
     jobs: HashMap<String, (u32, u32)>,
-    /// Threads whose session is capturing its nix dev shell.
     nix_shells: HashSet<String>,
-    /// Threads whose context is being compacted, since when (unix ms).
     compacting: HashMap<String, i64>,
 }
 
@@ -31,21 +19,17 @@ impl Live {
         self.inner.lock().unwrap().running.get(thread_id).copied()
     }
 
-    /// A prompt is on its way, or the session says its run began: count the thread as
-    /// running from now, unless it already does.
     pub fn begin_run(&self, thread_id: &str) {
         self.inner.lock().unwrap().running.entry(thread_id.to_owned()).or_insert_with(crate::now);
     }
 
-    /// The run is over: forget it and return how long it took.
     pub fn settle(&self, thread_id: &str) -> Option<i64> {
         let mut inner = self.inner.lock().unwrap();
-        // A compaction never outlives its run.
         inner.compacting.remove(thread_id);
         inner.running.remove(thread_id).map(|since| crate::now() - since)
     }
 
-    /// How many `async_bash` jobs the thread has running that it waits on, and that it left running.
+    // MUST KILL: type: the bare (u32, u32) is (waited-on, left-running) jobs; return a named struct
     pub fn jobs(&self, thread_id: &str) -> (u32, u32) {
         self.inner.lock().unwrap().jobs.get(thread_id).copied().unwrap_or_default()
     }
@@ -82,9 +66,7 @@ impl Live {
         };
     }
 
-    /// The thread's session is gone: what only a session has goes with it. A run begun for
-    /// a session still to load (`begin_run`, its prompt on the way) is not the session's to
-    /// end: `loaded` says whether there was one.
+    // MUST KILL: type: the loaded bool decides whether a run begun before its session loaded survives; use an enum
     pub fn unloaded(&self, thread_id: &str, loaded: bool) {
         let mut inner = self.inner.lock().unwrap();
         if loaded {

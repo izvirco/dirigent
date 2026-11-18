@@ -1,8 +1,3 @@
-//! The `codex` wire: OpenAI's Responses API as the Codex CLI speaks it
-//! (`/backend-api/codex/responses`), for every model that isn't Claude. Nothing is kept at
-//! the provider (`store: false`): each request carries the whole conversation, its reasoning
-//! as the encrypted items the provider gave.
-
 use super::{Chunk, Error, Message, Part, Partial, Request, Wire, sse};
 use dirigent_protocol::transcript::{Api, Block, Stop};
 use serde_json::{Value, json};
@@ -17,7 +12,6 @@ pub(super) fn headers(request: &Request<'_>) -> Vec<(&'static str, String)> {
     headers
 }
 
-/// The request as the API takes it.
 pub(super) fn body(request: &Request<'_>) -> Value {
     let model = request.model;
     let mut body = json!({
@@ -58,7 +52,6 @@ fn tool(spec: &crate::tool::ToolSpec) -> Value {
     json!({"type": "function", "name": spec.name, "description": spec.description, "parameters": spec.input, "strict": false})
 }
 
-/// The conversation as the API's input items.
 fn input(request: &Request<'_>) -> Vec<Value> {
     let images = request.model.images;
     let mut items = vec![];
@@ -83,7 +76,6 @@ fn input(request: &Request<'_>) -> Vec<Value> {
                 let content = content(parts, images);
                 let output = match content.as_slice() {
                     [] => json!("(no output)"),
-                    // Text alone goes as a string.
                     content if content.iter().all(|part| part["type"] == "input_text") => {
                         content.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n").into()
                     }
@@ -96,7 +88,6 @@ fn input(request: &Request<'_>) -> Vec<Value> {
     items
 }
 
-/// A user's or a tool result's parts as the API's content.
 fn content(parts: &[Part], images: bool) -> Vec<Value> {
     let part = |part: &Part| match part {
         Part::Text(text) if text.trim().is_empty() => None,
@@ -109,13 +100,11 @@ fn content(parts: &[Part], images: bool) -> Vec<Value> {
     parts.iter().filter_map(part).collect()
 }
 
-/// A block of an earlier reply as the item it goes back as, or none when it doesn't.
 fn assistant(block: &Block, api: Api) -> Option<Value> {
     match block {
         Block::Text { text, .. } if !text.trim().is_empty() => {
             Some(json!({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]}))
         }
-        // A reasoning item goes back whole, as it was kept (`Stream`), or not at all.
         Block::Thinking { signature: Some(item), .. } if api == Api::Codex => {
             serde_json::from_str::<Value>(item).ok().filter(Value::is_object)
         }
@@ -128,18 +117,14 @@ fn assistant(block: &Block, api: Api) -> Option<Value> {
     }
 }
 
-/// A reply as its stream's events put it together.
 #[derive(Default)]
 pub(super) struct Stream {
     partial: Partial,
-    /// The output items that are streaming, by the stream's index for them.
     open: HashMap<u64, Open>,
 }
 
 struct Open {
-    /// Its place in the reply's content.
     at: usize,
-    /// A function call's arguments, which come as pieces of JSON text.
     arguments: String,
 }
 
@@ -202,7 +187,6 @@ impl Wire for Stream {
                 return Ok(true);
             }
             "response.failed" | "error" => return Err(Error::in_stream(&data)),
-            // An error in a shape of the proxy's own.
             _ if !data["error"].is_null() => return Err(Error::in_stream(&data)),
             _ => {}
         }
@@ -215,19 +199,16 @@ impl Wire for Stream {
 }
 
 impl Stream {
-    /// The block of the output item `index`, and its place in the content.
     fn block(&mut self, index: u64) -> Option<(usize, &mut Block)> {
         let at = self.open.get(&index)?.at;
         Some((at, &mut self.partial.content[at]))
     }
 
-    /// An output item began: the block it becomes. `false`: it is of no kind that becomes one.
     fn open(&mut self, index: u64, item: &Value) -> bool {
         let text = |key: &str| item[key].as_str().unwrap_or_default().to_owned();
         let block = match item["type"].as_str().unwrap_or_default() {
             "reasoning" => Block::Thinking { text: String::new(), signature: None, redacted: false },
             "message" => Block::text(""),
-            // Its input is null until all of it is here.
             "function_call" => Block::ToolCall { id: text("call_id"), name: text("name"), input: Value::Null },
             _ => return false,
         };
@@ -236,7 +217,6 @@ impl Stream {
         true
     }
 
-    /// An output item is complete: `item` is all of it.
     fn close(&mut self, index: u64, item: &Value, on: &mut (dyn FnMut(Chunk) + Send)) {
         // A provider may send an item whole, without the events that open and fill it.
         if !self.open.contains_key(&index) && !self.open(index, item) {
@@ -252,8 +232,7 @@ impl Stream {
                 let whole =
                     Some(texts(&item["summary"], "\n\n")).filter(|s| !s.is_empty()).unwrap_or_else(|| texts(&item["content"], "\n\n"));
                 amend(text, whole, |delta| on(Chunk::Thinking { index: open.at, delta }));
-                // The item as it is goes back with the history: its id and encrypted content
-                // are the provider's proof of the reasoning.
+                // MUST KILL: type: a reasoning item's whole JSON is stashed in Block::Thinking.signature; give it a field of its own
                 *signature = Some(item.to_string());
             }
             Block::Text { text, .. } => amend(text, texts(&item["content"], ""), |delta| on(Chunk::Text { index: open.at, delta })),
@@ -279,7 +258,6 @@ impl Stream {
     }
 }
 
-/// Make `text`, as it streamed, the `whole` its item ends with: what is missing streams now.
 fn amend(text: &mut String, whole: String, mut on: impl FnMut(String)) {
     if whole.is_empty() || whole == *text {
         return;
@@ -326,10 +304,8 @@ mod tests {
                         {"type": "input_text", "text": "Look at this."},
                         {"type": "input_image", "detail": "auto", "image_url": "data:image/png;base64,aW1n"},
                     ]},
-                    // The other wire's thinking stays out; its text and calls are items of their own.
                     {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Running both."}]},
                     {"type": "function_call", "call_id": "call_1", "name": "bash", "arguments": "{\"command\":\"ls\"}"},
-                    // The call whose arguments were no object goes back without any.
                     {"type": "function_call", "call_id": "call_2", "name": "bash", "arguments": "{}"},
                     {"type": "function_call_output", "call_id": "call_1", "output": "a\nb"},
                     {"type": "function_call_output", "call_id": "call_2", "output": [
@@ -337,7 +313,6 @@ mod tests {
                         {"type": "input_image", "detail": "auto", "image_url": "data:image/png;base64,c2hvdA=="},
                     ]},
                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "And then?"}]},
-                    // Its own reasoning goes back as the item it was, but not the one nothing follows.
                     {"id": "rs_1", "type": "reasoning", "encrypted_content": "enc", "summary": [{"type": "summary_text", "text": "Thought."}]},
                     {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Done."}]},
                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Thanks."}]},
@@ -358,7 +333,6 @@ mod tests {
         );
         assert_eq!(headers(&request)[2], ("session_id", "thread-1".to_owned()));
 
-        // A model that doesn't reason or see, an output limit, no conversation to name.
         let plain = Model { efforts: vec![], images: false, ..gpt() };
         let request = Request {
             model: &plain,
@@ -389,8 +363,6 @@ mod tests {
         assert_eq!(headers(&request).len(), 2);
     }
 
-    /// The stream of a reply with reasoning, text and two function calls, as the proxy sent
-    /// it for a Claude model (encrypted content shortened).
     #[test]
     fn a_recorded_stream_becomes_the_reply() {
         let (partial, chunks, outcome) = replay(Stream::default(), include_str!("fixtures/codex_tools.sse"));
@@ -412,7 +384,6 @@ mod tests {
                 Block::ToolCall { id: read.into(), name: "read".into(), input: json!({"path": "/etc/hostname"}) },
             ]
         );
-        // 654 input tokens, 652 of them read from the cache.
         assert_eq!(partial.usage, Usage { input: 2, output: 274, cache_read: 652, cache_write: 0, ..Usage::default() });
         assert_eq!(partial.stop, Some(Stop::End));
         let streamed = |of: fn(&Chunk) -> Option<&str>| chunks.iter().filter_map(of).collect::<String>();
@@ -426,7 +397,6 @@ mod tests {
                 &Chunk::ToolCall { index: 3, id: read.into(), name: "read".into(), input: json!({"path": "/etc/hostname"}) },
             ]
         );
-        // The reasoning item goes back as it came.
         let model = gpt();
         let messages = [Message::Assistant { content: partial.content, api: Api::Codex }];
         let request = Request { model: &model, system: "", messages: &messages, tools: &[], effort: None, max_output: None, cache_key: "" };
@@ -439,14 +409,12 @@ mod tests {
             "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"content\":[]}}\n\n",
             "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Half a\"}\n\n",
         );
-        // The output limit.
         let cut = "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\
                    \"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n";
         let (partial, _, outcome) = replay(Stream::default(), &format!("{start}{cut}"));
         assert_eq!((outcome, partial.stop, partial.usage.input), (Ok(true), Some(Stop::MaxTokens), 10));
         assert_eq!(partial.content, [Block::text("Half a")]);
 
-        // The provider fails, in either of its ways to say so.
         let failed = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The server had an error\"}}}\n\n";
         let (partial, _, outcome) = replay(Stream::default(), &format!("{start}{failed}"));
         assert_eq!(
@@ -457,14 +425,12 @@ mod tests {
         let error = "data: {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"code\":\"context_length_exceeded\",\"message\":\"Your input exceeds the context window of this model.\"}}\n\n";
         assert_eq!(replay(Stream::default(), error).2.unwrap_err().failure, Failure::Overflow);
 
-        // An item that comes whole, without the events that fill it.
         let whole = "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"bash\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}\n\n";
         let (partial, chunks, _) = replay(Stream::default(), whole);
         let call = Block::ToolCall { id: "c1".into(), name: "bash".into(), input: json!({"command": "ls"}) };
         assert_eq!(partial.content, [call]);
         assert_eq!(chunks, [Chunk::ToolCall { index: 0, id: "c1".into(), name: "bash".into(), input: json!({"command": "ls"}) }]);
 
-        // Arguments that are no JSON object, mended where that will do: the call is one still.
         let call = |arguments: &str| {
             let item = json!({"type": "function_call", "call_id": "c1", "name": "bash", "arguments": arguments});
             let done = json!({"type": "response.output_item.done", "output_index": 0, "item": item});

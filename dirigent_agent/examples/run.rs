@@ -1,16 +1,3 @@
-//! Give the agent one prompt and print what comes of it: a session end to end, without a
-//! service or a desktop.
-//!
-//! ```sh
-//! cargo run -p dirigent_agent --example run -- "What does this crate do?"
-//! cargo run -p dirigent_agent --example run -- --model claude-haiku-5-5 --effort low --cwd /tmp/x --tools codemode,async_bash "…"
-//! ```
-//!
-//! The thread lives in directories of its own, which go when it ends; it works in `--cwd`
-//! (default: here), for real. The proxy is the one `DIRIGENT_PROXY_URL` and
-//! `DIRIGENT_PROXY_KEY` name, else the one of this machine's install (`[proxy]` in
-//! `~/.config/dirigent/agent.toml`).
-
 use anyhow::{Context, Result};
 use dirigent_agent::config::{self, Config, Dirs};
 use dirigent_agent::proxy::Proxy;
@@ -22,7 +9,6 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-/// A host that prints, and keeps images in memory.
 #[derive(Default)]
 struct Printer {
     blobs: Mutex<HashMap<String, (String, Vec<u8>)>>,

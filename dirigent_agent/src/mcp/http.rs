@@ -1,8 +1,3 @@
-//! MCP over streamable HTTP: every message is a POST to the server's address, answered
-//! with JSON or with a stream of events (SSE) that ends with the answer. The server names
-//! a session with its first answer, sent along from then on, and may send messages of its
-//! own on a stream opened with GET.
-
 use super::client::{Error, MAX_MESSAGE_BYTES, Transport};
 use super::oauth::Auth;
 use async_trait::async_trait;
@@ -17,14 +12,11 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-/// How much of an error's body its message quotes.
 pub(crate) const ERROR_BODY_BYTES: usize = 500;
-/// A stream that dropped is opened again after 1 s, then 2 s, ..., five times.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
 const MAX_RECONNECTS: u32 = 5;
 
-/// The HTTP client of every server and sign-in.
 pub(crate) fn http() -> reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     let build = || {
@@ -35,7 +27,6 @@ pub(crate) fn http() -> reqwest::Client {
 }
 
 pub(crate) fn network(e: reqwest::Error) -> Error {
-    // The address may carry a key: the reason alone.
     let e = e.without_url();
     let mut reason = e.to_string();
     let mut source = std::error::Error::source(&e);
@@ -50,31 +41,24 @@ pub(crate) struct Http(Arc<Shared>);
 
 struct Shared {
     url: Url,
-    /// The entry's headers.
     headers: HeaderMap,
     auth: Option<Arc<Auth>>,
     incoming: mpsc::UnboundedSender<Value>,
     session: Mutex<Option<String>>,
     version: Mutex<Option<String>>,
-    /// The token the last request went with: what `close` uses, which asks for none
-    /// (that may refresh one first).
+    // MUST KILL: rename: `token` → `last_sent_token` (what `close` reuses instead of asking `auth`, which may refresh)
     token: Mutex<Option<String>>,
     closed: CancellationToken,
 }
 
-/// Where a stream of events is: what a dropped one is taken up from again.
 #[derive(Default)]
 struct Cursor {
     last_event_id: Option<String>,
-    /// How long the server wants waited before that.
     retry: Option<Duration>,
-    /// A message came since this was last looked at.
     received: bool,
 }
 
 impl Http {
-    /// A connection to the server at `url`, with `headers` on every request and `auth`'s
-    /// token if it signs in. What the server sends comes through the channel.
     pub(crate) fn new(
         url: Url,
         headers: &BTreeMap<String, String>,
@@ -147,7 +131,6 @@ impl Transport for Http {
             return;
         }
         this.closed.cancel();
-        // The session is given back, if the server is quick to take it: it lapses anyway.
         if this.session.lock().unwrap().is_some() {
             let token = this.token.lock().unwrap().clone();
             let _ = this.request(Method::DELETE, token.as_deref()).timeout(Duration::from_secs(1)).send().await;
@@ -156,14 +139,12 @@ impl Transport for Http {
 }
 
 impl Drop for Http {
-    /// The streams still read end, and let go of what they share.
     fn drop(&mut self) {
         self.0.closed.cancel();
     }
 }
 
 impl Shared {
-    /// A request to the server with what every one carries.
     fn request(&self, method: Method, token: Option<&str>) -> RequestBuilder {
         let mut request = http().request(method, self.url.clone()).headers(self.headers.clone());
         if let Some(session) = &*self.session.lock().unwrap() {
@@ -178,8 +159,6 @@ impl Shared {
         }
     }
 
-    /// Make a request, signed in if the server takes that. One the server turns down for
-    /// its credentials is made again once, after `auth` did what it could about them.
     async fn fetch(&self, method: Method, body: Option<Vec<u8>>, accept: &str, last_event_id: Option<&str>) -> Result<Response, Error> {
         let mut again = false;
         loop {
@@ -200,7 +179,6 @@ impl Shared {
                 () = self.closed.cancelled() => return Err(Error::Closed),
             };
             let challenge = response.headers().get(WWW_AUTHENTICATE).and_then(|v| v.to_str().ok());
-            // 401, or a 403 that asks for more scope.
             let refused = match response.status().as_u16() {
                 401 => true,
                 403 => challenge.is_some_and(|c| c.to_ascii_lowercase().replace('"', "").contains("error=insufficient_scope")),
@@ -212,7 +190,6 @@ impl Shared {
         }
     }
 
-    /// `response` if it is one to read; else what its status says.
     async fn checked(&self, response: Response) -> Result<Response, Error> {
         let status = response.status();
         if status.is_success() {
@@ -232,8 +209,6 @@ impl Shared {
         })
     }
 
-    /// Open a stream of the server's own messages, from where `last_event_id` left off.
-    /// `None`: the server has none (405).
     async fn open_stream(&self, last_event_id: Option<&str>) -> Result<Option<Response>, Error> {
         let response = self.fetch(Method::GET, None, "text/event-stream", last_event_id).await?;
         if response.status().as_u16() == 405 {
@@ -246,8 +221,6 @@ impl Shared {
         }
     }
 
-    /// Read a stream of events to its end and pass its messages on. `true`: the answer to
-    /// request `answers` was among them.
     async fn consume(&self, mut response: Response, cursor: &mut Cursor, answers: Option<&Value>) -> Result<bool, Error> {
         let mut events = Events::default();
         let mut answered = false;
@@ -271,9 +244,7 @@ impl Shared {
         }
     }
 
-    /// Read the stream that answers request `id`. A server may end it before the answer:
-    /// if its events had ids, the rest is asked for again. Else the request has failed,
-    /// which it is told as an answer.
+    /// A server may end it before the answer: if its events had ids, the rest is asked for again.
     async fn answer(self: Arc<Self>, first: Response, id: Value) {
         let mut cursor = Cursor::default();
         let mut stream = Ok(Some(first));
@@ -306,8 +277,6 @@ impl Shared {
         let _ = self.incoming.send(json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": message}}));
     }
 
-    /// Keep the stream of the server's own messages open (its requests, a change of its
-    /// tools), if it has one: opened again when it drops, until that fails too often.
     async fn listen(self: Arc<Self>) {
         let mut cursor = Cursor::default();
         let mut attempt = 0;
@@ -319,7 +288,6 @@ impl Shared {
                 Err(e) => Err(e),
             };
             match ended {
-                // One that stayed up a while was a good one, even if nothing came.
                 Ok(()) if cursor.received || opened.elapsed() > MAX_RECONNECT_DELAY => attempt = 0,
                 Err(e) if !e.is_transient() => {
                     return tracing::debug!("mcp: {}: no stream of the server's own: {e}", self.url.host_str().unwrap_or(""));
@@ -334,8 +302,6 @@ impl Shared {
         }
     }
 
-    /// Wait before reconnect number `attempt`: as long as the server asked, else longer
-    /// each time. `false`: the connection closed meanwhile.
     async fn pause(&self, attempt: u32, asked: Option<Duration>) -> bool {
         let delay = asked.unwrap_or_else(|| (RECONNECT_DELAY * 2u32.pow(attempt)).min(MAX_RECONNECT_DELAY));
         tokio::select! {
@@ -350,7 +316,6 @@ fn content_type(response: &Response) -> Option<String> {
     Some(value.split(';').next()?.trim().to_ascii_lowercase())
 }
 
-/// The first `limit` bytes of a response's body, and whether there were more.
 async fn read(mut response: Response, limit: usize) -> Result<(Vec<u8>, bool), Error> {
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(network)? {
@@ -364,19 +329,16 @@ async fn read(mut response: Response, limit: usize) -> Result<(Vec<u8>, bool), E
     Ok((body, false))
 }
 
-/// A stream of server-sent events, taken apart as its bytes come.
 #[derive(Default)]
 struct Events {
     line: Vec<u8>,
     /// The last byte ended a line with a CR: an LF next belongs to it.
     after_cr: bool,
-    /// The event being read: its `data` lines so far, and its `event` if it names one.
     data: Option<String>,
     kind: Option<String>,
 }
 
 impl Events {
-    /// The stream's next bytes: the `data` of the messages they complete.
     fn feed(&mut self, bytes: &[u8], cursor: &mut Cursor) -> Result<Vec<String>, Error> {
         let mut messages = vec![];
         for &byte in bytes {
@@ -400,7 +362,6 @@ impl Events {
         Ok(messages)
     }
 
-    /// The stream ended: what its last event has, if it wasn't finished off.
     fn end(&mut self, cursor: &mut Cursor) -> Vec<String> {
         let mut messages = vec![];
         let line = std::mem::take(&mut self.line);
