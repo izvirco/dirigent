@@ -127,7 +127,8 @@
           mkdir -p $out/bin $out/libexec/dirigent
           ln -s ${lib.getExe cuaDriver} $out/libexec/dirigent/cua-driver
           ln -s ${cuaDriverLicense} $out/libexec/dirigent/cua-driver-LICENSE.md
-          ln -s ${pkgs.xvfb}/bin/Xvfb $out/libexec/dirigent/Xvfb
+          ln -s ${pkgs.sway-unwrapped}/bin/sway $out/libexec/dirigent/sway
+          ln -s ${lib.getExe pkgs.wtype} $out/libexec/dirigent/wtype
           ${lib.concatMapStrings place pkgs'}
         '';
 
@@ -242,8 +243,8 @@
             pkgs.cmake
             pkgs.sccache
             cuaDriver
-            pkgs.xvfb
-            pkgs.xdotool
+            pkgs.sway-unwrapped
+            pkgs.wtype
             pkgs.imagemagick
             (pkgs.lib.getBin pkgs.sqlite)
             pkgs.util-linux
@@ -257,8 +258,7 @@
             RUSTC_WRAPPER = "sccache";
             SCCACHE_CACHE_SIZE = "50G";
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath gpuiLibs;
-            # Software Vulkan (lavapipe): Xvfb has no GPU presentation. scripts/ui.sh sets
-            # VK_ICD_FILENAMES to this for the test app only.
+            # Software Vulkan (lavapipe): a private screen has no GPU presentation.
             DIRIGENT_UI_VK_ICD = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
             DIRIGENT_LILEX_DIR = lilexDir;
           };

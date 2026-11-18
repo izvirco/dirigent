@@ -99,7 +99,7 @@ Installing one is the stable line with `nightly` for `stable`:
 d=$(mktemp -d) && curl -fsSL https://dirigent.sebba.dev/api/v0/download/nightly/linux-x86_64 | tar xz -C "$d" && "$d/dirigent/install.sh"
 ```
 
-## Computer use (Cua Driver, Xvfb)
+## Computer use (Cua Driver, sway)
 
 The `computer` tool (Settings › Agent tools, on by default; `dirigent_agent/src/tools/computer.rs`) opens a screen for
 an agent to run and operate GUI apps on, when it asks for one: nothing runs before that. Two things do the work.
@@ -118,8 +118,19 @@ why. On macOS that is the user's own install
 (`/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"`): its `CuaDriver.app` holds the permissions.
 Untested by us, like the rest of the macOS build. Windows is untested too: the driver is what its release ships.
 Its telemetry and update check are off, and it keeps its state under `<data dir>/screens/`,
-which a service wipes as it starts. On Linux it drives X11 windows (and XWayland ones in a Wayland session); it
-needs `libX11`, `libXi` and `libxkbcommon`, which a desktop has.
+which a service wipes as it starts. On Linux it needs `libX11`, `libXi` and `libxkbcommon`, which a desktop has.
+
+In a Wayland session (`WAYLAND_DISPLAY` set) the driver is started with its Wayland backend on
+(`CUA_DRIVER_RS_ENABLE_WAYLAND=1`): by itself it leaves that off and reaches X11 windows alone, through XWayland.
+A value of that variable in the host's environment stays as it is, so `0` there turns the backend off again. The
+backend works with what the compositor offers: on sway, wlroots' protocols and `wtype` to type (looked for on
+PATH, so the driver's PATH gets the directory of the one we ship, where it isn't on it). On sway, input aimed at a window is
+refused in the background; in the foreground, a click at a window without the focus only brings it forward, and
+the next one lands. And while an X11 window is open there, the driver lists every window without pid or size, so
+nothing can be read or aimed at by window: screenshots and input by the screen's pixels still work, and `0` in
+that variable brings the X11 windows back. We ran it on sway alone: the driver's docs
+(`concepts/platform-support`) say what it does on GNOME, KDE and Hyprland. In an X11 session it drives X11
+windows, as before.
 
 The driver draws a cursor of its own on the screen, over the window it acts on, and leaves the user's pointer
 where it is. On the desktop it shows unless Settings › Agent tools turns it off (`computer_cursor` in
@@ -127,16 +138,23 @@ where it is. On the desktop it shows unless Settings › Agent tools turns it of
 panel draws its own there. The switch is read when a screen opens, so a desktop that is open keeps what it had.
 A click waits for the cursor to get there, about a second. On an X11 desktop without a compositor the cursor
 covers the window, and the pictures the agent and the panel get of it are black where the cursor rests. In a
-Wayland session the driver draws none (`WAYLAND_DISPLAY` set; seen on sway): the desktop is as with the switch
-off. On macOS `mcp` is a client of the user's own driver, whose settings decide, not the switch.
+Wayland session the compositor draws the cursor into the output, so those pictures have it in them (seen on
+sway). On macOS `mcp` is a client of the user's own driver, whose settings decide, not the switch.
 
-`Xvfb` makes a thread's private screen: an X display nobody sees but in the thread. Linux only. The nix packages
-ship it next to the binaries; the tarball doesn't, and takes it from PATH (`xvfb` on Debian and Ubuntu,
-`xorg-server-xvfb` on Arch, `xorg-x11-server-Xvfb` on Fedora; the dev shell has it). Where there is none (Windows and macOS too), an agent that asks for a
-private screen gets the machine's desktop in its place and is told to say so; the thread's panel marks what
-happens on the desktop either way. A private screen's apps run in the user's session in every other way (the same
-environment and session bus), so an app that is single-instance over D-Bus may open in the copy already running
-on the desktop.
+`sway` makes a thread's private screen: a headless Wayland display of the thread's own, with one output of the
+size asked for, which nobody sees but in the thread. Linux only. It runs on a config of ours (windows tile and
+have no borders; no XWayland, so an app that needs X11 doesn't start there) in a directory of its own under the
+temp dir (`dirigent-screen-<id>`, the owner's alone), which has its sockets and goes with it. The driver there is
+given that display and nothing of the user's own: `HYPRLAND_INSTANCE_SIGNATURE` and `NIRI_SOCKET` are emptied
+(it takes them for the compositor to talk to, and then sees nothing of the screen), and `DISPLAY`, so that
+nothing it launches opens on the user's X display. It types with `wtype`. The nix
+packages ship `sway` and `wtype` next to the binaries; the tarball doesn't, and takes them from PATH (packages of
+those names on Debian, Ubuntu, Arch and Fedora; the dev shell has them). Where one is missing (Windows and macOS
+too), an agent that asks for a private screen gets the machine's desktop in its place and is told to say so; the
+thread's panel marks what happens on the desktop either way. A private screen's apps run in the user's session
+in every other way (the same environment and session bus), so an app that is single-instance over D-Bus may open
+in the copy already running on the desktop. Untried on a GNOME or KDE host, where the driver also looks for those
+desktops' own helpers on that bus.
 
 ## The command line (`dirigent`)
 
@@ -395,7 +413,7 @@ builds, dev and nix too), or `DIRIGENT_API_URL` at run time for tests.
 `flake.nix` packages all three: `dirigent_desktop` (the default), `dirigent_service` for remote hosts, and
 `dirigent_api`, e.g. `nix profile install <flake url>#dirigent_service`. The first two come with the `dirigent`
 command line and are laid out like an install: the binaries in `libexec/dirigent/`, next to Cua Driver (patched
-to find its libraries in the store) and Xvfb, and symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
+to find its libraries in the store), sway and wtype, and symlinked into `bin/`. Nix builds never self-update (no update url is baked in). The desktop needs a Vulkan
 driver: on NixOS `hardware.graphics.enable`; elsewhere nix's vulkan-loader may not find the system's drivers
 (nixGL).
 

@@ -4,17 +4,18 @@ Open your private screen (`computer`, `screen: "private"`), `scripts/ui.sh start
 the screen's tools. Never on the desktop. The app has its own port, data and config: nothing of Seb's is touched.
 
 ```
-scripts/ui.sh start DISPLAY          # build + (re)launch on your private screen (e.g. :3), filling it
+scripts/ui.sh start SCREEN           # build + (re)launch on your private screen (its WAYLAND_DISPLAY)
 scripts/ui.sh setup [DIR] [MODEL]    # add DIR ("" = <session>/scratch) as a project, pick MODEL; restarts the app
 scripts/ui.sh wait-idle [SECS]       # until no thread runs or has jobs (timeout 300 s)
 scripts/ui.sh rpc JSON [EXPR]        # one protocol request to the session's service; EXPR is JS over the reply `r`
-scripts/ui.sh run CMD...             # CMD with sqlite3, xdotool, magick, DISPLAY, UI_DIR (session dir), UI_PORT
+scripts/ui.sh run CMD...             # CMD with sqlite3, swaymsg, wtype, magick, the screen's WAYLAND_DISPLAY and
+                                     # SWAYSOCK, UI_DIR (session dir), UI_PORT
 scripts/ui.sh log [N]                # last N lines of the app's output (its service's included)
 scripts/ui.sh stop                   # kill the app
 scripts/ui.sh reset                  # stop + wipe the session's data
 ```
 
-- The window is the screen (1280x800, scale 1): click where the picture shows it.
+- The window is the screen (1280x800, scale 1) while it is the only one there: click where the picture shows it.
 - Take the picture after an action in the same script, or in a later message; never in a second tool call of the
   same message: those run at the same time, and the picture shows the app as it was before.
 - A look at one region: `get_desktop_state({screenshot_out_file: "<session>/s.png"})`, then
@@ -23,13 +24,14 @@ scripts/ui.sh reset                  # stop + wipe the session's data
 - `reset` for a clean state, `wait-idle` instead of `sleep`, `stop` when done.
 - The app dies with the screen: open it again and `start`.
 - Session: `/tmp/dirigent-ui-<user>/<session>/` (`data/`, `config/`, `app.log`), named after your thread id;
-  `UI_SESSION=name` picks another. Service port: 7800 + the display's number.
+  `UI_SESSION=name` picks another. Service port: `<session>/port` (`UI_PORT` under `run`).
 - Models: by their id at the proxy. `claude-opus-5-5` is `setup`'s default; use `claude-haiku-5-5` and short
   prompts wherever the model doesn't matter (the proxy is Seb's subscription).
 
 ```sh
-# computer({ screen: "private" })   → names your display, say :3
-scripts/ui.sh start :3
+# computer({ screen: "private" })   → names your screen's WAYLAND_DISPLAY
+S=/tmp/dirigent-screen-1a2b3c4d/wayland-1
+scripts/ui.sh start $S
 scripts/ui.sh setup
 # on the screen: ctrl+n, type a prompt, ctrl+Return
 scripts/ui.sh wait-idle
@@ -85,31 +87,36 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 - **MCP servers**: `[mcp.<name>]` in that `agent.toml`, or Settings › MCP servers. A stdio server to try:
   `command = "npx"`, `args = ["-y", "@modelcontextprotocol/server-everything"]`.
 - **Computer use in the app under test** (`"computer"` in a prompt's `tools`): its `desktop` is your private screen.
-  - An app there: `scripts/ui.sh run sh -c 'setsid xcalc -geometry 300x400+500+200 &'` (`nixpkgs#xcalc`).
-  - The app back on top: `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | xargs xdotool windowraise'`.
-  - A covered window is only captured under a compositor: `picom --backend xrender` (`nixpkgs#picom`).
-  - The driver's cursor shows on your screen with `"computer_cursor"` in the `tools` too. Without a compositor it
-    covers the window: the agent's pictures are black where it rests.
-  - A private screen that doesn't start (an error, not the desktop): a `UI_PATH` directory with an `Xvfb` that exits 1.
-    The fallback to the desktop is for a machine with no `Xvfb` at all: a `PATH` without one.
+  - An app there (`nixpkgs#foot`; a Wayland one: the screen has no XWayland), afloat so that Dirigent keeps the screen:
+    `scripts/ui.sh run sh -c 'setsid foot & sleep 1; swaymsg "[app_id=foot] floating enable, resize set 420 260, move position 800 500"'`.
+  - A window's picture is its part of the screen's: what covers the window is in it.
+  - Input aimed at a window (`pid`, `window_id`) is refused in the background. In the foreground, a click at a
+    window without the focus only brings it forward: the next one lands.
+  - The driver's cursor shows on your screen with `"computer_cursor"` in the `tools` too, and in the pictures
+    the agent takes of it.
+  - A private screen that doesn't start (an error, not the desktop): a `UI_PATH` directory with a `sway` that exits 1.
+    The fallback to the desktop is for a machine with no `sway` or no `wtype` at all: a `PATH` without one.
   - Over `rpc`: `screen` events, `get_screen`, and `screen: true` in `list_threads`.
-- **The setup** (`onboarding.rs`): `UI_ONBOARDING=1 scripts/ui.sh start :3`. It animates: ~2 s title card, ~0.6 s
+- **The setup** (`onboarding.rs`): `UI_ONBOARDING=1 scripts/ui.sh start $S`. It animates: ~2 s title card, ~0.6 s
   per step, ~1 s fade out.
-- **A nightly build** (its title `Dirigent Nightly`, window class, logo, version): `start` with
+- **A nightly build** (its title `Dirigent Nightly`, app id, logo, version): `start` with
   `DIRIGENT_BUILD_VERSION` set, and again without it when done (both rebuild):
-  `DIRIGENT_BUILD_VERSION=0.0.10-nightly.202611151432 scripts/ui.sh start :3`.
+  `DIRIGENT_BUILD_VERSION=0.0.10-nightly.202611151432 scripts/ui.sh start $S`.
   The session's dirs and port are the script's either way. A nightly's own dirs (`packaging/README.md`) only show
   without `--data-dir`: start the binary by hand with `HOME`, `XDG_DATA_HOME` and `XDG_CONFIG_HOME` in a temp
   dir, and with `DIRIGENT_PORT=<a free port> DIRIGENT_BIND=127.0.0.1`: its default port, 7776, is Seb's nightly.
 - **The changelog modal**: lower `kv.last_version` in `data/desktop.db` and `start`. Esc closes it.
-- **Window placement** (`kv.window`, `placement.rs`): `start` resizes the window after launch, so relaunch the
-  binary as `launch` in `ui.sh` does without the `xdotool` line, and check `xdotool getwindowgeometry`.
+- **Window placement** (`kv.window`, `placement.rs`): a tiled window fills the screen whatever it asks for, so
+  float it, for as long as the screen lives: `scripts/ui.sh run swaymsg 'for_window [app_id="^dirigent"] floating enable'`.
+  Then `start`, resize it (`scripts/ui.sh run swaymsg '[app_id="^dirigent"] resize set 900 600'`), `stop`, `start`:
+  its `rect` in `scripts/ui.sh run swaymsg -t get_tree` is the size it came back with. Where it opens is sway's to
+  say. Never a bare `swaymsg`: on a sway desktop that one talks to the user's own.
 - **Open in Dirigent**: run the binary with the session's dirs and a folder,
   `target/debug/dirigent_desktop --data-dir <session>/data --config-dir <session>/config /some/dir`.
   Never without `--data-dir`: that hands off to Seb's desktop.
 - **The update button**: `dirigent_api serve` with `S3_PREFIX=test/` and a newer `linux-x86_64` release
   (`dirigent_api publish`, `packaging/README.md`), then
-  `DIRIGENT_UPDATE_URL=http://127.0.0.1:<port>/api/v0/updates/<channel> scripts/ui.sh start :3`. The release is a
+  `DIRIGENT_UPDATE_URL=http://127.0.0.1:<port>/api/v0/updates/<channel> scripts/ui.sh start $S`. The release is a
   tarball of `dirigent/` with the debug binary as `dirigent` and `packaging/linux/install.sh`, signed with your
   own key (`DIRIGENT_UPDATE_KEY=<public key>`). It installs into `<session>/prefix`
   (`<session>/data/logs/install.log`). "Restart when idle" needs an agent working.
@@ -136,23 +143,18 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
 ## Gotchas
 
 - **Links open Seb's real browser** (`xdg-open`): put a fake one in `UI_PATH` before clicking any.
-- **The picture stops changing, or typing seems to land nowhere**: seen after moving the pointer with `xdotool`
-  (a hover), on a screen without a window manager. What was typed and clicked meanwhile is not lost: it took
-  effect, or does once the window has the keyboard focus again, so look before doing it over. To set it right:
-  `scripts/ui.sh run sh -c 'xdotool search --name "^Dirigent( Nightly)?$" | head -1 | xargs xdotool windowfocus'`.
+- **A long text half typed**: `type_text` sends its keys at once, and a debug build takes a moment with them.
+  A picture taken right after may show the start of it: look again before typing it over.
 - **A model under test reads what it can reach**, the session's `data/proxy.json` with the proxy's API key
   included: don't print the tool results of a thread you didn't write the prompt for.
 - Logs: `DIRIGENT_LOG=dirigent_desktop=debug` (every keystroke with its key context), `dirigent_service=debug`,
   `dirigent=debug` for both. Not a bare `debug`.
-- This is gpui's X11 backend on software Vulkan. Wayland-only details (IME, clipboard, decorations) and
-  translucent themes are Seb's to check.
-- Key repeat (Wayland-only, `rekey_repeats` in `main.rs`) under headless sway:
-  `nix shell nixpkgs#sway-unwrapped nixpkgs#wtype nixpkgs#grim`,
-  `WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 sway` on a private `XDG_RUNTIME_DIR`
-  (config: `output HEADLESS-1 resolution 1100x720`, `default_border none`, `xwayland disable`), the binary launched
-  as in `ui.sh` with that `WAYLAND_DISPLAY` and no `DISPLAY` (`ui.sh stop` first).
-  `wtype -k End -s 300 -P Left -s 1000 -M ctrl -s 400 -p Left -m ctrl` (the first key of a run is lost), `grim`.
-- Fractional scaling: `GPUI_X11_SCALE_FACTOR=1.25 scripts/ui.sh start :3`.
+- This is gpui's Wayland backend on software Vulkan, under sway. Its X11 backend, what other compositors do
+  differently (decorations, IME) and translucent themes are Seb's to check.
+- Key repeat (Wayland-only, `rekey_repeats` in `main.rs`):
+  `scripts/ui.sh run wtype -k End -s 300 -P Left -s 1000 -M ctrl -s 400 -p Left -m ctrl` (the first key of a run is lost).
+- Fractional scaling: `scripts/ui.sh run swaymsg output HEADLESS-1 scale 1.25`. The picture stays 1280x800 and
+  the app draws larger in it.
 
 ## Non-UI crates
 
@@ -176,5 +178,5 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   for little. The proxy, theirs and the examples': the one `DIRIGENT_PROXY_URL` and `DIRIGENT_PROXY_KEY` name, else
   this machine's install's (`~/.local/share/dirigent/proxy.json`; an install that is still a 0.0.10 has no API key
   there, so name the proxy then).
-- `cua_driver` and `public_http` (`mcp`: the real driver, real servers), `a_private_screen` (computer use, on an
-  Xvfb of its own).
+- `cua_driver` and `public_http` (`mcp`: the real driver, real servers), `a_private_screen` (computer use, on a
+  sway of its own).
