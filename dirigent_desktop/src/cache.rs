@@ -93,8 +93,6 @@ impl Cache {
         for (table, column, decl) in COLUMNS {
             ensure_column(&conn, table, column, decl)?;
         }
-        // MUST KILL: extract: the DROP TABLE entries in init into a named step that drops the pi-era cache
-        conn.execute_batch("DROP TABLE IF EXISTS entries")?;
         Ok(Self { conn })
     }
 
@@ -226,11 +224,6 @@ impl Cache {
             )?;
         }
         tx.commit()?;
-        Ok(())
-    }
-
-    pub fn thread_models_as_ids(&self) -> Result<()> {
-        self.conn.execute("UPDATE threads SET model = substr(model, instr(model, '/') + 1) WHERE instr(model, '/') > 0", [])?;
         Ok(())
     }
 

@@ -20,7 +20,6 @@ mod login;
 mod markdown;
 mod mcp;
 mod menu;
-mod migration;
 mod modal;
 mod net;
 mod onboarding;
@@ -103,12 +102,7 @@ fn main() {
         rekey_repeats(cx);
         cx.observe_keystrokes(|ev, _, _| tracing::debug!("key {} ctx={:?}", ev.keystroke.unparse(), ev.context_stack)).detach();
 
-        let start = move |cx: &mut App| start(open, launches, cx);
-        if migration::needed() {
-            migration::open(&config::peek(), start, cx);
-        } else {
-            start(cx);
-        }
+        start(open, launches, cx);
     });
     tracing::info!("desktop exited");
 }

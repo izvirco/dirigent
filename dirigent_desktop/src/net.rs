@@ -357,14 +357,14 @@ mod tests {
     #[tokio::test]
     async fn local_service_that_does_not_start_is_the_hosts_error() {
         fn broken() -> BoxFuture<'static, Result<()>> {
-            Box::pin(async { anyhow::bail!("migrate service.db: disk full") })
+            Box::pin(async { anyhow::bail!("open service.db: disk full") })
         }
         let port = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap().port();
         let (mut ui, _tx) = start(LOCAL, format!("ws://127.0.0.1:{port}/ws"), Some(broken));
         assert_eq!(status(&mut ui).await, (HostStatus::Connecting, None));
         assert_eq!(status(&mut ui).await, (HostStatus::Disconnected, None));
         assert_eq!(status(&mut ui).await, (HostStatus::Connecting, None));
-        let why = "Its service stopped: migrate service.db: disk full";
+        let why = "Its service stopped: open service.db: disk full";
         assert_eq!(status(&mut ui).await, (HostStatus::Disconnected, Some(why.to_owned())));
     }
 }

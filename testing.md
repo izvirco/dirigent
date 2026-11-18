@@ -74,14 +74,6 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   UPDATE threads SET locked = 1 WHERE id = '…';
   ```
 
-- **The migration from pi** (the window a first start opens on, `dirigent_desktop/src/migration.rs`): a session
-  as pi left it. After `reset`, make `<session>/config/agent` with a `cliproxyapi.json`
-  (`{"baseUrl": "…", "apiKey": "…"}`) and something that doesn't come over (an `APPEND_SYSTEM.md`; a `mcp.json`
-  entry with `"type": "sse"`), put a snapshot of a real `service.db` (below) in `<session>/data`, then `start`: a
-  debug build is seconds over the threads. `start` makes the window fill the screen (what it shows stays a
-  column in the middle); the app's own comes with Continue. The backups are `<session>/config.bck` and
-  `<session>/data.bck`. Without a window: `target/debug/dirigent_service --data-dir … --config-dir …` on such
-  dirs (with `DIRIGENT_PORT` set) logs it.
 - **A host on another protocol** (`update that host` in Settings › Hosts, on the status word's tooltip): a
   websocket server that answers `{"type":"hello","host_name":"old","version":"0.0.9"}` and nothing else, as a
   `ws://127.0.0.1:<port>/ws` entry of `<session>/config/hosts.toml`.
@@ -171,10 +163,3 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   this machine's install's (`[proxy]` in `~/.config/dirigent/agent.toml`).
 - `cua_driver` and `public_http` (`mcp`: the real driver, real servers), `a_private_screen` (computer use, on an
   Xvfb of its own).
-- `a_real_service_db`: the migration from pi, against a snapshot of a real `service.db` (never the live one; the
-  test migrates a copy of it):
-
-  ```sh
-  sqlite3 "file:$HOME/.local/share/dirigent/service.db?mode=ro" "VACUUM INTO '/tmp/snapshot/service.db'"
-  DIRIGENT_MIGRATE=/tmp/snapshot/service.db cargo test -p dirigent_service --release a_real_service_db -- --ignored --nocapture
-  ```

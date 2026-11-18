@@ -139,10 +139,6 @@ pub fn load() -> Result<Config> {
     }
 }
 
-pub fn peek() -> Config {
-    std::fs::read_to_string(path()).ok().and_then(|text| toml::from_str(&text).ok()).unwrap_or_default()
-}
-
 fn upgrade(config: &mut Config) -> bool {
     let old = OLD_TITLE_PROMPTS.contains(&config.title.prompt.as_str());
     if old {

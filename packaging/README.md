@@ -160,36 +160,15 @@ management key, for Usage), `jobs/` (the logs of the commands agents run) and ca
 Models come through a [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) the user runs, and only that
 way: the setup and Settings › Proxy ask for its address and API key. Dirigent neither installs nor starts one.
 
-Dirigent used to run pi, as a bundled runtime. The first start of a version with its own agent brings an install
-over where it is, once (`dirigent_service/src/migration.rs`). A desktop does it in a window that opens before the
-app does and stays until Continue; a service without one says it in its log. In order:
-
-- A backup: `service.db` and `desktop.db` are copied to `<data dir>.bck`, and the whole config dir to
-  `<config dir>.bck`, beside the directories they are of (`~/.local/share/dirigent.bck`, `~/.config/dirigent.bck`;
-  `.bck.2` and so on where there is one already). Not the rest of the data dir: workspaces stay as they are.
-  Nothing removes the backups; they are the user's to delete.
-- `<data dir>/service.db`, pi's, is converted and replaced by the agent's, under the same name (`migrate` in
-  `dirigent_service/src/storage.rs`). A thread whose history can't be read as the agent's stays in the list,
-  locked: it opens, but takes no more messages.
-- `<config dir>/agent` (pi's agent dir) becomes the files above: the proxy from the CLIProxyAPI provider's
-  `cliproxyapi.json`, the compaction settings, `AGENTS.md`, the skills, the MCP servers of `mcp.json` and their
-  sign-ins (`dirigent_service/src/agent.rs`). Then it is removed, with all of it in the backup and nothing
-  that was brought over still linking into it; the report names a file of pi's where it is from then on.
-
-What can't be brought over (an `APPEND_SYSTEM.md`, a file that would not copy, an MCP server or sign-in that
-doesn't work as it was, a thread that is locked) doesn't stop the rest: the window lists it, the log has it, and
-it is in `migration.txt` in the backups. A step that fails as a whole (no room for the backup) stops the
-migration with the data as that step found it. The next start goes on from there with the backup there is (a
-file `unfinished` in it says so), so trying again makes no second one, and says again what the try before
-could not bring over; pi's agent dir then stays where it is.
-
-A migration is of an install, and has it to itself. It stops, with nothing changed, when another Dirigent
-has `service.db` open (an older one that still runs), when another migration is under way on the data dir, and
-for an instance with only one of `--data-dir` and `--config-dir` given: the other directory is the real
-install's, so pass both.
+Up to 0.0.9 Dirigent ran pi, as a bundled runtime, and 0.0.10 brought an install over on its first start. That
+migration is gone: a `service.db` as pi left it is refused with a line that says to start 0.0.10 on it once
+(`Storage::open` in `dirigent_service/src/storage.rs`), and pi's agent dir (`<config dir>/agent`) is not read.
+What is left of it in an install is the threads 0.0.10 could not convert whole. They are locked: they open and
+fork, but take no more messages. And the backups 0.0.10 made beside the data and the config dir (`<dir>.bck`, with
+a `migration.txt`): nothing removes them, they are the user's to delete.
 
 A `--config-dir` instance without an `agent.toml` copies the real install's `agent.toml`, `AGENTS.md` and
-`skills/` instead (the proxy's API key with them, the management key not).
+`skills/` (the proxy's API key with them, the management key not).
 
 ## Remote hosts
 

@@ -8,7 +8,6 @@ pub mod hosts;
 mod live;
 mod logging;
 mod mcp;
-pub mod migration;
 pub mod platform;
 mod proxy;
 mod screen;
@@ -951,13 +950,7 @@ pub fn shutdown() {
 }
 
 pub(crate) fn open_storage(data: &Path) -> Result<Storage> {
-    let db = data.join("service.db");
-    anyhow::ensure!(
-        !storage::from_pi(&db)?,
-        "{} is from before Dirigent had its own agent: start Dirigent once to migrate it",
-        db.display()
-    );
-    Storage::open(&db)
+    Storage::open(&data.join("service.db"))
 }
 
 /// Take `--data-dir DIR` / `--config-dir DIR` from the command line, every binary's only
@@ -1004,10 +997,6 @@ fn parse_dirs(args: impl Iterator<Item = String>) -> Result<(Dirs, Vec<String>)>
     Ok((dirs, operands))
 }
 
-pub(crate) fn half_elsewhere() -> bool {
-    DIRS.get().is_some_and(|dirs| dirs.data.is_some() != dirs.config.is_some())
-}
-
 /// `--config-dir`, else the platform's (`platform::config_dir`): the desktop's
 /// `config.toml`, the machine's `hosts.toml` and the agent's files (`agent.rs`).
 pub fn config_dir() -> PathBuf {
@@ -1052,7 +1041,6 @@ pub async fn run(port: u16) -> Result<()> {
         addrs.push((public.listen, Some(Arc::new(gate))));
     }
     let listeners = server::bind(addrs).await?;
-    tokio::task::spawn_blocking(migration::headless).await??;
     agent::prepare(&dirs);
     let storage = open_storage(&dirs.data)?;
     let service_id = storage.service_id()?;

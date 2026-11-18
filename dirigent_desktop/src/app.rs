@@ -36,7 +36,6 @@ pub const KEY_CONTEXT: &str = "Dirigent";
 const TOAST_TTL: Duration = Duration::from_secs(8);
 const VCS_REFRESH_SECS: u64 = 2;
 const LAST_MODEL_KEY: &str = "last_model";
-const MODEL_IDS_KEY: &str = "model_ids";
 const LAST_EFFORT_KEY: &str = "last_effort";
 const LAST_TARGET_KEY: &str = "last_target";
 const LAST_ISOLATE_KEY: &str = "last_isolate";
@@ -484,7 +483,7 @@ pub struct Dirigent {
 }
 
 impl Dirigent {
-    pub fn new(cache: Cache, mut config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(cache: Cache, config: config::Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut hosts = vec![(hosts::LOCAL.to_owned(), hosts::Host::new(format!("ws://127.0.0.1:{}/ws", dirigent_service::port())))];
         let hosts_error = match hosts::load() {
             Ok(remote) => {
@@ -495,11 +494,6 @@ impl Dirigent {
         };
         let updated = changelog::after_update(&cache);
         let onboard = onboarding::needed(&cache);
-        if name_models_by_id(&cache, &mut config)
-            && let Err(e) = config::save(&config)
-        {
-            tracing::warn!("{e:#}");
-        }
         let host_states = hosts.iter().map(|(name, host)| host_state(&cache, name, host)).collect();
         let links = cache.links().unwrap_or_default().into_iter().map(|(h, p, g)| ((h, p), g)).collect();
         let names = cache.project_names().unwrap_or_default().into_iter().collect();
@@ -3938,37 +3932,6 @@ pub fn image_from(mime: &str, bytes: Vec<u8>) -> Option<Arc<gpui::Image>> {
     Some(Arc::new(gpui::Image { format, bytes, id }))
 }
 
-fn model_id(model: &str) -> &str {
-    model.split_once('/').map_or(model, |(_, id)| id)
-}
-
-fn name_models_by_id(cache: &Cache, config: &mut config::Config) -> bool {
-    if cache.get(MODEL_IDS_KEY).is_some() {
-        return false;
-    }
-    if let Err(e) = cache.thread_models_as_ids() {
-        tracing::warn!("{e:#}");
-    }
-    if let Some(model) = cache.get(LAST_MODEL_KEY) {
-        let _ = cache.set(LAST_MODEL_KEY, model_id(&model));
-    }
-    if let Some(old) = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str::<Vec<Preset>>(&s).ok()) {
-        let mut presets: Vec<Preset> = vec![];
-        for p in old {
-            let p = Preset { model: model_id(&p.model).to_owned(), effort: p.effort };
-            if !presets.contains(&p) {
-                presets.push(p);
-            }
-        }
-        let _ = cache.set(PRESETS_KEY, &serde_json::to_string(&presets).unwrap_or_default());
-    }
-    let _ = cache.set(MODEL_IDS_KEY, "1");
-    let title = model_id(&config.title.model).to_owned();
-    let changed = title != config.title.model;
-    config.title.model = title;
-    changed
-}
-
 // MUST KILL: rearchitect: migrate stored pi efforts (off, minimal) once instead of mapping them on every hold
 fn held_effort(effort: &str, efforts: &[String]) -> Option<String> {
     let named = |name: &str| efforts.iter().find(|e| *e == name);
@@ -4291,38 +4254,6 @@ mod tests {
         t.fold(user(5, "u3", None, "yo"));
         assert!(t.rewound.is_none());
         assert_eq!(texts(&t), ["yo"]);
-    }
-
-    #[test]
-    fn models_kept_as_provider_and_id_become_ids_once() {
-        let mut cache = Cache::in_memory().unwrap();
-        let thread = |id: &str, model: &str| ThreadSummary { id: id.into(), model: Some(model.into()), ..Default::default() };
-        let models = |cache: &Cache| {
-            let mut threads = cache.threads("h").unwrap();
-            threads.sort_by(|a, b| a.id.cmp(&b.id));
-            threads.into_iter().map(|t| t.model.unwrap()).collect::<Vec<_>>()
-        };
-        let preset = |model: &str, effort: &str| Preset { model: model.into(), effort: Some(effort.into()) };
-        let presets = |cache: &Cache| serde_json::from_str::<Vec<Preset>>(&cache.get(PRESETS_KEY).unwrap()).unwrap();
-        let old =
-            [preset("cliproxyapi/claude-opus-5-5", "high"), preset("openai/gpt-5", "low"), preset("anthropic/claude-opus-5-5", "high")];
-        cache.set_threads("h", &[thread("a", "cliproxyapi/claude-opus-5-5"), thread("b", "openrouter/vendor/model")]).unwrap();
-        cache.set(LAST_MODEL_KEY, "cliproxyapi/claude-opus-5-5").unwrap();
-        cache.set(PRESETS_KEY, &serde_json::to_string(&old).unwrap()).unwrap();
-        let mut config = config::Config::default();
-        config.title.model = "anthropic/claude-haiku-5-5".into();
-
-        assert!(name_models_by_id(&cache, &mut config));
-        assert_eq!(models(&cache), ["claude-opus-5-5", "vendor/model"]);
-        assert_eq!(cache.get(LAST_MODEL_KEY).as_deref(), Some("claude-opus-5-5"));
-        assert!(presets(&cache) == [preset("claude-opus-5-5", "high"), preset("gpt-5", "low")]);
-        assert_eq!(config.title.model, "claude-haiku-5-5");
-
-        config.title.model = "vendor/model".into();
-        cache.set(LAST_MODEL_KEY, "vendor/model").unwrap();
-        assert!(!name_models_by_id(&cache, &mut config));
-        assert_eq!(models(&cache), ["claude-opus-5-5", "vendor/model"]);
-        assert_eq!((cache.get(LAST_MODEL_KEY).as_deref(), config.title.model.as_str()), (Some("vendor/model"), "vendor/model"));
     }
 
     #[test]
