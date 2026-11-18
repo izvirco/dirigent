@@ -22,6 +22,8 @@ const UNFIT_RETRY: Duration = Duration::from_secs(60);
 
 const HELLO_WAIT: Duration = Duration::from_secs(20);
 
+const STANDALONE_LOCAL_SERVICE_RESTART_GRACE: Duration = Duration::from_secs(2);
+
 // MUST KILL: extract: MAX_MESSAGE → one const in dirigent_protocol that both ends read
 const MAX_MESSAGE: usize = 64 << 20;
 
@@ -150,6 +152,7 @@ async fn host_loop(
     let mut embedded: Option<tokio::task::JoinHandle<Result<()>>> = None;
     let mut stopped: Option<String> = None;
     let mut started: Option<Instant> = None;
+    let mut standalone_lost: Option<Instant> = None;
     let mut failing = false;
     loop {
         status(HostStatus::Connecting, None);
@@ -217,6 +220,9 @@ async fn host_loop(
                 }
                 while rx.try_recv().is_ok() {}
                 info!(host = %name, "disconnected");
+                if embedded.is_none() {
+                    standalone_lost = Some(Instant::now());
+                }
                 let wait = unfit.as_ref().map(|why| {
                     warn!(host = %name, "{why}");
                     UNFIT_RETRY
@@ -233,6 +239,7 @@ async fn host_loop(
                     warn!(host = %name, "connect {url}: {e:#} (retrying)");
                 }
                 if let Some(run) = service
+                    && standalone_lost.is_none_or(|at| at.elapsed() >= STANDALONE_LOCAL_SERVICE_RESTART_GRACE)
                     && embedded.as_ref().is_none_or(|h| h.is_finished())
                 {
                     if let Some(ended) = embedded.take() {
@@ -352,6 +359,30 @@ mod tests {
                 ClientMessage::ListModels { id: 8 }
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn standalone_local_service_gets_a_moment_to_come_back() {
+        static EMBEDDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        fn embedded() -> BoxFuture<'static, Result<()>> {
+            EMBEDDED.store(true, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+        let started = || EMBEDDED.load(std::sync::atomic::Ordering::SeqCst);
+        let (host_name, version, service_id) = ("h".into(), "0".into(), "s".into());
+        let hello = ServerMessage::Hello { host_name, version, service_id, protocol: dirigent_protocol::PROTOCOL };
+        let (url, asked) = host(serde_json::to_string(&hello).unwrap(), 3).await;
+        let (mut ui, _tx) = start(LOCAL, url, Some(embedded));
+        assert_eq!(status(&mut ui).await, (HostStatus::Connecting, None));
+        assert_eq!(status(&mut ui).await, (HostStatus::Connected, None));
+        asked.await.unwrap();
+        assert_eq!(status(&mut ui).await, (HostStatus::Disconnected, None));
+        assert_eq!(status(&mut ui).await, (HostStatus::Connecting, None));
+        assert_eq!(status(&mut ui).await, (HostStatus::Disconnected, None));
+        assert!(!started(), "the embedded service took the place of one that may be restarting");
+        while !started() {
+            status(&mut ui).await;
+        }
     }
 
     #[tokio::test]

@@ -1,14 +1,16 @@
 use crate::app::{Dirigent, Menu};
-use anyhow::{Context as _, Result, bail};
-use dirigent_protocol::release::{self, Release};
+use crate::net::HostStatus;
+use crate::projects::HostState;
+use anyhow::{Context as _, Result};
+use dirigent_protocol::ClientMessage;
+use dirigent_service::update::{Transfer, Updater};
 use gpui::Context;
-use semver::Version;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
 const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
+pub const HOST_CHECK_SECS: u64 = 5 * 60;
 // MUST KILL: rename: IDLE_FOR → SUB_AGENT_HANDOFF_GRACE
 const IDLE_FOR: Duration = Duration::from_secs(3);
 
@@ -24,12 +26,6 @@ pub struct Download {
     pub transfer: Option<Transfer>,
 }
 
-pub struct Transfer {
-    pub received: u64,
-    pub total: Option<u64>,
-    pub per_second: f64,
-}
-
 enum Report {
     Progress(Option<Download>),
     Ready(Ready),
@@ -43,15 +39,34 @@ pub struct State {
     idle_since: Option<Instant>,
 }
 
-// MUST KILL: rename: endpoint's two env vars → a baked BUILD_UPDATE_URL const and a run-time override fn
-fn endpoint() -> Option<String> {
-    let url = std::env::var("DIRIGENT_UPDATE_URL").ok().or_else(|| option_env!("DIRIGENT_BUILD_UPDATE_URL").map(str::to_owned));
-    url.filter(|u| !u.is_empty()).map(|u| u.trim_end_matches('/').to_owned())
+#[derive(Default)]
+pub struct HostUpdate {
+    unanswered_check: Option<u64>,
+    pub offer: Option<Offer>,
+}
+
+pub struct Offer {
+    pub version: String,
+    pub stage: Stage,
+}
+
+impl HostUpdate {
+    pub(crate) fn disconnected(&mut self) {
+        self.unanswered_check = None;
+        self.offer.take_if(|offer| !matches!(offer.stage, Stage::WhenIdle { .. }));
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Stage {
+    Offered,
+    WhenIdle { idle_since: Option<Instant> },
+    Installing { request: u64 },
 }
 
 pub fn start(cx: &mut Context<Dirigent>) {
-    let Some(endpoint) = endpoint() else { return };
-    info!(%endpoint, "checking for updates");
+    let Some(updater) = Updater::desktop() else { return };
+    info!(endpoint = %updater.endpoint(), "checking for updates");
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
     std::thread::spawn(move || {
         let mut offered: Option<String> = None;
@@ -60,7 +75,7 @@ pub fn start(cx: &mut Context<Dirigent>) {
             let _ = tx.unbounded_send(Report::Progress(Some(download)));
         };
         loop {
-            match check(&endpoint, offered.as_deref(), progress) {
+            match check(&updater, offered.as_deref(), progress) {
                 Ok(ready) => {
                     failing = false;
                     if let Some(ready) = ready {
@@ -92,9 +107,7 @@ pub fn start(cx: &mut Context<Dirigent>) {
                         this.updater.downloading = None;
                     }
                 }
-                if this.updater.ready.is_none() && this.updater.downloading.is_none() && this.menu == Some(Menu::Update) {
-                    this.menu = None;
-                }
+                this.close_spent_update_menu();
                 cx.notify();
             });
             if shown.is_err() {
@@ -105,101 +118,15 @@ pub fn start(cx: &mut Context<Dirigent>) {
     .detach();
 }
 
-fn check(endpoint: &str, offered: Option<&str>, progress: impl Fn(Download)) -> Result<Option<Ready>> {
-    let platform = release::platform();
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .user_agent(format!("Dirigent/{} ({platform})", release::VERSION))
-            .timeout_connect(Some(Duration::from_secs(20)))
-            .timeout_per_read(Some(Duration::from_secs(30)))
-            .build(),
-    );
-    let url = format!("{endpoint}/{platform}");
-    let release: Release = match agent.get(&url).call() {
-        Ok(mut res) => serde_json::from_str(&res.body_mut().read_to_string()?).with_context(|| format!("{url}: not a release"))?,
-        Err(ureq::Error::StatusCode(404)) => return Ok(None),
-        Err(e) => return Err(e).with_context(|| format!("GET {url}")),
-    };
-    let dir = dirigent_service::data_dir().join("updates");
-    if Version::parse(&release.version)? <= Version::parse(release::VERSION)? {
-        clean(&dir, None);
-        return Ok(None);
-    }
-    let name = release.url.rsplit('/').next().filter(|n| !n.is_empty() && !n.contains(['\\', ':']) && *n != "..");
-    let installer = dir.join(name.context("the release url has no file name")?);
-    if offered == Some(&release.version) && installer.exists() {
+fn check(updater: &Updater, offered: Option<&str>, progress: impl Fn(Download)) -> Result<Option<Ready>> {
+    let Some(release) = updater.newer()? else { return Ok(None) };
+    if offered == Some(&release.version) && updater.installer(&release)?.exists() {
         return Ok(None);
     }
     let report = |transfer| progress(Download { version: release.version.clone(), transfer });
     report(None);
-    let signature = agent.get(format!("{}.minisig", release.url)).call()?.body_mut().read_to_string()?;
-    let test_key = std::env::var("DIRIGENT_UPDATE_KEY").ok().filter(|_| cfg!(debug_assertions));
-    let keys: Vec<String> = release::KEYS.iter().map(|k| k.to_string()).chain(test_key).collect();
-    let verify = |file: &Path| verify(file, &signature, &release.version, &platform, &keys);
-    if !installer.exists() || verify(&installer).is_err() {
-        info!(version = %release.version, "downloading update");
-        std::fs::create_dir_all(&dir)?;
-        let part = installer.with_extension("part");
-        let mut res = agent.get(&release.url).call().with_context(|| format!("GET {}", release.url))?;
-        let total = res.body().content_length();
-        let sample = |received, per_second| report(Some(Transfer { received, total, per_second }));
-        let (mut body, mut file) = (res.body_mut().as_reader(), std::fs::File::create(&part)?);
-        let (mut buf, mut done, mut speed, mut mark) = (vec![0; 1 << 16], 0u64, None, (Instant::now(), 0u64));
-        loop {
-            let n = body.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            file.write_all(&buf[..n])?;
-            done += n as u64;
-            let since = mark.0.elapsed();
-            if since >= Duration::from_secs(1) {
-                let per_second = (done - mark.1) as f64 / since.as_secs_f64();
-                (speed, mark) = (Some(per_second), (Instant::now(), done));
-                sample(done, per_second);
-            }
-        }
-        drop(file);
-        sample(done, speed.unwrap_or_else(|| done as f64 / mark.0.elapsed().as_secs_f64()));
-        verify(&part)?;
-        std::fs::rename(&part, &installer)?;
-    }
-    clean(&dir, Some(&installer));
+    let installer = updater.download(&release, |transfer| report(Some(transfer)))?;
     Ok(Some(Ready { version: release.version, installer }))
-}
-
-fn verify(file: &Path, signature: &str, version: &str, platform: &str, keys: &[String]) -> Result<()> {
-    let signature = minisign_verify::Signature::decode(signature)?;
-    if signature.trusted_comment() != release::trusted_comment(version, platform) {
-        bail!("the signature is for {:?}, not {version} on {platform}", signature.trusted_comment());
-    }
-    for key in keys {
-        let key = minisign_verify::PublicKey::from_base64(key)?;
-        let Ok(mut stream) = key.verify_stream(&signature) else { continue };
-        let mut file = std::fs::File::open(file)?;
-        let mut buf = vec![0; 1 << 16];
-        loop {
-            let n = file.read(&mut buf)?;
-            if n == 0 {
-                break;
-            }
-            stream.update(&buf[..n]);
-        }
-        if stream.finalize().is_ok() {
-            return Ok(());
-        }
-    }
-    bail!("{} isn't signed by a release key", file.display())
-}
-
-fn clean(dir: &Path, keep: Option<&Path>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if keep != Some(path.as_path()) {
-            let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
-        }
-    }
 }
 
 #[cfg(windows)]
@@ -215,16 +142,10 @@ fn start_installer(installer: &Path) -> Result<()> {
 #[cfg(unix)]
 fn start_installer(installer: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
-    let dir = installer.with_file_name("unpacked");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir)?;
-    let tar = std::process::Command::new("tar").arg("-xzf").arg(installer).arg("-C").arg(&dir).output().context("run tar")?;
-    if !tar.status.success() {
-        bail!("unpack {}: {}", installer.display(), String::from_utf8_lossy(&tar.stderr).trim());
-    }
+    let script = dirigent_service::update::unpack(installer)?;
     let log = std::fs::File::create(dirigent_service::data_dir().join("logs").join("install.log"))?;
     std::process::Command::new("sh")
-        .arg(dir.join("dirigent").join("install.sh"))
+        .arg(script)
         .arg("--update")
         .arg(std::process::id().to_string())
         .args(dirigent_service::dir_args())
@@ -238,11 +159,116 @@ fn start_installer(installer: &Path) -> Result<()> {
     Ok(())
 }
 
+fn settled(busy: bool, idle_since: &mut Option<Instant>) -> bool {
+    if busy {
+        *idle_since = None;
+        return false;
+    }
+    idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_FOR
+}
+
+impl HostState {
+    pub fn threads_a_restart_would_cut_off(&self) -> usize {
+        self.threads.iter().filter(|t| t.running() || t.jobs > 0 || t.setup.is_some()).count()
+    }
+}
+
 impl Dirigent {
     // MUST KILL: rename: local_busy → threads_a_restart_would_cut_off (jobs and setup count, asks don't)
     pub fn local_busy(&self) -> usize {
-        let Some(host) = self.host(dirigent_service::hosts::LOCAL) else { return 0 };
-        host.threads.iter().filter(|t| t.running() || t.jobs > 0 || t.setup.is_some()).count()
+        self.host(dirigent_service::hosts::LOCAL).map_or(0, HostState::threads_a_restart_would_cut_off)
+    }
+
+    pub fn has_updates(&self) -> bool {
+        self.updater.ready.is_some() || self.updater.downloading.is_some() || self.hosts.iter().any(|h| h.update.offer.is_some())
+    }
+
+    // MUST KILL: rearchitecture: close_spent_update_menu → a Menu::Update that cannot outlive its button
+    pub(crate) fn close_spent_update_menu(&mut self) {
+        if self.menu == Some(Menu::Update) && !self.has_updates() {
+            self.menu = None;
+        }
+    }
+
+    pub(crate) fn check_host_update(&mut self, host: &str) {
+        let Some(h) = self.host(host) else { return };
+        let installing = matches!(h.update.offer, Some(Offer { stage: Stage::Installing { .. }, .. }));
+        if h.status != HostStatus::Connected || h.update.unanswered_check.is_some() || installing {
+            return;
+        }
+        let id = self.request(host, |id| ClientMessage::CheckUpdate { id });
+        if let Some(h) = self.host_mut(host) {
+            h.update.unanswered_check = Some(id);
+        }
+    }
+
+    pub(crate) fn check_host_updates(&mut self) {
+        let hosts: Vec<String> = self.hosts.iter().map(|h| h.name.clone()).collect();
+        for host in hosts {
+            self.check_host_update(&host);
+        }
+    }
+
+    pub(crate) fn on_host_update(&mut self, host: &str, version: Option<String>) {
+        let Some(h) = self.host_mut(host) else { return };
+        h.update.unanswered_check = None;
+        h.update.offer = match (version, h.update.offer.take()) {
+            (Some(version), Some(offer)) if offer.version == version => Some(offer),
+            (Some(version), _) => Some(Offer { version, stage: Stage::Offered }),
+            (None, _) => None,
+        };
+        self.close_spent_update_menu();
+    }
+
+    pub(crate) fn on_host_update_reply(&mut self, host: &str, request: u64, result: Result<(), String>, cx: &mut Context<Self>) -> bool {
+        let Some(h) = self.host_mut(host) else { return false };
+        if h.update.unanswered_check == Some(request) {
+            h.update.unanswered_check = None;
+            if let Err(why) = result {
+                info!(%host, "no update check: {why}");
+            }
+            return true;
+        }
+        let Some(offer) = h.update.offer.as_mut().filter(|o| o.stage == Stage::Installing { request }) else { return false };
+        let message = match result {
+            Ok(()) => format!("{host} restarts as Dirigent {}", offer.version),
+            Err(why) => {
+                offer.stage = Stage::Offered;
+                format!("{host}: the update failed: {why}")
+            }
+        };
+        self.toast(message, cx);
+        true
+    }
+
+    pub fn update_host(&mut self, host: &str, cx: &mut Context<Self>) {
+        self.menu = None;
+        if self.host(host).is_some_and(|h| h.threads_a_restart_would_cut_off() == 0) {
+            self.install_host_update(host);
+        } else if let Some(offer) = self.host_mut(host).and_then(|h| h.update.offer.as_mut()) {
+            offer.stage = Stage::WhenIdle { idle_since: None };
+        }
+        cx.notify();
+    }
+
+    pub fn cancel_host_update(&mut self, host: &str, cx: &mut Context<Self>) {
+        self.menu = None;
+        let offer = self.host_mut(host).and_then(|h| h.update.offer.as_mut());
+        if let Some(offer) = offer.filter(|o| matches!(o.stage, Stage::WhenIdle { .. })) {
+            offer.stage = Stage::Offered;
+        }
+        cx.notify();
+    }
+
+    fn install_host_update(&mut self, host: &str) {
+        if self.host(host).is_none_or(|h| h.update.offer.is_none()) {
+            return;
+        }
+        let id = self.request(host, |id| ClientMessage::InstallUpdate { id });
+        if let Some(offer) = self.host_mut(host).and_then(|h| h.update.offer.as_mut()) {
+            info!(%host, version = %offer.version, "telling the host to update");
+            offer.stage = Stage::Installing { request: id };
+        }
     }
 
     pub fn restart_to_update(&mut self, cx: &mut Context<Self>) {
@@ -263,14 +289,19 @@ impl Dirigent {
     }
 
     pub fn tick_update(&mut self, cx: &mut Context<Self>) {
-        if !self.updater.when_idle {
-            return;
-        }
-        if self.local_busy() > 0 {
-            self.updater.idle_since = None;
-        } else if self.updater.idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_FOR {
+        if self.updater.when_idle && settled(self.local_busy() > 0, &mut self.updater.idle_since) {
             self.updater.when_idle = false;
             self.apply_update(cx);
+        }
+        let idle = |h: &mut HostState| {
+            let busy = h.status != HostStatus::Connected || h.threads_a_restart_would_cut_off() > 0;
+            let Some(Offer { stage: Stage::WhenIdle { idle_since }, .. }) = &mut h.update.offer else { return None };
+            settled(busy, idle_since).then(|| h.name.clone())
+        };
+        let hosts: Vec<String> = self.hosts.iter_mut().filter_map(idle).collect();
+        for host in hosts {
+            self.install_host_update(&host);
+            cx.notify();
         }
     }
 
@@ -297,36 +328,5 @@ impl Dirigent {
             }
         })
         .detach();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const KEY: &str = "RWRe9G0q34tFvBAF73zIZUL9dKvcm2lxf6ZaGGrgte90weV+749I+VZ5";
-    const PAYLOAD: &[u8] = b"dirigent update test payload\n";
-    const SIGNATURE: &str = "untrusted comment: signature from minisign secret key
-RURe9G0q34tFvJlpaNkQeP74VVpYbV9BLta4/BglNpka2gfdLWz59EAFQ2+nCD2HHNjwo2MOZfKP40D+xzTIcQu9I9zYfrOGCAo=
-trusted comment: dirigent 1.2.3 test-platform
-/ISCyMq0dwbO9g4CteEvkBvOBComNxoEEvUtz73AXR1Q2i+NXLU2it0S3G2WgV9mLJYO8cBwuGpPu05u/ToSCg==
-";
-
-    #[test]
-    fn verifies_signed_release_only() {
-        let dir = std::env::temp_dir().join(format!("dirigent-update-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (good, bad) = (dir.join("good"), dir.join("bad"));
-        std::fs::write(&good, PAYLOAD).unwrap();
-        std::fs::write(&bad, b"dirigent update test payloaf\n").unwrap();
-        let keys = [KEY.to_owned()];
-        let check = |file: &Path, version: &str, platform: &str, keys: &[String]| verify(file, SIGNATURE, version, platform, keys);
-        assert!(check(&good, "1.2.3", "test-platform", &keys).is_ok());
-        assert!(check(&good, "1.2.4", "test-platform", &keys).is_err());
-        assert!(check(&good, "1.2.3", "other-platform", &keys).is_err());
-        assert!(check(&bad, "1.2.3", "test-platform", &keys).is_err());
-        let release_keys: Vec<String> = release::KEYS.iter().map(|k| k.to_string()).collect();
-        assert!(check(&good, "1.2.3", "test-platform", &release_keys).is_err());
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

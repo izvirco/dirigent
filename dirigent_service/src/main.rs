@@ -1,3 +1,7 @@
+// No console window on Windows, where the service starts at sign-in (the installer's task).
+// It has nowhere to print there: `dirigent key` and `dirigent login` are its commands' way in.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let operands = dirigent_service::init_dirs()?;
@@ -13,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
     dirigent_service::init_logging("service");
+    dirigent_service::update::enable();
     tokio::select! {
         ran = dirigent_service::run(dirigent_service::port()) => {
             if let Err(e) = ran {

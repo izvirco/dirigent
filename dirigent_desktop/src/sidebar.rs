@@ -9,6 +9,7 @@ use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
 use crate::titlebar;
 use crate::toasts;
+use crate::update::{Offer, Stage};
 use dirigent_protocol::{ThreadSummary, release};
 use gpui::{
     AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Render, SharedString,
@@ -247,37 +248,64 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
 }
 
 fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
-    let Some(ready) = this.updater.ready.as_ref() else {
-        let download = this.updater.downloading.as_ref()?;
-        let menu = (this.menu == Some(Menu::Update)).then(|| {
-            let mut rows = vec![menu::header(format!("Downloading Dirigent {}", download.version))];
+    if !this.has_updates() {
+        return None;
+    }
+    let offers = || this.hosts.iter().filter_map(|h| Some((h, h.update.offer.as_ref()?)));
+    let armed = this.updater.when_idle || offers().any(|(_, offer)| matches!(offer.stage, Stage::WhenIdle { .. }));
+    let menu = (this.menu == Some(Menu::Update)).then(|| {
+        let mut items = vec![];
+        if let Some(ready) = &this.updater.ready {
+            let busy = this.local_busy();
+            let action = if this.updater.when_idle {
+                menu::item("update-cancel", "Cancel restart", "waiting for agents", false, |this, cx| this.cancel_restart(cx), cx)
+            } else if busy > 0 {
+                menu::item("update-idle", "Restart when idle", working(busy), false, |this, cx| this.restart_to_update(cx), cx)
+            } else {
+                menu::item("update-now", "Restart to update", "", false, |this, cx| this.restart_to_update(cx), cx)
+            };
+            items.extend([menu::header(format!("Dirigent {} is ready", ready.version)), action]);
+        } else if let Some(download) = &this.updater.downloading {
+            items.push(menu::header(format!("Downloading Dirigent {}", download.version)));
             if let Some(t) = &download.transfer {
                 let total = t.total.map(|total| format!("/{}", total >> 20)).unwrap_or_default();
-                rows.push(menu::header(format!("{}{total} MiB, {:.1} MiB/s", t.received >> 20, t.per_second / f64::from(1 << 20))));
+                items.push(menu::header(format!("{}{total} MiB, {:.1} MiB/s", t.received >> 20, t.per_second / f64::from(1 << 20))));
             }
-            menu::popup(Side::Above, rows, cx)
-        });
-        let button = theme::tinted_icon_button("update", "circle-arrow-down", theme::t().accent_ink, cx, |this, cx| {
-            this.toggle_menu(Menu::Update, cx)
-        });
-        return Some(button.children(menu).into_any_element());
-    };
-    let armed = this.updater.when_idle;
-    let menu = (this.menu == Some(Menu::Update)).then(|| {
-        let busy = this.local_busy();
-        let action = if armed {
-            menu::item("update-cancel", "Cancel restart", "waiting for agents", false, |this, cx| this.cancel_restart(cx), cx)
-        } else if busy > 0 {
-            let detail = if busy == 1 { "1 agent working".to_owned() } else { format!("{busy} agents working") };
-            menu::item("update-idle", "Restart when idle", detail, false, |this, cx| this.restart_to_update(cx), cx)
-        } else {
-            menu::item("update-now", "Restart to update", "", false, |this, cx| this.restart_to_update(cx), cx)
-        };
-        menu::popup(Side::Above, vec![menu::header(format!("Dirigent {} is ready", ready.version)), action], cx)
+        }
+        let hosts: Vec<AnyElement> =
+            offers().map(|(host, offer)| host_update(&host.name, offer, host.threads_a_restart_would_cut_off(), cx)).collect();
+        if !items.is_empty() && !hosts.is_empty() {
+            items.push(menu::separator());
+        }
+        items.extend(hosts);
+        menu::popup(Side::Above, items, cx)
     });
     let icon = if armed { "hourglass" } else { "circle-arrow-down" };
     let button = theme::tinted_icon_button("update", icon, theme::t().accent_ink, cx, |this, cx| this.toggle_menu(Menu::Update, cx));
     Some(button.children(menu).into_any_element())
+}
+
+fn working(busy: usize) -> String {
+    if busy == 1 { "1 agent working".to_owned() } else { format!("{busy} agents working") }
+}
+
+fn host_update(host: &str, offer: &Offer, busy: usize, cx: &mut Context<Dirigent>) -> AnyElement {
+    let id = format!("update-host-{host}");
+    let name = host.to_owned();
+    match offer.stage {
+        Stage::Installing { .. } => menu::disabled(id, format!("Updating {host} to {}…", offer.version)),
+        Stage::WhenIdle { .. } => {
+            let cancel = move |this: &mut Dirigent, cx: &mut Context<Dirigent>| this.cancel_host_update(&name, cx);
+            menu::item(id, format!("Cancel updating {host}"), "waiting for agents", false, cancel, cx)
+        }
+        Stage::Offered => {
+            let (label, detail) = match busy {
+                0 => (format!("Update {host}"), format!("to {}", offer.version)),
+                _ => (format!("Update {host} when idle"), working(busy)),
+            };
+            menu::item(id, label, detail, false, move |this, cx| this.update_host(&name, cx), cx)
+        }
+    }
 }
 
 fn proxy_update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {

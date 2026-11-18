@@ -730,7 +730,7 @@ impl Dirigent {
         });
     }
 
-    fn host_mut(&mut self, name: &str) -> Option<&mut HostState> {
+    pub(crate) fn host_mut(&mut self, name: &str) -> Option<&mut HostState> {
         self.hosts.iter_mut().find(|h| h.name == name)
     }
 
@@ -969,10 +969,12 @@ impl Dirigent {
                     if let Some(h) = self.host_mut(&host) {
                         h.outbox.disconnected();
                         h.proxy_update = None;
+                        h.update.disconnected();
                         for t in &mut h.threads {
                             t.running_since = None;
                         }
                     }
+                    self.close_spent_update_menu();
                     if self.open().is_some_and(|t| t.host == host) {
                         self.settle_open();
                         self.unrewind(cx);
@@ -1012,6 +1014,7 @@ impl Dirigent {
                 }
                 if status == HostStatus::Connected {
                     self.request(&host, proxy::list_without_samples);
+                    self.check_host_update(&host);
                     let (snoozes, pins, seen) = {
                         let cache = self.cache.lock().unwrap();
                         (
@@ -1052,7 +1055,8 @@ impl Dirigent {
                 self.prompts.remove(&reply_to);
                 let _ = self.change_answered(&host, reply_to)
                     || self.on_login_reply(&host, reply_to, Ok(()), cx)
-                    || self.on_mcp_reply(&host, reply_to, Ok(()), cx);
+                    || self.on_mcp_reply(&host, reply_to, Ok(()), cx)
+                    || self.on_host_update_reply(&host, reply_to, Ok(()), cx);
             }
             ServerMessage::McpServers { reply_to, servers, path } => self.on_mcp_servers(&host, reply_to, servers, path, cx),
             ServerMessage::McpStatus { reply_to, status } => self.on_mcp_status(&host, reply_to, status),
@@ -1223,6 +1227,7 @@ impl Dirigent {
                 self.vcs.insert((host, path), VcsInfo { vcs, dirty, branch, refs });
             }
             ServerMessage::Focus { thread_id } => self.show_thread(&host, &thread_id, cx),
+            ServerMessage::Update { version, .. } => self.on_host_update(&host, version),
             ServerMessage::Search { .. } | ServerMessage::Hosts { .. } => {}
             ServerMessage::ThreadCreated { reply_to, thread } => {
                 let pending = self.take_pending(&host, reply_to);
@@ -1270,7 +1275,8 @@ impl Dirigent {
                 if let Some(id) = reply_to
                     && (self.on_login_reply(&host, id, Err(message.clone()), cx)
                         || self.on_proxy_settings(id, Err(message.clone()), cx)
-                        || self.on_mcp_reply(&host, id, Err(message.clone()), cx))
+                        || self.on_mcp_reply(&host, id, Err(message.clone()), cx)
+                        || self.on_host_update_reply(&host, id, Err(message.clone()), cx))
                 {
                     return;
                 }
@@ -1682,6 +1688,9 @@ impl Dirigent {
                     }
                     if this.ticks % PROXY_UPDATE_CHECK_SECS == 0 {
                         this.check_proxy_updates();
+                    }
+                    if this.ticks % update::HOST_CHECK_SECS == 0 {
+                        this.check_host_updates();
                     }
                     if this.watch.changed() {
                         this.reload_config(cx);
@@ -2610,6 +2619,7 @@ impl Dirigent {
                 let _ = self.cache.lock().unwrap().remove_host(&name);
             }
         }
+        self.close_spent_update_menu();
         for (name, host) in wanted {
             if self.host(&name).is_none() {
                 self.hosts.push(host_state(&self.cache.lock().unwrap(), &name, &host));
@@ -4085,6 +4095,7 @@ fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
         service_id: None,
         outbox: Outbox::new(cache.outbox(name)),
         proxy_update: None,
+        update: Default::default(),
     };
     state.outbox.apply(&mut state.projects, &mut state.threads);
     state

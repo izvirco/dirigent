@@ -384,6 +384,19 @@ pub enum ClientMessage {
         #[serde(default)]
         management_key: String,
     },
+    /// The newer release this host's service can update itself to: replies `Update`. Only a
+    /// service that runs on its own (`dirigent_service`, from a release's install) has one. A
+    /// desktop updates the service it embeds by updating itself, and a nix package is nix's.
+    CheckUpdate {
+        id: u64,
+    },
+    /// Install the release `CheckUpdate` told of and restart as it. The reply (`Ok`) says the
+    /// service restarts now, as that release (on Windows its setup installs it once the
+    /// service is gone): every connection drops, and the threads that run are cut off, so a
+    /// client asks when the host is idle. An `Error` says why nothing changed.
+    InstallUpdate {
+        id: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -536,6 +549,12 @@ pub enum ServerMessage {
     Hosts {
         reply_to: u64,
         hosts: Vec<HostInfo>,
+    },
+    /// Reply to `CheckUpdate`: the version `InstallUpdate` would install. `None`: the service
+    /// runs its channel's latest release, or isn't one that updates itself.
+    Update {
+        reply_to: u64,
+        version: Option<String>,
     },
 }
 
@@ -1136,6 +1155,8 @@ mod tests {
         roundtrip(ClientMessage::ListUsage { id: 11, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         roundtrip(ClientMessage::ListProxy { id: 31, since: 0, until: 86_400_000, bucket_ms: 3_600_000 });
         roundtrip(ClientMessage::SetProxy { id: 32, url: "http://127.0.0.1:8317".into(), key: "k".into(), management_key: "m".into() });
+        roundtrip(ClientMessage::CheckUpdate { id: 37 });
+        roundtrip(ClientMessage::InstallUpdate { id: 38 });
         assert_eq!(
             serde_json::to_value(ClientMessage::Prompt {
                 id: 4,
@@ -1289,6 +1310,7 @@ mod tests {
             duration_ms: 9,
         });
         roundtrip(ServerMessage::Ok { reply_to: 3 });
+        roundtrip(ServerMessage::Update { reply_to: 9, version: Some("0.0.11".into()) });
         roundtrip(ServerMessage::Error { reply_to: Some(4), message: "boom".into() });
         roundtrip(ServerMessage::Entry { thread_id: "t".into(), entry: e });
         roundtrip(ServerMessage::Event { thread_id: "t".into(), event: Event::RunStart });

@@ -123,6 +123,18 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   tarball of `dirigent/` with the debug binary as `dirigent` and `packaging/linux/install.sh`, signed with your
   own key (`DIRIGENT_UPDATE_KEY=<public key>`). It installs into `<session>/prefix`
   (`<session>/data/logs/install.log`). "Restart when idle" needs an agent working.
+- **A host that can update itself** (the update menu's `Update <host>`): a `dirigent_service` of your own that
+  runs from an install. The install is a directory `dirigent/` with the debug `dirigent_service` and
+  `packaging/linux/install.sh`, installed with
+  `HOME=<temp dir> XDG_CONFIG_HOME=<temp dir>/.config dirigent/install.sh --headless`, with stand-ins
+  for `systemctl` and `loginctl` first on `PATH` (scripts that exit 0). Never without them, nor with your own
+  `HOME`: the real ones would hand Seb's user manager a unit that starts a service on Seb's data. Start
+  `<temp dir>/.local/bin/dirigent_service` as a remote host (above), with `DIRIGENT_UPDATE_URL` and
+  `DIRIGENT_UPDATE_KEY` as for the update button. The newer release is a tarball of such a directory whose
+  service was built with `DIRIGENT_BUILD_VERSION=<a newer version>` (and a `CARGO_TARGET_DIR` of its own). Any
+  http server does for the api: `<url>/linux-x86_64` answers `{"version": "…", "url": "<the tarball's>"}`, and
+  the tarball's `.minisig` is beside it (`minisign -S -t "dirigent <version> linux-x86_64"`, `nixpkgs#minisign`).
+  The click's "when idle" needs an agent working on that host.
 - **An outdated proxy** (the sidebar's warning, its line in Settings › Proxy): a stand-in CLIProxyAPI, as a test
   instance has no management key. An http server that answers `/v1/models` with
   `{"data": [{"id": "claude-haiku-5-5", "owned_by": "anthropic"}]}`, `/v8/management/credentials` with

@@ -15,6 +15,7 @@ mod server;
 mod storage;
 mod title;
 pub mod tunnel;
+pub mod update;
 mod vcs;
 
 use anyhow::{Result, anyhow};
@@ -184,7 +185,9 @@ impl Service {
             | ClientMessage::GetScreen { id, .. }
             | ClientMessage::ListUsage { id, .. }
             | ClientMessage::ListProxy { id, .. }
-            | ClientMessage::SetProxy { id, .. } => *id,
+            | ClientMessage::SetProxy { id, .. }
+            | ClientMessage::CheckUpdate { id }
+            | ClientMessage::InstallUpdate { id } => *id,
         };
         match self.try_handle(req, conn).await {
             Ok(reply) => reply,
@@ -451,6 +454,17 @@ impl Service {
             ClientMessage::SetProxy { id, url, key, management_key } => {
                 self.set_proxy(&url, &key, &management_key).await?;
                 ServerMessage::Proxy { reply_to: id, proxy: self.proxy(vec![], true).await }
+            }
+            ClientMessage::CheckUpdate { id } => {
+                ServerMessage::Update { reply_to: id, version: tokio::task::spawn_blocking(update::available).await?? }
+            }
+            ClientMessage::InstallUpdate { id } => {
+                tokio::task::spawn_blocking(update::install).await??;
+                tokio::spawn(async {
+                    tokio::time::sleep(update::REPLY_FLUSH_GRACE_BEFORE_RESTART).await;
+                    tokio::task::spawn_blocking(|| update::restart());
+                });
+                ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::Abort { id, thread_id } => {
                 info!(thread = %thread_id, "abort");

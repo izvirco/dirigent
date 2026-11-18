@@ -14,6 +14,7 @@ pub struct HostState {
     pub service_id: Option<String>,
     pub outbox: Outbox,
     pub proxy_update: Option<ProxyUpdate>,
+    pub update: crate::update::HostUpdate,
 }
 
 pub const ORPHANS: &str = "orphans";
@@ -246,6 +247,7 @@ mod tests {
             service_id: None,
             outbox: Outbox::default(),
             proxy_update: None,
+            update: Default::default(),
         }
     }
 

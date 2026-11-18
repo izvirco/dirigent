@@ -55,6 +55,7 @@ Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 ; Older installs get this ticked on their next update: Inno restores each task's previous state, and a
 ; task it hasn't seen before keeps its default.
 Name: addtopath; Description: "Add the {#Cli} command to PATH"
+Name: service; Description: "Run the {#Name} service when I sign in, so that other machines can use this PC as a host"; Flags: unchecked
 
 [InstallDelete]
 Type: filesandordirs; Name: "{app}\runtime"
@@ -63,6 +64,7 @@ Type: files; Name: "{app}\Dirigent.exe"
 [Files]
 Source: "{#Dist}\dirigent_desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; DestName: "{#Cli}.exe"; Flags: ignoreversion
+Source: "{#Dist}\dirigent_service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\cua-driver.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
 
@@ -81,12 +83,22 @@ Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; Val
 Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#Name} Service"; ValueData: """{app}\dirigent_service.exe"""; Flags: uninsdeletevalue; Tasks: service
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "{#Name} Service"; Flags: deletevalue; Tasks: not service
+
 [Run]
+; MUST KILL: rearchitecture: StartsService's line must stay above the desktop's -> a desktop that yields to a service started after it
+Filename: "{app}\dirigent_service.exe"; Flags: nowait; Check: StartsService
 Filename: "{app}\dirigent_desktop.exe"; Description: "Start {#Name}"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\dirigent_desktop.exe"; Flags: nowait; Check: IsUpdate
+Filename: "{app}\dirigent_desktop.exe"; Flags: nowait; Check: RestartsDesktop
+
+[UninstallRun]
+; A service still running would keep its exe from being removed.
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Get-Process dirigent_service -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{app}\dirigent_service.exe' } | Stop-Process -Force"""; Flags: runhidden; RunOnceId: "StopService"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\{#Data}\updates"
+Type: filesandordirs; Name: "{localappdata}\{#Data}\updates-service"
 
 [Code]
 const
@@ -99,15 +111,25 @@ function WaitForSingleObject(Handle: Cardinal; Milliseconds: Cardinal): Cardinal
 function CloseHandle(Handle: Cardinal): Boolean;
   external 'CloseHandle@kernel32.dll stdcall';
 
-{ The bare /UPDATE switch. Not a param constant: those only read /NAME=value. }
-function IsUpdate(): Boolean;
+{ A bare switch. Not a param constant: those only read /NAME=value. }
+function HasSwitch(Name: String): Boolean;
 var
   I: Integer;
 begin
   Result := False;
   for I := 1 to ParamCount do
-    if CompareText(ParamStr(I), '/UPDATE') = 0 then
+    if CompareText(ParamStr(I), Name) = 0 then
       Result := True;
+end;
+
+function RestartsDesktop(): Boolean;
+begin
+  Result := HasSwitch('/UPDATE');
+end;
+
+function StartsService(): Boolean;
+begin
+  Result := WizardIsTaskSelected('service') or HasSwitch('/SERVICE');
 end;
 
 { MUST KILL: extract: an IsWslBash check for the system-dir prefix test, apart from the Git lookup }
