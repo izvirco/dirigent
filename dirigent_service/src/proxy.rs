@@ -1,11 +1,8 @@
 use crate::Service;
 use crate::now;
-use anyhow::Context;
-use dirigent_agent::config::Config;
+use dirigent_agent::config;
 use dirigent_protocol::{Proxy, ProxyAccount, ProxyLimit, ProxySample};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
 use tracing::{info, warn};
@@ -19,41 +16,19 @@ const ANTHROPIC: &str = "anthropic-ratelimit-unified-";
 /// Codex's: `<prefix><slot>-used-percent` and so on, for the slots `primary` and `secondary`.
 const CODEX: &str = "x-codex-";
 
-fn path() -> PathBuf {
-    crate::data_dir().join("proxy.json")
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-struct File {
-    url: String,
-    key: String,
-}
-
-impl File {
-    fn read(path: &Path) -> Option<File> {
-        let text = std::fs::read_to_string(path).ok()?;
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        serde_json::from_str(&text).inspect_err(|e| WARNED.call_once(|| warn!("{}: {e} (no proxy until fixed)", path.display()))).ok()
+fn set(proxy: &mut config::Proxy, url: &str, key: &str, management_key: &str) -> anyhow::Result<()> {
+    let url = url.trim().trim_end_matches('/');
+    if url.is_empty() {
+        *proxy = config::Proxy::default();
+        return Ok(());
     }
-
-    fn save(path: &Path, url: &str, key: &str) -> anyhow::Result<()> {
-        let url = url.trim().trim_end_matches('/');
-        if url.is_empty() {
-            match std::fs::remove_file(path) {
-                Ok(()) => info!("proxy: management key removed"),
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("remove {}", path.display())),
-                Err(_) => {}
-            }
-            return Ok(());
-        }
-        anyhow::ensure!(url.starts_with("http://") || url.starts_with("https://"), "The address starts with http:// or https://");
-        let held = File::read(path).filter(|held| held.url == url).map(|held| held.key);
-        let key = Some(key.trim().to_owned()).filter(|k| !k.is_empty()).or(held);
-        let file = File { url: url.to_owned(), key: key.context("The proxy's management key is needed")? };
-        crate::hosts::write_private(path, &serde_json::to_string_pretty(&file)?).with_context(|| format!("write {}", path.display()))?;
-        info!(url, "proxy: management key set");
-        Ok(())
-    }
+    anyhow::ensure!(url.starts_with("http://") || url.starts_with("https://"), "The address starts with http:// or https://");
+    let held = if proxy.url == url { proxy.clone() } else { config::Proxy::default() };
+    let or_held = |typed: &str, held: String| if typed.trim().is_empty() { held } else { typed.trim().to_owned() };
+    let api_key = or_held(key, held.api_key);
+    anyhow::ensure!(!api_key.is_empty(), "The proxy's API key is needed");
+    *proxy = config::Proxy { url: url.to_owned(), api_key, management_key: or_held(management_key, held.management_key) };
+    Ok(())
 }
 
 #[derive(Default)]
@@ -84,7 +59,10 @@ impl Service {
                 return;
             }
         }
-        let Some(File { url, key }) = File::read(&path()) else { return };
+        let Ok(config::Proxy { url, management_key: key, .. }) = config::Proxy::load(&self.agent.dirs) else { return };
+        if key.is_empty() {
+            return;
+        }
         let result = tokio::task::spawn_blocking(move || fetch(&url, &key))
             .await
             .unwrap_or_else(|e| Err(Failure { message: format!("{e}"), refused: false }));
@@ -116,32 +94,19 @@ impl Service {
     }
 
     pub(crate) async fn set_proxy(&self, url: &str, key: &str, management_key: &str) -> anyhow::Result<()> {
-        let url = url.trim().trim_end_matches('/');
-        anyhow::ensure!(
-            url.is_empty() || url.starts_with("http://") || url.starts_with("https://"),
-            "The address starts with http:// or https://"
-        );
-        Config::update(&self.agent.dirs, |config| {
-            let held = (config.proxy.url == url).then(|| std::mem::take(&mut config.proxy.key));
-            let key = Some(key.trim().to_owned()).filter(|k| !k.is_empty()).or(held).filter(|_| !url.is_empty());
-            anyhow::ensure!(url.is_empty() || key.is_some(), "The proxy's API key is needed");
-            config.proxy = dirigent_agent::config::Proxy { url: url.to_owned(), key: key.unwrap_or_default() };
-            Ok(())
-        })?;
-        info!(url, "proxy set");
-        let held = File::read(&path()).is_some_and(|held| held.url == url);
-        File::save(&path(), if management_key.trim().is_empty() && !held { "" } else { url }, management_key)?;
+        config::Proxy::update(&self.agent.dirs, |proxy| set(proxy, url, key, management_key))?;
+        info!(url = url.trim(), "proxy set");
         *self.proxy.state.lock().unwrap() = State::default();
         self.poll_proxy(0).await;
         Ok(())
     }
 
     pub(crate) async fn proxy(&self, samples: Vec<ProxySample>, ask: bool) -> Proxy {
-        let config = match Config::load(&self.agent.dirs) {
-            Ok(config) => config.proxy,
+        let held = match config::Proxy::load(&self.agent.dirs) {
+            Ok(held) => held,
             Err(e) => return Proxy { models_error: Some(format!("{e:#}")), ..Proxy::default() },
         };
-        let served = match (config.url.is_empty(), ask) {
+        let served = match (held.url.is_empty(), ask) {
             (true, _) => Ok(vec![]),
             (false, true) => self.models.refresh().await,
             (false, false) => self.models.models().await,
@@ -150,12 +115,11 @@ impl Service {
             Ok(models) => (models.len() as u32, None),
             Err(e) => (0, Some(format!("{e:#}"))),
         };
-        let management_key = File::read(&path()).is_some_and(|file| file.url == config.url);
         let state = self.proxy.state.lock().unwrap();
         Proxy {
-            url: config.url,
-            key: !config.key.is_empty(),
-            management_key,
+            url: held.url,
+            key: !held.api_key.is_empty(),
+            management_key: !held.management_key.is_empty(),
             models,
             models_error,
             error: state.error.clone(),
@@ -279,28 +243,28 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn the_key_is_kept_private_and_for_its_address() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("proxy.json");
-        let file = |url: &str, key: &str| Some(File { url: url.into(), key: key.into() });
-        assert_eq!(File::read(&path), None);
-        assert!(File::save(&path, "http://p:1", "").is_err());
-        assert!(File::save(&path, "p:1", "k").is_err());
-        File::save(&path, " http://p:1/ ", " k1 ").unwrap();
-        assert_eq!(File::read(&path), file("http://p:1", "k1"));
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
-        }
-        File::save(&path, "http://p:1", "").unwrap();
-        assert!(File::save(&path, "http://q:1", "").is_err());
-        assert_eq!(File::read(&path), file("http://p:1", "k1"));
-        File::save(&path, "http://q:1", "k2").unwrap();
-        assert_eq!(File::read(&path), file("http://q:1", "k2"));
-        File::save(&path, "", "").unwrap();
-        File::save(&path, "", "").unwrap();
-        assert!(!path.exists());
+    fn a_key_left_empty_is_the_one_held_for_the_address() {
+        let proxy = |url: &str, api_key: &str, management_key: &str| config::Proxy {
+            url: url.into(),
+            api_key: api_key.into(),
+            management_key: management_key.into(),
+        };
+        let mut held = config::Proxy::default();
+        assert!(set(&mut held, "http://p:1", "", "m").is_err());
+        assert!(set(&mut held, "p:1", "k", "").is_err());
+        assert_eq!(held, config::Proxy::default());
+        set(&mut held, " http://p:1/ ", " k1 ", "").unwrap();
+        assert_eq!(held, proxy("http://p:1", "k1", ""));
+        set(&mut held, "http://p:1", "", " m1 ").unwrap();
+        assert_eq!(held, proxy("http://p:1", "k1", "m1"));
+        set(&mut held, "http://p:1", "k2", "").unwrap();
+        assert_eq!(held, proxy("http://p:1", "k2", "m1"));
+        assert!(set(&mut held, "http://q:1", "", "m2").is_err());
+        assert_eq!(held, proxy("http://p:1", "k2", "m1"));
+        set(&mut held, "http://q:1", "k3", "").unwrap();
+        assert_eq!(held, proxy("http://q:1", "k3", ""));
+        set(&mut held, "", "k", "m").unwrap();
+        assert_eq!(held, config::Proxy::default());
     }
 
     #[test]

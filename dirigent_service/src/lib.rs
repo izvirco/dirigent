@@ -352,7 +352,7 @@ impl Service {
                 ServerMessage::Ok { reply_to: id }
             }
             ClientMessage::ListModels { id } => {
-                let set_up = !dirigent_agent::config::Config::load(&self.agent.dirs)?.proxy.url.is_empty();
+                let set_up = !dirigent_agent::config::Proxy::load(&self.agent.dirs)?.url.is_empty();
                 let models = if set_up { self.models.models().await? } else { vec![] };
                 let info = |m: dirigent_agent::proxy::Model| ModelInfo {
                     id: m.id,
@@ -925,7 +925,7 @@ struct Dirs {
 
 static DIRS: std::sync::OnceLock<Dirs> = std::sync::OnceLock::new();
 
-pub const USAGE: &str = "options: --data-dir DIR (dbs, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent, \
+pub const USAGE: &str = "options: --data-dir DIR (dbs, proxy.json, workspaces, jobs, logs; default $XDG_DATA_HOME/dirigent, \
                          %LOCALAPPDATA%\\dirigent on Windows) --config-dir DIR (agent.toml, AGENTS.md, skills, hosts.toml, config.toml, themes; \
                          default $XDG_CONFIG_HOME/dirigent, %APPDATA%\\dirigent on Windows); a nightly build's \
                          are dirigent-nightly";

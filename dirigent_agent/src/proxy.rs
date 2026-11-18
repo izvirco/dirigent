@@ -15,7 +15,7 @@ mod sse;
 
 pub use failure::Error;
 
-use crate::config::{Config, Dirs};
+use crate::config::{self, Dirs};
 use crate::tool::ToolSpec;
 use dirigent_protocol::transcript::{Api, Assistant, Block, Stop, Usage};
 use serde::{Deserialize, Serialize};
@@ -181,7 +181,7 @@ struct Connection {
 const STALL: Duration = Duration::from_secs(300);
 
 impl Proxy {
-    /// The client of the proxy `agent.toml` (in `dirs.config`) names. The file is read for
+    /// The client of the proxy `proxy.json` (in `dirs.data`) names. The file is read for
     /// every request, so a changed address or key applies to the next one.
     pub fn new(dirs: Dirs) -> Self {
         Self::with_stall(dirs, STALL)
@@ -259,8 +259,8 @@ impl Proxy {
     }
 
     fn connection(&self) -> Result<Connection, Error> {
-        let proxy = Config::load(&self.inner.dirs).map_err(|e| Error::other(format!("{e:#}")))?.proxy;
-        let (url, key) = (address(&proxy.url), proxy.key.trim());
+        let proxy = config::Proxy::load(&self.inner.dirs).map_err(|e| Error::other(format!("{e:#}")))?;
+        let (url, key) = (address(&proxy.url), proxy.api_key.trim());
         if url.is_empty() || key.is_empty() {
             return Err(Error::not_set_up());
         }
@@ -437,8 +437,8 @@ mod tests {
     }
 
     pub(super) fn point_at(dirs: &Dirs, url: &str, key: &str) {
-        Config::update(dirs, |config| {
-            config.proxy = crate::config::Proxy { url: url.into(), key: key.into() };
+        config::Proxy::update(dirs, |proxy| {
+            *proxy = config::Proxy { url: url.into(), api_key: key.into(), management_key: String::new() };
             Ok(())
         })
         .unwrap();

@@ -8,10 +8,10 @@ const HAIKU: &str = "claude-haiku-5-5";
 fn proxy() -> (tempfile::TempDir, Proxy) {
     let from_env = std::env::var("DIRIGENT_PROXY_URL").ok().zip(std::env::var("DIRIGENT_PROXY_KEY").ok());
     let (url, key) = from_env.unwrap_or_else(|| {
-        let real = Dirs { config: format!("{}/.config/dirigent", std::env::var("HOME").unwrap()).into(), data: std::env::temp_dir() };
-        let proxy = Config::load(&real).unwrap().proxy;
-        assert!(!proxy.url.is_empty(), "no proxy: set DIRIGENT_PROXY_URL and DIRIGENT_PROXY_KEY");
-        (proxy.url, proxy.key)
+        let real = Dirs { config: std::env::temp_dir(), data: format!("{}/.local/share/dirigent", std::env::var("HOME").unwrap()).into() };
+        let proxy = config::Proxy::load(&real).unwrap();
+        assert!(!proxy.api_key.is_empty(), "no proxy: set DIRIGENT_PROXY_URL and DIRIGENT_PROXY_KEY");
+        (proxy.url, proxy.api_key)
     });
     proxy_at(&url, &key)
 }
@@ -216,7 +216,7 @@ async fn failures_are_told_apart() {
         (reply.failure.unwrap(), reply.message.error.unwrap())
     };
 
-    let url = Config::load(&proxy.inner.dirs).unwrap().proxy.url;
+    let url = config::Proxy::load(&proxy.inner.dirs).unwrap().url;
     let (_tmp, stranger) = proxy_at(&url, "not-a-key");
     let (kind, message) = failure(&stranger, &haiku, "hi").await;
     assert_eq!(kind, Failure::Unauthorized, "{message}");
