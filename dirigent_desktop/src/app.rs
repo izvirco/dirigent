@@ -53,6 +53,7 @@ const PANEL_HIDDEN_KEY: &str = "panel_hidden";
 const LOG_MIN: f32 = 280.;
 const COPIED_TTL: Duration = Duration::from_millis(1200);
 const USAGE_REFRESH_SECS: u64 = 30;
+const PROXY_UPDATE_CHECK_SECS: u64 = 60 * 60;
 const TITLING_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, PartialEq)]
@@ -977,6 +978,7 @@ impl Dirigent {
                     self.leaderboard.drop_uploads(&host);
                     if let Some(h) = self.host_mut(&host) {
                         h.outbox.disconnected();
+                        h.proxy_update = None;
                         for t in &mut h.threads {
                             t.running_since = None;
                         }
@@ -1019,6 +1021,7 @@ impl Dirigent {
                     self.refresh_draft_vcs();
                 }
                 if status == HostStatus::Connected {
+                    self.request(&host, proxy::list_without_samples);
                     let (snoozes, pins, seen) = {
                         let cache = self.cache.lock().unwrap();
                         (
@@ -1197,6 +1200,9 @@ impl Dirigent {
                 }
             }
             ServerMessage::Proxy { reply_to, proxy } => {
+                if let Some(h) = self.host_mut(&host) {
+                    h.proxy_update = proxy.update.clone();
+                }
                 if self.usage.proxy_request == Some(reply_to) {
                     self.usage.proxies.insert(host, proxy);
                 } else {
@@ -1679,6 +1685,9 @@ impl Dirigent {
                     }
                     if this.ticks % leaderboard::UPLOAD_EVERY == 0 {
                         this.upload_all();
+                    }
+                    if this.ticks % PROXY_UPDATE_CHECK_SECS == 0 {
+                        this.check_proxy_updates();
                     }
                     if this.watch.changed() {
                         this.reload_config(cx);
@@ -2815,6 +2824,13 @@ impl Dirigent {
             self.net.send(&h.name, ClientMessage::ListProxy { id, since, until, bucket_ms });
         }
         cx.notify();
+    }
+
+    fn check_proxy_updates(&mut self) {
+        let id = self.next_id();
+        for h in &self.hosts {
+            self.net.send(&h.name, proxy::list_without_samples(id));
+        }
     }
 
     pub fn set_usage_limit(&mut self, limit: String, cx: &mut Context<Self>) {
@@ -3987,6 +4003,7 @@ fn host_state(cache: &Cache, name: &str, host: &hosts::Host) -> HostState {
         models: cache.models(name),
         service_id: None,
         outbox: Outbox::new(cache.outbox(name)),
+        proxy_update: None,
     };
     state.outbox.apply(&mut state.projects, &mut state.threads);
     state

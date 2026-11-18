@@ -741,6 +741,19 @@ pub struct Proxy {
     /// The limits' history for the window asked for, oldest slot first.
     #[serde(default)]
     pub samples: Vec<ProxySample>,
+    /// The proxy is outdated: releases behind the latest one, enough of them to say so. The
+    /// host knows with the management key only, and as of the last time it asked the proxy
+    /// for the latest release, a few times a day.
+    #[serde(default)]
+    pub update: Option<ProxyUpdate>,
+}
+
+/// The CLIProxyAPI release a proxy is outdated by.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProxyUpdate {
+    /// The release the proxy runs (`8.0.75`).
+    pub running: String,
+    pub latest: String,
 }
 
 /// An account (a credential) behind a CLIProxyAPI.
@@ -1331,6 +1344,7 @@ mod tests {
                     ..ProxyAccount::default()
                 }],
                 samples: vec![ProxySample { start: 0, account: "a.json".into(), limit: "7d_oi".into(), used: 0.42 }],
+                update: Some(ProxyUpdate { running: "8.0.75".into(), latest: "8.0.85".into() }),
             },
         });
         assert_eq!(serde_json::from_value::<Proxy>(json!({"url": ""})).unwrap(), Proxy::default());

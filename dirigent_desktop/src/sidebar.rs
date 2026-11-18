@@ -4,6 +4,7 @@ use crate::hosts;
 use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
+use crate::proxy;
 use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
 use crate::titlebar;
@@ -221,6 +222,7 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
             div()
                 .flex()
                 .flex_row()
+                .children(proxy_update_button(this, cx))
                 .children(update_button(this, cx))
                 .child(theme::icon_button("usage", "chart-no-axes-combined", cx, |this, cx| this.open_usage(cx)))
                 .child(theme::icon_button("settings", "settings", cx, |this, cx| this.open_settings(cx))),
@@ -259,6 +261,15 @@ fn update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyEleme
     let icon = if armed { "hourglass" } else { "circle-arrow-down" };
     let button = theme::tinted_icon_button("update", icon, theme::t().accent_ink, cx, |this, cx| this.toggle_menu(Menu::Update, cx));
     Some(button.children(menu).into_any_element())
+}
+
+fn proxy_update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
+    let (host, update) = this.hosts.iter().find_map(|h| Some((h.name.clone(), h.proxy_update.as_ref()?)))?;
+    let tip = proxy::outdated(update, (this.hosts.len() > 1).then_some(host.as_str()));
+    let button = theme::tinted_icon_button("proxy-update", "triangle-alert", theme::t().warn, cx, move |this, cx| {
+        this.open_proxy_settings(Some(host.clone()), cx)
+    });
+    Some(button.tooltip(theme::tooltip(tip)).into_any_element())
 }
 
 // MUST KILL: rearchitect: row leaves its right padding to the trailing box → a row that takes its trailing control

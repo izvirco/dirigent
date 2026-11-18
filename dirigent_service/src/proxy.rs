@@ -1,7 +1,7 @@
 use crate::Service;
 use crate::now;
 use dirigent_agent::config;
-use dirigent_protocol::{Proxy, ProxyAccount, ProxyLimit, ProxySample};
+use dirigent_protocol::{Proxy, ProxyAccount, ProxyLimit, ProxySample, ProxyUpdate};
 use serde_json::Value;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -10,6 +10,10 @@ use tracing::{info, warn};
 pub const SAMPLE_MS: i64 = 5 * 60_000;
 const KEEP_MS: i64 = 35 * 24 * 60 * 60_000;
 pub const FRESH_MS: i64 = 10_000;
+/// The proxy asks GitHub every time it is asked for its latest release.
+const LATEST_MS: i64 = 6 * 60 * 60_000;
+/// CLIProxyAPI publishes more than one patch release a day.
+const OUTDATED_BY_PATCHES: u64 = 10;
 const TIMEOUT: Duration = Duration::from_secs(10);
 /// Anthropic's rate-limit headers: `<prefix><limit>-utilization` and `<prefix><limit>-reset`.
 const ANTHROPIC: &str = "anthropic-ratelimit-unified-";
@@ -43,6 +47,15 @@ struct State {
     error: Option<String>,
     asked_at: i64,
     refused: bool,
+    running: Option<String>,
+    latest: Option<String>,
+    latest_asked_at: i64,
+}
+
+struct Seen {
+    accounts: Vec<ProxyAccount>,
+    running: Option<String>,
+    latest: Option<String>,
 }
 
 struct Failure {
@@ -50,47 +63,70 @@ struct Failure {
     refused: bool,
 }
 
+impl State {
+    fn latest_is_due(&self, now: i64) -> bool {
+        now - self.latest_asked_at >= LATEST_MS
+    }
+
+    fn record(&mut self, result: Result<Seen, Failure>, asked_latest: bool, at: i64) {
+        self.asked_at = at;
+        match result {
+            Ok(seen) => {
+                if self.error.take().is_some() {
+                    info!("proxy: answering again");
+                }
+                self.accounts = seen.accounts;
+                self.running = seen.running;
+                if asked_latest {
+                    self.latest_asked_at = at;
+                    info!(running = self.running.as_deref(), latest = seen.latest.as_deref(), "proxy: asked for the latest release");
+                }
+                self.latest = seen.latest.or(self.latest.take());
+            }
+            Err(f) => {
+                if self.error.as_deref() != Some(&f.message) {
+                    warn!("proxy: {}", f.message);
+                }
+                self.refused = f.refused;
+                self.error = Some(f.message);
+            }
+        }
+    }
+
+    fn update(&self) -> Option<ProxyUpdate> {
+        if self.error.is_some() {
+            return None;
+        }
+        outdated(self.running.as_deref()?, self.latest.as_deref()?)
+    }
+}
+
 impl Service {
     pub(crate) async fn poll_proxy(&self, max_age: i64) {
         let _busy = self.proxy.busy.lock().await;
-        {
+        let ask_latest = {
             let state = self.proxy.state.lock().unwrap();
             if state.refused || now() - state.asked_at < max_age {
                 return;
             }
-        }
+            state.latest_is_due(now())
+        };
         let Ok(config::Proxy { url, management_key: key, .. }) = config::Proxy::load(&self.agent.dirs) else { return };
         if key.is_empty() {
             return;
         }
-        let result = tokio::task::spawn_blocking(move || fetch(&url, &key))
+        let result = tokio::task::spawn_blocking(move || fetch(&url, &key, ask_latest))
             .await
             .unwrap_or_else(|e| Err(Failure { message: format!("{e}"), refused: false }));
         let at = now();
-        if let Ok(accounts) = &result {
+        if let Ok(seen) = &result {
             let samples: Vec<(&str, &str, f64)> =
-                accounts.iter().flat_map(|a| a.limits.iter().map(move |l| (a.id.as_str(), l.name.as_str(), l.used_at(at)))).collect();
+                seen.accounts.iter().flat_map(|a| a.limits.iter().map(move |l| (a.id.as_str(), l.name.as_str(), l.used_at(at)))).collect();
             if let Err(e) = self.storage.lock().unwrap().add_proxy_samples(at - at % SAMPLE_MS, &samples, at - KEEP_MS) {
                 warn!("proxy: keeping the limits: {e:#}");
             }
         }
-        let mut state = self.proxy.state.lock().unwrap();
-        state.asked_at = at;
-        match result {
-            Ok(accounts) => {
-                if state.error.take().is_some() {
-                    info!("proxy: answering again");
-                }
-                state.accounts = accounts;
-            }
-            Err(f) => {
-                if state.error.as_deref() != Some(&f.message) {
-                    warn!("proxy: {}", f.message);
-                }
-                state.refused = f.refused;
-                state.error = Some(f.message);
-            }
-        }
+        self.proxy.state.lock().unwrap().record(result, ask_latest, at);
     }
 
     pub(crate) async fn set_proxy(&self, url: &str, key: &str, management_key: &str) -> anyhow::Result<()> {
@@ -115,21 +151,33 @@ impl Service {
             Ok(models) => (models.len() as u32, None),
             Err(e) => (0, Some(format!("{e:#}"))),
         };
+        let management_key = !held.management_key.is_empty();
         let state = self.proxy.state.lock().unwrap();
         Proxy {
             url: held.url,
             key: !held.api_key.is_empty(),
-            management_key: !held.management_key.is_empty(),
+            management_key,
             models,
             models_error,
             error: state.error.clone(),
             accounts: state.accounts.clone(),
             samples,
+            update: state.update().filter(|_| management_key),
         }
     }
 }
 
-fn fetch(url: &str, key: &str) -> Result<Vec<ProxyAccount>, Failure> {
+/// CLIProxyAPI names the release it runs `8.0.75` (`v8.0.75` in its Docker image), and the
+/// latest one by its tag, `v8.0.77`.
+fn outdated(running: &str, latest: &str) -> Option<ProxyUpdate> {
+    let release = |version: &str| version.split('.').map(|n| n.parse::<u64>().ok()).collect::<Option<Vec<u64>>>();
+    let (running, latest) = (running.trim_start_matches('v'), latest.trim_start_matches('v'));
+    let mut tolerated = release(running)?;
+    *tolerated.last_mut()? += OUTDATED_BY_PATCHES - 1;
+    (release(latest)? > tolerated).then(|| ProxyUpdate { running: running.to_owned(), latest: latest.to_owned() })
+}
+
+fn fetch(url: &str, key: &str, ask_latest: bool) -> Result<Seen, Failure> {
     let fail = |message: String| Failure { message, refused: false };
     let agent = ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
@@ -139,16 +187,21 @@ fn fetch(url: &str, key: &str) -> Result<Vec<ProxyAccount>, Failure> {
             .http_status_as_error(false)
             .build(),
     );
-    let mut res = agent
-        .get(format!("{url}/v8/management/credentials"))
-        .header("Authorization", format!("Bearer {key}"))
-        .call()
-        .map_err(|e| fail(format!("Can't reach the proxy at {url}: {e}")))?;
+    let get = |route: &str| agent.get(format!("{url}/v8/management/{route}")).header("Authorization", format!("Bearer {key}")).call();
+    let mut res = get("credentials").map_err(|e| fail(format!("Can't reach the proxy at {url}: {e}")))?;
     let status = res.status().as_u16();
+    let running = res.headers().get("x-cpa-version").and_then(|v| v.to_str().ok()).map(str::to_owned);
     let body: Value = res.body_mut().read_to_string().ok().and_then(|b| serde_json::from_str(&b).ok()).unwrap_or_default();
     let said = body.get("error").and_then(Value::as_str).unwrap_or("no reason given");
     match status {
-        200 => accounts(&body).ok_or_else(|| fail(format!("{url} doesn't answer like a CLIProxyAPI"))),
+        200 => {
+            let accounts = accounts(&body).ok_or_else(|| fail(format!("{url} doesn't answer like a CLIProxyAPI")))?;
+            let latest = ask_latest.then(|| get("server/latest-version")).and_then(|res| {
+                let release: Value = serde_json::from_str(&res.ok()?.body_mut().read_to_string().ok()?).ok()?;
+                Some(release.get("latest-version")?.as_str()?.to_owned())
+            });
+            Ok(Seen { accounts, running, latest })
+        }
         401 => Err(Failure { message: format!("The proxy turned the management key down: {said}"), refused: true }),
         // No management routes at all: a proxy without a management key has none.
         404 => Err(fail(format!("No management API at {url}: the proxy needs a `management.secret-key` in its config"))),
@@ -265,6 +318,86 @@ mod tests {
         assert_eq!(held, proxy("http://q:1", "k3", ""));
         set(&mut held, "", "k", "m").unwrap();
         assert_eq!(held, config::Proxy::default());
+    }
+
+    fn serve(answer: fn(&str) -> (u16, &'static str, &'static str)) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut lines = BufReader::new(stream.try_clone().unwrap()).lines().map(Result::unwrap);
+                let request = lines.next().unwrap();
+                lines.find(String::is_empty);
+                let (status, headers, body) = answer(request.split(' ').nth(1).unwrap());
+                let head = format!("HTTP/1.1 {status} -\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                stream.write_all(format!("{head}{body}").as_bytes()).unwrap();
+            }
+        });
+        url
+    }
+
+    #[test]
+    fn reads_what_the_proxy_runs_and_the_latest_release() {
+        let url = serve(|path| match path {
+            "/v8/management/credentials" => (200, "X-CPA-VERSION: 8.0.75\r\n", r#"{"files": []}"#),
+            "/v8/management/server/latest-version" => (200, "", r#"{"latest-version": "v8.0.77"}"#),
+            _ => (404, "", ""),
+        });
+        let seen = |ask_latest| fetch(&url, "k", ask_latest).ok().map(|seen| (seen.accounts.len(), seen.running, seen.latest));
+        assert_eq!(seen(true), Some((0, Some("8.0.75".into()), Some("v8.0.77".into()))));
+        assert_eq!(seen(false), Some((0, Some("8.0.75".into()), None)));
+
+        let offline = serve(|path| match path {
+            "/v8/management/credentials" => (200, "", r#"{"files": []}"#),
+            _ => (502, "", r#"{"error": "no way to GitHub"}"#),
+        });
+        assert!(fetch(&offline, "k", true).is_ok_and(|seen| seen.running.is_none() && seen.latest.is_none()));
+    }
+
+    #[test]
+    fn an_update_is_told_while_the_proxy_answers_and_asked_for_once_in_a_while() {
+        let seen = |running: &str, latest: Option<&str>| {
+            Ok(Seen { accounts: vec![], running: Some(running.into()), latest: latest.map(str::to_owned) })
+        };
+        let down = || Err(Failure { message: "down".into(), refused: false });
+        let update = Some(ProxyUpdate { running: "8.0.75".into(), latest: "8.0.85".into() });
+        let start = 1_800_000_000_000;
+        let mut state = State::default();
+        assert!(state.latest_is_due(start));
+        state.record(down(), true, start);
+        assert!(state.latest_is_due(start + 1));
+
+        state.record(seen("8.0.75", Some("v8.0.85")), true, start + 1);
+        assert_eq!(state.update(), update);
+        assert!(!state.latest_is_due(start + LATEST_MS));
+        assert!(state.latest_is_due(start + 1 + LATEST_MS));
+
+        state.record(seen("8.0.75", None), false, start + 2);
+        assert_eq!(state.update(), update);
+        state.record(down(), false, start + 3);
+        assert_eq!(state.update(), None);
+        state.record(seen("8.0.75", None), true, start + 1 + LATEST_MS);
+        assert_eq!(state.update(), update);
+        assert!(!state.latest_is_due(start + 2 + LATEST_MS));
+
+        state.record(seen("8.0.85", None), false, start + 3 + LATEST_MS);
+        assert_eq!(state.update(), None);
+    }
+
+    #[test]
+    fn a_proxy_is_outdated_ten_patch_releases_or_a_minor_one_behind() {
+        let update = |running: &str, latest: &str| outdated(running, latest).map(|u| (u.running, u.latest));
+        assert_eq!(update("8.0.75", "v8.0.85"), Some(("8.0.75".into(), "8.0.85".into())));
+        assert_eq!(update("v8.0.75", "v8.0.85"), Some(("8.0.75".into(), "8.0.85".into())));
+        assert_eq!(update("8.0.99", "v8.1.0"), Some(("8.0.99".into(), "8.1.0".into())));
+        assert_eq!(update("8.9.99", "v9.0.0"), Some(("8.9.99".into(), "9.0.0".into())));
+        assert_eq!(update("8.0.75", "v8.0.84"), None);
+        assert_eq!(update("8.0.85", "v8.0.85"), None);
+        assert_eq!(update("8.1.0", "v8.0.85"), None);
+        assert_eq!(update("dev", "v8.0.85"), None);
+        assert_eq!(update("8.0.75-3-g75b1575", "v8.0.85"), None);
     }
 
     #[test]
