@@ -1512,7 +1512,6 @@ impl Dirigent {
             self.show_latest_log();
         }
         self.menu = None;
-        self.base = None;
         self.selection.clear();
         self.remember_pane();
         self.mark_seen(host, id);
@@ -1733,10 +1732,16 @@ impl Dirigent {
     }
 
     pub fn new_draft(&mut self, target: Option<Target>, cx: &mut Context<Self>) {
-        let target = target.or_else(|| self.context_target()).or_else(|| self.last_target()).filter(|t| self.target_valid(t));
+        if let Some(t) = target.filter(|t| self.target_valid(t)) {
+            self.remember_target(&t);
+        }
+        let target = self.last_target().filter(|t| self.target_valid(t));
+        (self.model, self.effort) = {
+            let cache = self.cache.lock().unwrap();
+            (cache.get(LAST_MODEL_KEY), cache.get(LAST_EFFORT_KEY))
+        };
         self.set_pane(Pane::Draft { target }, cx);
         self.menu = None;
-        self.base = None;
         self.selection.clear();
         self.refresh_draft_vcs();
         self.focus_composer(cx);
@@ -1750,20 +1755,11 @@ impl Dirigent {
         self.new_draft(None, cx);
     }
 
-    fn context_target(&self) -> Option<Target> {
-        match &self.pane {
-            Pane::Thread(t) => {
-                let pid = self.summary(&t.host, &t.id)?.project_id.clone()?;
-                Some(Target { host: t.host.clone(), project_id: pid })
-            }
-            Pane::Draft { target } => target.clone(),
-            Pane::Project { group_key } => {
-                let (groups, _) = self.groups();
-                let group = groups.into_iter().find(|g| g.key == *group_key)?;
-                Some(group.member_for(None).into())
-            }
-            _ => None,
+    fn remember_target(&mut self, target: &Target) {
+        if self.last_target().as_ref() != Some(target) {
+            self.base = None;
         }
+        let _ = self.cache.lock().unwrap().set(LAST_TARGET_KEY, &format!("{}\n{}", target.host, target.project_id));
     }
 
     pub(crate) fn last_target(&self) -> Option<Target> {
@@ -1797,6 +1793,7 @@ impl Dirigent {
     }
 
     pub fn set_target(&mut self, target: Target, cx: &mut Context<Self>) {
+        self.remember_target(&target);
         if let Pane::Draft { target: t } = &mut self.pane {
             *t = Some(target);
         }
@@ -2586,6 +2583,14 @@ impl Dirigent {
             .into_iter()
             .map(|((host, project), group)| ((if host == old { new.to_owned() } else { host }, project), group))
             .collect();
+        if let Some(t) = self.last_target().filter(|t| t.host == old) {
+            self.remember_target(&Target { host: new.to_owned(), ..t });
+        }
+        if let Pane::Draft { target: Some(t) } = &mut self.pane
+            && t.host == old
+        {
+            t.host = new.to_owned();
+        }
         self.sync_hosts(cx);
         if let Some(id) = open {
             self.select_thread(new, &id, cx);
@@ -2917,7 +2922,7 @@ impl Dirigent {
         let levels = self.models().iter().find(|m| m.id == key).map(|m| m.efforts.clone()).unwrap_or_default();
         self.effort = held_effort(self.effort.as_deref().unwrap_or("high"), &levels);
         self.model = Some(key);
-        self.remember_model();
+        self.remember_draft_model();
         self.menu = None;
         self.focus_composer(cx);
         cx.notify();
@@ -2925,7 +2930,7 @@ impl Dirigent {
 
     pub fn set_effort(&mut self, level: String, cx: &mut Context<Self>) {
         self.effort = Some(level);
-        self.remember_model();
+        self.remember_draft_model();
         self.menu = None;
         self.focus_composer(cx);
         cx.notify();
@@ -2939,14 +2944,18 @@ impl Dirigent {
         }
     }
 
-    fn remember_model(&self) {
+    fn remember_draft_model(&self) {
+        if !matches!(self.pane, Pane::Draft { .. }) {
+            return;
+        }
         let cache = self.cache.lock().unwrap();
         if let Some(m) = &self.model {
             let _ = cache.set(LAST_MODEL_KEY, m);
         }
-        if let Some(e) = &self.effort {
-            let _ = cache.set(LAST_EFFORT_KEY, e);
-        }
+        let _ = match &self.effort {
+            Some(e) => cache.set(LAST_EFFORT_KEY, e),
+            None => cache.remove(LAST_EFFORT_KEY),
+        };
     }
 
     pub fn current_preset(&self) -> Option<Preset> {
@@ -2957,7 +2966,7 @@ impl Dirigent {
         self.model = Some(p.model.clone());
         self.effort = p.effort.clone();
         self.hold_effort();
-        self.remember_model();
+        self.remember_draft_model();
         self.menu = None;
         self.focus_composer(cx);
         cx.notify();
@@ -3201,7 +3210,6 @@ impl Dirigent {
                 self.toast(format!("{} is offline", target.host), cx);
                 return;
             }
-            let _ = self.cache.lock().unwrap().set(LAST_TARGET_KEY, &format!("{}\n{}", target.host, target.project_id));
             let workspace = self.isolate && self.draft_vcs().is_some_and(|(_, _, v)| v.is_some_and(|v| v.vcs.is_some()));
             let base = self.base.clone().filter(|_| workspace);
             let cwd = self.draft_vcs().map(|(_, path, _)| path.to_owned()).unwrap_or_default();
@@ -3250,9 +3258,8 @@ impl Dirigent {
                 h.threads.insert(0, thread.clone());
             }
             let host = target.host.clone();
-            self.pending.push(PendingDraft { id, target, base: self.base.clone(), text: text.clone(), images, thread });
+            self.pending.push(PendingDraft { id, target, base: self.base.take(), text: text.clone(), images, thread });
             self.titling.insert((host.clone(), thread_id.clone()), Instant::now());
-            self.remember_model();
             self.select_thread(&host, &thread_id, cx);
             self.echo(&host, &thread_id, text, PromptMode::Prompt);
             return;
@@ -3329,7 +3336,6 @@ impl Dirigent {
         );
         let sent = SentPrompt { host: host.to_owned(), thread_id: thread_id.to_owned(), text: text.clone(), images: images.to_vec(), mode };
         self.prompts.insert(id, sent);
-        self.remember_model();
         self.echo(host, thread_id, text, mode);
         cx.notify();
     }
@@ -3727,7 +3733,6 @@ impl Dirigent {
         );
         self.attachments = e.images;
         self.composer.update(cx, |input, cx| input.set_content(e.stash, window, cx));
-        self.remember_model();
         self.echo(&host, &thread_id, text, PromptMode::Prompt);
         cx.notify();
     }
