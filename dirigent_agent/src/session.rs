@@ -56,6 +56,11 @@ pub struct Prompt {
     pub edit: Option<String>,
 }
 
+pub(crate) enum ServersFor {
+    Request,
+    Script,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Queued {
     User { text: String, content: Vec<Block> },
@@ -228,7 +233,6 @@ impl Session {
     }
 
     fn specs(&self, scripts: bool) -> Vec<ToolSpec> {
-        // MUST KILL: rearchitect: hand codemode's spec() the tool list, so specs needn't release state's lock before calling it
         let switches = self.state.lock().unwrap().switches.clone();
         let on = |name: &str| !SWITCHED.contains(&name) || switches.iter().any(|s| s == name);
         let own = self.tools.iter().filter(|(name, _)| on(name) && (scripts || name != CODEMODE)).map(|(_, tool)| tool.spec());
@@ -242,9 +246,9 @@ impl Session {
         }
     }
 
-    // MUST KILL: type: servers_ready's bool `scripts` wants an enum of which servers a request must wait for
-    pub(crate) async fn servers_ready(&self, scripts: bool) {
-        self.mcp.ready(!scripts && self.is_on(CODEMODE), SERVERS_WAIT).await;
+    pub(crate) async fn servers_ready(&self, servers_for: ServersFor) {
+        let direct_only = matches!(servers_for, ServersFor::Request) && self.is_on(CODEMODE);
+        self.mcp.ready(direct_only, SERVERS_WAIT).await;
     }
 
     pub(crate) fn scripted_servers(&self) -> &[(String, Option<String>)] {
@@ -265,7 +269,7 @@ impl Session {
 
     pub(crate) fn append(&self, state: &mut State, body: Body) -> Entry {
         let parent_id = state.branch.last().map(|e| e.id.clone());
-        let entry = Entry { seq: 0, id: crate::short_id(16), parent_id, at: crate::now(), body };
+        let entry = Entry { seq: 0, id: crate::short_id(16), parent_id, at: crate::unix_ms(), body };
         state.branch.push(entry.clone());
         self.emit(Out::Entry(entry.clone()));
         entry
@@ -341,8 +345,8 @@ impl Session {
             self.start(&mut state);
             return true;
         }
-        // MUST KILL: extract: deliver's "a model in async_bash wait gets every notice as a steer" rule into a named fn
-        if when == Notify::Asap || !self.waiters.lock().unwrap().is_empty() {
+        let model_waits = !self.waiters.lock().unwrap().is_empty();
+        if when == Notify::Asap || model_waits {
             let line = first_line(notice.text());
             state.steering.push_back(Queued::Notice(notice));
             self.wake(&line);
