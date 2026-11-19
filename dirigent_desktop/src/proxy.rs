@@ -23,7 +23,6 @@ pub fn outdated(update: &ProxyUpdate, host: Option<&str>) -> String {
     format!("CLIProxyAPI {}{on} is outdated: update it to {}", update.running, update.latest)
 }
 
-// MUST KILL: type: State's shown / request / saving → one enum of the tab's phase (loading, saving, shown)
 pub struct State {
     url: Entity<TextInput>,
     key: Entity<TextInput>,
@@ -106,8 +105,7 @@ impl Dirigent {
         cx.notify();
     }
 
-    // MUST KILL: rename: on_proxy_settings → take_proxy_reply, false when the reply is none of the tab's
-    pub(crate) fn on_proxy_settings(&mut self, reply_to: u64, outcome: Result<Proxy, String>, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn take_proxy_reply(&mut self, reply_to: u64, outcome: Result<Proxy, String>, cx: &mut Context<Self>) -> bool {
         if self.proxy.request.take_if(|r| *r == reply_to).is_none() {
             return false;
         }

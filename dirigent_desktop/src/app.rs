@@ -1055,7 +1055,7 @@ impl Dirigent {
                 self.prompts.remove(&reply_to);
                 let _ = self.change_answered(&host, reply_to)
                     || self.on_login_reply(&host, reply_to, Ok(()), cx)
-                    || self.on_mcp_reply(&host, reply_to, Ok(()), cx)
+                    || self.take_mcp_reply(&host, reply_to, Ok(()), cx)
                     || self.on_host_update_reply(&host, reply_to, Ok(()), cx);
             }
             ServerMessage::McpServers { reply_to, servers, path } => self.on_mcp_servers(&host, reply_to, servers, path, cx),
@@ -1200,7 +1200,7 @@ impl Dirigent {
                 if self.usage.proxy_request == Some(reply_to) {
                     self.usage.proxies.insert(host, proxy);
                 } else {
-                    self.on_proxy_settings(reply_to, Ok(proxy), cx);
+                    self.take_proxy_reply(reply_to, Ok(proxy), cx);
                 }
             }
             ServerMessage::Title { reply_to, title, model, input, output, cost, duration_ms } => {
@@ -1274,8 +1274,8 @@ impl Dirigent {
                 }
                 if let Some(id) = reply_to
                     && (self.on_login_reply(&host, id, Err(message.clone()), cx)
-                        || self.on_proxy_settings(id, Err(message.clone()), cx)
-                        || self.on_mcp_reply(&host, id, Err(message.clone()), cx)
+                        || self.take_proxy_reply(id, Err(message.clone()), cx)
+                        || self.take_mcp_reply(&host, id, Err(message.clone()), cx)
                         || self.on_host_update_reply(&host, id, Err(message.clone()), cx))
                 {
                     return;
@@ -3434,7 +3434,7 @@ impl Dirigent {
         if self.onboarding_open() {
             return;
         }
-        if self.host_form_escape(cx) || self.mcp_form_escape(cx) {
+        if self.host_form_escape(cx) || self.close_mcp_form_on_escape(cx) {
             return;
         }
         if self.modal.is_some() {
