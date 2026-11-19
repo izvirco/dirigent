@@ -4,20 +4,19 @@
 #ifndef Dist
   #define Dist "..\..\dist"
 #endif
-; MUST KILL: rename: Key/Cli/Data to ShellKey/PathCommand/DataDirName
 #if Pos("-nightly.", Version) > 0
   #define Id "{{92A54733-5874-4F63-BB88-EDBA04F3B7EE}"
   #define Name "Dirigent Nightly"
-  #define Key "DirigentNightly"
-  #define Cli "dirigent-nightly"
-  #define Data "dirigent-nightly"
+  #define ShellKey "DirigentNightly"
+  #define PathCommand "dirigent-nightly"
+  #define DataDirName "dirigent-nightly"
   #define Icon "dirigent_nightly.ico"
 #else
   #define Id "{{62E36A4A-63C4-495C-8340-00B3023A0729}"
   #define Name "Dirigent"
-  #define Key "Dirigent"
-  #define Cli "dirigent"
-  #define Data "dirigent"
+  #define ShellKey "Dirigent"
+  #define PathCommand "dirigent"
+  #define DataDirName "dirigent"
   #define Icon "dirigent.ico"
 #endif
 
@@ -54,7 +53,7 @@ Name: contextmenu; Description: "Add ""Open in {#Name}"" to the folder right-cli
 Name: desktopicon; Description: "Create a desktop shortcut"; Flags: unchecked
 ; Older installs get this ticked on their next update: Inno restores each task's previous state, and a
 ; task it hasn't seen before keeps its default.
-Name: addtopath; Description: "Add the {#Cli} command to PATH"
+Name: addtopath; Description: "Add the {#PathCommand} command to PATH"
 Name: service; Description: "Run the {#Name} service when I sign in, so that other machines can use this PC as a host"; Flags: unchecked
 
 [InstallDelete]
@@ -63,7 +62,7 @@ Type: files; Name: "{app}\Dirigent.exe"
 
 [Files]
 Source: "{#Dist}\dirigent_desktop.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; DestName: "{#Cli}.exe"; Flags: ignoreversion
+Source: "{#Dist}\dirigent.exe"; DestDir: "{app}"; DestName: "{#PathCommand}.exe"; Flags: ignoreversion
 Source: "{#Dist}\dirigent_service.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\cua-driver.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#Dist}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion
@@ -73,15 +72,15 @@ Name: "{autoprograms}\{#Name}"; Filename: "{app}\dirigent_desktop.exe"
 Name: "{autodesktop}\{#Name}"; Filename: "{app}\dirigent_desktop.exe"; Tasks: desktopicon
 
 [Registry]
-Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\Drive\shell\{#Key}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\{#ShellKey}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\{#ShellKey}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\shell\{#ShellKey}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#ShellKey}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#ShellKey}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Directory\Background\shell\{#ShellKey}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\{#ShellKey}"; ValueType: string; ValueName: ""; ValueData: "Open in {#Name}"; Flags: uninsdeletekey; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\{#ShellKey}"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\dirigent_desktop.exe"",0"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\Drive\shell\{#ShellKey}\command"; ValueType: string; ValueName: ""; ValueData: """{app}\dirigent_desktop.exe"" ""%V"""; Tasks: contextmenu
 
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#Name} Service"; ValueData: """{app}\dirigent_service.exe"""; Flags: uninsdeletevalue; Tasks: service
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: none; ValueName: "{#Name} Service"; Flags: deletevalue; Tasks: not service
@@ -97,8 +96,8 @@ Filename: "{app}\dirigent_desktop.exe"; Flags: nowait; Check: RestartsDesktop
 Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Get-Process dirigent_service -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq '{app}\dirigent_service.exe' } | Stop-Process -Force"""; Flags: runhidden; RunOnceId: "StopService"
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\{#Data}\updates"
-Type: filesandordirs; Name: "{localappdata}\{#Data}\updates-service"
+Type: filesandordirs; Name: "{localappdata}\{#DataDirName}\updates"
+Type: filesandordirs; Name: "{localappdata}\{#DataDirName}\updates-service"
 
 [Code]
 const
@@ -132,7 +131,11 @@ begin
   Result := WizardIsTaskSelected('service') or HasSwitch('/SERVICE');
 end;
 
-{ MUST KILL: extract: an IsWslBash check for the system-dir prefix test, apart from the Git lookup }
+function IsWslBash(Bash: String): Boolean;
+begin
+  Result := Pos(LowerCase(ExpandConstant('{sys}')), LowerCase(Bash)) = 1;
+end;
+
 function BashFound(): Boolean;
 var
   OnPath: String;
@@ -140,22 +143,27 @@ begin
   OnPath := FileSearch('bash.exe', GetEnv('PATH'));
   Result := FileExists(ExpandConstant('{commonpf64}\Git\bin\bash.exe'))
     or FileExists(ExpandConstant('{commonpf32}\Git\bin\bash.exe'))
-    or ((OnPath <> '') and (Pos(LowerCase(ExpandConstant('{sys}')), LowerCase(OnPath)) <> 1));
+    or ((OnPath <> '') and not IsWslBash(OnPath));
 end;
 
-{ MUST KILL: extract: a ReadUserPath that skips a non-string Path, out of SetOnPath }
+function ReadUserPath(var Paths: String): Boolean;
+begin
+  Result := True;
+  if not RegQueryStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Paths) then
+  begin
+    Result := not RegValueExists(HKEY_CURRENT_USER, 'Environment', 'Path');
+    Paths := '';
+  end;
+end;
+
 procedure SetOnPath(Add: Boolean);
 var
   Paths, Dir, Padded: String;
   P: Integer;
 begin
   Dir := ExpandConstant('{app}');
-  if not RegQueryStringValue(HKEY_CURRENT_USER, 'Environment', 'Path', Paths) then
-  begin
-    if RegValueExists(HKEY_CURRENT_USER, 'Environment', 'Path') then
-      Exit;
-    Paths := '';
-  end;
+  if not ReadUserPath(Paths) then
+    Exit;
   Padded := ';' + Paths + ';';
   P := Pos(';' + Uppercase(Dir) + ';', Uppercase(Padded));
   if Add then
@@ -193,14 +201,13 @@ end;
 
 function InitializeSetup(): Boolean;
 var
-  Pid: Cardinal;
+  UpdaterPid: Cardinal;
   Handle: Cardinal;
 begin
-  { MUST KILL: extract: a WaitForUpdater(Pid) out of InitializeSetup }
-  Pid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
-  if Pid <> 0 then
+  UpdaterPid := StrToIntDef(ExpandConstant('{param:WAITPID|0}'), 0);
+  if UpdaterPid <> 0 then
   begin
-    Handle := OpenProcess(SYNCHRONIZE, False, Pid);
+    Handle := OpenProcess(SYNCHRONIZE, False, UpdaterPid);
     if Handle <> 0 then
     begin
       WaitForSingleObject(Handle, 30000);
