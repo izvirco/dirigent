@@ -62,14 +62,24 @@ pub struct Service {
     models: Arc<Proxy>,
     live: Live,
     missing: Mutex<std::collections::HashSet<String>>,
-    // MUST KILL: type: Option<Setup> means workspace-being-made vs prompt-in-flight; give starting threads an enum
-    starting: Mutex<HashMap<String, Option<Setup>>>,
+    starting: Mutex<HashMap<String, Starting>>,
     logins: mcp::Logins,
     proxy: proxy::Poller,
     screens: screen::Screens,
     pub push: broadcast::Sender<ServerMessage>,
     pub host_name: String,
     pub service_id: String,
+}
+
+enum Starting {
+    MakingWorkspace,
+    Prompting,
+}
+
+#[derive(PartialEq)]
+enum Moving {
+    NewThread,
+    ExistingThread,
 }
 
 impl Service {
@@ -82,11 +92,13 @@ impl Service {
         let missing = self.missing.lock().unwrap();
         let starting = self.starting.lock().unwrap();
         for t in &mut threads {
-            // MUST KILL: extract: a running_since(id) that also counts a starting thread from its prompted_at
             t.running_since = self.live.running_since(&t.id).or(t.prompted_at.filter(|_| starting.contains_key(&t.id)));
             (t.jobs, t.free_jobs) = self.live.jobs(&t.id);
             t.workspace_missing = missing.contains(&t.id);
-            t.setup = starting.get(&t.id).copied().flatten().or(self.live.nix_shell(&t.id).then_some(Setup::NixShell));
+            t.setup = match starting.get(&t.id) {
+                Some(Starting::MakingWorkspace) => Some(Setup::Workspace),
+                _ => self.live.nix_shell(&t.id).then_some(Setup::NixShell),
+            };
             t.compacting_since = self.live.compacting_since(&t.id);
             t.screen = t.running_since.is_some() && self.screens.has(&t.id);
         }
@@ -208,7 +220,8 @@ impl Service {
                 anyhow::ensure!(path.is_dir(), "not a directory on this host: {}", path.display());
                 let origin = git::origin(&path);
                 let project_id = uuid::Uuid::now_v7().to_string();
-                let project = self.storage.lock().unwrap().add_project(&project_id, &path.to_string_lossy(), origin.as_deref(), now())?;
+                let project =
+                    self.storage.lock().unwrap().get_or_add_project(&project_id, &path.to_string_lossy(), origin.as_deref(), now())?;
                 if project.id == project_id {
                     info!(project = %project_id, path = %path.display(), "project added");
                     self.push_projects();
@@ -249,11 +262,12 @@ impl Service {
                         storage.set_tools(&thread_id, &storage.thread_tools(p)?)?;
                         storage.set_report(&thread_id, report, notify)?;
                     }
-                    // MUST KILL: rearchitect: creating a thread and beginning its run must be one step, not hinge on holding the storage lock
                     if let Some(p) = &prompt {
-                        storage.set_prompted(&thread_id, &p.text, p.model.as_deref(), p.effort.as_deref(), now())?;
+                        storage.set_prompted(&thread_id, p.model.as_deref(), p.effort.as_deref(), now())?;
+                        storage.set_prompt_title_unless_named(&thread_id, &p.text)?;
                         self.live.begin_run(&thread_id);
-                        self.starting.lock().unwrap().insert(thread_id.clone(), workspace.then_some(Setup::Workspace));
+                        let step = if workspace { Starting::MakingWorkspace } else { Starting::Prompting };
+                        self.starting.lock().unwrap().insert(thread_id.clone(), step);
                     }
                     thread
                 };
@@ -269,7 +283,7 @@ impl Service {
                         self.push_threads();
                     }
                     let (this, id) = (self.clone(), thread_id.clone());
-                    let made = tokio::task::spawn_blocking(move || this.move_to_workspace(&id, true, base.as_deref()))
+                    let made = tokio::task::spawn_blocking(move || this.move_to_workspace(&id, Moving::NewThread, base.as_deref()))
                         .await
                         .unwrap_or_else(|e| Err(anyhow!("making the workspace failed: {e}")));
                     if let Err(e) = made {
@@ -277,8 +291,8 @@ impl Service {
                     }
                 }
                 if let Some(p) = &prompt {
-                    if let Some(setup) = self.starting.lock().unwrap().get_mut(&thread_id) {
-                        *setup = None;
+                    if let Some(step) = self.starting.lock().unwrap().get_mut(&thread_id) {
+                        *step = Starting::Prompting;
                     }
                     self.push_threads();
                     if let Err(e) = self.deliver(&thread_id, PromptMode::Prompt, p, None).await {
@@ -290,7 +304,7 @@ impl Service {
                 ServerMessage::ThreadCreated { reply_to: id, thread: Box::new(thread) }
             }
             ClientMessage::MoveToWorkspace { id, thread_id, base } => {
-                self.move_to_workspace(&thread_id, false, base.as_deref())?;
+                self.move_to_workspace(&thread_id, Moving::ExistingThread, base.as_deref())?;
                 self.push_threads();
                 ServerMessage::Ok { reply_to: id }
             }
@@ -573,10 +587,13 @@ impl Service {
         let idle = self.live.running_since(thread_id).is_none();
         let mode = if idle { PromptMode::Prompt } else { mode };
         let unarchived = self.storage.lock().unwrap().unarchive(thread_id)?;
-        // MUST KILL: rearchitect: commit the prompt's model once the session took it, so no rollback through set_model
         let before = self.storage.lock().unwrap().thread_model(thread_id)?;
         if mode == PromptMode::Prompt {
-            self.storage.lock().unwrap().set_prompted(thread_id, &p.text, p.model.as_deref(), p.effort.as_deref(), now())?;
+            {
+                let storage = self.storage.lock().unwrap();
+                storage.set_prompted(thread_id, p.model.as_deref(), p.effort.as_deref(), now())?;
+                storage.set_prompt_title_unless_named(thread_id, &p.text)?;
+            }
             self.live.begin_run(thread_id);
         }
         if mode == PromptMode::Prompt || unarchived {
@@ -617,8 +634,7 @@ impl Service {
     async fn name_thread(&self, thread_id: &str, settings: &TitleGen, text: &str) {
         let own = self.storage.lock().unwrap().thread_model(thread_id).ok().and_then(|(model, _)| model);
         let title = title::generate(&*self.models, settings, text, own.as_deref()).await;
-        // MUST KILL: extract: a set_title step in name_thread that returns with storage's lock released
-        let named = title.and_then(|title| self.storage.lock().unwrap().set_title(thread_id, &title.title));
+        let named = title.and_then(|title| self.storage.lock().unwrap().set_title_unless_renamed(thread_id, &title.title));
         match named {
             Ok(()) => {
                 self.push(ServerMessage::Event { thread_id: thread_id.to_owned(), event: Event::Titled });
@@ -708,18 +724,20 @@ impl Service {
     }
 
     fn thread_repo(&self, thread_id: &str) -> Result<(PathBuf, Vcs)> {
-        let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+        let repo = self.storage.lock().unwrap().thread_project_path_incl_deleted(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
         let repo = PathBuf::from(repo);
         let vcs = vcs::detect(&repo).ok_or_else(|| anyhow!("{} is not a git or jj repository", repo.display()))?;
         Ok((repo, vcs))
     }
 
-    // MUST KILL: type: move_to_workspace's bare new bool switches off the running and dirty checks; use an enum
-    fn move_to_workspace(&self, thread_id: &str, new: bool, base: Option<&str>) -> Result<()> {
-        anyhow::ensure!(new || self.live.running_since(thread_id).is_none(), "the thread is running");
+    fn move_to_workspace(&self, thread_id: &str, moving: Moving, base: Option<&str>) -> Result<()> {
+        anyhow::ensure!(moving == Moving::NewThread || self.live.running_since(thread_id).is_none(), "the thread is running");
         let (repo, vcs) = self.thread_repo(thread_id)?;
         let recreating = self.storage.lock().unwrap().thread_workspace(thread_id)?.is_some();
-        anyhow::ensure!(recreating || new || !vcs::dirty(vcs, &repo)?, "the working copy has uncommitted changes; commit them first");
+        anyhow::ensure!(
+            recreating || moving == Moving::NewThread || !vcs::dirty(vcs, &repo)?,
+            "the working copy has uncommitted changes; commit them first"
+        );
         let dest = self.workspace_dir(thread_id);
         if recreating && dest.exists() && !vcs::is_workspace(&dest) {
             std::fs::remove_dir_all(&dest)?;
@@ -741,7 +759,7 @@ impl Service {
 
     fn remove_workspace(&self, thread_id: &str, detach: bool) -> Result<()> {
         let ws = self.storage.lock().unwrap().thread_workspace(thread_id)?.ok_or_else(|| anyhow!("the thread has no workspace"))?;
-        let repo = self.storage.lock().unwrap().thread_project_path(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
+        let repo = self.storage.lock().unwrap().thread_project_path_incl_deleted(thread_id)?.ok_or_else(|| anyhow!("no such thread"))?;
         if !detach {
             match vcs::detect(Path::new(&repo)) {
                 Some(vcs) => vcs::remove_workspace(vcs, Path::new(&repo), Path::new(&ws), thread_id)?,

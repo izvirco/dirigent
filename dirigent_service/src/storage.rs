@@ -132,8 +132,7 @@ impl Storage {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    // MUST KILL: rename: add_project returns the existing project for a known path; call it add_or_get_project
-    pub fn add_project(&self, id: &str, path: &str, origin: Option<&str>, now: i64) -> Result<Project> {
+    pub fn get_or_add_project(&self, id: &str, path: &str, origin: Option<&str>, now: i64) -> Result<Project> {
         // `C:\Work\x` and `c:\work\x` are one directory on Windows.
         let same = if cfg!(windows) { "path = ?1 COLLATE NOCASE" } else { "path = ?1" };
         let existing = self
@@ -162,8 +161,7 @@ impl Storage {
         Ok(self.conn.query_row("SELECT path FROM projects WHERE id = ?1 AND deleted_at IS NULL", [id], |r| r.get(0)).optional()?)
     }
 
-    // MUST KILL: rename: thread_project_path → thread_project_path_incl_deleted
-    pub fn thread_project_path(&self, thread_id: &str) -> Result<Option<String>> {
+    pub fn thread_project_path_incl_deleted(&self, thread_id: &str) -> Result<Option<String>> {
         Ok(self
             .conn
             .query_row("SELECT p.path FROM threads t JOIN projects p ON p.id = t.project_id WHERE t.id = ?1", [thread_id], |r| r.get(0))
@@ -278,13 +276,16 @@ impl Storage {
         Ok(json.map(|j| serde_json::from_str(&j)).transpose()?)
     }
 
-    // MUST KILL: extract: set_prompted also names an unnamed thread after the prompt; split that out
-    pub fn set_prompted(&self, id: &str, text: &str, model: Option<&str>, effort: Option<&str>, now: i64) -> Result<()> {
+    pub fn set_prompted(&self, id: &str, model: Option<&str>, effort: Option<&str>, now: i64) -> Result<()> {
         self.conn.execute(
-            "UPDATE threads SET prompted_at = ?2, name = COALESCE(name, ?3), model = COALESCE(?4, model), effort = COALESCE(?5, effort)
-             WHERE id = ?1",
-            params![id, now, prompt_title(text), model, effort],
+            "UPDATE threads SET prompted_at = ?2, model = COALESCE(?3, model), effort = COALESCE(?4, effort) WHERE id = ?1",
+            params![id, now, model, effort],
         )?;
+        Ok(())
+    }
+
+    pub fn set_prompt_title_unless_named(&self, id: &str, prompt: &str) -> Result<()> {
+        self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1 AND name IS NULL", params![id, prompt_title(prompt)])?;
         Ok(())
     }
 
@@ -332,8 +333,7 @@ impl Storage {
         Ok(())
     }
 
-    // MUST KILL: rename: set_title → set_title_unless_renamed
-    pub fn set_title(&self, id: &str, title: &str) -> Result<()> {
+    pub fn set_title_unless_renamed(&self, id: &str, title: &str) -> Result<()> {
         self.conn.execute("UPDATE threads SET name = ?2 WHERE id = ?1 AND renamed = 0", params![id, title])?;
         Ok(())
     }
@@ -554,7 +554,6 @@ impl Storage {
             add_usage(&tx, entry.at, provider, model, usage)?;
             add_spend(&tx, thread_id, usage)?;
         }
-        // MUST KILL: extract: a moves_updated_at(&Body) helper instead of the inline Store exception to the updated_at bump
         if !matches!(entry.body, Body::Store { .. }) {
             tx.execute("UPDATE threads SET updated_at = ?2 WHERE id = ?1", params![thread_id, now])?;
         }
@@ -801,21 +800,24 @@ mod tests {
     #[test]
     fn adding_a_path_twice_keeps_one_project() {
         let s = Storage::in_memory().unwrap();
-        let first = s.add_project("p1", "/x", None, 1).unwrap();
-        assert_eq!(s.add_project("p2", "/x", None, 2).unwrap(), first);
+        let first = s.get_or_add_project("p1", "/x", None, 1).unwrap();
+        assert_eq!(s.get_or_add_project("p2", "/x", None, 2).unwrap(), first);
         assert_eq!(s.list_projects().unwrap(), [first]);
         s.remove_project("p1", 3).unwrap();
-        assert_eq!(s.add_project("p3", "/x", None, 4).unwrap().id, "p3");
+        assert_eq!(s.get_or_add_project("p3", "/x", None, 4).unwrap().id, "p3");
     }
 
     #[test]
     fn roundtrip_thread_and_entries() {
         let s = Storage::in_memory().unwrap();
-        s.add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
+        s.get_or_add_project("p1", "/x", Some("github.com/a/b"), 9).unwrap();
         s.create_thread("t1", "p1", "/x", None, None, 10).unwrap();
-        s.set_prompted("t1", "  hello  \nworld", Some("claude-opus-5-5"), Some("high"), 10).unwrap();
+        s.set_prompted("t1", Some("claude-opus-5-5"), Some("high"), 10).unwrap();
+        s.set_prompt_title_unless_named("t1", "  hello  \nworld").unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("hello"));
-        s.set_prompted("t1", "later", None, Some("low"), 10).unwrap();
+        s.set_prompted("t1", None, Some("low"), 10).unwrap();
+        s.set_prompt_title_unless_named("t1", "later").unwrap();
+        assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("hello"));
         let blob = s.put_blob("image/png", &[1, 2, 3]).unwrap();
         assert_eq!(blob, "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81");
         assert_eq!(s.put_blob("image/png", &[1, 2, 3]).unwrap(), blob);
@@ -866,7 +868,7 @@ mod tests {
         assert_eq!(threads[0].project_id.as_deref(), Some("p1"));
         assert_eq!((threads[0].entry_count, threads[0].updated_at, threads[0].locked), (4, 12, false));
         assert!(s.get_thread("nope").unwrap().is_none());
-        s.set_title("t1", "Greeting").unwrap();
+        s.set_title_unless_renamed("t1", "Greeting").unwrap();
         assert_eq!(s.list_threads().unwrap()[0].name.as_deref(), Some("Greeting"));
         s.append_entry("t1", entry("w", Some("d"), 21, Body::Store { values: [("k".to_owned(), json!(1))].into() }), 21).unwrap();
         assert_eq!(s.list_threads().unwrap()[0].updated_at, 12);
@@ -879,7 +881,7 @@ mod tests {
         s.remove_project("p1", 13).unwrap();
         assert!(s.list_projects().unwrap().is_empty());
         assert_eq!(s.list_threads().unwrap()[0].project_id, None);
-        assert_eq!(s.thread_project_path("t1").unwrap().as_deref(), Some("/x"));
+        assert_eq!(s.thread_project_path_incl_deleted("t1").unwrap().as_deref(), Some("/x"));
 
         s.set_archived("t1", true, 14).unwrap();
         assert!(s.list_threads().unwrap()[0].archived);
@@ -900,7 +902,7 @@ mod tests {
         let s = Storage::in_memory().unwrap();
         s.create_thread("src", "p", "/ws/src", None, Some("Bug hunt"), 1).unwrap();
         s.set_tools("src", &["ask_user".into()]).unwrap();
-        s.set_prompted("src", "find the bug", Some("x"), Some("high"), 2).unwrap();
+        s.set_prompted("src", Some("x"), Some("high"), 2).unwrap();
         s.append_entry("src", user("u1", None, "find the bug"), 3).unwrap();
         s.append_entry("src", reply("r1", "u1", 4, Stop::End, "found it", 5, 0.5), 4).unwrap();
         s.append_entry("src", user("u2", None, "find the other bug"), 5).unwrap();
@@ -968,7 +970,8 @@ mod tests {
         assert_eq!(s.last_reply("root").unwrap().as_deref(), Some("The bug is a missing index on usage.at"));
         assert_eq!(s.last_reply("kid").unwrap(), None);
         assert_eq!(s.last_reply("nope").unwrap(), None);
-        s.set_prompted("kid", "write docs", None, None, 60).unwrap();
+        s.set_prompted("kid", None, None, 60).unwrap();
+        s.set_prompt_title_unless_named("kid", "write docs").unwrap();
         assert_eq!(by_id(&s, "kid").name.as_deref(), Some("Review"));
         assert_eq!(by_id(&s, "kid").prompted_at, Some(60));
         s.append_entry("root", user("u2", Some("a2"), "and again"), 54).unwrap();
@@ -981,7 +984,7 @@ mod tests {
         assert_eq!(s.conversation("root").unwrap().0, ["find the sqlite bug", "once more"]);
         s.set_name("root", "Missing usage index").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
-        s.set_title("root", "Sqlite bug").unwrap();
+        s.set_title_unless_renamed("root", "Sqlite bug").unwrap();
         assert_eq!(by_id(&s, "root").name.as_deref(), Some("Missing usage index"));
         assert!(s.set_name("nope", "x").is_err());
         let hits = s.search("sqlite", 10).unwrap();
