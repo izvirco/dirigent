@@ -95,8 +95,6 @@ launch only. What it copied: the screen's `clipboard_read({include_text: true})`
   - A window's picture is its part of the screen's: what covers the window is in it.
   - Input aimed at a window (`pid`, `window_id`) is refused in the background. In the foreground, a click at a
     window without the focus only brings it forward: the next one lands.
-  - The driver's cursor shows on your screen with `"computer_cursor"` in the `tools` too, and in the pictures
-    the agent takes of it.
   - A private screen that doesn't start (an error, not the desktop): a `UI_PATH` directory with a `sway` that exits 1.
     The fallback to the desktop is for a machine with no `sway` or no `wtype` at all: a `PATH` without one.
   - Over `rpc`: `screen` events, `get_screen`, and `screen: true` in `list_threads`.

@@ -130,8 +130,8 @@ pub enum ClientMessage {
     /// `images` are attached to the message; the host scales them to what a model takes.
     /// `title` (sent with a thread's first prompt) asks the host to name the thread from `text`.
     /// `tools` names the tool switches that are on from now on (`async_bash`, `ask_user`,
-    /// `dirigent`, `computer`, `codemode`) and the options `bash_background` and
-    /// `computer_cursor`; the host remembers them for the thread. `None` leaves them as they are.
+    /// `dirigent`, `computer`, `codemode`) and the option `bash_background`; the host
+    /// remembers them for the thread. `None` leaves them as they are.
     /// The reply (`Ok`) says the model has the message: its run started, or it is queued
     /// behind the one in progress. An `Error` says it has not, and why (the session didn't
     /// load, the proxy doesn't serve the model): the conversation has nothing of the message,
