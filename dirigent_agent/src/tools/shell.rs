@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::watch;
 
@@ -24,7 +23,6 @@ struct Shell {
     stdin: bool,
 }
 
-// MUST KILL: extract: a cache that only keeps a found shell, so a lookup that failed visibly runs again next time
 fn shell() -> Result<Shell> {
     static SHELL: OnceLock<Shell> = OnceLock::new();
     if let Some(shell) = SHELL.get() {
@@ -280,33 +278,37 @@ pub enum Tell {
 
 #[derive(Default)]
 pub struct Jobs {
-    jobs: Mutex<HashMap<String, Arc<Job>>>,
-    // MUST KILL: type: move `closed` inside the `jobs` Mutex so it can only be read and set under that lock
-    closed: AtomicBool,
+    jobs: Mutex<Table>,
+}
+
+#[derive(Default)]
+struct Table {
+    by_id: HashMap<String, Arc<Job>>,
+    closed: bool,
 }
 
 impl Jobs {
     pub fn spawn(&self, env: &Env, command: &str, cwd: &Path) -> Result<Arc<Job>> {
         let job = Job::spawn(env, command, cwd)?;
         let mut jobs = self.jobs.lock().unwrap();
-        if self.closed.load(Ordering::Relaxed) {
+        if jobs.closed {
             job.kill_now();
             bail!("the thread was unloaded");
         }
-        jobs.insert(job.id.clone(), job.clone());
+        jobs.by_id.insert(job.id.clone(), job.clone());
         Ok(job)
     }
 
     pub fn forget(&self, job: &Job) {
-        self.jobs.lock().unwrap().remove(&job.id);
+        self.jobs.lock().unwrap().by_id.remove(&job.id);
     }
 
     fn in_background(&self) -> Vec<(Arc<Job>, Tell)> {
-        self.jobs.lock().unwrap().values().filter_map(|job| Some((job.clone(), job.tell()?))).collect()
+        self.jobs.lock().unwrap().by_id.values().filter_map(|job| Some((job.clone(), job.tell()?))).collect()
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<Job>> {
-        self.jobs.lock().unwrap().get(id).filter(|job| job.tell().is_some()).cloned()
+        self.jobs.lock().unwrap().by_id.get(id).filter(|job| job.tell().is_some()).cloned()
     }
 
     pub fn all(&self) -> Vec<Arc<Job>> {
@@ -329,7 +331,7 @@ impl Jobs {
     }
 
     pub fn kill(&self, awaited_only: bool) {
-        for job in self.jobs.lock().unwrap().values() {
+        for job in self.jobs.lock().unwrap().by_id.values() {
             if job.exit().is_none() && !(awaited_only && job.tell() == Some(Tell::Never)) {
                 job.kill();
             }
@@ -337,9 +339,9 @@ impl Jobs {
     }
 
     pub fn kill_now(&self) {
-        let jobs = self.jobs.lock().unwrap();
-        self.closed.store(true, Ordering::Relaxed);
-        jobs.values().for_each(|job| job.kill_now());
+        let mut jobs = self.jobs.lock().unwrap();
+        jobs.closed = true;
+        jobs.by_id.values().for_each(|job| job.kill_now());
     }
 }
 

@@ -46,8 +46,7 @@ struct Shared {
     incoming: mpsc::UnboundedSender<Value>,
     session: Mutex<Option<String>>,
     version: Mutex<Option<String>>,
-    // MUST KILL: rename: `token` → `last_sent_token` (what `close` reuses instead of asking `auth`, which may refresh)
-    token: Mutex<Option<String>>,
+    last_sent_token: Mutex<Option<String>>,
     closed: CancellationToken,
 }
 
@@ -72,8 +71,9 @@ impl Http {
             };
         }
         let (messages, incoming) = mpsc::unbounded_channel();
-        let (session, version, token) = Default::default();
-        let shared = Shared { url, headers: map, auth, incoming: messages, session, version, token, closed: CancellationToken::new() };
+        let (session, version, last_sent_token) = Default::default();
+        let shared =
+            Shared { url, headers: map, auth, incoming: messages, session, version, last_sent_token, closed: CancellationToken::new() };
         Ok((Self(Arc::new(shared)), incoming))
     }
 }
@@ -132,7 +132,7 @@ impl Transport for Http {
         }
         this.closed.cancel();
         if this.session.lock().unwrap().is_some() {
-            let token = this.token.lock().unwrap().clone();
+            let token = this.last_sent_token.lock().unwrap().clone();
             let _ = this.request(Method::DELETE, token.as_deref()).timeout(Duration::from_secs(1)).send().await;
         }
     }
@@ -166,7 +166,7 @@ impl Shared {
                 Some(auth) => auth.token().await,
                 None => None,
             };
-            self.token.lock().unwrap().clone_from(&token);
+            self.last_sent_token.lock().unwrap().clone_from(&token);
             let mut request = self.request(method.clone(), token.as_deref()).header(ACCEPT, accept);
             if let Some(body) = &body {
                 request = request.header(CONTENT_TYPE, "application/json").body(body.clone());
