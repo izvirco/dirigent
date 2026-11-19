@@ -724,7 +724,7 @@ fn view_controls(this: &Dirigent, model: &Model, cx: &mut Context<Dirigent>) -> 
                 menu::item(format!("m/{}", m.label()), m.label(), "", model.metric == m, move |this, cx| this.set_usage_metric(m, cx), cx)
             })
             .collect();
-        menu::popup(Side::Below(24.), items, cx)
+        menu::popup(Side::Below { trigger_h: 24. }, items, cx)
     });
     let metric = theme::chip("usage-metric", model.metric.label(), false, open)
         .text_size(text::sm())
@@ -745,7 +745,7 @@ fn group_control(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             .into_iter()
             .map(|g| menu::item(format!("g/{}", g.label()), g.label(), "", s.group == g, move |this, cx| this.set_usage_group(g, cx), cx))
             .collect();
-        menu::popup(Side::Below(24.), items, cx)
+        menu::popup(Side::Below { trigger_h: 24. }, items, cx)
     });
     theme::chip("usage-group", s.group.label(), false, open)
         .text_size(text::sm())

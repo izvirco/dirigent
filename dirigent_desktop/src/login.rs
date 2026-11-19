@@ -171,7 +171,7 @@ pub(crate) fn host_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful
                 menu::item(format!("sh/{name}"), name.clone(), detail, selected, move |this, cx| this.set_shown_host(name.clone(), cx), cx)
             })
             .collect();
-        menu::popup(Side::BelowRight(26.), items, cx)
+        menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
     theme::labeled_chip("settings-host", "Host", this.login.host.clone(), false, open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::SettingsHost, cx)))

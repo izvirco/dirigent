@@ -101,7 +101,7 @@ fn thread_row(host: &str, t: &ThreadSummary, depth: usize, selected: bool, this:
         (None, Some(ms)) => duration(ms),
         (None, None) => String::new(),
     };
-    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Tree, Side::BelowRight(20.), this, cx);
+    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Tree, Side::BelowRight { trigger_h: 20. }, this, cx);
     let asking = archive_confirm.is_some();
     let action = (archived || this.at_rest(host, t)).then(|| {
         let (h, tid) = (h.clone(), tid.clone());

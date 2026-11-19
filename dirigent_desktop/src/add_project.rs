@@ -110,7 +110,7 @@ fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Di
                 )
             })
             .collect();
-        menu::popup(Side::Below(24.), items, cx)
+        menu::popup(Side::Below { trigger_h: 24. }, items, cx)
     });
     let host_chip = theme::chip("new-project-host", host.clone(), false, host_open)
         .flex_shrink_0()
