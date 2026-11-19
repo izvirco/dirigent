@@ -44,6 +44,8 @@ impl Tab {
     }
 }
 
+const COMMON_EFFORTS: [&str; 3] = ["low", "medium", "high"];
+
 const SAMPLE: &str = "The websocket client in net.rs reconnects with a fixed 1s delay, which hammers the service when a host is \
 down for a while. Switch it to exponential backoff starting at 1s and capped at 30s, reset the delay once a connection \
 succeeds, and make sure the status shown in the sidebar still flips to connecting on every attempt. Add a unit test for \
@@ -296,12 +298,11 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
 
     let effort_open = this.menu == Some(Menu::TitleEffort);
     let effort_menu = effort_open.then(|| {
-        // MUST KILL: extract: the fallback ["low", "medium", "high"] → a named const of the efforts every reasoning model takes
         let levels = models
             .iter()
             .find(|m| m.id == this.config.title.model)
             .map(|m| m.efforts.clone())
-            .unwrap_or_else(|| ["low", "medium", "high"].map(String::from).to_vec());
+            .unwrap_or_else(|| COMMON_EFFORTS.map(String::from).to_vec());
         let items = levels
             .into_iter()
             .map(|l| {
@@ -415,7 +416,6 @@ fn tools(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     )
 }
 
-// MUST KILL: rename: telemetry → telemetry_choice_unsent
 fn telemetry(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let on = this.config.telemetry;
     let switch = switch("telemetry", on, cx, |this, cx| this.toggle_telemetry(cx));

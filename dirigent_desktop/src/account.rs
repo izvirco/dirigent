@@ -7,15 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::info;
 
-// MUST KILL: rename: CHECK_EVERY -> CHECK_EVERY_TICKS, counted in Dirigent::tick seconds
-pub const CHECK_EVERY: u64 = 5;
+pub const CHECK_SECS: u64 = 5;
 
 const NAME: &str = "Vir forge";
+
+const NO_DOT: u32 = 0x00000000;
 
 #[derive(Default)]
 pub struct State {
     pub status: Status,
-    // MUST KILL: rename: signing_in -> sign_in_cancel, the flag that cancels the waiting browser sign-in
     pub signing_in: Option<Arc<AtomicBool>>,
 }
 
@@ -98,10 +98,8 @@ impl Dirigent {
 
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
     let t = theme::t();
-    let ended = matches!(this.forge.status, Status::Ended(_)).then(|| {
-        // MUST KILL: extract: the 27-unit indent as a const shared with row()'s dot and gap
-        div().pl(u(27.)).pb_1().text_size(text::sm()).text_color(rgba(t.error)).child(forge::ENDED)
-    });
+    let ended = matches!(this.forge.status, Status::Ended(_))
+        .then(|| line(NO_DOT).pb_1().child(div().flex_1().min_w_0().text_size(text::sm()).text_color(rgba(t.error)).child(forge::ENDED)));
     let page = forge::forge().account_page();
     let link = div()
         .id("forge-account-page")
@@ -123,14 +121,9 @@ fn board_row(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
         .text_color(rgba(t.error))
         .on_click(cx.listener(|this, _, _, cx| this.leave_board(cx)));
     Some(
-        div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .gap_3()
+        line(NO_DOT)
             .h(u(38.))
-            .px_2()
-            .child(theme::dot(theme::alpha(t.fg_2, 0x00)))
+            .pr_2()
             .child(
                 div()
                     .flex_1()
@@ -197,14 +190,9 @@ fn row(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .into_any_element(),
         ),
     }
-    div()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_3()
+    line(dot)
         .h(u(38.))
-        .px_2()
-        .child(theme::dot(dot))
+        .pr_2()
         .child(
             div()
                 .flex_1()
@@ -217,4 +205,8 @@ fn row(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 .child(div().min_w_0().truncate().text_size(text::sm()).text_color(rgba(t.fg_2)).child(SharedString::from(host))),
         )
         .child(div().flex().flex_row().items_center().gap_3().flex_shrink_0().children(right))
+}
+
+fn line(dot: u32) -> Div {
+    div().flex().flex_row().items_center().gap_3().pl_2().child(theme::dot(dot))
 }

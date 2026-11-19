@@ -458,7 +458,7 @@ pub struct Dirigent {
     watch: config::Watch,
     config_edit: u64,
     pub settings: settings::State,
-    pub login: crate::login::State,
+    pub shown_host: crate::login::HostTabs,
     pub proxy: proxy::State,
     pub mcp: mcp::State,
     titling: HashMap<(String, String), Instant>,
@@ -571,7 +571,7 @@ impl Dirigent {
             cx.subscribe(input, |this, _, _: &input::UserEdited, cx| this.schedule_apply(cx)).detach();
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
-        let login = crate::login::State::new(cx);
+        let shown_host = crate::login::HostTabs::new(cx);
         let proxy = proxy::State::new(cx);
         let mcp = mcp::State::new(cx);
         let (fonts, missing) = config.fonts.resolve(cx);
@@ -635,7 +635,7 @@ impl Dirigent {
             watch: config::Watch::new(),
             config_edit: 0,
             settings,
-            login,
+            shown_host,
             proxy,
             mcp,
             titling: HashMap::new(),
@@ -1054,7 +1054,7 @@ impl Dirigent {
             ServerMessage::Ok { reply_to } => {
                 self.prompts.remove(&reply_to);
                 let _ = self.change_answered(&host, reply_to)
-                    || self.on_login_reply(&host, reply_to, Ok(()), cx)
+                    || self.take_login_reply(&host, reply_to, Ok(()), cx)
                     || self.take_mcp_reply(&host, reply_to, Ok(()), cx)
                     || self.on_host_update_reply(&host, reply_to, Ok(()), cx);
             }
@@ -1273,7 +1273,7 @@ impl Dirigent {
                     return;
                 }
                 if let Some(id) = reply_to
-                    && (self.on_login_reply(&host, id, Err(message.clone()), cx)
+                    && (self.take_login_reply(&host, id, Err(message.clone()), cx)
                         || self.take_proxy_reply(id, Err(message.clone()), cx)
                         || self.take_mcp_reply(&host, id, Err(message.clone()), cx)
                         || self.on_host_update_reply(&host, id, Err(message.clone()), cx))
@@ -1681,7 +1681,7 @@ impl Dirigent {
                             _ => {}
                         }
                     }
-                    if this.ticks % account::CHECK_EVERY == 0 {
+                    if this.ticks % account::CHECK_SECS == 0 {
                         this.sync_forge(cx);
                     }
                     if this.ticks % leaderboard::UPLOAD_EVERY == 0 {
@@ -3434,7 +3434,7 @@ impl Dirigent {
         if self.onboarding_open() {
             return;
         }
-        if self.host_form_escape(cx) || self.close_mcp_form_on_escape(cx) {
+        if self.close_host_form_on_escape(cx) || self.close_mcp_form_on_escape(cx) {
             return;
         }
         if self.modal.is_some() {

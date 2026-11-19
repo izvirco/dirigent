@@ -1,7 +1,7 @@
 use crate::app::Dirigent;
 use crate::icons::icon;
 use crate::input::{Submitted, TextInput};
-use crate::login::{host_chip, too_old};
+use crate::login::{explain_unknown_request, host_chip};
 use crate::net::HostStatus;
 use crate::settings::{self, field, primary_button, row, section, text_button};
 use crate::theme::{self, text};
@@ -60,7 +60,7 @@ impl Dirigent {
     }
 
     pub(crate) fn enter_proxy_settings(&mut self, cx: &mut Context<Self>) {
-        if self.host(&self.login.host).is_none() {
+        if self.host(&self.shown_host.host).is_none() {
             self.show_host(hosts::LOCAL.to_owned());
         }
         self.request_proxy_settings(cx);
@@ -73,7 +73,7 @@ impl Dirigent {
     }
 
     pub(crate) fn request_proxy_settings(&mut self, cx: &mut Context<Self>) {
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         self.proxy.shown = None;
         self.proxy.saving = false;
         self.proxy.request = None;
@@ -96,7 +96,7 @@ impl Dirigent {
     }
 
     fn set_proxy(&mut self, url: String, key: String, management_key: String, cx: &mut Context<Self>) {
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         if !self.connected(&host) {
             return self.toast(format!("{host} is offline"), cx);
         }
@@ -111,7 +111,7 @@ impl Dirigent {
         }
         self.proxy.saving = false;
         if outcome.is_ok() {
-            let host = self.login.host.clone();
+            let host = self.shown_host.host.clone();
             self.request(&host, |id| ClientMessage::ListModels { id });
         }
         if let Ok(proxy) = &outcome {
@@ -122,7 +122,7 @@ impl Dirigent {
                 input.update(cx, |key, cx| key.set_placeholder(if held { KEY_SET } else { unset }, cx));
             }
         }
-        self.proxy.shown = Some(outcome.map_err(too_old));
+        self.proxy.shown = Some(outcome.map_err(explain_unknown_request));
         true
     }
 }
@@ -138,7 +138,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
 pub fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let p = &this.proxy;
-    let host = &this.login.host;
+    let host = &this.shown_host.host;
     let note = |text: SharedString, color: u32| div().min_w_0().text_size(text::sm()).text_color(rgba(color)).child(text);
     let count = |n: usize, what: &str| if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") };
     let marked = |mark: gpui::AnyElement, line: Div| {

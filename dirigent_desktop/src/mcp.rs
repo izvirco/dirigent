@@ -1,6 +1,6 @@
 use crate::app::{Dirigent, Menu, Modal};
 use crate::input::{self, Submitted, TextInput};
-use crate::login::{Login, action, hint, host_chip, login_panel, too_old};
+use crate::login::{Login, action, explain_unknown_request, hint, host_chip, login_panel};
 use crate::menu::{self, Side};
 use crate::net::HostStatus;
 use crate::settings::{self, field, saved_to, section, switch};
@@ -133,7 +133,7 @@ impl State {
 
 impl Dirigent {
     pub(crate) fn enter_mcp(&mut self, cx: &mut Context<Self>) {
-        if self.host(&self.login.host).is_none() {
+        if self.host(&self.shown_host.host).is_none() {
             self.show_host(hosts::LOCAL.to_owned());
         }
         self.mcp.checks.retain(|_, c| matches!(c, Check::Running(_)));
@@ -146,7 +146,7 @@ impl Dirigent {
     }
 
     fn request_mcp(&mut self) {
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         if self.connected(&host) {
             self.mcp.list_request = Some(self.request(&host, |id| ClientMessage::ListMcpServers { id }));
         }
@@ -171,7 +171,7 @@ impl Dirigent {
     }
 
     pub(crate) fn on_mcp_servers(&mut self, host: &str, reply_to: u64, servers: Vec<McpServer>, path: String, cx: &mut Context<Self>) {
-        if host != self.login.host || self.mcp.list_request.take_if(|r| *r == reply_to).is_none() {
+        if host != self.shown_host.host || self.mcp.list_request.take_if(|r| *r == reply_to).is_none() {
             return;
         }
         self.mcp.checks.retain(|name, _| servers.iter().any(|s| s.name == *name));
@@ -187,7 +187,7 @@ impl Dirigent {
             .filter(|s| s.error.is_none() && enabled(&s.config) && !self.mcp.checks.contains_key(&s.name))
             .map(|s| s.name.clone())
             .collect();
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         for name in due {
             let id = self.request(&host, |id| ClientMessage::CheckMcpServer { id, name: name.clone() });
             self.mcp.checks.insert(name, Check::Running(id));
@@ -201,7 +201,7 @@ impl Dirigent {
     }
 
     pub(crate) fn on_mcp_status(&mut self, host: &str, reply_to: u64, status: McpServerStatus) {
-        if host != self.login.host {
+        if host != self.shown_host.host {
             return;
         }
         if let Some(name) = self.mcp.checked_by(reply_to) {
@@ -210,17 +210,17 @@ impl Dirigent {
     }
 
     pub(crate) fn take_mcp_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
-        let shown = host == self.login.host;
+        let shown = host == self.shown_host.host;
         let m = &mut self.mcp;
         if shown && m.list_request.take_if(|r| *r == reply_to).is_some() {
             if let Err(e) = outcome {
-                m.list = List::Failed(too_old(e));
+                m.list = List::Failed(explain_unknown_request(e));
             }
             return true;
         }
         if let Some(name) = m.checked_by(reply_to).filter(|_| shown) {
             if let Err(e) = outcome {
-                m.checks.insert(name, Check::Done(Err(too_old(e))));
+                m.checks.insert(name, Check::Done(Err(explain_unknown_request(e))));
             }
             return true;
         }
@@ -231,14 +231,14 @@ impl Dirigent {
                     self.close_mcp_form(cx);
                     self.mcp_changed(host, Some(&name), cx);
                 }
-                Err(e) => form.error = Some(too_old(e)),
+                Err(e) => form.error = Some(explain_unknown_request(e)),
             }
             cx.notify();
             return true;
         }
         if let Some(Change { server, failure }) = m.changes.remove(&reply_to) {
             if let Err(e) = outcome {
-                self.toast(format!("{failure}: {}", too_old(e)), cx);
+                self.toast(format!("{failure}: {}", explain_unknown_request(e)), cx);
             }
             self.mcp_changed(host, Some(&server), cx);
             return true;
@@ -247,7 +247,7 @@ impl Dirigent {
     }
 
     pub(crate) fn mcp_changed(&mut self, host: &str, name: Option<&str>, cx: &mut Context<Self>) {
-        if host != self.login.host {
+        if host != self.shown_host.host {
             return;
         }
         match name {
@@ -261,7 +261,7 @@ impl Dirigent {
     }
 
     fn change_mcp(&mut self, name: &str, failure: String, make: impl FnOnce(u64, String) -> ClientMessage, cx: &mut Context<Self>) {
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         if !self.connected(&host) {
             return self.toast(format!("{host} is offline"), cx);
         }
@@ -271,8 +271,8 @@ impl Dirigent {
     }
 
     fn save_mcp_entry(&mut self, name: &str, config: Value, failure: String, cx: &mut Context<Self>) {
-        if !self.connected(&self.login.host) {
-            return self.toast(format!("{} is offline", self.login.host), cx);
+        if !self.connected(&self.shown_host.host) {
+            return self.toast(format!("{} is offline", self.shown_host.host), cx);
         }
         if let List::Listed { servers, .. } = &mut self.mcp.list
             && let Some(s) = servers.iter_mut().find(|s| s.name == name)
@@ -307,14 +307,14 @@ impl Dirigent {
     }
 
     pub fn start_mcp_login(&mut self, name: &str, cx: &mut Context<Self>) {
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         if !self.connected(&host) {
             return self.toast(format!("{host} is offline"), cx);
         }
         self.cancel_login(cx);
         self.drop_mcp_form();
         let request = self.request(&host, |id| ClientMessage::McpLogin { id, name: name.to_owned() });
-        self.login.login = Some(Login::new(host, request, name.to_owned()));
+        self.shown_host.login = Some(Login::new(host, request, name.to_owned()));
         self.focus_mcp(cx);
         cx.notify();
     }
@@ -367,7 +367,7 @@ impl Dirigent {
             let base = form.editing.as_ref().map(|s| &s.config);
             config_from(base, &text(&m.run), &text(&m.env_or_headers), &text(&m.client), &text(&m.description))
         };
-        let host = self.login.host.clone();
+        let host = self.shown_host.host.clone();
         let made = made.and_then(|config| if self.connected(&host) { Ok(config) } else { Err(format!("{host} is offline")) });
         match made {
             Ok(config) => {
@@ -412,10 +412,10 @@ impl Dirigent {
         if !self.mcp_open() {
             return;
         }
-        let login = self.login.login.as_ref();
+        let login = self.shown_host.login.as_ref();
         let m = &self.mcp;
         match (login, &m.form) {
-            (Some(l), _) if l.typing() => self.focus(self.login.answer.focus_handle(cx), cx),
+            (Some(l), _) if l.typing() => self.focus(self.shown_host.answer.focus_handle(cx), cx),
             (None, Some(f)) if f.editing.is_some() => self.focus(m.run.focus_handle(cx), cx),
             (None, Some(_)) => self.focus(m.name.focus_handle(cx), cx),
             _ => self.focus_root(cx),
@@ -579,8 +579,8 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
 }
 
 fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
-    let host = &this.login.host;
-    let login = this.login.login.as_ref();
+    let host = &this.shown_host.host;
+    let login = this.shown_host.login.as_ref();
     let content = match (login, &this.mcp.list) {
         (Some(l), _) => login_panel(l, this, cx),
         (None, List::Unlisted) if !this.connected(host) => hint(format!("{host} is offline")),
