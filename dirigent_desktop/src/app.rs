@@ -904,9 +904,8 @@ impl Dirigent {
         rows
     }
 
-    pub fn lineage(&self, host: &str, id: &str) -> Vec<LineageNode<'_>> {
-        let Some(h) = self.host(host) else { return vec![] };
-        orchestra::lineage(&h.threads, id, &self.unfolded)
+    pub fn lineage(&self, host: &str, id: &str) -> Option<Vec<LineageNode<'_>>> {
+        orchestra::lineage(&self.host(host)?.threads, id, &self.unfolded)
     }
 
     pub fn toggle_unfolded(&mut self, parent: &str, cx: &mut Context<Self>) {
@@ -1092,8 +1091,8 @@ impl Dirigent {
             }
             ServerMessage::Dirs { reply_to, dirs } => {
                 self.dir_requests.remove(&reply_to);
-                if let Some(s) = self.add_project.as_mut().filter(|s| s.list_request == Some(reply_to)) {
-                    s.dirs = Some(Ok(dirs));
+                if let Some(s) = self.add_project.as_mut().filter(|s| s.listing.request == Some(reply_to)) {
+                    s.listing.dirs = Some(Ok(dirs));
                     s.selected = 0;
                 }
             }
@@ -1292,14 +1291,14 @@ impl Dirigent {
                     self.titling.remove(&thread);
                 }
                 if let Some(id) = reply_to.filter(|id| self.dir_requests.remove(id)) {
-                    if let Some(s) = self.add_project.as_mut().filter(|s| s.list_request == Some(id)) {
+                    if let Some(s) = self.add_project.as_mut().filter(|s| s.listing.request == Some(id)) {
                         // An older service doesn't know `ListDirs`.
                         let message = if message.starts_with("bad request") {
                             "This host's service can't list directories (too old). Type a full path.".to_owned()
                         } else {
                             message
                         };
-                        s.dirs = Some(Err(message));
+                        s.listing.dirs = Some(Err(message));
                     }
                     return;
                 }
@@ -1949,11 +1948,10 @@ impl Dirigent {
         let host = self.new_project_host().unwrap_or_default();
         let id = self.next_id();
         let Some(s) = &mut self.add_project else { return };
-        if !force && s.host == host && s.dir == dir && s.list_request.is_some() {
+        if !force && s.listing.host == host && s.listing.dir == dir && s.listing.request.is_some() {
             return;
         }
-        (s.host, s.dir, s.dirs) = (host.clone(), dir.to_owned(), None);
-        s.list_request = (!dir.is_empty()).then_some(id);
+        s.listing = add_project::Listing { host: host.clone(), dir: dir.to_owned(), dirs: None, request: (!dir.is_empty()).then_some(id) };
         if !dir.is_empty() {
             self.dir_requests.insert(id);
             self.net.send(&host, ClientMessage::ListDirs { id, path: dir.to_owned() });
@@ -2307,7 +2305,7 @@ impl Dirigent {
             Panel::Open => true,
             Panel::Closed => false,
             Panel::Auto => {
-                t.screen.is_some() || t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && !self.lineage(&t.host, &t.id).is_empty())
+                t.screen.is_some() || t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && self.lineage(&t.host, &t.id).is_some())
             }
         }
     }

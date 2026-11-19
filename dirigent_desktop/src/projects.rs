@@ -19,7 +19,6 @@ pub struct HostState {
 
 pub const ORPHANS: &str = "orphans";
 
-// MUST KILL: type: Links' (host, project id) key → a ProjectRef struct
 pub type Links = HashMap<(String, String), String>;
 
 pub type Names = HashMap<String, String>;
@@ -35,8 +34,7 @@ pub struct Group {
     pub name: String,
     pub dir_name: String,
     pub members: Vec<Member>,
-    // MUST KILL: rename: threads → threads_newest_first
-    pub threads: Vec<(String, ThreadSummary)>,
+    pub threads_newest_first: Vec<(String, ThreadSummary)>,
 }
 
 impl Group {
@@ -45,12 +43,12 @@ impl Group {
     }
 
     pub fn threads_of(&self, member: &Member) -> usize {
-        self.threads.iter().filter(|(h, t)| *h == member.host && t.project_id.as_deref() == Some(&member.project.id)).count()
+        self.threads_newest_first.iter().filter(|(h, t)| *h == member.host && t.project_id.as_deref() == Some(&member.project.id)).count()
     }
 
     pub fn member_for(&self, host: Option<&str>) -> &Member {
         let on = |h: &str| self.members.iter().find(|m| m.host == h);
-        host.and_then(on).or_else(|| self.threads.first().and_then(|(h, _)| on(h))).unwrap_or(&self.members[0])
+        host.and_then(on).or_else(|| self.threads_newest_first.first().and_then(|(h, _)| on(h))).unwrap_or(&self.members[0])
     }
 }
 
@@ -75,8 +73,6 @@ pub fn same_local_path(a: &str, b: &str) -> bool {
     norm(a) == norm(b)
 }
 
-// MUST KILL: extract: groups' naming rule (the first member not linked in names the group) → a fn of its own
-// MUST KILL: extract: groups' two stable sorts → one sort_by_key on (order position, Reverse(latest), name)
 pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String]) -> (Vec<Group>, Vec<(String, ThreadSummary)>) {
     let mut by_key: HashMap<String, Group> = HashMap::new();
     let mut seen: Vec<String> = vec![];
@@ -86,12 +82,8 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
             let linked = links.contains_key(&(host.name.clone(), project.id.clone()));
             let group = by_key.entry(key.clone()).or_insert_with(|| {
                 seen.push(key.clone());
-                Group { key: key.clone(), name: String::new(), dir_name: String::new(), members: vec![], threads: vec![] }
+                Group { key: key.clone(), name: String::new(), dir_name: String::new(), members: vec![], threads_newest_first: vec![] }
             });
-            if group.members.iter().all(|m| m.linked && !linked) {
-                group.dir_name = basename(&project.path).to_owned();
-                group.name = names.get(&key).cloned().unwrap_or_else(|| group.dir_name.clone());
-            }
             group.members.push(Member { host: host.name.clone(), project: project.clone(), linked });
         }
     }
@@ -105,7 +97,7 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
                 .and_then(|pid| host.projects.iter().find(|p| p.id == *pid))
                 .map(|p| group_key(&host.name, p, links));
             match key.and_then(|k| by_key.get_mut(&k)) {
-                Some(group) => group.threads.push((host.name.clone(), thread.clone())),
+                Some(group) => group.threads_newest_first.push((host.name.clone(), thread.clone())),
                 None => orphans.push((host.name.clone(), thread.clone())),
             }
         }
@@ -113,17 +105,19 @@ pub fn groups(hosts: &[HostState], links: &Links, names: &Names, order: &[String
 
     let mut groups: Vec<Group> = seen.into_iter().filter_map(|k| by_key.remove(&k)).collect();
     for g in &mut groups {
+        let namesake = g.members.iter().find(|m| !m.linked).unwrap_or(&g.members[0]);
+        g.dir_name = basename(&namesake.project.path).to_owned();
+        g.name = names.get(&g.key).cloned().unwrap_or_else(|| g.dir_name.clone());
         g.members.sort_by(|a, b| a.host.cmp(&b.host));
-        g.threads.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
+        g.threads_newest_first.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     }
-    let latest = |g: &Group| g.threads.first().map(|(_, t)| t.updated_at).unwrap_or(0);
-    groups.sort_by(|a, b| latest(b).cmp(&latest(a)).then_with(|| a.name.cmp(&b.name)));
-    groups.sort_by_key(|g| order.iter().position(|k| *k == g.key).unwrap_or(usize::MAX));
+    let place = |g: &Group| order.iter().position(|k| *k == g.key).unwrap_or(usize::MAX);
+    let latest = |g: &Group| g.threads_newest_first.first().map(|(_, t)| t.updated_at).unwrap_or(0);
+    groups.sort_by_cached_key(|g| (place(g), std::cmp::Reverse(latest(g)), g.name.clone()));
     orphans.sort_by_key(|(_, t)| std::cmp::Reverse(t.updated_at));
     (groups, orphans)
 }
 
-// MUST KILL: extract: search's 0 / 1 / 2 ranks → a Match enum (NamePrefix, InName, InPathOrHost) ordered best first
 pub fn search(groups: Vec<Group>, query: &str) -> Vec<Group> {
     let query = query.to_lowercase();
     let words: Vec<&str> = query.split_whitespace().collect();
@@ -165,16 +159,15 @@ pub fn moved(order: &[String], groups: &[Group], key: &str, onto: &str) -> Vec<S
     out
 }
 
-// MUST KILL: rename: drop_slot's y → y_below_list_top
-pub fn drop_slot(heights: &[f32], gap: f32, dragged: usize, y: f32) -> usize {
+pub fn drop_slot(heights: &[f32], gap: f32, dragged: usize, y_below_list_top: f32) -> usize {
     let Some(&own) = heights.get(dragged) else { return dragged };
     let (mut top, mut slot) = (0., dragged);
     for (i, height) in heights.iter().enumerate() {
         let bottom = top + height;
-        if i < dragged && y < top + own {
+        if i < dragged && y_below_list_top < top + own {
             return i;
         }
-        if i > dragged && y > bottom - own {
+        if i > dragged && y_below_list_top > bottom - own {
             slot = i;
         }
         top = bottom + gap;
@@ -261,7 +254,7 @@ mod tests {
             ),
             host(
                 "box",
-                vec![project("b", "/srv/app", Some("gh/me/app")), project("m", "/srv/notes", None)],
+                vec![project("b", "/srv/app-box", Some("gh/me/app")), project("m", "/srv/notes", None)],
                 vec![thread("t3", Some("b"), 7)],
             ),
         ];
@@ -272,7 +265,7 @@ mod tests {
         assert_eq!(groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(), ["app", "notes"]);
         let app = &groups[0];
         assert_eq!(app.members.iter().map(|m| m.host.as_str()).collect::<Vec<_>>(), ["box", "local"]);
-        assert_eq!(app.threads.iter().map(|(_, t)| t.id.as_str()).collect::<Vec<_>>(), ["t3", "t1"]);
+        assert_eq!(app.threads_newest_first.iter().map(|(_, t)| t.id.as_str()).collect::<Vec<_>>(), ["t3", "t1"]);
         assert!(app.members.iter().all(|m| !m.linked));
         let notes = &groups[1];
         assert_eq!(notes.members.len(), 2);

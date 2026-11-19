@@ -13,28 +13,30 @@ use std::ops::Range;
 
 const WIDTH: f32 = 560.;
 const ROW_H: f32 = 28.;
-// MUST KILL: extract: the list's p_1 padding (the + 8.) as a named const
-const LIST_H: f32 = ROW_H * 8. + 8.;
+const LIST_PAD: f32 = 4.;
+const LIST_H: f32 = ROW_H * 8. + 2. * LIST_PAD;
 
 #[derive(Default)]
 pub struct State {
-    // MUST KILL: extract: host, dir, dirs and list_request into a Listing struct
-    pub host: String,
-    pub dir: String,
-    pub dirs: Option<Result<Vec<Dir>, String>>,
-    pub list_request: Option<u64>,
+    pub listing: Listing,
     pub add_request: Option<u64>,
     pub error: Option<String>,
-    // MUST KILL: rename: selected -> selected_visible, an index into visible()
     pub selected: usize,
     pub scroll: UniformListScrollHandle,
     pub link: Option<Offer>,
 }
 
+#[derive(Default)]
+pub struct Listing {
+    pub host: String,
+    pub dir: String,
+    pub dirs: Option<Result<Vec<Dir>, String>>,
+    pub request: Option<u64>,
+}
+
 pub struct Offer {
     pub key: String,
     pub name: String,
-    // MUST KILL: type: candidates as a struct with group key and members fields, not a tuple
     pub candidates: Vec<(String, String)>,
 }
 
@@ -57,10 +59,10 @@ pub fn offer(groups: &[Group], host: &str, project_id: &str) -> Option<Offer> {
     if own.members.len() > 1 {
         return None;
     }
+    let unrenamed = |g: &Group| g.name == g.dir_name;
     let others: Vec<(String, String)> = groups
         .iter()
-        // MUST KILL: extract: the unrenamed same-dir-name test in offer() as a named predicate
-        .filter(|g| g.key != own.key && g.dir_name == own.dir_name && g.name == g.dir_name && g.members.iter().all(|m| m.host != host))
+        .filter(|g| g.key != own.key && g.dir_name == own.dir_name && unrenamed(g) && g.members.iter().all(|m| m.host != host))
         .map(|g| {
             let members: Vec<String> = g.members.iter().map(|m| format!("{} {}", m.host, m.project.path)).collect();
             (g.key.clone(), members.join(", "))
@@ -72,8 +74,8 @@ pub fn offer(groups: &[Group], host: &str, project_id: &str) -> Option<Offer> {
 impl State {
     pub fn visible(&self, text: &str) -> Vec<&Dir> {
         let (dir, prefix) = split(text);
-        match &self.dirs {
-            Some(Ok(dirs)) if dir == self.dir => matches(dirs, prefix),
+        match &self.listing.dirs {
+            Some(Ok(dirs)) if dir == self.listing.dir => matches(dirs, prefix),
             _ => vec![],
         }
     }
@@ -132,23 +134,18 @@ fn browse_page(this: &Dirigent, state: &State, cx: &mut Context<Dirigent>) -> Di
     let (dir, _) = split(&text);
     let visible: Vec<(SharedString, bool)> = state.visible(&text).into_iter().map(|d| (d.name.clone().into(), d.repo)).collect();
     let connected = this.hosts.iter().any(|h| h.name == host && h.status == HostStatus::Connected);
-    // MUST KILL: type: note as an enum (Error / Info) instead of a (String, bool)
-    let note = match &state.dirs {
-        _ if state.error.is_some() => state.error.clone().map(|e| (e, true)),
-        _ if !connected => Some((format!("{host} is not connected"), true)),
-        _ if dir.is_empty() => Some(("Start with ~/ or an absolute path".to_owned(), false)),
-        Some(Err(e)) if dir == state.dir => Some((e.clone(), true)),
-        Some(Ok(_)) if dir == state.dir && visible.is_empty() => Some(("No matching directories".to_owned(), false)),
-        Some(Ok(_)) if dir == state.dir => None,
-        _ => Some(("Loading…".to_owned(), false)),
+    let (error, quiet) = (theme::t().error, theme::t().fg_2);
+    let note = match &state.listing.dirs {
+        _ if state.error.is_some() => state.error.clone().map(|e| (e, error)),
+        _ if !connected => Some((format!("{host} is not connected"), error)),
+        _ if dir.is_empty() => Some(("Start with ~/ or an absolute path".to_owned(), quiet)),
+        Some(Err(e)) if dir == state.listing.dir => Some((e.clone(), error)),
+        Some(Ok(_)) if dir == state.listing.dir && visible.is_empty() => Some(("No matching directories".to_owned(), quiet)),
+        Some(Ok(_)) if dir == state.listing.dir => None,
+        _ => Some(("Loading…".to_owned(), quiet)),
     };
-    let list = div().h(u(LIST_H)).flex().flex_col().p_1().child(match note {
-        Some((note, error)) => div()
-            .p_2()
-            .text_size(text::sm())
-            .text_color(rgba(if error { theme::t().error } else { theme::t().fg_2 }))
-            .child(note)
-            .into_any_element(),
+    let list = div().h(u(LIST_H)).flex().flex_col().p(u(LIST_PAD)).child(match note {
+        Some((note, color)) => div().p_2().text_size(text::sm()).text_color(rgba(color)).child(note).into_any_element(),
         None => dir_list(visible, state.selected, dir.to_owned(), &state.scroll, cx).into_any_element(),
     });
     div().flex().flex_col().child(top).child(div().h(px(1.)).bg(rgba(theme::t().line))).child(list)
@@ -273,7 +270,7 @@ mod tests {
                 linked: false,
             })
             .collect();
-        Group { key: key.into(), name: name.into(), dir_name: name.into(), members, threads: vec![] }
+        Group { key: key.into(), name: name.into(), dir_name: name.into(), members, threads_newest_first: vec![] }
     }
 
     #[test]
