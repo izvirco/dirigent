@@ -103,7 +103,6 @@ async fn connection(socket: WebSocket, svc: Arc<Service>, peer: SocketAddr) {
         protocol: dirigent_protocol::PROTOCOL,
     });
 
-    // MUST KILL: extract: a prioritized outbox (replies, pushes, screens, blobs) instead of four channels and a biased select
     let writer = tokio::spawn(async move {
         loop {
             let msg = tokio::select! {

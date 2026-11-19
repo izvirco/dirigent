@@ -20,8 +20,7 @@ pub struct Logins {
 #[derive(Default)]
 struct Inner {
     running: HashMap<(u64, u64), Running>,
-    // MUST KILL: rename: cancelled → cancelled_before_start; concurrent requests let LoginCancel beat its McpLogin
-    cancelled: HashSet<(u64, u64)>,
+    cancelled_before_start: HashSet<(u64, u64)>,
 }
 
 struct Running {
@@ -43,13 +42,13 @@ impl Logins {
         let mut inner = self.inner.lock().unwrap();
         match inner.running.get(&(conn, login)) {
             Some(running) => running.cancel.cancel(),
-            None => drop(inner.cancelled.insert((conn, login))),
+            None => drop(inner.cancelled_before_start.insert((conn, login))),
         }
     }
 
     pub fn disconnected(&self, conn: u64) {
         let mut inner = self.inner.lock().unwrap();
-        inner.cancelled.retain(|(c, _)| *c != conn);
+        inner.cancelled_before_start.retain(|(c, _)| *c != conn);
         for running in inner.running.iter().filter(|((c, _), _)| *c == conn).map(|(_, running)| running) {
             info!("login cancelled: its client left");
             running.cancel.cancel();
@@ -103,7 +102,7 @@ impl Service {
         let (key, cancel) = ((conn.id, id), CancellationToken::new());
         {
             let mut inner = self.logins.inner.lock().unwrap();
-            if inner.cancelled.remove(&key) {
+            if inner.cancelled_before_start.remove(&key) {
                 return ServerMessage::Error { reply_to: Some(id), message: "Sign-in cancelled".into() };
             }
             inner.running.insert(key, Running { cancel: cancel.clone(), paste: None });

@@ -134,7 +134,6 @@ pub fn logout() -> Result<Option<Account>> {
 
 #[derive(Default)]
 struct Minter {
-    // MUST KILL: type: the (sub, jwt, until) tuple wants a named struct
     cache: Mutex<BTreeMap<String, (String, String, i64)>>,
 }
 

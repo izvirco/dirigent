@@ -2,7 +2,6 @@ use dirigent_agent::config::{self, Dirs, Proxy};
 use std::path::Path;
 use tracing::{info, warn};
 
-// MUST KILL: type: COPIED's order matters (agent.toml last marks a whole copy); make the marker explicit
 const COPIED: [&str; 3] = ["AGENTS.md", "skills", "agent.toml"];
 
 pub fn prepare(dirs: &Dirs) {
@@ -54,9 +53,8 @@ fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
 
 fn copy_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
     let meta = src.symlink_metadata()?;
-    // MUST KILL: rename: written → instance_writes_it
-    let written = src.file_name().is_some_and(|n| n == "agent.toml");
-    if meta.is_symlink() && cfg!(unix) && !written {
+    let instance_writes_it = src.file_name().is_some_and(|n| n == "agent.toml");
+    if meta.is_symlink() && cfg!(unix) && !instance_writes_it {
         #[cfg(unix)]
         std::os::unix::fs::symlink(std::fs::read_link(src)?, dst)?;
     } else if src.is_dir() {
@@ -68,7 +66,7 @@ fn copy_entry(src: &Path, dst: &Path) -> std::io::Result<()> {
     } else {
         std::fs::copy(src, dst)?;
         #[cfg(unix)]
-        if written {
+        if instance_writes_it {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o600))?;
         }
