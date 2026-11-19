@@ -810,9 +810,18 @@ impl Dirigent {
     }
 
     pub fn status(&self, host: &str, t: &ThreadSummary) -> Status {
-        match Status::of(t) {
-            Status::Done if t.jobs > 0 || self.has_busy_children(host, &t.id) => Status::Waiting,
-            s => s,
+        if t.asking() && !t.archived {
+            Status::Asking
+        } else if t.running() {
+            Status::Working
+        } else if t.archived {
+            Status::Archived
+        } else if t.snoozed {
+            Status::Snoozed
+        } else if t.jobs > 0 || self.has_busy_children(host, &t.id) {
+            Status::Waiting
+        } else {
+            Status::Done
         }
     }
 
@@ -2116,7 +2125,7 @@ impl Dirigent {
     }
 
     fn reload_config(&mut self, cx: &mut Context<Self>) {
-        match config::load() {
+        match config::load_or_write() {
             Ok(c) => {
                 for font in self.apply_config(c, cx) {
                     self.toast(format!("font `{font}` is not installed"), cx);
@@ -2168,7 +2177,7 @@ impl Dirigent {
 
     fn set_text_size(&mut self, size: f32, cx: &mut Context<Self>) {
         if size != self.config.fonts.size() {
-            self.edit_config(|c| c.fonts.size = size, cx);
+            self.edit_config(|c| c.fonts.set_size(size), cx);
         }
     }
 
