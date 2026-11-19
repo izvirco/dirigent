@@ -245,13 +245,13 @@ impl Proxy {
                 Ok(Ok(Some(bytes))) => bytes,
             };
             for event in events.push(&bytes) {
-                if wire.event(event, on)? {
+                if wire.event(event, on)? == Progress::Complete {
                     return Ok(());
                 }
             }
         }
         if let Some(event) = events.finish()
-            && wire.event(event, on)?
+            && wire.event(event, on)? == Progress::Complete
         {
             return Ok(());
         }
@@ -303,15 +303,21 @@ async fn success(response: reqwest::Response) -> Result<reqwest::Response, Error
 }
 
 trait Wire: Send {
-    // MUST KILL: type: Wire::event's bool "the reply is complete" wants an enum (Continue / Complete)
-    fn event(&mut self, event: sse::Event, on: &mut (dyn FnMut(Chunk) + Send)) -> Result<bool, Error>;
+    fn event(&mut self, event: sse::Event, on: &mut (dyn FnMut(Chunk) + Send)) -> Result<Progress, Error>;
 
     fn take(&mut self) -> Partial;
 }
 
+#[derive(Debug, PartialEq)]
+enum Progress {
+    Continue,
+    Complete,
+}
+
+const STILL_STREAMING: Value = Value::Null;
+
 #[derive(Default)]
 struct Partial {
-    // MUST KILL: type: a tool call still streaming has input Value::Null; give it a state of its own in Partial.content
     content: Vec<Block>,
     usage: Usage,
     cache_write_1h: u64,
@@ -321,13 +327,12 @@ struct Partial {
 fn reply(model: &Model, partial: Partial, outcome: Option<Result<(), Error>>) -> Reply {
     let Partial { mut content, mut usage, cache_write_1h, stop } = partial;
     content.retain(|block| match block {
-        Block::ToolCall { input, .. } => !input.is_null(),
+        Block::ToolCall { input, .. } => *input != STILL_STREAMING,
         Block::Text { text, .. } => !text.is_empty(),
         Block::Thinking { text, signature, .. } => !text.is_empty() || signature.is_some(),
         Block::Image { .. } => true,
     });
     let calls = content.iter().any(|block| matches!(block, Block::ToolCall { .. }));
-    // MUST KILL: extract: a stop_of(stop, has_calls) fn out of reply for its MaxTokens and ToolUse overrides
     let outcome = outcome.map(|outcome| {
         outcome.and_then(|()| match stop {
             None => Err(Error::transient("The reply ended without saying why.")),
@@ -375,11 +380,10 @@ fn call_input(arguments: &str) -> Value {
         return Value::Object(Default::default());
     }
     let object = |json: &str| serde_json::from_str::<Value>(json).ok().filter(Value::is_object);
-    object(arguments).or_else(|| object(&repair(arguments))).unwrap_or_else(|| arguments.into())
+    object(arguments).or_else(|| object(&escape_raw_controls_and_stray_backslashes(arguments))).unwrap_or_else(|| arguments.into())
 }
 
-// MUST KILL: rename: repair -> escape_raw_controls_and_stray_backslashes
-fn repair(json: &str) -> String {
+fn escape_raw_controls_and_stray_backslashes(json: &str) -> String {
     let mut repaired = String::with_capacity(json.len());
     let mut in_string = false;
     let mut chars = json.char_indices();
@@ -492,13 +496,13 @@ mod tests {
         ("Be terse.", messages, tools)
     }
 
-    pub(super) fn replay(mut wire: impl Wire, stream: &str) -> (Partial, Vec<Chunk>, Result<bool, Error>) {
+    pub(super) fn replay(mut wire: impl Wire, stream: &str) -> (Partial, Vec<Chunk>, Result<Progress, Error>) {
         let mut chunks = vec![];
         let mut decoder = sse::Decoder::default();
-        let mut outcome = Ok(false);
+        let mut outcome = Ok(Progress::Continue);
         for event in decoder.push(stream.as_bytes()).into_iter().chain(decoder.finish()) {
             outcome = wire.event(event, &mut |chunk| chunks.push(chunk));
-            if outcome != Ok(false) {
+            if outcome != Ok(Progress::Continue) {
                 break;
             }
         }
@@ -651,7 +655,7 @@ mod tests {
         let model = model("claude-haiku-5-5", Api::Anthropic);
         let call = |input: Value| Block::ToolCall { id: "c".into(), name: "bash".into(), input };
         let unsigned = Block::Thinking { text: String::new(), signature: None, redacted: false };
-        let content = vec![unsigned, Block::text(""), Block::text("Hi."), call(json!({})), call(Value::Null)];
+        let content = vec![unsigned, Block::text(""), Block::text("Hi."), call(json!({})), call(STILL_STREAMING)];
         let usage = Usage { input: 1_000_000, output: 1_000_000, cache_read: 1_000_000, cache_write: 1_000_000, ..Usage::default() };
 
         let reply =

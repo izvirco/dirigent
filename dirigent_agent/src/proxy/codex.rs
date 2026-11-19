@@ -1,4 +1,4 @@
-use super::{Chunk, Error, Message, Part, Partial, Request, Wire, sse};
+use super::{Chunk, Error, Message, Part, Partial, Progress, Request, STILL_STREAMING, Wire, sse};
 use dirigent_protocol::transcript::{Api, Block, Stop};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -129,9 +129,9 @@ struct Open {
 }
 
 impl Wire for Stream {
-    fn event(&mut self, event: sse::Event, on: &mut (dyn FnMut(Chunk) + Send)) -> Result<bool, Error> {
+    fn event(&mut self, event: sse::Event, on: &mut (dyn FnMut(Chunk) + Send)) -> Result<Progress, Error> {
         if event.data.is_empty() || event.data == "[DONE]" {
-            return Ok(false);
+            return Ok(Progress::Continue);
         }
         let data: Value =
             serde_json::from_str(&event.data).map_err(|e| Error::transient(format!("The proxy sent an event that is not JSON ({e})")))?;
@@ -184,13 +184,13 @@ impl Wire for Stream {
                     (Some("failed" | "cancelled"), _) => return Err(Error::in_stream(&data)),
                     _ => Some(Stop::End),
                 };
-                return Ok(true);
+                return Ok(Progress::Complete);
             }
             "response.failed" | "error" => return Err(Error::in_stream(&data)),
             _ if !data["error"].is_null() => return Err(Error::in_stream(&data)),
             _ => {}
         }
-        Ok(false)
+        Ok(Progress::Continue)
     }
 
     fn take(&mut self) -> Partial {
@@ -209,7 +209,7 @@ impl Stream {
         let block = match item["type"].as_str().unwrap_or_default() {
             "reasoning" => Block::Thinking { text: String::new(), signature: None, redacted: false },
             "message" => Block::text(""),
-            "function_call" => Block::ToolCall { id: text("call_id"), name: text("name"), input: Value::Null },
+            "function_call" => Block::ToolCall { id: text("call_id"), name: text("name"), input: STILL_STREAMING },
             _ => return false,
         };
         self.open.insert(index, Open { at: self.partial.content.len(), arguments: text("arguments") });
@@ -366,7 +366,7 @@ mod tests {
     #[test]
     fn a_recorded_stream_becomes_the_reply() {
         let (partial, chunks, outcome) = replay(Stream::default(), include_str!("fixtures/codex_tools.sse"));
-        assert_eq!(outcome, Ok(true));
+        assert_eq!(outcome, Ok(Progress::Complete));
         let thinking = "I'm checking which comes first alphabetically, \"bash\" or \"read,\" and it's \"bash.\" I'll make both calls, \
                         the echo and reading the hostname file, together in one block and keep the reply brief.\n\n";
         let text = "Alphabetically, \"bash\" comes before \"read,\" so I'll run the bash command first and the read together.";
@@ -412,7 +412,7 @@ mod tests {
         let cut = "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\
                    \"usage\":{\"input_tokens\":10,\"output_tokens\":5}}}\n\n";
         let (partial, _, outcome) = replay(Stream::default(), &format!("{start}{cut}"));
-        assert_eq!((outcome, partial.stop, partial.usage.input), (Ok(true), Some(Stop::MaxTokens), 10));
+        assert_eq!((outcome, partial.stop, partial.usage.input), (Ok(Progress::Complete), Some(Stop::MaxTokens), 10));
         assert_eq!(partial.content, [Block::text("Half a")]);
 
         let failed = "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"The server had an error\"}}}\n\n";

@@ -118,8 +118,7 @@ const OVERFLOW: &[&str] = &[
     "token limit exceeded",
 ];
 
-// MUST KILL: rename: SPENT -> QUOTA_EXHAUSTED, an account that fails again whatever the status
-const SPENT: &[&str] = &[
+const QUOTA_EXHAUSTED: &[&str] = &[
     "insufficient_quota",
     "quota exceeded",
     "usage limit",
@@ -168,7 +167,7 @@ pub(super) fn classify(status: Option<u16>, text: &str) -> Failure {
     if matches!(status, Some(401 | 403)) {
         return Failure::Unauthorized;
     }
-    if says(SPENT) {
+    if says(QUOTA_EXHAUSTED) {
         return Failure::Other;
     }
     let transient = match status {
