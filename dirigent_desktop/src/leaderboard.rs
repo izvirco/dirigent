@@ -12,8 +12,7 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const ACCOUNT_KEY: &str = "leaderboard_account";
-// MUST KILL: rename: UPLOAD_EVERY -> UPLOAD_EVERY_TICKS, counted in Dirigent::tick seconds
-pub const UPLOAD_EVERY: u64 = 300;
+pub const UPLOAD_EVERY_SECS: u64 = 300;
 const UPLOAD_DAYS: i64 = 30;
 const NOT_ON_THE_BOARD: u16 = 403;
 
@@ -42,14 +41,16 @@ pub struct State {
     pub range: Range,
     pub board: Option<Board>,
     pub error: Option<String>,
-    // MUST KILL: rename: fetch -> fetch_generation, only the latest fetch's answer is shown
-    fetch: u64,
-    // MUST KILL: type: uploads' (request id, service id) as a struct, not a tuple
-    uploads: HashMap<String, (u64, String)>,
+    latest_fetch: u64,
+    uploads: HashMap<String, UploadRequest>,
     not_ours: HashSet<String>,
     failing: bool,
-    // MUST KILL: type: avatars' values as an enum (Loading / Failed / Loaded), not an Option for both
     pub avatars: HashMap<String, Option<Arc<gpui::Image>>>,
+}
+
+struct UploadRequest {
+    id: u64,
+    service: String,
 }
 
 impl State {
@@ -174,15 +175,14 @@ impl Dirigent {
         let since = floor_hour(joined_at.max(now - UPLOAD_DAYS * 24 * HOUR));
         let until = floor_hour(now) + HOUR;
         let id = self.request(host, |id| ClientMessage::ListUsage { id, since, until, bucket_ms: HOUR });
-        self.leaderboard.uploads.insert(host.to_owned(), (id, service));
+        self.leaderboard.uploads.insert(host.to_owned(), UploadRequest { id, service });
     }
 
-    // MUST KILL: rename: on_upload_usage -> take_upload_usage, true when the reply was an upload's
-    pub fn on_upload_usage(&mut self, reply_to: u64, buckets: &[UsageBucket], cx: &mut Context<Self>) -> bool {
-        let ours = self.leaderboard.uploads.iter().find(|(_, (id, _))| *id == reply_to).map(|(host, _)| host.clone());
-        let Some((_, service)) = ours.and_then(|host| self.leaderboard.uploads.remove(&host)) else { return false };
+    pub fn on_upload_usage(&mut self, reply_to: u64, buckets: &[UsageBucket], cx: &mut Context<Self>) {
+        let ours = self.leaderboard.uploads.iter().find(|(_, r)| r.id == reply_to).map(|(host, _)| host.clone());
+        let Some(UploadRequest { service, .. }) = ours.and_then(|host| self.leaderboard.uploads.remove(&host)) else { return };
         if self.leaderboard.active(&self.forge.status).is_none() {
-            return true;
+            return;
         }
         let up = Upload { service: service.clone(), hours: hours(buckets) };
         http(
@@ -216,12 +216,11 @@ impl Dirigent {
                 }
             },
         );
-        true
     }
 
     pub fn fetch_board(&mut self, cx: &mut Context<Self>) {
-        self.leaderboard.fetch += 1;
-        let (fetch, range) = (self.leaderboard.fetch, self.leaderboard.range);
+        self.leaderboard.latest_fetch += 1;
+        let (fetch, range) = (self.leaderboard.latest_fetch, self.leaderboard.range);
         http(
             cx,
             move || -> Result<Board> {
@@ -230,7 +229,7 @@ impl Dirigent {
                 Ok(serde_json::from_str(&body)?)
             },
             move |this, board, cx| {
-                if this.leaderboard.fetch != fetch {
+                if this.leaderboard.latest_fetch != fetch {
                     return;
                 }
                 match board {

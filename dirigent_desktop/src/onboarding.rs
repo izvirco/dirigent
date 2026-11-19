@@ -82,13 +82,11 @@ impl Dirigent {
         cx.notify();
     }
 
-    // MUST KILL: rename: onboarding_open → onboarding_taking_input, false once it is leaving
-    pub fn onboarding_open(&self) -> bool {
+    pub fn onboarding_taking_input(&self) -> bool {
         self.onboarding.as_ref().is_some_and(|s| s.leaving.is_none())
     }
 
-    // MUST KILL: rename: app_shown → app_shown_fraction, 0 under the setup to 1 without it
-    pub fn app_shown(&self) -> f32 {
+    pub fn app_opacity(&self) -> f32 {
         match &self.onboarding {
             None => 1.,
             Some(s) => s.leave().map_or(0., |k| ease_out(span(k, 0.28, 0.72))),
@@ -128,9 +126,8 @@ impl Dirigent {
         self.onboarding_next(cx);
     }
 
-    // MUST KILL: rename: finish_onboarding's `start` → open_first_thread
-    fn finish_onboarding(&mut self, start: bool, cx: &mut Context<Self>) {
-        if !self.onboarding_open() {
+    fn finish_onboarding(&mut self, start_thread: bool, cx: &mut Context<Self>) {
+        if !self.onboarding_taking_input() {
             return;
         }
         if let Err(e) = self.cache.lock().unwrap().set(DONE_KEY, "1") {
@@ -151,7 +148,7 @@ impl Dirigent {
             .detach();
         }
         self.leave_onboarding_step(cx);
-        if start {
+        if start_thread {
             let used = self.last_target().is_some_and(|t| self.target_valid(&t));
             let newest = || {
                 let projects = self.hosts.iter().flat_map(|h| h.projects.iter().map(move |p| (h, p)));
@@ -210,7 +207,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
 
 pub fn curtain(this: &Dirigent, layer: impl IntoElement + 'static) -> AnyElement {
     let edge = this.config.background.reach == Reach::Edge;
-    let keep = if edge { 1. - this.app_shown() } else { 1. };
+    let keep = if edge { 1. - this.app_opacity() } else { 1. };
     let curtain = Animation::new(ms(CURTAIN_MS));
     div()
         .absolute()
