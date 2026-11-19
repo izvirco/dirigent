@@ -23,7 +23,6 @@ const LOCAL: &str = "local";
 const CONNECT: Duration = Duration::from_secs(3);
 const REQUEST: Duration = Duration::from_secs(30);
 const LINK: &str = "dirigent://thread/";
-const MAX_MESSAGE: usize = 64 << 20;
 
 static OWNERS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
@@ -345,8 +344,8 @@ impl Remote {
             request.headers_mut().insert(AUTHORIZATION, format!("Bearer {bearer}").parse()?);
         }
         let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(MAX_MESSAGE))
-            .max_frame_size(Some(MAX_MESSAGE));
+            .max_message_size(Some(dirigent_protocol::MAX_MESSAGE))
+            .max_frame_size(Some(dirigent_protocol::MAX_MESSAGE));
         let connect = async {
             let (mut ws, _) = tokio_tungstenite::connect_async_with_config(request, Some(config), false).await?;
             while let Some(message) = ws.next().await {

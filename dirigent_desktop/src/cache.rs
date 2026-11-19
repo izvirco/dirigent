@@ -42,7 +42,6 @@ CREATE TABLE IF NOT EXISTS draft_images (
 );
 ";
 
-// MUST KILL: type: DraftImage as a struct with n, mime and bytes fields, not a tuple
 pub type DraftImage = (u32, String, Vec<u8>);
 
 const PER_THREAD: [&str; 3] = ["transcript", "drafts", "draft_images"];
@@ -105,7 +104,6 @@ impl Cache {
         Ok(())
     }
 
-    // MUST KILL: rename: rename_host -> rename_host_replacing, it drops what new already had
     pub fn rename_host(&mut self, old: &str, new: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
         for table in HOST_TABLES {
@@ -135,7 +133,6 @@ impl Cache {
         Ok(())
     }
 
-    // MUST KILL: type: links() returns a Link struct, not a (host, project id, group key) tuple
     pub fn links(&self) -> Result<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare("SELECT host, project_id, group_key FROM links")?;
         Ok(stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?)
@@ -208,7 +205,6 @@ impl Cache {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    // MUST KILL: extract: the PER_THREAD prune in set_threads into a named prune_deleted_threads step
     pub fn set_threads(&mut self, host: &str, threads: &[ThreadSummary]) -> Result<()> {
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM threads WHERE host = ?1", [host])?;
@@ -235,8 +231,7 @@ impl Cache {
         Ok(rows.filter_map(|r| r.ok()).filter_map(|s| serde_json::from_str(&s).ok()).collect())
     }
 
-    // MUST KILL: rename: set_entries -> set_entries_up_to, entries past the snapshot's end stay
-    pub fn set_entries(&mut self, host: &str, thread_id: &str, entries: &[Entry]) -> Result<()> {
+    pub fn set_entries_up_to(&mut self, host: &str, thread_id: &str, entries: &[Entry]) -> Result<()> {
         let end = entries.last().map_or(-1, |e| e.seq as i64);
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM transcript WHERE host = ?1 AND thread_id = ?2 AND seq <= ?3", params![host, thread_id, end])?;
@@ -337,7 +332,6 @@ impl Cache {
         Ok(ids)
     }
 
-    // MUST KILL: type: the draft key as an enum (NewThread / Thread), not ("", "") strings
     pub fn draft(&self, host: &str, thread_id: &str) -> Option<(Content, Vec<DraftImage>)> {
         let content = self
             .conn
@@ -405,7 +399,6 @@ impl Cache {
         Ok(())
     }
 
-    // MUST KILL: rename: kv_empty -> is_new_data_dir
     pub fn kv_empty(&self) -> bool {
         self.conn.query_row("SELECT NOT EXISTS (SELECT 1 FROM kv)", [], |r| r.get(0)).unwrap_or(true)
     }
@@ -574,7 +567,7 @@ mod tests {
             cache.add_entry("h", "t", &entry(seq)).unwrap();
         }
         let seqs = |cache: &Cache| cache.entries("h", "t").unwrap().iter().map(|e| e.seq).collect::<Vec<_>>();
-        cache.set_entries("h", "t", &[entry(0), entry(1), entry(2)]).unwrap();
+        cache.set_entries_up_to("h", "t", &[entry(0), entry(1), entry(2)]).unwrap();
         assert_eq!(seqs(&cache), [0, 1, 2, 3]);
         cache.remove_entries("h", "t", Some(2), 3).unwrap();
         assert_eq!(seqs(&cache), [0, 1, 2]);

@@ -1,7 +1,7 @@
 use crate::cache::Cache;
 use crate::hosts::{Host, LOCAL};
 use anyhow::Result;
-use dirigent_protocol::{ClientMessage, ServerMessage};
+use dirigent_protocol::{ClientMessage, MAX_MESSAGE, ServerMessage};
 use futures::future::BoxFuture;
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -17,15 +17,13 @@ use tracing::{error, info, warn};
 
 pub const CONNECT_LIST_ID: u64 = 0;
 
-// MUST KILL: extract: UNFIT_RETRY doubles as the embedded service's restart interval; split it in two
 const UNFIT_RETRY: Duration = Duration::from_secs(60);
+
+const STOPPED_SERVICE_RETRY: Duration = Duration::from_secs(60);
 
 const HELLO_WAIT: Duration = Duration::from_secs(20);
 
 const STANDALONE_LOCAL_SERVICE_RESTART_GRACE: Duration = Duration::from_secs(2);
-
-// MUST KILL: extract: MAX_MESSAGE → one const in dirigent_protocol that both ends read
-const MAX_MESSAGE: usize = 64 << 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostStatus {
@@ -50,6 +48,42 @@ type Service = fn() -> BoxFuture<'static, Result<()>>;
 
 fn embedded_service() -> BoxFuture<'static, Result<()>> {
     Box::pin(dirigent_service::run(dirigent_service::port()))
+}
+
+struct EmbeddedService {
+    run: Service,
+    task: Option<tokio::task::JoinHandle<Result<()>>>,
+    stopped: Option<String>,
+    started: Option<Instant>,
+    standalone_lost: Option<Instant>,
+}
+
+impl EmbeddedService {
+    async fn start_if_due(&mut self) {
+        if self.standalone_lost.is_some_and(|at| at.elapsed() < STANDALONE_LOCAL_SERVICE_RESTART_GRACE)
+            || self.task.as_ref().is_some_and(|h| !h.is_finished())
+        {
+            return;
+        }
+        if let Some(ended) = self.task.take() {
+            let why = match ended.await {
+                Ok(Ok(())) => "its listeners closed".to_owned(),
+                Ok(Err(e)) => format!("{e:#}"),
+                Err(e) => e.to_string(),
+            };
+            if self.stopped.as_ref() != Some(&why) {
+                error!("embedded service stopped: {why}");
+            }
+            self.stopped = Some(why);
+        }
+        if self.stopped.is_none() || self.started.is_none_or(|at| at.elapsed() >= STOPPED_SERVICE_RETRY) {
+            if self.stopped.is_none() {
+                info!("starting embedded service on :{}", dirigent_service::port());
+            }
+            self.task = Some(tokio::spawn((self.run)()));
+            self.started = Some(Instant::now());
+        }
+    }
 }
 
 enum Control {
@@ -134,8 +168,6 @@ async fn connect(host: &Host) -> Result<WebSocket> {
 
 type WebSocket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-// MUST KILL: extract: host_loop's embedded-service retry state (stopped, started, failing) → a struct of its own
-// MUST KILL: extract: host_loop's three `while rx.try_recv()` drains → a named drop_unsent_requests
 async fn host_loop(
     name: String,
     host: Host,
@@ -149,10 +181,7 @@ async fn host_loop(
         let _ = ui.unbounded_send(Incoming::Status { host: name.clone(), status: s, error });
     };
     let mut backoff = Duration::from_millis(300);
-    let mut embedded: Option<tokio::task::JoinHandle<Result<()>>> = None;
-    let mut stopped: Option<String> = None;
-    let mut started: Option<Instant> = None;
-    let mut standalone_lost: Option<Instant> = None;
+    let mut embedded = service.map(|run| EmbeddedService { run, task: None, stopped: None, started: None, standalone_lost: None });
     let mut failing = false;
     loop {
         status(HostStatus::Connecting, None);
@@ -160,7 +189,9 @@ async fn host_loop(
             Ok(ws) => {
                 backoff = Duration::from_millis(300);
                 failing = false;
-                stopped = None;
+                if let Some(embedded) = &mut embedded {
+                    embedded.stopped = None;
+                }
                 let (mut sink, mut stream) = ws.split();
                 let mut greeted = false;
                 let mut unfit = None;
@@ -192,7 +223,7 @@ async fn host_loop(
                                         }
                                     }
                                     if !std::mem::replace(&mut greeted, true) {
-                                        while rx.try_recv().is_ok() {}
+                                        drop_unsent_requests(&mut rx);
                                         status(HostStatus::Connected, None);
                                         for req in [
                                             ClientMessage::ListProjects { id: CONNECT_LIST_ID },
@@ -218,10 +249,12 @@ async fn host_loop(
                         }
                     }
                 }
-                while rx.try_recv().is_ok() {}
+                drop_unsent_requests(&mut rx);
                 info!(host = %name, "disconnected");
-                if embedded.is_none() {
-                    standalone_lost = Some(Instant::now());
+                if let Some(embedded) = &mut embedded
+                    && embedded.task.is_none()
+                {
+                    embedded.standalone_lost = Some(Instant::now());
                 }
                 let wait = unfit.as_ref().map(|why| {
                     warn!(host = %name, "{why}");
@@ -234,35 +267,15 @@ async fn host_loop(
                 }
             }
             Err(e) => {
-                let starting = service.is_some() && embedded.is_none() && stopped.is_none();
+                let starting = embedded.as_ref().is_some_and(|s| s.task.is_none() && s.stopped.is_none());
                 if !starting && !std::mem::replace(&mut failing, true) {
                     warn!(host = %name, "connect {url}: {e:#} (retrying)");
                 }
-                if let Some(run) = service
-                    && standalone_lost.is_none_or(|at| at.elapsed() >= STANDALONE_LOCAL_SERVICE_RESTART_GRACE)
-                    && embedded.as_ref().is_none_or(|h| h.is_finished())
-                {
-                    if let Some(ended) = embedded.take() {
-                        let why = match ended.await {
-                            Ok(Ok(())) => "its listeners closed".to_owned(),
-                            Ok(Err(e)) => format!("{e:#}"),
-                            Err(e) => e.to_string(),
-                        };
-                        if stopped.as_ref() != Some(&why) {
-                            error!("embedded service stopped: {why}");
-                        }
-                        stopped = Some(why);
-                    }
-                    if stopped.is_none() || started.is_none_or(|at| at.elapsed() >= UNFIT_RETRY) {
-                        if stopped.is_none() {
-                            info!("starting embedded service on :{}", dirigent_service::port());
-                        }
-                        embedded = Some(tokio::spawn(run()));
-                        started = Some(Instant::now());
-                    }
+                if let Some(embedded) = &mut embedded {
+                    embedded.start_if_due().await;
                 }
-                while rx.try_recv().is_ok() {}
-                let error = match &stopped {
+                drop_unsent_requests(&mut rx);
+                let error = match embedded.as_ref().and_then(|s| s.stopped.as_ref()) {
                     Some(why) => format!("Its service stopped: {why}"),
                     None => format!("{e:#}"),
                 };
@@ -274,13 +287,17 @@ async fn host_loop(
     }
 }
 
+fn drop_unsent_requests(rx: &mut mpsc::UnboundedReceiver<ClientMessage>) {
+    while rx.try_recv().is_ok() {}
+}
+
 fn update_cache(cache: &Mutex<Cache>, host: &str, msg: &ServerMessage) -> Result<()> {
     let mut cache = cache.lock().unwrap();
     match msg {
         ServerMessage::Projects { projects, .. } => cache.set_projects(host, projects),
         ServerMessage::Models { models, .. } => cache.set_models(host, models),
         ServerMessage::Threads { threads, .. } => cache.set_threads(host, threads),
-        ServerMessage::Thread { thread_id, entries, .. } => cache.set_entries(host, thread_id, entries),
+        ServerMessage::Thread { thread_id, entries, .. } => cache.set_entries_up_to(host, thread_id, entries),
         ServerMessage::Entry { thread_id, entry } => cache.add_entry(host, thread_id, entry),
         ServerMessage::Blob { blob_id, mime_type, data, .. } => {
             let bytes = base64::Engine::decode(&base64::prelude::BASE64_STANDARD, data)?;

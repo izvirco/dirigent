@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::serve::ListenerExt;
-use dirigent_protocol::{ClientMessage, ServerMessage};
+use dirigent_protocol::{ClientMessage, MAX_MESSAGE, ServerMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -58,10 +58,6 @@ fn tune(tcp: &mut TcpStream) {
 #[cfg(not(target_os = "linux"))]
 fn tune(_: &mut TcpStream) {}
 
-/// Largest message we read, and frame too: clients send each message as one frame, so
-/// axum's 16 MiB frame default would cut off big requests far below its message limit.
-const MAX_MESSAGE: usize = 64 << 20;
-
 #[derive(Clone)]
 pub struct Conn {
     pub id: u64,
@@ -83,6 +79,7 @@ async fn upgrade(
             return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer")], why).into_response();
         }
     }
+    // axum's 16 MiB frame default would cut off big requests far below its message limit.
     ws.max_frame_size(MAX_MESSAGE).max_message_size(MAX_MESSAGE).on_upgrade(move |socket| connection(socket, svc, peer))
 }
 
