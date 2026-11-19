@@ -3,7 +3,6 @@
 # bare executable in our tarball isn't, so computer use there runs the user's own install.
 set -eu
 
-# MUST KILL: rearchitect: one Cua Driver pin that this script and flake.nix's cuaDriver both read
 version=0.51.3
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64)

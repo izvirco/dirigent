@@ -35,7 +35,6 @@ case $mode in
     pid=$2
     shift 2
     while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
-    # MUST KILL: extract: a relaunch_on_exit function, so restarting whatever ends up installed is named
     trap '"$dest/dirigent" "$@" >/dev/null 2>&1 </dev/null &' EXIT
     ;;
   --update-service)
@@ -136,7 +135,6 @@ To keep it running after that, and from when this machine starts: sudo loginctl 
 }
 
 mkdir -p "$prefix/lib" "$prefix/bin"
-# MUST KILL: extract: a swap_in function for the copy-beside-then-rename install
 rm -rf "$dest.new" "$dest.old"
 cp -R "$src" "$dest.new"
 if [ -n "$headless" ]; then rm -f "$dest.new/dirigent_desktop" "$dest.new/dirigent" "$dest.new/dirigent.png"; fi

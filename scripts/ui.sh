@@ -31,8 +31,7 @@ mkdir -p "$BASE"
 
 NIX=(nix develop --option warn-dirty false "$ROOT" -c)
 NIX_BUILD=("${NIX[@]}")
-# MUST KILL: rearchitect: detect the dev shell by an explicit marker, not by DIRIGENT_UI_VK_ICD being set
-[ -n "${DIRIGENT_UI_VK_ICD:-}" ] && NIX_BUILD=()
+[ -n "${DIRIGENT_DEV_SHELL:-}" ] && NIX_BUILD=()
 ENV=$BASE/devenv-$(cat flake.nix flake.lock | sha256sum | cut -c1-16).sh
 if [ ! -s "$ENV" ]; then
   # shellcheck disable=SC2016
@@ -56,12 +55,10 @@ mkdir -p "$DIR"
 
 PREFIX=$DIR/prefix
 APP_CMD="^($BIN|$PREFIX/lib/dirigent(-nightly)?/dirigent) --data-dir $DIR/data( |$)"
-# MUST KILL: extract: one app_pids lookup (pid file, else APP_CMD) shared by alive and kill_app
 alive() {
   [ -f "$DIR/app.pid" ] && kill -0 "$(cat "$DIR/app.pid")" 2>/dev/null && return
   pgrep -f "$APP_CMD" >/dev/null
 }
-# MUST KILL: extract: a kill_group helper naming the setsid process-group kill
 kill_app() {
   if alive; then
     [ -f "$DIR/app.pid" ] && { kill -TERM -- "-$(cat "$DIR/app.pid")" 2>/dev/null || true; }
@@ -102,7 +99,6 @@ build() {
   fi
 }
 
-# MUST KILL: rearchitect: have the desktop skip first-run on request instead of seeding its kv rows
 onboarding() {
   local sql version
   version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -1)
@@ -114,7 +110,6 @@ onboarding() {
   sqlite3 "$DIR/data/desktop.db" "CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); $sql"
 }
 
-# MUST KILL: extract: a named list of the vars the test app must not inherit, out of launch
 launch() {
   screen_env
   PORT=$(port 2>/dev/null || true)
@@ -168,10 +163,9 @@ case "${1:-}" in
     ;;
   wait-idle)
     need_app
-    LIMIT=${2:-300}; IDLE=0; SECONDS=0
+    LIMIT=${2:-300}; IDLE=0; SETTLE_POLLS=5; SECONDS=0
     [ "$LIMIT" -gt 0 ] 2>/dev/null || { echo "usage: scripts/ui.sh wait-idle [SECS]" >&2; exit 1; }
-    # MUST KILL: extract: name the 5-poll settle count (SETTLE_POLLS)
-    while [ $IDLE -lt 5 ]; do
+    while [ $IDLE -lt $SETTLE_POLLS ]; do
       BUSY=$(rpc '{"type":"list_threads"}' 'r.threads.filter(t => t.running_since != null || t.jobs > 0).map(t => t.id + " " + t.name).join(", ")')
       if [ -n "$BUSY" ]; then IDLE=0; else IDLE=$((IDLE + 1)); fi
       [ $SECONDS -lt "$LIMIT" ] || { echo "still busy after ${LIMIT}s: $BUSY" >&2; exit 1; }

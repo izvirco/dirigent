@@ -82,7 +82,6 @@
           // args
         );
 
-      # MUST KILL: rearchitect: one Cua Driver pin that cuaDriver and packaging/cua-driver.sh both read
       cuaDriver = pkgs.stdenvNoCC.mkDerivation rec {
         pname = "cua-driver";
         version = "0.51.3";
@@ -117,8 +116,7 @@
         pkgs':
         let
           name = (builtins.head pkgs').meta.mainProgram;
-          # MUST KILL: rename: place copies each binary beside the tools (copyBesideTools), not links it
-          place = pkg: ''
+          copyBesideTools = pkg: ''
             cp ${lib.getExe pkg} $out/libexec/dirigent/
             ln -s ../libexec/dirigent/${pkg.meta.mainProgram} $out/bin/${pkg.meta.mainProgram}
           '';
@@ -129,7 +127,7 @@
           ln -s ${cuaDriverLicense} $out/libexec/dirigent/cua-driver-LICENSE.md
           ln -s ${pkgs.sway-unwrapped}/bin/sway $out/libexec/dirigent/sway
           ln -s ${lib.getExe pkgs.wtype} $out/libexec/dirigent/wtype
-          ${lib.concatMapStrings place pkgs'}
+          ${lib.concatMapStrings copyBesideTools pkgs'}
         '';
 
       cli = crate "dirigent_cli" { meta.mainProgram = "dirigent"; };
@@ -265,6 +263,7 @@
             # Software Vulkan (lavapipe): a private screen has no GPU presentation.
             DIRIGENT_UI_VK_ICD = "${pkgs.mesa}/share/vulkan/icd.d/lvp_icd.x86_64.json";
             DIRIGENT_LILEX_DIR = lilexDir;
+            DIRIGENT_DEV_SHELL = "1";
           };
 
           # sccache's server listens on one TCP port for the whole machine by default, so a second
