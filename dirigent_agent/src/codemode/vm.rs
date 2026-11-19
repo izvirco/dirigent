@@ -4,7 +4,6 @@ use super::output::Item;
 use super::search::{Document, rank};
 use crate::tool::ToolSpec;
 use rquickjs::context::EvalOptions;
-use rquickjs::function::Rest;
 use rquickjs::{Context, Ctx, Function, Module, Object, Runtime, Value as JsValue};
 use serde_json::{Value, json};
 use std::cell::Cell;
@@ -73,7 +72,6 @@ impl Vm {
     }
 }
 
-// MUST KILL: extract: a Vm::stop that sets the flag and drops `results`, so waking the waiting thread is explicit
 impl Drop for Vm {
     fn drop(&mut self) {
         self.interrupt.store(true, Ordering::Relaxed);
@@ -109,16 +107,15 @@ fn drive<'js>(
     let tools_json = catalog.tools_json();
     let done = Rc::new(Cell::new(false));
 
-    let bridge = Function::new(ctx.clone(), bridge(events.clone(), catalog, done.clone()))?;
+    let host = host(ctx, events.clone(), catalog, done.clone())?;
     let (prelude, loaded) = Module::declare(ctx.clone(), "codemode-prelude.js", PRELUDE)?.eval()?;
     loaded.finish::<()>()?;
     let prelude: Function = prelude.get("default")?;
-    let api: Object = prelude.call((bridge, tools_json, Value::Object(stored).to_string(), out_of_memory()))?;
+    let api: Object = prelude.call((host, tools_json, Value::Object(stored).to_string(), out_of_memory()))?;
     let (settle, start, stalled): (Function, Function, Function) = (api.get("settle")?, api.get("run")?, api.get("stalled")?);
 
     let mut options = EvalOptions::default();
     (options.strict, options.filename) = (false, Some("codemode.js".into()));
-    // MUST KILL: extract: a wrap_script(code) fn that visibly keeps the script on the wrapper's first line
     let main: Function = match ctx.eval_with_options(format!("(async (tools, console) => {{{code}\n}})"), options) {
         Ok(main) => main,
         Err(error) => {
@@ -151,33 +148,41 @@ fn drive<'js>(
     }
 }
 
-fn bridge<'js>(
-    events: UnboundedSender<Event>,
-    catalog: Catalog,
-    done: Rc<Cell<bool>>,
-) -> impl Fn(String, Rest<JsValue<'js>>) -> Option<String> + 'js {
-    move |kind, Rest(args)| {
-        let text = |i: usize| args.get(i).and_then(JsValue::as_string).and_then(|s| s.to_string().ok());
-        let number = |i: usize| args.get(i).and_then(JsValue::as_number).unwrap_or_default();
-        let event = match kind.as_str() {
-            "call" => Event::Call { id: number(0) as u32, name: text(1).unwrap_or_default(), args: text(2) },
-            "output" => Event::Output(match text(0).as_deref() {
-                Some("image") => Item::Image { data: text(1).unwrap_or_default(), mime: text(2).unwrap_or_default() },
-                Some("console") => Item::Console(text(1).unwrap_or_default()),
-                _ => Item::Text(text(1).unwrap_or_default()),
-            }),
-            "done" => {
-                done.set(true);
-                let payload = text(1).unwrap_or_default();
-                Event::Done(if args.first().and_then(JsValue::as_bool) == Some(true) { Ok(payload) } else { Err(payload) })
-            }
-            "search" => return Some(catalog.search(&text(0).unwrap_or_default(), number(1) as usize, text(2).as_deref())),
-            "namespace" => return catalog.namespace(&text(0).unwrap_or_default()),
-            _ => return None,
+fn host<'js>(ctx: &Ctx<'js>, events: UnboundedSender<Event>, catalog: Catalog, done: Rc<Cell<bool>>) -> rquickjs::Result<Object<'js>> {
+    let host = Object::new(ctx.clone())?;
+    let out = events.clone();
+    let call = move |id: u32, name: JsValue<'js>, args: JsValue<'js>| {
+        let _ = out.send(Event::Call { id, name: text(name).unwrap_or_default(), args: text(args) });
+    };
+    host.set("call", Function::new(ctx.clone(), call)?)?;
+    let out = events.clone();
+    let output = move |kind: JsValue<'js>, data: JsValue<'js>, mime: JsValue<'js>| {
+        let item = match text(kind).as_deref() {
+            Some("image") => Item::Image { data: text(data).unwrap_or_default(), mime: text(mime).unwrap_or_default() },
+            Some("console") => Item::Console(text(data).unwrap_or_default()),
+            _ => Item::Text(text(data).unwrap_or_default()),
         };
-        let _ = events.send(event);
-        None
-    }
+        let _ = out.send(Event::Output(item));
+    };
+    host.set("output", Function::new(ctx.clone(), output)?)?;
+    let finish = move |ok: bool, payload: JsValue<'js>| {
+        done.set(true);
+        let payload = text(payload).unwrap_or_default();
+        let _ = events.send(Event::Done(if ok { Ok(payload) } else { Err(payload) }));
+    };
+    host.set("done", Function::new(ctx.clone(), finish)?)?;
+    let catalog = Rc::new(catalog);
+    let searched = catalog.clone();
+    let search = move |query: JsValue<'js>, limit: f64, namespace: JsValue<'js>| {
+        searched.search(&text(query).unwrap_or_default(), limit as usize, text(namespace).as_deref())
+    };
+    host.set("search", Function::new(ctx.clone(), search)?)?;
+    host.set("namespace", Function::new(ctx.clone(), move |name: JsValue<'js>| catalog.namespace(&text(name).unwrap_or_default()))?)?;
+    Ok(host)
+}
+
+fn text(value: JsValue<'_>) -> Option<String> {
+    value.as_string().and_then(|text| text.to_string().ok())
 }
 
 fn explain(ctx: &Ctx<'_>, error: rquickjs::Error) -> String {

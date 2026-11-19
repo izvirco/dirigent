@@ -48,7 +48,7 @@ pub fn description(tools: &[ToolSpec], namespace: impl Fn(&str) -> Option<Namesp
         return INTRO.into();
     }
     let costs: Vec<Vec<usize>> = groups.values().map(|entries| entries.iter().map(|(cost, _)| *cost).collect()).collect();
-    let shown = select(&costs, INLINE_BUDGET);
+    let shown = fill_round_robin(&costs, INLINE_BUDGET);
 
     let mut sections = vec![INTRO.to_string(), "Tools (declared to you as well: a script passes the same arguments):".to_string()];
     for ((name, entries), shown) in groups.iter().zip(shown) {
@@ -69,8 +69,7 @@ pub fn description(tools: &[ToolSpec], namespace: impl Fn(&str) -> Option<Namesp
     sections.join("\n\n")
 }
 
-// MUST KILL: rename: `select` → `fill_round_robin` (every namespace is represented before any is complete)
-fn select(groups: &[Vec<usize>], budget: usize) -> Vec<Vec<bool>> {
+fn fill_round_robin(groups: &[Vec<usize>], budget: usize) -> Vec<Vec<bool>> {
     let mut shown: Vec<Vec<bool>> = groups.iter().map(|costs| vec![false; costs.len()]).collect();
     let mut queues: Vec<std::collections::VecDeque<usize>> = groups
         .iter()
@@ -554,6 +553,6 @@ mod tests {
         assert!(text.contains("tool_146_") && !text.contains("tool_147_"));
 
         let costs = [vec![5, 1, 3], vec![2, 2], vec![9]];
-        assert_eq!(select(&costs, 9), [vec![false, true, true], vec![true, true], vec![false]]);
+        assert_eq!(fill_round_robin(&costs, 9), [vec![false, true, true], vec![true, true], vec![false]]);
     }
 }

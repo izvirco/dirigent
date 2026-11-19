@@ -96,6 +96,13 @@ impl Tool for Codemode {
     }
 }
 
+struct SettledCall {
+    id: u32,
+    index: usize,
+    failed: bool,
+    result: Result<String, String>,
+}
+
 impl Codemode {
     async fn run(&self, source: &Source<'_>, call: &Call, started: Instant) -> (Vec<Item>, Result<BTreeMap<String, Value>, String>) {
         let never_started = |why: String| (vec![], Err(format!("{why}\n\nThe script did not start.")));
@@ -113,7 +120,7 @@ impl Codemode {
         namespaces.sort_unstable();
         namespaces.dedup();
         let namespaces = namespaces.into_iter().filter_map(|name| self.host.namespace(name)).collect();
-        let script = Script { code: source.code.into(), tools, namespaces, stored: self.host.stored() };
+        let script = Script { code: source.code_keeping_line_numbers.into(), tools, namespaces, stored: self.host.stored() };
         let mut vm = match Vm::start(script, slot) {
             Ok(vm) => vm,
             Err(error) => return never_started(format!("Script sandbox failed: {error}")),
@@ -127,9 +134,7 @@ impl Codemode {
         };
         tokio::pin!(deadline);
         let nested = Call { id: call.id.clone(), cancel: call.cancel.child_token(), script: true };
-        // MUST KILL: type: a named struct for a settled call instead of this anonymous tuple
-        let mut running: JoinSet<(u32, usize, bool, Result<String, String>)> = JoinSet::new();
-        // MUST KILL: type: a CallStatus enum instead of "ok"/"failed"/"cancelled" strings
+        let mut running: JoinSet<SettledCall> = JoinSet::new();
         let mut calls: Vec<(String, &str)> = vec![];
         let mut items = vec![];
         let end = loop {
@@ -145,10 +150,13 @@ impl Codemode {
                         running.spawn(async move {
                             let input = match args.as_deref().map(serde_json::from_str).unwrap_or_else(|| Ok(json!({}))) {
                                 Ok(input) => input,
-                                Err(error) => return (id, index, true, Err(format!("The arguments could not be read as JSON: {error}"))),
+                                Err(error) => {
+                                    let result = Err(format!("The arguments could not be read as JSON: {error}"));
+                                    return SettledCall { id, index, failed: true, result };
+                                }
                             };
                             let output = host.call(&name, input, &nested).await;
-                            (id, index, output.is_error, script_value(&name, output))
+                            SettledCall { id, index, failed: output.is_error, result: script_value(&name, output) }
                         });
                     }
                     Some(Event::Done(Ok(writes))) => break parse_writes(&writes).map(|(stored, refused)| {
@@ -160,7 +168,7 @@ impl Codemode {
                     None => break Err("Script sandbox failed: the VM ended without a result".into()),
                 },
                 Some(settled) = running.join_next() => match settled {
-                    Ok((id, index, failed, result)) => {
+                    Ok(SettledCall { id, index, failed, result }) => {
                         calls[index].1 = if failed { "failed" } else { "ok" };
                         vm.settle(id, result);
                     }
@@ -245,8 +253,7 @@ fn parse_writes(json: &str) -> Result<(BTreeMap<String, Value>, Vec<String>), St
 
 #[derive(Debug, PartialEq)]
 struct Source<'a> {
-    // MUST KILL: rename: `code` → `code_keeping_line_numbers` (starts at the options line's newline)
-    code: &'a str,
+    code_keeping_line_numbers: &'a str,
     max_output_tokens: u64,
     timeout: Option<Duration>,
 }
@@ -263,11 +270,11 @@ impl<'a> Source<'a> {
         if let Some(line) = input.split('\n').skip(1).position(|line| line.trim_start().starts_with(PREFIX)) {
             bail!("The {PREFIX} line must be the first line of the input; found one on line {}", line + 2);
         }
-        let mut source = Self { code: input, max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS, timeout: None };
+        let mut source = Self { code_keeping_line_numbers: input, max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS, timeout: None };
         let first = input.split('\n').next().unwrap_or_default();
         let Some(options) = first.trim_start().strip_prefix(PREFIX) else { return Ok(source) };
-        source.code = &input[first.len()..];
-        if source.code.trim().is_empty() {
+        source.code_keeping_line_numbers = &input[first.len()..];
+        if source.code_keeping_line_numbers.trim().is_empty() {
             bail!("The @options line must be followed by JavaScript source on subsequent lines");
         }
         let fields = match serde_json::from_str(options.trim()) {

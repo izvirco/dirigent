@@ -1,5 +1,4 @@
-// MUST KILL: type: one named host function per bridge kind (call, output, done, search, namespace) instead of bridge(kind, a, b, c)
-export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
+export default function prelude(host, toolsJson, storeJson, outOfMemory) {
   // Freezing alone breaks ordinary code through the "override mistake": a data property that is
   // read-only on a prototype cannot be assigned on an instance either, so
   // this.name = "MyError" in an Error subclass would throw. Commonly overridden properties
@@ -112,7 +111,7 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   let finished = false;
   const EXIT = Object.freeze({});
 
-  // What crosses the bridge as text is read as UTF-8 on the other side: a lone surrogate (a
+  // What crosses to the host as text is read as UTF-8 on the other side: a lone surrogate (a
   // string cut in the middle of an emoji) becomes U+FFFD.
   const wellFormed = (text) => text.toWellFormed();
 
@@ -130,7 +129,7 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   function done(ok, payload) {
     if (finished) return;
     finished = true;
-    bridge("done", ok, payload);
+    host.done(ok, payload);
   }
 
   // QuickJS stacks list frames only. Prefix "Name: message" like V8 so the
@@ -186,9 +185,8 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
         }
         const id = nextId++;
         pending.set(id, { resolve, reject });
-        bridge("call", id, name, json);
+        host.call(id, name, json);
       });
-    // MUST KILL: extract: a named first-wins identifier resolver that falls back to the raw name on collision
     const callName = !(jsName in tools) ? jsName : name;
     if (callName in tools) continue;
     const entry = Object.freeze({ name: callName, description });
@@ -249,8 +247,7 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
     if (namespace !== undefined && typeof namespace !== "string")
       throw new TypeError("searchTools() namespace must be a string");
     const names = parse(
-      bridge(
-        "search",
+      host.search(
         wellFormed(query),
         limit,
         namespace === undefined ? undefined : wellFormed(namespace),
@@ -267,7 +264,7 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   async function describeNamespace(name) {
     if (typeof name !== "string")
       throw new TypeError("describeNamespace() expects a namespace name");
-    const json = bridge("namespace", wellFormed(name));
+    const json = host.namespace(wellFormed(name));
     return json === undefined ? undefined : parse(json);
   }
 
@@ -344,7 +341,6 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
   let outputChars = 0;
   let outputItems = 0;
 
-  // MUST KILL: extract: a failOutputLimit() that ends the script via done() before throwing, so a caught error visibly cannot resume output
   function output(kind, data, mimeType) {
     if (finished) return;
     outputChars += data.length;
@@ -361,7 +357,7 @@ export default function prelude(bridge, toolsJson, storeJson, outOfMemory) {
       done(false, describeError(error));
       throw error;
     }
-    bridge("output", kind, kind === "image" ? data : wellFormed(data), mimeType);
+    host.output(kind, kind === "image" ? data : wellFormed(data), mimeType);
   }
 
   function outputText(value) {
