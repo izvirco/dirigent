@@ -1,25 +1,29 @@
-## 0.0.11 (draft)
+## 0.0.11
 
-- Lowercase `agents.md` and `skill.md` are read too ([#199])
-- The migration from pi is gone: start 0.0.10 once on an install of 0.0.9 or older before updating it ([#200])
-- `agent.toml` no longer holds the proxy's key, so machines that all run 0.0.11 can share it: the proxy moved to `proxy.json` in the data dir ([#201])
-- If you published an `agent.toml` of 0.0.10, change your proxy's API key: it was in that file ([#201])
-- A warning in the sidebar and in Settings › Proxy when your CLIProxyAPI is 10 releases behind, on hosts that hold its management key ([#204])
-- Running timers all change at the same moment, once a second ([#205])
-- Remove a project, or archive, delete, rename, pin and snooze a thread, while its host is offline: the host gets the change when it is back ([#203])
-- The Projects list says which hosts are offline ([#203])
-- Visuals: an agent draws a chart, a diagram or a layout into its reply, in your theme's colours ([#210])
-- Fixed: editing a host's address or key dropped its drafts ([#203])
-- A new thread starts with the project, model and reasoning you last picked for one, not those of the thread or project page you came from ([#207])
-- Esc takes the focus off the composer where it used to close the right panel, and `i` focuses the composer again; its ring shows while it has focus ([#208])
-- Fixed: while you edited a message and scrolled it out of view, Esc and every shortcut did nothing ([#212])
-- Toasts: a repeat counts up instead of stacking, a click dismisses one, and the sidebar keeps the session's history ([#211])
-- A private screen is a Wayland display now, made with sway: it needs `sway` and `wtype` where it needed Xvfb, and apps that need X11 don't open on it ([#214])
-- On a Wayland desktop, computer use operates Wayland apps, where it reached those under XWayland alone; on sway it types with `wtype` ([#214])
-- On a sway desktop with an X11 app open, computer use can't aim at windows, only at the screen's pixels: `CUA_DRIVER_RS_ENABLE_WAYLAND=0` in Dirigent's environment goes back to X11 apps alone ([#214])
-- The update button shows as soon as a new version is found, with the download's progress in its menu ([#209])
-- Every release has `dirigent_service` in it: `install.sh --headless` makes a Linux machine or a Mac a remote host that starts by itself, and the Windows installer can run the service at sign-in ([#213])
+Remote hosts that start by themselves and update from the app, visuals in replies, and computer use on Wayland.
+
+- `install.sh --headless` makes a Linux machine or a Mac a remote host that starts by itself ([#213])
+- The Windows installer can make a PC a remote host that starts at sign-in ([#213])
 - Update a remote host from the update button: at once, or when its agents are done ([#213])
+- The update button shows as soon as a version is found, with the download's progress in its menu ([#209])
+- Visuals: agents draw charts and diagrams into their replies, in your theme's colours ([#210])
+- Private screens run on sway, not Xvfb: install `sway` and `wtype`; apps that need X11 don't open there ([#214])
+- On a Wayland desktop, computer use operates Wayland apps; on sway it types with `wtype` ([#214])
+- On a sway desktop with an X11 app open, computer use aims at the screen's pixels, not at windows ([#214])
+- `CUA_DRIVER_RS_ENABLE_WAYLAND=0` in Dirigent's environment keeps computer use to X11 apps, as in 0.0.10 ([#214])
+- From 0.0.9 or older, start 0.0.10 once before updating: the migration from pi is gone ([#200])
+- The proxy moved from `agent.toml` to `proxy.json` in the data dir, so machines on 0.0.11 can share `agent.toml` ([#201])
+- If you published an `agent.toml` of 0.0.10, change your proxy's API key: it was in that file ([#201])
+- A warning when a host's CLIProxyAPI is 10 releases behind ([#204])
+- Archive, rename, pin, snooze or delete a thread, or remove a project, while its host is offline ([#203])
+- The Projects list says which hosts are offline ([#203])
+- A new thread starts with the project, model and reasoning you last picked for one ([#207])
+- Esc unfocuses the composer instead of closing the right panel; `i` focuses the composer again ([#208])
+- Toasts: repeats count up, a click dismisses one, the sidebar keeps the session's history ([#211])
+- Running timers tick together, once a second ([#205])
+- Lowercase `agents.md` and `skill.md` are read too ([#199])
+- Fixed: editing a host's address or key dropped its drafts ([#203])
+- Fixed: shortcuts did nothing once a message you were editing scrolled out of view ([#212])
 
 [#199]: https://forge.sebba.dev/izvir/dirigent/changes/199
 [#200]: https://forge.sebba.dev/izvir/dirigent/changes/200
@@ -29,12 +33,12 @@
 [#205]: https://forge.sebba.dev/izvir/dirigent/changes/205
 [#207]: https://forge.sebba.dev/izvir/dirigent/changes/207
 [#208]: https://forge.sebba.dev/izvir/dirigent/changes/208
+[#209]: https://forge.sebba.dev/izvir/dirigent/changes/209
 [#210]: https://forge.sebba.dev/izvir/dirigent/changes/210
 [#211]: https://forge.sebba.dev/izvir/dirigent/changes/211
 [#212]: https://forge.sebba.dev/izvir/dirigent/changes/212
-[#214]: https://forge.sebba.dev/izvir/dirigent/changes/214
-[#209]: https://forge.sebba.dev/izvir/dirigent/changes/209
 [#213]: https://forge.sebba.dev/izvir/dirigent/changes/213
+[#214]: https://forge.sebba.dev/izvir/dirigent/changes/214
 
 ## 0.0.10
 
