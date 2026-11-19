@@ -4,7 +4,7 @@
 //! whatever the request asks, and drops what is over four. The ones set here are thus what a
 //! proxy that does none of this needs, and do no harm with one that does.
 
-use super::{Chunk, Error, Message, Part, Partial, Request, Wire, sse};
+use super::{Chunk, Error, Message, Part, Partial, Progress, Request, STILL_STREAMING, Wire, sse};
 use dirigent_protocol::transcript::{Api, Block, Stop};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -121,7 +121,6 @@ fn messages(request: &Request<'_>) -> Value {
             }
         }
     }
-    // MUST KILL: extract: a cache_breakpoints_on_last_two_user_turns(turns) fn out of messages
     for (_, blocks) in turns.iter_mut().rev().filter(|(role, _)| *role == "user").take(2) {
         if let Some(last) = blocks.last_mut() {
             breakpoint(last);
@@ -175,9 +174,9 @@ struct Open {
 }
 
 impl Wire for Stream {
-    fn event(&mut self, event: sse::Event, on: &mut (dyn FnMut(Chunk) + Send)) -> Result<bool, Error> {
+    fn event(&mut self, event: sse::Event, on: &mut (dyn FnMut(Chunk) + Send)) -> Result<Progress, Error> {
         if event.data.is_empty() {
-            return Ok(false);
+            return Ok(Progress::Continue);
         }
         let data: Value =
             serde_json::from_str(&event.data).map_err(|e| Error::transient(format!("The proxy sent an event that is not JSON ({e})")))?;
@@ -197,8 +196,8 @@ impl Wire for Stream {
                     },
                     // Reasoning the provider keeps to itself: all of it is the data to send back.
                     "redacted_thinking" => Block::Thinking { text: String::new(), signature: Some(text("data")), redacted: true },
-                    "tool_use" => Block::ToolCall { id: text("id"), name: text("name"), input: Value::Null },
-                    _ => return Ok(false),
+                    "tool_use" => Block::ToolCall { id: text("id"), name: text("name"), input: STILL_STREAMING },
+                    _ => return Ok(Progress::Continue),
                 };
                 match &block {
                     Block::Text { text, .. } if !text.is_empty() => on(Chunk::Text { index: at, delta: text.clone() }),
@@ -209,7 +208,7 @@ impl Wire for Stream {
                 self.open.insert(index, Open { at, input: String::new() });
             }
             "content_block_delta" => {
-                let Some(open) = self.open.get_mut(&index) else { return Ok(false) };
+                let Some(open) = self.open.get_mut(&index) else { return Ok(Progress::Continue) };
                 let delta = &data["delta"];
                 let piece = |key: &str| delta[key].as_str().unwrap_or_default();
                 match (delta["type"].as_str().unwrap_or_default(), &mut self.partial.content[open.at]) {
@@ -229,7 +228,7 @@ impl Wire for Stream {
                 }
             }
             "content_block_stop" => {
-                let Some(open) = self.open.remove(&index) else { return Ok(false) };
+                let Some(open) = self.open.remove(&index) else { return Ok(Progress::Continue) };
                 if let Block::ToolCall { id, name, input } = &mut self.partial.content[open.at] {
                     *input = super::call_input(&open.input);
                     on(Chunk::ToolCall { index: open.at, id: id.clone(), name: name.clone(), input: input.clone() });
@@ -259,12 +258,12 @@ impl Wire for Stream {
                     }
                 };
             }
-            "message_stop" => return Ok(true),
+            "message_stop" => return Ok(Progress::Complete),
             "error" => return Err(Error::in_stream(&data)),
             _ if !data["error"].is_null() => return Err(Error::in_stream(&data)),
             _ => {}
         }
-        Ok(false)
+        Ok(Progress::Continue)
     }
 
     fn take(&mut self) -> Partial {
@@ -406,7 +405,7 @@ mod tests {
     #[test]
     fn a_recorded_stream_becomes_the_reply() {
         let (partial, chunks, outcome) = replay(Stream::default(), include_str!("fixtures/anthropic_tools.sse"));
-        assert_eq!(outcome, Ok(true));
+        assert_eq!(outcome, Ok(Progress::Complete));
         let thinking = "I'm weighing whether \"bash\" or \"read\" comes first alphabetically, and the tool names are zoo_bash and narrow_read, \
                         with \"bash\" landing ahead. The order doesn't really matter, so I just need to issue both calls together in one block.\n\n";
         let text = "Alphabetically, \"bash\" comes before \"read,\" so the bash call goes first. Both calls are independent, so I'm running them together.";
@@ -449,12 +448,14 @@ mod tests {
             "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
         );
         let (partial, chunks, outcome) = replay(Stream::default(), cut);
-        assert_eq!((outcome, partial.stop), (Ok(true), Some(Stop::MaxTokens)));
+        assert_eq!((outcome, partial.stop), (Ok(Progress::Complete), Some(Stop::MaxTokens)));
         let input = json!("{\"command\": \"ec");
         assert_eq!(partial.content, [Block::ToolCall { id: "t1".into(), name: "bash".into(), input: input.clone() }]);
         assert_eq!(chunks, [Chunk::ToolCall { index: 0, id: "t1".into(), name: "bash".into(), input }]);
         let open = &cut[..cut.find("event: content_block_stop").unwrap()];
-        assert!(matches!(replay(Stream::default(), open).0.content.as_slice(), [Block::ToolCall { input: Value::Null, .. }]));
+        assert!(
+            matches!(replay(Stream::default(), open).0.content.as_slice(), [Block::ToolCall { input, .. }] if *input == STILL_STREAMING)
+        );
 
         let overloaded = concat!(
             "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",

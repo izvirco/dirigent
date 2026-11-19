@@ -90,8 +90,8 @@ impl Proxy {
             tokio::join!(self.get(connection, "/v1/models?client_version=dirigent"), self.get(connection, "/v1/models"), self.prices());
         self.inner.catalog.state.lock().unwrap().asked_at = now_ms();
         let mut models = models(&catalog?, &list?).ok_or_else(Error::not_a_proxy)?;
-        // MUST KILL: extract: fetch's "an empty listing keeps the cached models" rule into a fn of its own
-        if models.is_empty() && self.remembered(&connection.url).is_some_and(|catalog| !catalog.models.is_empty()) {
+        let keep_remembered = models.is_empty() && self.remembered(&connection.url).is_some_and(|catalog| !catalog.models.is_empty());
+        if keep_remembered {
             return Ok(models);
         }
         for model in &mut models {
