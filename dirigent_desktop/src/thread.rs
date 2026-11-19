@@ -1,4 +1,4 @@
-use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, PANE_MIN, Pane, PanelPart, Resize, Target, default_base};
+use crate::app::{ArchiveAt, AskForm, Blob, Dirigent, Menu, OpenThread, PANE_MIN, Pane, PanelPart, Resize, Target};
 use crate::icons::icon;
 use crate::lists::{Via, breadcrumb, header};
 use crate::markdown;
@@ -14,6 +14,7 @@ use crate::working;
 use dirigent_protocol::transcript::{Body, Stop};
 use dirigent_protocol::visuals::WIDTH;
 use dirigent_protocol::{PromptMode, Setup, ThreadSummary};
+use dirigent_service::vcs::default_base;
 use gpui::{
     Anchor, Animation, AnimationExt, AnyElement, Bounds, ClipboardItem, Context, Div, ElementId, Focusable, FontWeight, MouseButton,
     ObjectFit, Pixels, SharedString, Stateful, Window, anchored, canvas, deferred, div, img, list, point, prelude::*, px, relative, rgba,
