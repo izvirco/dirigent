@@ -178,8 +178,7 @@ impl Dirigent {
         }
     }
 
-    // MUST KILL: rename: host_form_escape -> close_host_form_on_escape, true when it handled the Esc
-    pub fn host_form_escape(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn close_host_form_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
         let on_tab = self.modal == Some(Modal::Settings) && self.settings.tab == settings::Tab::Hosts;
         if !on_tab || self.hosts_tab.form.is_none() {
             return false;
@@ -259,7 +258,7 @@ fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<D
     let t = theme::t();
     let name = h.name.clone();
     let local = name == hosts::LOCAL;
-    let (dot, status, why) = state(this, h, cx);
+    let state = state(this, h, cx);
     let auth = HostAuth::of(&h.config).tag();
     let edit = name.clone();
     div()
@@ -275,7 +274,7 @@ fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<D
         .when(!local, |d| {
             d.cursor_pointer().hover(|d| d.bg(rgba(t.hover))).on_click(cx.listener(move |this, _, _, cx| this.edit_host_form(&edit, cx)))
         })
-        .child(theme::dot(dot))
+        .child(theme::dot(state.dot))
         .child(div().w(u(110.)).flex_shrink_0().truncate().font_weight(FontWeight::MEDIUM).child(name.clone()))
         .child(
             div()
@@ -295,23 +294,30 @@ fn row(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> Stateful<D
                 .flex_shrink_0()
                 .flex()
                 .flex_row()
-                .child(status)
-                .when_some(why, |d, why| d.tooltip(theme::tooltip(why))),
+                .child(state.word)
+                .when_some(state.tooltip, |d, tooltip| d.tooltip(theme::tooltip(tooltip))),
         )
         .child(actions(&name, local, cx))
 }
 
-// MUST KILL: type: state returns a struct (dot, word, hover text), not a tuple
-fn state(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> (u32, AnyElement, Option<String>) {
+struct RowState {
+    dot: u32,
+    word: AnyElement,
+    tooltip: Option<String>,
+}
+
+fn state(this: &Dirigent, h: &HostState, cx: &mut Context<Dirigent>) -> RowState {
     let t = theme::t();
     let word = |text: &'static str, color: u32| div().text_size(text::sm()).text_color(rgba(color)).child(text).into_any_element();
     let signed_out = h.config.auth == Auth::Forge && this.forge.status.signed_in().is_none();
     match (&h.error, h.status) {
-        (_, HostStatus::Connected) => (t.done, word("connected", t.fg_2), None),
-        _ if signed_out => (t.warn, forge_link("not signed in", h.name.clone(), t.warn, cx).into_any_element(), None),
-        (Some(e), _) => (t.error, word("error", t.error), Some(e.clone())),
-        (None, HostStatus::Connecting) => (t.warn, word("connecting", t.fg_2), None),
-        (None, HostStatus::Disconnected) => (t.error, word("disconnected", t.fg_2), None),
+        (_, HostStatus::Connected) => RowState { dot: t.done, word: word("connected", t.fg_2), tooltip: None },
+        _ if signed_out => {
+            RowState { dot: t.warn, word: forge_link("not signed in", h.name.clone(), t.warn, cx).into_any_element(), tooltip: None }
+        }
+        (Some(e), _) => RowState { dot: t.error, word: word("error", t.error), tooltip: Some(e.clone()) },
+        (None, HostStatus::Connecting) => RowState { dot: t.warn, word: word("connecting", t.fg_2), tooltip: None },
+        (None, HostStatus::Disconnected) => RowState { dot: t.error, word: word("disconnected", t.fg_2), tooltip: None },
     }
 }
 

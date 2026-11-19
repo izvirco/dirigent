@@ -9,8 +9,7 @@ use dirigent_service::hosts;
 use gpui::{AnyElement, ClipboardItem, Context, Div, Entity, FontWeight, SharedString, Stateful, div, prelude::*, rgba};
 use std::collections::HashSet;
 
-// MUST KILL: rename: login::State -> HostTabs, it holds the host the Settings tabs show as well as the sign-in
-pub struct State {
+pub struct HostTabs {
     pub host: String,
     pub(crate) login: Option<Login>,
     pub(crate) answer: Entity<TextInput>,
@@ -20,16 +19,15 @@ pub struct State {
 pub(crate) struct Login {
     pub host: String,
     request: u64,
-    // MUST KILL: rename: name -> server
-    pub name: String,
+    pub server: String,
     steps: Vec<LoginStep>,
     // MUST KILL: type: Login's progress as an enum (Running(steps) / Failed(error)), not steps beside an Option error
     error: Option<String>,
 }
 
 impl Login {
-    pub fn new(host: String, request: u64, name: String) -> Self {
-        Self { host, request, name, steps: vec![], error: None }
+    pub fn new(host: String, request: u64, server: String) -> Self {
+        Self { host, request, server, steps: vec![], error: None }
     }
 
     fn prompt(&self) -> Option<u32> {
@@ -44,7 +42,7 @@ impl Login {
     }
 }
 
-impl State {
+impl HostTabs {
     pub fn new(cx: &mut Context<Dirigent>) -> Self {
         let answer = cx.new(|cx| TextInput::new(cx, "", true));
         cx.subscribe(&answer, |this, _, _: &crate::input::Submitted, cx| this.answer_login(cx)).detach();
@@ -54,15 +52,15 @@ impl State {
 
 impl Dirigent {
     pub(crate) fn show_host(&mut self, host: String) {
-        if host != self.login.host {
-            self.login.host = host;
+        if host != self.shown_host.host {
+            self.shown_host.host = host;
             self.mcp.reset();
         }
     }
 
     pub fn set_shown_host(&mut self, host: String, cx: &mut Context<Self>) {
         self.menu = None;
-        if host != self.login.host {
+        if host != self.shown_host.host {
             self.show_host(host);
             self.request_proxy_settings(cx);
             if self.mcp_open() {
@@ -73,9 +71,9 @@ impl Dirigent {
     }
 
     pub fn cancel_login(&mut self, cx: &mut Context<Self>) {
-        let Some(login) = self.login.login.take() else { return };
+        let Some(login) = self.shown_host.login.take() else { return };
         if login.error.is_none() {
-            self.login.cancelled.insert(login.request);
+            self.shown_host.cancelled.insert(login.request);
             self.request(&login.host, |id| ClientMessage::LoginCancel { id, login: login.request });
         }
         self.focus_mcp(cx);
@@ -83,31 +81,31 @@ impl Dirigent {
     }
 
     pub fn answer_login(&mut self, cx: &mut Context<Self>) {
-        let value = self.login.answer.read(cx).text().trim().to_owned();
-        let Some(login) = &mut self.login.login else { return };
+        let value = self.shown_host.answer.read(cx).text().trim().to_owned();
+        let Some(login) = &mut self.shown_host.login else { return };
         let Some(n) = login.prompt() else { return };
         login.steps.retain(|s| !matches!(s, LoginStep::Prompt { n: m, .. } if *m == n));
         let (host, request) = (login.host.clone(), login.request);
         self.request(&host, |id| ClientMessage::LoginAnswer { id, login: request, prompt: n, value });
-        self.set_input(&self.login.answer, "", cx);
+        self.set_input(&self.shown_host.answer, "", cx);
         self.focus_mcp(cx);
         cx.notify();
     }
 
     pub(crate) fn on_login_step(&mut self, host: &str, login: u64, step: LoginStep, cx: &mut Context<Self>) {
-        if !self.login.login.as_ref().is_some_and(|l| l.host == host && l.request == login) {
+        if !self.shown_host.login.as_ref().is_some_and(|l| l.host == host && l.request == login) {
             return;
         }
         match &step {
             LoginStep::AuthUrl { url } => cx.open_url(url),
             LoginStep::Prompt { placeholder, .. } => {
                 let placeholder = placeholder.clone().unwrap_or_default();
-                self.login.answer.update(cx, |a, cx| a.set_placeholder(placeholder, cx));
-                self.set_input(&self.login.answer, "", cx);
+                self.shown_host.answer.update(cx, |a, cx| a.set_placeholder(placeholder, cx));
+                self.set_input(&self.shown_host.answer, "", cx);
             }
             _ => {}
         }
-        let Some(l) = &mut self.login.login else { return };
+        let Some(l) = &mut self.shown_host.login else { return };
         match step {
             LoginStep::PromptClosed { n } => l.steps.retain(|s| !matches!(s, LoginStep::Prompt { n: m, .. } if *m == n)),
             step => l.steps.push(step),
@@ -115,35 +113,34 @@ impl Dirigent {
         self.focus_mcp(cx);
     }
 
-    // MUST KILL: rename: on_login_reply -> take_login_reply, false when the reply is no sign-in's
-    pub(crate) fn on_login_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
-        if self.login.cancelled.remove(&reply_to) {
+    pub(crate) fn take_login_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
+        if self.shown_host.cancelled.remove(&reply_to) {
             if outcome.is_ok() {
                 self.mcp_changed(host, None, cx);
             }
             return true;
         }
-        let Some(login) = self.login.login.as_mut().filter(|l| l.host == host && l.request == reply_to) else { return false };
-        let name = login.name.clone();
+        let Some(login) = self.shown_host.login.as_mut().filter(|l| l.host == host && l.request == reply_to) else { return false };
+        let server = login.server.clone();
         match outcome {
             Ok(()) => {
-                self.login.login = None;
-                self.toast(format!("Signed in to {name}"), cx);
+                self.shown_host.login = None;
+                self.toast(format!("Signed in to {server}"), cx);
             }
-            Err(e) => login.error = Some(too_old(e)),
+            Err(e) => login.error = Some(explain_unknown_request(e)),
         }
-        self.mcp_changed(host, Some(&name), cx);
+        self.mcp_changed(host, Some(&server), cx);
         self.focus_mcp(cx);
         true
     }
 
     pub(crate) fn shown_host_status(&mut self, host: &str, status: HostStatus, cx: &mut Context<Self>) {
         if status == HostStatus::Disconnected
-            && let Some(l) = self.login.login.as_mut().filter(|l| l.host == host && l.error.is_none())
+            && let Some(l) = self.shown_host.login.as_mut().filter(|l| l.host == host && l.error.is_none())
         {
             l.error = Some("The connection to the host dropped".into());
         }
-        if host != self.login.host {
+        if host != self.shown_host.host {
             return;
         }
         if self.proxy_open() {
@@ -153,8 +150,7 @@ impl Dirigent {
     }
 }
 
-// MUST KILL: rename: too_old -> explain_unknown_request, it maps an unknown-variant error to update advice
-pub(crate) fn too_old(message: String) -> String {
+pub(crate) fn explain_unknown_request(message: String) -> String {
     if message.starts_with("bad request: unknown variant") { "This host's service is too old for this; update it".into() } else { message }
 }
 
@@ -167,13 +163,13 @@ pub(crate) fn host_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful
             .map(|h| {
                 let name = h.name.clone();
                 let detail = if h.status == HostStatus::Connected { "" } else { "offline" };
-                let selected = name == this.login.host;
+                let selected = name == this.shown_host.host;
                 menu::item(format!("sh/{name}"), name.clone(), detail, selected, move |this, cx| this.set_shown_host(name.clone(), cx), cx)
             })
             .collect();
         menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
-    theme::labeled_chip("settings-host", "Host", this.login.host.clone(), false, open)
+    theme::labeled_chip("settings-host", "Host", this.shown_host.host.clone(), false, open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::SettingsHost, cx)))
         .children(menu)
 }
@@ -208,7 +204,7 @@ pub(crate) fn login_panel(login: &Login, this: &Dirigent, cx: &mut Context<Dirig
         .flex_row()
         .items_center()
         .justify_between()
-        .child(div().font_weight(FontWeight::MEDIUM).child(format!("Sign in to {}", login.name)))
+        .child(div().font_weight(FontWeight::MEDIUM).child(format!("Sign in to {}", login.server)))
         .child(action("login-close".into(), close, None).on_click(cx.listener(|this, _, _, cx| this.cancel_login(cx))));
     let body: Vec<AnyElement> = match &login.error {
         Some(e) => vec![div().text_size(text::sm()).text_color(rgba(t.error)).child(e.clone()).into_any()],
@@ -252,7 +248,7 @@ fn step(s: &LoginStep, open: bool, this: &Dirigent, cx: &mut Context<Dirigent>) 
                 .flex_row()
                 .gap_2()
                 .items_center()
-                .child(field(this.login.answer.clone()).flex_1().h(u(ACTION_H)).py_0().flex().items_center())
+                .child(field(this.shown_host.answer.clone()).flex_1().h(u(ACTION_H)).py_0().flex().items_center())
                 .child(action("auth-answer".into(), "Continue", None).on_click(cx.listener(|this, _, _, cx| this.answer_login(cx))));
             theme::stack().gap_1p5().child(question).child(answer).into_any()
         }
