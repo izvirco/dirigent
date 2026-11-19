@@ -16,9 +16,12 @@ const ROW_H: f32 = 38.;
 
 const SUMMARY_CHARS: usize = 300;
 
-// MUST KILL: type: EXPOSURES as an enum with a Default, not a tuple array whose first entry is the default
-const EXPOSURES: [(&str, &str); 2] =
-    [("codemode", "only scripts call them; declared when codemode is off"), ("direct", "declared to the model, as built-in tools are")];
+const DEFAULT_EXPOSURE: &str = "codemode";
+
+const EXPOSURES: [(&str, &str); 2] = [
+    (DEFAULT_EXPOSURE, "only scripts call them; declared when codemode is off"),
+    ("direct", "declared to the model, as built-in tools are"),
+];
 
 const RUN_PLACEHOLDER: &str = "npx -y @modelcontextprotocol/server-filesystem ~, or https://…/mcp";
 const ENV_PLACEHOLDER: &str = "KEY=value, a line each";
@@ -26,20 +29,28 @@ const HEADERS_PLACEHOLDER: &str = "Authorization: Bearer ${TOKEN}, a line each";
 const CLIENT_PLACEHOLDER: &str = "Claude Code, if the server refuses unknown clients";
 
 pub struct State {
-    // MUST KILL: type: list as an enum (Unlisted / Listed { servers, path } / Failed), not an Option of a Result of a tuple
-    list: Option<Result<(Vec<McpServer>, String), String>>,
+    list: List,
     list_request: Option<u64>,
     checks: HashMap<String, Check>,
-    // MUST KILL: type: changes' (server, failure toast) as a struct, not a tuple
-    changes: HashMap<u64, (String, String)>,
+    changes: HashMap<u64, Change>,
     open: Option<String>,
     pub form: Option<Form>,
     name: Entity<TextInput>,
     run: Entity<TextInput>,
-    // MUST KILL: rename: pairs -> env_or_headers
-    pairs: Entity<TextInput>,
+    env_or_headers: Entity<TextInput>,
     client: Entity<TextInput>,
     description: Entity<TextInput>,
+}
+
+enum List {
+    Unlisted,
+    Listed { servers: Vec<McpServer>, path: String },
+    Failed(String),
+}
+
+struct Change {
+    server: String,
+    failure: String,
 }
 
 enum Check {
@@ -50,20 +61,18 @@ enum Check {
 pub struct Form {
     editing: Option<McpServer>,
     error: Option<String>,
-    // MUST KILL: type: saving's (request id, server name) as a struct, not a tuple
     saving: Option<(u64, String)>,
-    // MUST KILL: rename: url -> run_is_url
-    url: bool,
+    run_is_url: bool,
 }
 
 impl State {
     pub fn new(cx: &mut Context<Dirigent>) -> Self {
         let name = cx.new(|cx| TextInput::new(cx, "filesystem", true));
         let run = cx.new(|cx| TextInput::new(cx, RUN_PLACEHOLDER, true));
-        let pairs = cx.new(|cx| TextInput::new(cx, ENV_PLACEHOLDER, false));
+        let env_or_headers = cx.new(|cx| TextInput::new(cx, ENV_PLACEHOLDER, false));
         let client = cx.new(|cx| TextInput::new(cx, CLIENT_PLACEHOLDER, true));
         let description = cx.new(|cx| TextInput::new(cx, "What it offers, in a sentence (optional)", true));
-        for input in [&name, &run, &pairs, &client, &description] {
+        for input in [&name, &run, &env_or_headers, &client, &description] {
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.save_mcp_form(cx)).detach();
             cx.subscribe(input, |this, _, _: &input::UserEdited, cx| {
                 if let Some(form) = this.mcp.form.as_mut().filter(|f| f.error.is_some()) {
@@ -75,15 +84,15 @@ impl State {
         }
         cx.subscribe(&run, |this, run, _: &input::UserEdited, cx| {
             let url = is_url(run.read(cx).text());
-            if let Some(form) = this.mcp.form.as_mut().filter(|f| f.url != url) {
-                form.url = url;
-                this.mcp.pairs.update(cx, |p, cx| p.set_placeholder(pairs_placeholder(url), cx));
+            if let Some(form) = this.mcp.form.as_mut().filter(|f| f.run_is_url != url) {
+                form.run_is_url = url;
+                this.mcp.env_or_headers.update(cx, |p, cx| p.set_placeholder(env_or_headers_placeholder(url), cx));
                 cx.notify();
             }
         })
         .detach();
         Self {
-            list: None,
+            list: List::Unlisted,
             list_request: None,
             checks: HashMap::new(),
             changes: HashMap::new(),
@@ -91,14 +100,14 @@ impl State {
             form: None,
             name,
             run,
-            pairs,
+            env_or_headers,
             client,
             description,
         }
     }
 
     pub fn inputs(&self) -> [Entity<TextInput>; 5] {
-        [self.name.clone(), self.run.clone(), self.pairs.clone(), self.client.clone(), self.description.clone()]
+        [self.name.clone(), self.run.clone(), self.env_or_headers.clone(), self.client.clone(), self.description.clone()]
     }
 
     fn checked_by(&self, id: u64) -> Option<String> {
@@ -113,7 +122,7 @@ impl State {
     }
 
     pub(crate) fn reset(&mut self) {
-        self.list = None;
+        self.list = List::Unlisted;
         self.list_request = None;
         self.checks.clear();
         self.changes.clear();
@@ -166,13 +175,13 @@ impl Dirigent {
             return;
         }
         self.mcp.checks.retain(|name, _| servers.iter().any(|s| s.name == *name));
-        self.mcp.list = Some(Ok((servers, path)));
+        self.mcp.list = List::Listed { servers, path };
         self.check_servers();
         cx.notify();
     }
 
     fn check_servers(&mut self) {
-        let Some(Ok((servers, _))) = &self.mcp.list else { return };
+        let List::Listed { servers, .. } = &self.mcp.list else { return };
         let due: Vec<String> = servers
             .iter()
             .filter(|s| s.error.is_none() && enabled(&s.config) && !self.mcp.checks.contains_key(&s.name))
@@ -200,13 +209,12 @@ impl Dirigent {
         }
     }
 
-    // MUST KILL: rename: on_mcp_reply -> take_mcp_reply, false when the reply is none of the tab's
-    pub(crate) fn on_mcp_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn take_mcp_reply(&mut self, host: &str, reply_to: u64, outcome: Result<(), String>, cx: &mut Context<Self>) -> bool {
         let shown = host == self.login.host;
         let m = &mut self.mcp;
         if shown && m.list_request.take_if(|r| *r == reply_to).is_some() {
             if let Err(e) = outcome {
-                m.list = Some(Err(too_old(e)));
+                m.list = List::Failed(too_old(e));
             }
             return true;
         }
@@ -228,11 +236,11 @@ impl Dirigent {
             cx.notify();
             return true;
         }
-        if let Some((name, failure)) = m.changes.remove(&reply_to) {
+        if let Some(Change { server, failure }) = m.changes.remove(&reply_to) {
             if let Err(e) = outcome {
                 self.toast(format!("{failure}: {}", too_old(e)), cx);
             }
-            self.mcp_changed(host, Some(&name), cx);
+            self.mcp_changed(host, Some(&server), cx);
             return true;
         }
         false
@@ -258,7 +266,7 @@ impl Dirigent {
             return self.toast(format!("{host} is offline"), cx);
         }
         let id = self.request(&host, |id| make(id, name.to_owned()));
-        self.mcp.changes.insert(id, (name.to_owned(), failure));
+        self.mcp.changes.insert(id, Change { server: name.to_owned(), failure });
         cx.notify();
     }
 
@@ -266,7 +274,7 @@ impl Dirigent {
         if !self.connected(&self.login.host) {
             return self.toast(format!("{} is offline", self.login.host), cx);
         }
-        if let Some(Ok((servers, _))) = &mut self.mcp.list
+        if let List::Listed { servers, .. } = &mut self.mcp.list
             && let Some(s) = servers.iter_mut().find(|s| s.name == name)
         {
             s.config = config.clone();
@@ -286,7 +294,7 @@ impl Dirigent {
         if exposure == self::exposure(&server.config) {
             return cx.notify();
         }
-        let config = with(&server.config, "exposure", (exposure != EXPOSURES[0].0).then(|| json!(exposure)));
+        let config = with(&server.config, "exposure", (exposure != DEFAULT_EXPOSURE).then(|| json!(exposure)));
         self.save_mcp_entry(&server.name, config, format!("Couldn't change how {}'s tools are reached", server.name), cx);
     }
 
@@ -320,16 +328,18 @@ impl Dirigent {
     pub fn open_mcp_form(&mut self, editing: Option<McpServer>, cx: &mut Context<Self>) {
         self.menu = None;
         self.drop_mcp_form();
-        let (run, pairs, description) = editing.as_ref().map(|s| fields_of(&s.config)).unwrap_or_default();
+        let Fields { run, env_or_headers, description } = editing.as_ref().map(|s| fields_of(&s.config)).unwrap_or_default();
         let name = editing.as_ref().map(|s| s.name.as_str()).unwrap_or_default();
         let client = editing.as_ref().map(|s| client_name(&s.config)).unwrap_or_default();
         let m = &self.mcp;
-        for (input, text) in [(&m.name, name), (&m.run, &run), (&m.pairs, &pairs), (&m.client, client), (&m.description, &description)] {
+        for (input, text) in
+            [(&m.name, name), (&m.run, &run), (&m.env_or_headers, &env_or_headers), (&m.client, client), (&m.description, &description)]
+        {
             self.set_input(input, text, cx);
         }
-        let url = is_url(&run);
-        self.mcp.pairs.update(cx, |p, cx| p.set_placeholder(pairs_placeholder(url), cx));
-        self.mcp.form = Some(Form { editing, error: None, saving: None, url });
+        let run_is_url = is_url(&run);
+        self.mcp.env_or_headers.update(cx, |p, cx| p.set_placeholder(env_or_headers_placeholder(run_is_url), cx));
+        self.mcp.form = Some(Form { editing, error: None, saving: None, run_is_url });
         self.focus_mcp(cx);
         cx.notify();
     }
@@ -346,7 +356,7 @@ impl Dirigent {
             None => text(&m.name).trim().to_owned(),
         };
         let listed = match &m.list {
-            Some(Ok((servers, _))) => servers.iter().any(|s| s.name == name),
+            List::Listed { servers, .. } => servers.iter().any(|s| s.name == name),
             _ => false,
         };
         let made = if name.is_empty() {
@@ -355,7 +365,7 @@ impl Dirigent {
             Err(format!("There's already a server named {name}"))
         } else {
             let base = form.editing.as_ref().map(|s| &s.config);
-            config_from(base, &text(&m.run), &text(&m.pairs), &text(&m.client), &text(&m.description))
+            config_from(base, &text(&m.run), &text(&m.env_or_headers), &text(&m.client), &text(&m.description))
         };
         let host = self.login.host.clone();
         let made = made.and_then(|config| if self.connected(&host) { Ok(config) } else { Err(format!("{host} is offline")) });
@@ -384,15 +394,13 @@ impl Dirigent {
         }
     }
 
-    // MUST KILL: rename: drop_mcp_form -> drop_mcp_form_keeping_save, an unanswered save becomes a tracked change
     pub(crate) fn drop_mcp_form(&mut self) {
         if let Some((id, name)) = self.mcp.form.take().and_then(|f| f.saving) {
-            self.mcp.changes.insert(id, (name.clone(), format!("Couldn't save {name}")));
+            self.mcp.changes.insert(id, Change { failure: format!("Couldn't save {name}"), server: name });
         }
     }
 
-    // MUST KILL: rename: mcp_form_escape -> close_mcp_form_on_escape, true when it handled the Esc
-    pub fn mcp_form_escape(&mut self, cx: &mut Context<Self>) -> bool {
+    pub fn close_mcp_form_on_escape(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.mcp_open() || self.mcp.form.is_none() {
             return false;
         }
@@ -420,11 +428,11 @@ fn enabled(config: &Value) -> bool {
 }
 
 fn exposure(config: &Value) -> &str {
-    config.get("exposure").and_then(Value::as_str).unwrap_or(EXPOSURES[0].0)
+    config.get("exposure").and_then(Value::as_str).unwrap_or(DEFAULT_EXPOSURE)
 }
 
 fn transport(config: &Value) -> String {
-    fields_of(config).0
+    fields_of(config).run
 }
 
 fn is_url(run: &str) -> bool {
@@ -432,8 +440,8 @@ fn is_url(run: &str) -> bool {
     run.starts_with("https://") || run.starts_with("http://")
 }
 
-fn pairs_placeholder(url: bool) -> &'static str {
-    if url { HEADERS_PLACEHOLDER } else { ENV_PLACEHOLDER }
+fn env_or_headers_placeholder(run_is_url: bool) -> &'static str {
+    if run_is_url { HEADERS_PLACEHOLDER } else { ENV_PLACEHOLDER }
 }
 
 fn with(config: &Value, key: &str, value: Option<Value>) -> Value {
@@ -451,8 +459,14 @@ fn client_name(config: &Value) -> &str {
     config.pointer("/oauth/clientName").and_then(Value::as_str).unwrap_or_default()
 }
 
-// MUST KILL: type: fields_of returns a struct (run, pairs, description), not a tuple
-fn fields_of(config: &Value) -> (String, String, String) {
+#[derive(Debug, Default, PartialEq)]
+struct Fields {
+    run: String,
+    env_or_headers: String,
+    description: String,
+}
+
+fn fields_of(config: &Value) -> Fields {
     let str_of = |key: &str| config.get(key).and_then(Value::as_str).unwrap_or_default().to_owned();
     let pairs = |key: &str, sep: &str| {
         let map = config.get(key).and_then(Value::as_object);
@@ -460,17 +474,16 @@ fn fields_of(config: &Value) -> (String, String, String) {
     };
     let description = str_of("description");
     if config.get("url").is_some() {
-        return (str_of("url"), pairs("headers", ": "), description);
+        return Fields { run: str_of("url"), env_or_headers: pairs("headers", ": "), description };
     }
     let args = config.get("args").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned);
     let words: Vec<String> = std::iter::once(str_of("command")).chain(args).collect();
-    (if words[0].is_empty() { String::new() } else { join_words(&words) }, pairs("env", "="), description)
+    let run = if words[0].is_empty() { String::new() } else { join_words(&words) };
+    Fields { run, env_or_headers: pairs("env", "="), description }
 }
 
-fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, description: &str) -> Result<Value, String> {
+fn config_from(base: Option<&Value>, run: &str, env_or_headers: &str, client: &str, description: &str) -> Result<Value, String> {
     let mut config = base.and_then(Value::as_object).cloned().unwrap_or_default();
-    // MUST KILL: extract: the "type" removal in config_from into a named step that clears the other transport's keys
-    config.remove("type");
     let mut oauth = config.get("oauth").and_then(Value::as_object).cloned().unwrap_or_default();
     match client.trim() {
         "" => oauth.remove("clientName"),
@@ -486,21 +499,21 @@ fn config_from(base: Option<&Value>, run: &str, pairs: &str, client: &str, descr
         return Err("Enter the command that runs the server, or its URL".into());
     }
     if is_url(run) {
-        for key in ["command", "args", "env", "cwd"] {
+        for key in ["type", "command", "args", "env", "cwd"] {
             set(key, None);
         }
         set("url", Some(json!(run)));
-        set("headers", nonempty(parse_pairs(pairs, ':', "Header", "Name: value")?));
+        set("headers", nonempty(parse_pairs(env_or_headers, ':', "Header", "Name: value")?));
         set("oauth", nonempty(oauth));
     } else {
-        for key in ["url", "headers", "oauth"] {
+        for key in ["type", "url", "headers", "oauth"] {
             set(key, None);
         }
         let mut words = split_words(run)?.into_iter();
         set("command", words.next().map(Value::String));
         let args: Vec<Value> = words.map(Value::String).collect();
         set("args", (!args.is_empty()).then_some(Value::Array(args)));
-        set("env", nonempty(parse_pairs(pairs, '=', "Environment", "KEY=value")?));
+        set("env", nonempty(parse_pairs(env_or_headers, '=', "Environment", "KEY=value")?));
     }
     let description = description.trim();
     set("description", (!description.is_empty()).then(|| json!(description)));
@@ -518,7 +531,6 @@ fn parse_pairs(text: &str, sep: char, what: &str, shape: &str) -> Result<Map<Str
     Ok(map)
 }
 
-// MUST KILL: rename: split_words -> split_command_line, backslashes stay literal unlike a shell
 fn split_words(line: &str) -> Result<Vec<String>, String> {
     let mut words = vec![];
     let mut word: Option<String> = None;
@@ -560,7 +572,7 @@ fn join_words(words: &[String]) -> String {
 
 pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Vec<Div> {
     let mut out = vec![section("MCP servers", body(this, cx))];
-    if let Some(Ok((_, path))) = &this.mcp.list {
+    if let List::Listed { path, .. } = &this.mcp.list {
         out.push(saved_to(Path::new(path)));
     }
     out
@@ -571,10 +583,10 @@ fn body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
     let login = this.login.login.as_ref();
     let content = match (login, &this.mcp.list) {
         (Some(l), _) => login_panel(l, this, cx),
-        (None, None) if !this.connected(host) => hint(format!("{host} is offline")),
-        (None, None) => hint("Loading…"),
-        (None, Some(Err(e))) => div().text_size(text::sm()).text_color(rgba(theme::t().error)).child(e.clone()),
-        (None, Some(Ok((servers, _)))) => list(servers, this, cx),
+        (None, List::Unlisted) if !this.connected(host) => hint(format!("{host} is offline")),
+        (None, List::Unlisted) => hint("Loading…"),
+        (None, List::Failed(e)) => div().text_size(text::sm()).text_color(rgba(theme::t().error)).child(e.clone()),
+        (None, List::Listed { servers, .. }) => list(servers, this, cx),
     };
     let chip = this.hosts.len() > 1 && login.is_none();
     let header = div()
@@ -661,7 +673,6 @@ fn row(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> Stateful<D
         }))
 }
 
-// MUST KILL: type: state returns a struct (dot, word, word colour), not a tuple
 fn state(m: &State, s: &McpServer) -> (u32, String, u32) {
     let t = theme::t();
     if s.error.is_some() {
@@ -788,7 +799,7 @@ fn exposure_chip(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> 
 fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
     let t = theme::t();
     let m = &this.mcp;
-    let url = f.url;
+    let url = f.run_is_url;
     let title = match &f.editing {
         Some(s) => format!("Edit {}", s.name),
         None => "New MCP server".to_owned(),
@@ -827,7 +838,7 @@ fn form_card(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Div {
         .child(div().font_weight(FontWeight::MEDIUM).child(title))
         .when(f.editing.is_none(), |d| d.child(line("Name", &m.name)))
         .child(line(if url { "URL" } else { "Command" }, &m.run))
-        .child(line(if url { "Headers" } else { "Environment" }, &m.pairs))
+        .child(line(if url { "Headers" } else { "Environment" }, &m.env_or_headers))
         .when(url, |d| d.child(line("Client name", &m.client)))
         .child(line("Description", &m.description))
         .child(footer)
@@ -897,11 +908,12 @@ mod tests {
     #[test]
     fn entries_fill_the_form_back() {
         let c = json!({"command": "uvx", "args": ["my tool"], "env": {"A": "1"}, "description": "d"});
-        assert_eq!(fields_of(&c), ("uvx 'my tool'".into(), "A=1".into(), "d".into()));
+        assert_eq!(fields_of(&c), Fields { run: "uvx 'my tool'".into(), env_or_headers: "A=1".into(), description: "d".into() });
         let c = json!({"url": "https://x.dev/mcp", "headers": {"X-Key": "k"}});
-        assert_eq!(fields_of(&c), ("https://x.dev/mcp".into(), "X-Key: k".into(), String::new()));
-        let (run, pairs, description) = fields_of(&c);
-        assert_eq!(config_from(Some(&c), &run, &pairs, client_name(&c), &description).unwrap(), c);
+        let fields = fields_of(&c);
+        assert_eq!(fields, Fields { run: "https://x.dev/mcp".into(), env_or_headers: "X-Key: k".into(), description: String::new() });
+        let Fields { run, env_or_headers, description } = fields;
+        assert_eq!(config_from(Some(&c), &run, &env_or_headers, client_name(&c), &description).unwrap(), c);
         assert_eq!(fields_of(&json!({})), Default::default());
     }
 }
