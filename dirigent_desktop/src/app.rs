@@ -1186,11 +1186,10 @@ impl Dirigent {
                 }
             }
             ServerMessage::Usage { reply_to, buckets } => {
-                if self.on_upload_usage(reply_to, &buckets, cx) {
-                    return;
-                }
                 if self.usage.request == Some(reply_to) {
                     self.usage.buckets.insert(host, buckets);
+                } else {
+                    self.on_upload_usage(reply_to, &buckets, cx);
                 }
             }
             ServerMessage::Proxy { reply_to, proxy } => {
@@ -1684,7 +1683,7 @@ impl Dirigent {
                     if this.ticks % account::CHECK_SECS == 0 {
                         this.sync_forge(cx);
                     }
-                    if this.ticks % leaderboard::UPLOAD_EVERY == 0 {
+                    if this.ticks % leaderboard::UPLOAD_EVERY_SECS == 0 {
                         this.upload_all();
                     }
                     if this.ticks % PROXY_UPDATE_CHECK_SECS == 0 {
@@ -1754,7 +1753,7 @@ impl Dirigent {
     }
 
     pub fn new_thread(&mut self, _: &NewThread, _: &mut Window, cx: &mut Context<Self>) {
-        if self.add_project.is_some() || self.modal.is_some() || self.onboarding_open() {
+        if self.add_project.is_some() || self.modal.is_some() || self.onboarding_taking_input() {
             return;
         }
         self.new_draft(None, cx);
@@ -3431,7 +3430,7 @@ impl Dirigent {
         if self.add_project.is_some() {
             return self.close_add_project(cx);
         }
-        if self.onboarding_open() {
+        if self.onboarding_taking_input() {
             return;
         }
         if self.close_host_form_on_escape(cx) || self.close_mcp_form_on_escape(cx) {
@@ -3463,7 +3462,7 @@ impl Dirigent {
             || self.screen_preview
             || self.menu.is_some()
             || self.add_project.is_some()
-            || self.onboarding_open()
+            || self.onboarding_taking_input()
             || self.modal.is_some()
             || self.renaming.is_some()
     }
@@ -3475,7 +3474,7 @@ impl Dirigent {
     }
 
     pub fn toggle_sidebar(&mut self, _: &ToggleSidebar, window: &mut Window, cx: &mut Context<Self>) {
-        if self.typed_bracket("[", window, cx) || self.onboarding_open() {
+        if self.typed_bracket("[", window, cx) || self.onboarding_taking_input() {
             return;
         }
         self.set_sidebar_hidden(!self.sidebar_hidden, cx);
@@ -3488,7 +3487,7 @@ impl Dirigent {
     }
 
     pub fn toggle_log_key(&mut self, _: &ToggleLog, window: &mut Window, cx: &mut Context<Self>) {
-        if self.typed_bracket("]", window, cx) || self.onboarding_open() {
+        if self.typed_bracket("]", window, cx) || self.onboarding_taking_input() {
             return;
         }
         self.toggle_panel(cx);
@@ -4201,11 +4200,11 @@ impl Render for Dirigent {
         if bg.pattern != Pattern::Off && bg.reach == Reach::Full {
             fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE).round() as u32);
         }
-        let shown = self.app_shown();
+        let opacity = self.app_opacity();
         if self.onboarding.as_ref().is_some_and(|s| s.leaving.is_some()) {
             window.request_animation_frame();
         }
-        let app = (!self.onboarding_open()).then(|| {
+        let app = (!self.onboarding_taking_input()).then(|| {
             let main = match &self.pane {
                 Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, window, cx),
                 _ => lists::render(self, window, cx),
@@ -4225,7 +4224,7 @@ impl Render for Dirigent {
                 .size_full()
                 .flex()
                 .flex_row()
-                .when(shown < 1., |d| d.opacity(shown))
+                .when(opacity < 1., |d| d.opacity(opacity))
                 .when(docked, |d| d.child(sidebar::docked(self, cx)))
                 .child(panel)
                 .when(!docked, |d| d.child(sidebar::peek(self, cx)))
@@ -4237,7 +4236,7 @@ impl Render for Dirigent {
         };
         let key_context = match &self.menu {
             Some(_) => format!("{KEY_CONTEXT} {}", menu::KEY_CONTEXT),
-            None if self.onboarding_open() => format!("{KEY_CONTEXT} {}", onboarding::KEY_CONTEXT),
+            None if self.onboarding_taking_input() => format!("{KEY_CONTEXT} {}", onboarding::KEY_CONTEXT),
             None => KEY_CONTEXT.to_owned(),
         };
         div()

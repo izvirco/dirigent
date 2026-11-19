@@ -117,7 +117,7 @@ impl Metric {
     fn of(self, t: &Totals) -> f64 {
         match self {
             Metric::Cost => t.cost,
-            Metric::Tokens => (t.input + t.output) as f64,
+            Metric::Tokens => (t.prompt + t.output) as f64,
             Metric::Output => t.output as f64,
             Metric::Messages => t.messages as f64,
             Metric::Used => t.used,
@@ -151,7 +151,6 @@ pub struct State {
     pub board: View,
     pub proxy: View,
     pub range: Range,
-    // MUST KILL: type: since / until (unix ms, until exclusive) → one half-open window
     pub since: i64,
     pub until: i64,
     pub group: Group,
@@ -283,35 +282,34 @@ fn midnight(d: NaiveDate) -> i64 {
 
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub struct Totals {
-    // MUST KILL: rename: Totals.input → prompt (fresh input + cache read + cache write)
-    pub input: u64,
+    pub prompt: u64,
     pub output: u64,
     pub cached: u64,
     pub cost: f64,
     pub messages: u64,
-    // MUST KILL: extract: Totals.used (per slot, never summed) out of Totals, whose other fields sum
     pub used: f64,
 }
 
 impl Totals {
     fn of(input: u64, output: u64, cache_read: u64, cache_write: u64, cost: f64, messages: u64) -> Self {
-        Totals { input: input + cache_read + cache_write, output, cached: cache_read, cost, messages, used: 0. }
+        Totals { prompt: input + cache_read + cache_write, output, cached: cache_read, cost, messages, used: 0. }
     }
 
     fn sum(&mut self, o: &Totals) {
-        self.input += o.input;
-        self.output += o.output;
-        self.cached += o.cached;
-        self.cost += o.cost;
-        self.messages += o.messages;
+        let Totals { prompt, output, cached, cost, messages, used: _ } = *o;
+        self.prompt += prompt;
+        self.output += output;
+        self.cached += cached;
+        self.cost += cost;
+        self.messages += messages;
     }
 
     fn cached_pct(&self) -> String {
-        if self.input == 0 { "–".into() } else { format!("{}%", (self.cached as f64 / self.input as f64 * 100.).round()) }
+        if self.prompt == 0 { "–".into() } else { format!("{}%", (self.cached as f64 / self.prompt as f64 * 100.).round()) }
     }
 
     fn split(&self) -> String {
-        format!("{} in · {} out · {} cached", kilo(self.input), kilo(self.output), self.cached_pct())
+        format!("{} in · {} out · {} cached", kilo(self.prompt), kilo(self.output), self.cached_pct())
     }
 }
 
@@ -362,14 +360,11 @@ struct Model {
     running: bool,
     series: Vec<Series>,
     total: Totals,
-    // MUST KILL: rename: labels → label_line_ends
-    labels: bool,
+    label_line_ends: bool,
 }
 
 impl Model {
-    fn new(since: i64, bucket: i64, slots: usize, mut series: Vec<Series>, view: &View, labels: bool) -> Self {
-        let metric = view.metric;
-        series.sort_by(|a, b| metric.of(&b.total).total_cmp(&metric.of(&a.total)).then_with(|| a.key.cmp(&b.key)));
+    fn new(since: i64, bucket: i64, slots: usize, mut series: Vec<Series>, view: &View, label_line_ends: bool) -> Self {
         let palette = palette();
         let mut total = Totals::default();
         for (i, s) in series.iter_mut().enumerate() {
@@ -385,7 +380,7 @@ impl Model {
                 }
             }
         }
-        Self { since, bucket, slots, metric, running: view.running, series, total, labels }
+        Self { since, bucket, slots, metric: view.metric, running: view.running, series, total, label_line_ends }
     }
 
     fn visible(&self) -> impl Iterator<Item = &Series> {
@@ -414,6 +409,10 @@ impl Model {
     }
 }
 
+fn rank(series: &mut [Series], metric: Metric) {
+    series.sort_by(|a, b| metric.of(&b.total).total_cmp(&metric.of(&a.total)).then_with(|| a.key.cmp(&b.key)));
+}
+
 fn mine(s: &State) -> Model {
     let bucket = s.bucket();
     let slots = ((s.until - s.since + bucket - 1) / bucket).max(1) as usize;
@@ -430,10 +429,11 @@ fn mine(s: &State) -> Model {
             .or_insert_with(|| Series::new(key, label, detail, slots))
             .add(i, Totals::of(b.input, b.output, b.cache_read, b.cache_write, b.cost, b.messages));
     }
-    Model::new(s.since, bucket, slots, by_key.into_values().collect(), &s.mine, false)
+    let mut series: Vec<Series> = by_key.into_values().collect();
+    rank(&mut series, s.mine.metric);
+    Model::new(s.since, bucket, slots, series, &s.mine, false)
 }
 
-// MUST KILL: rearchitect: proxy leans on Model::new's tie-break by key to keep accounts in order → an explicit order
 fn proxy(s: &State) -> Model {
     let bucket = s.bucket();
     let slots = ((s.until - s.since + bucket - 1) / bucket).max(1) as usize;
@@ -458,6 +458,7 @@ fn proxy(s: &State) -> Model {
             series.push(line);
         }
     }
+    series.sort_by(|a, b| a.key.cmp(&b.key));
     let mut model = Model::new(s.since, bucket, slots, series, &s.proxy, false);
     model.metric = Metric::Used;
     model
@@ -506,7 +507,7 @@ fn board(board: Option<&Board>, view: &View, you: Option<&str>, avatars: &HashMa
     let slot = b.slot.max(1);
     let slots = ((b.until - b.since) / slot).max(1) as usize;
     let at = |t: i64| (t - b.since).div_euclid(slot).clamp(0, slots as i64 - 1) as usize;
-    let series = b
+    let mut series: Vec<Series> = b
         .players
         .iter()
         .map(|p| {
@@ -520,6 +521,7 @@ fn board(board: Option<&Board>, view: &View, you: Option<&str>, avatars: &HashMa
             s
         })
         .collect();
+    rank(&mut series, view.metric);
     Model::new(b.since, slot, slots, series, view, true)
 }
 
@@ -554,7 +556,7 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         Tab::Board => board(lb.board.as_ref(), &s.board, lb.active(&this.forge.status).map(|a| a.id.as_str()), &lb.avatars),
         Tab::Proxy => proxy(s),
     });
-    let hover_slot = s.hover.and_then(|p| Layout::new(*s.plot.borrow(), model.labels).slot_at(p.x, model.slots));
+    let hover_slot = s.hover.and_then(|p| Layout::new(*s.plot.borrow(), model.label_line_ends).slot_at(p.x, model.slots));
     let (when, hero, list) = match s.tab {
         Tab::Mine => {
             let [metric, mode] = view_controls(this, &model, cx);
@@ -927,14 +929,14 @@ fn chart(this: &Dirigent, model: Rc<Model>, hover_slot: Option<usize>, cx: &mut 
         |_, _, _| {},
         move |bounds, _, window, cx| {
             *plot.borrow_mut() = bounds;
-            paint(&paint_model, &Layout::new(bounds, paint_model.labels), hover_slot, window, cx);
+            paint(&paint_model, &Layout::new(bounds, paint_model.label_line_ends), hover_slot, window, cx);
         },
     )
     .size_full();
     let empty = empty_text(this, &model).map(|text| {
         div().absolute().inset_0().flex().items_center().justify_center().pb(u(AXIS)).text_color(rgba(theme::t().fg_2)).child(text)
     });
-    let card = hover_slot.zip(s.hover).map(|(i, p)| readout(&model, i, p, &Layout::new(*s.plot.borrow(), model.labels)));
+    let card = hover_slot.zip(s.hover).map(|(i, p)| readout(&model, i, p, &Layout::new(*s.plot.borrow(), model.label_line_ends)));
     div()
         .id("usage-chart")
         .relative()
@@ -1005,7 +1007,7 @@ fn paint(model: &Model, layout: &Layout, hover: Option<usize>, window: &mut Wind
         }
     }
 
-    if model.labels {
+    if model.label_line_ends {
         paint_labels(model, layout, &y_of, window, cx);
     }
 
@@ -1086,8 +1088,7 @@ fn fit(s: &str, room: Pixels, size: Pixels, window: &mut Window) -> String {
     String::new()
 }
 
-// MUST KILL: rename: smooth → monotone_cubic (Fritsch–Carlson tangents, never overshoots the data)
-fn smooth(pts: &[Point<Pixels>]) -> Vec<(Point<Pixels>, Point<Pixels>, Point<Pixels>)> {
+fn monotone_cubic(pts: &[Point<Pixels>]) -> Vec<(Point<Pixels>, Point<Pixels>, Point<Pixels>)> {
     let n = pts.len();
     if n < 2 {
         return vec![];
@@ -1123,7 +1124,7 @@ fn smooth(pts: &[Point<Pixels>]) -> Vec<(Point<Pixels>, Point<Pixels>, Point<Pix
 }
 
 fn line_path(pts: &[Point<Pixels>]) -> Option<gpui::Path<Pixels>> {
-    let segs = smooth(pts);
+    let segs = monotone_cubic(pts);
     if segs.is_empty() {
         return None;
     }
@@ -1136,7 +1137,7 @@ fn line_path(pts: &[Point<Pixels>]) -> Option<gpui::Path<Pixels>> {
 }
 
 fn area_path(pts: &[Point<Pixels>], base: Pixels) -> Option<gpui::Path<Pixels>> {
-    let segs = smooth(pts);
+    let segs = monotone_cubic(pts);
     if segs.is_empty() {
         return None;
     }
@@ -1282,7 +1283,7 @@ fn legend(model: &Model, cx: &mut Context<Dirigent>) -> Div {
                         }),
                 )
                 .child(col(80., dollars(t.cost), fg))
-                .child(col(80., kilo(t.input), num))
+                .child(col(80., kilo(t.prompt), num))
                 .child(col(80., kilo(t.output), num))
                 .child(col(80., t.cached_pct(), num))
                 .child(col(70., t.messages.to_string(), num))
@@ -1421,7 +1422,7 @@ fn ranking(model: &Model, cx: &mut Context<Dirigent>) -> Div {
                 .child(picture)
                 .child(name)
                 .child(col(80., dollars(tot.cost), fg))
-                .child(col(80., kilo(tot.input + tot.output), num))
+                .child(col(80., kilo(tot.prompt + tot.output), num))
                 .child(col(70., kilo(tot.output), num))
                 .child(col(64., tot.cached_pct(), num))
                 .child(col(70., tot.messages.to_string(), num))
@@ -1473,7 +1474,7 @@ mod tests {
             m.series.iter().map(|x| (x.label.as_str(), x.total.cost, x.hidden)).collect::<Vec<_>>(),
             [("b", 5., true), ("a", 3., false)]
         );
-        assert_eq!(m.series[1].slots[0], Totals { input: 28, output: 4, cached: 20, cost: 3., messages: 4, used: 0. });
+        assert_eq!(m.series[1].slots[0], Totals { prompt: 28, output: 4, cached: 20, cost: 3., messages: 4, used: 0. });
         assert_eq!((m.total.messages, m.total.cost), (4, 3.));
         assert_eq!(m.scale(), 5.);
         s.mine.metric = Metric::Messages;
@@ -1584,7 +1585,7 @@ mod tests {
     fn smoothing_never_overshoots() {
         let pts: Vec<Point<Pixels>> =
             [(0., 100.), (10., 100.), (20., 0.), (30., 0.), (40., 50.)].iter().map(|&(x, y)| point(px(x), px(y))).collect();
-        for (to, a, b) in smooth(&pts) {
+        for (to, a, b) in monotone_cubic(&pts) {
             for p in [to, a, b] {
                 assert!((0. ..=100.).contains(&f32::from(p.y)), "{p:?}");
             }
