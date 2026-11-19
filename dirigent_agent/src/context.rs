@@ -46,7 +46,6 @@ pub fn messages(branch: &[Entry], model: &str, images: bool, blob: &mut dyn FnMu
     if let Some(summary) = summary {
         out.push(Message::User(vec![Part::Text(format!("{SUMMARY_PREFIX}{summary}{SUMMARY_SUFFIX}"))]));
     }
-    // MUST KILL: rename: whole -> not_failed_or_aborted, so dropping a failed reply and its calls reads from the name
     let whole = |a: &Assistant| !matches!(a.stop, Stop::Error | Stop::Aborted);
     let called: HashSet<&str> = entries
         .iter()
@@ -129,6 +128,17 @@ pub fn tokens(branch: &[Entry]) -> u64 {
     }
 }
 
+fn cut_keeping_results_with_calls(entries: &[&Entry], keep_recent: u64) -> Option<usize> {
+    let mut kept = 0;
+    let reached = (0..entries.len()).rev().find(|i| {
+        kept += estimate(entries[*i]);
+        kept >= keep_recent
+    });
+    let reached = reached.unwrap_or(0);
+    let not_a_result = |i: &usize| !matches!(entries[*i].body, Body::ToolResult(_));
+    (reached..entries.len()).find(not_a_result).or_else(|| (0..reached).rev().find(not_a_result))
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Plan<'a> {
     pub first_kept: String,
@@ -139,23 +149,13 @@ pub struct Plan<'a> {
 }
 
 impl<'a> Plan<'a> {
-    // MUST KILL: extract: Plan::new's cut search into a fn that never cuts between a tool call and its result
     pub fn new(branch: &'a [Entry], keep_recent: u64) -> Option<Self> {
         if matches!(branch.last()?.body, Body::Compaction { .. }) {
             return None;
         }
         let (previous, entries) = visible(branch);
         let starts_turn = |e: &Entry| matches!(e.body, Body::User { .. } | Body::Notice(_));
-        let cut_points: Vec<usize> = (0..entries.len()).filter(|i| !matches!(entries[*i].body, Body::ToolResult(_))).collect();
-        let mut cut = *cut_points.first()?;
-        let mut kept = 0;
-        for i in (0..entries.len()).rev() {
-            kept += estimate(entries[i]);
-            if kept >= keep_recent {
-                cut = cut_points.iter().copied().find(|c| *c >= i).unwrap_or(*cut_points.last()?);
-                break;
-            }
-        }
+        let cut = cut_keeping_results_with_calls(&entries, keep_recent)?;
         let turn_start = if starts_turn(entries[cut]) { None } else { (0..cut).rev().find(|i| starts_turn(entries[*i])) };
         let older = entries[..turn_start.unwrap_or(cut)].to_vec();
         let turn_prefix = turn_start.map_or(vec![], |start| entries[start..cut].to_vec());

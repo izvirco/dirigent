@@ -2,7 +2,7 @@ use crate::Out;
 use crate::config::Config;
 use crate::context::{self, Plan};
 use crate::proxy::{Chunk, Failure, Model, Reply, Request};
-use crate::session::{Counted, Queued, Session, State};
+use crate::session::{Counted, Queued, ServersFor, Session, State};
 use crate::tool::{Call, Content, Tool, ToolOutput};
 use crate::tools::images;
 use anyhow::Result;
@@ -21,13 +21,13 @@ const TOOL_STOP_GRACE: Duration = Duration::from_secs(3);
 const BAD_INPUT_CHARS: usize = 300;
 
 pub(crate) async fn run(session: Arc<Session>, cancel: CancellationToken) {
-    match AssertUnwindSafe(session.turns(&cancel)).catch_unwind().await {
-        Ok(Ok(true)) => return,
-        Ok(Ok(false)) => {}
-        Ok(Err(e)) => session.close_turn(Some(format!("{e:#}"))),
-        Err(panic) => session.close_turn(Some(format!("The agent hit a bug and stopped: {}", crate::panic_message(&*panic)))),
-    }
-    session.stop();
+    let error = match AssertUnwindSafe(session.turns(&cancel)).catch_unwind().await {
+        Ok(Ok(())) => return,
+        Ok(Err(e)) => format!("{e:#}"),
+        Err(panic) => format!("The agent hit a bug and stopped: {}", crate::panic_message(&*panic)),
+    };
+    session.append_stand_in_reply(Some(error));
+    session.end_run_keeping_notices();
 }
 
 pub(crate) async fn with_retries<Fut>(
@@ -61,13 +61,13 @@ where
 }
 
 impl Session {
-    // MUST KILL: type: turns returns a bool for "the run already ended in finish"; an enum (Ended / StoppedShort) says it
-    async fn turns(self: &Arc<Self>, cancel: &CancellationToken) -> Result<bool> {
+    async fn turns(self: &Arc<Self>, cancel: &CancellationToken) -> Result<()> {
         loop {
             self.take_steers();
             let reply = self.turn(cancel).await?;
             if matches!(reply.stop, Stop::Error | Stop::Aborted) {
-                return Ok(false);
+                self.end_run_keeping_notices();
+                return Ok(());
             }
             let calls: Vec<(String, String, Value)> = reply
                 .content
@@ -78,7 +78,7 @@ impl Session {
                 .collect();
             if calls.is_empty() {
                 if self.finish() {
-                    return Ok(true);
+                    return Ok(());
                 }
                 continue;
             }
@@ -90,8 +90,9 @@ impl Session {
                 }
             }
             if cancel.is_cancelled() {
-                self.close_turn(None);
-                return Ok(false);
+                self.append_stand_in_reply(None);
+                self.end_run_keeping_notices();
+                return Ok(());
             }
         }
     }
@@ -101,19 +102,18 @@ impl Session {
         if state.steering.is_empty() {
             return;
         }
-        // MUST KILL: extract: take_steers' emit-the-queue-then-append order into a fn of its own, so clients never see a message twice
         let taken = std::mem::take(&mut state.steering);
-        self.emit_queue(&state);
-        for queued in taken {
-            self.append_queued(&mut state, queued);
-        }
+        self.emit_queue_then_append(&mut state, taken);
     }
 
-    fn append_queued(&self, state: &mut State, queued: Queued) {
-        match queued {
-            Queued::User { content, .. } => self.append(state, Body::User { content }),
-            Queued::Notice(notice) => self.append(state, Body::Notice(notice)),
-        };
+    fn emit_queue_then_append(&self, state: &mut State, taken: impl IntoIterator<Item = Queued>) {
+        self.emit_queue(state);
+        for queued in taken {
+            match queued {
+                Queued::User { content, .. } => self.append(state, Body::User { content }),
+                Queued::Notice(notice) => self.append(state, Body::Notice(notice)),
+            };
+        }
     }
 
     fn finish(&self) -> bool {
@@ -122,8 +122,7 @@ impl Session {
             return false;
         }
         if let Some(next) = state.follow_up.pop_front() {
-            self.emit_queue(&state);
-            self.append_queued(&mut state, next);
+            self.emit_queue_then_append(&mut state, [next]);
             return false;
         }
         state.run = None;
@@ -131,23 +130,18 @@ impl Session {
         true
     }
 
-    // MUST KILL: rename: stop -> end_run_keeping_notices, it drops queued messages but keeps queued notices as entries
-    fn stop(&self) {
+    fn end_run_keeping_notices(&self) {
         let mut state = self.state.lock().unwrap();
         let state = &mut *state;
         let waiting: Vec<Queued> = state.steering.drain(..).chain(state.follow_up.drain(..)).collect();
-        self.emit_queue(state);
-        for notice in waiting.into_iter().filter(|q| matches!(q, Queued::Notice(_))) {
-            self.append_queued(state, notice);
-        }
+        self.emit_queue_then_append(state, waiting.into_iter().filter(|q| matches!(q, Queued::Notice(_))));
         state.run = None;
         self.emit(Out::Event(Event::RunEnd));
     }
 
-    // MUST KILL: rename: close_turn -> append_stand_in_reply, it writes an Assistant entry in place of the reply that didn't come
-    fn close_turn(&self, error: Option<String>) {
+    fn append_stand_in_reply(&self, error: Option<String>) {
         let mut state = self.state.lock().unwrap();
-        let closing = Assistant {
+        let stand_in = Assistant {
             content: vec![],
             model: state.model.clone().unwrap_or_default(),
             provider: String::new(),
@@ -158,7 +152,7 @@ impl Session {
             error,
             duration_ms: 0,
         };
-        self.append(&mut state, Body::Assistant(closing));
+        self.append(&mut state, Body::Assistant(stand_in));
     }
 
     fn window(&self) -> Vec<dirigent_protocol::transcript::Entry> {
@@ -176,7 +170,7 @@ impl Session {
         let limit = model.context_window.saturating_sub(config.reserve(&model.id));
         let mut compacted = context::tokens(&self.window()) > limit && self.compact(&model, effort.as_deref(), &config, cancel).await;
         loop {
-            self.servers_ready(false).await;
+            self.servers_ready(ServersFor::Request).await;
             let specs = self.declared();
             let system = self.prompt.system(&specs, self.scripted_servers());
             let messages = context::messages(&self.window(), &model.id, model.images, &mut |blob| self.image(blob));
@@ -308,7 +302,7 @@ impl Session {
     pub(crate) async fn call_tool(&self, tool: &Arc<dyn Tool>, name: &str, input: Value, call: &Call) -> ToolOutput {
         let _host_call = self.is_host_tool(name).then(|| Counted::new(&self.host_calls));
         if name == crate::session::CODEMODE {
-            self.servers_ready(true).await;
+            self.servers_ready(ServersFor::Script).await;
         }
         let stopped = async {
             call.cancel.cancelled().await;

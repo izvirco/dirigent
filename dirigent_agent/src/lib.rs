@@ -114,7 +114,6 @@ impl Agent {
             let host = host.clone();
             async move {
                 while let Some((thread_id, out)) = outs.recv().await {
-                    // MUST KILL: extract: an emit_catching_panics(host, thread_id, out) fn out of Agent::new's delivery task
                     let taken = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| host.emit(&thread_id, out)));
                     if let Err(panic) = taken {
                         tracing::error!(thread = %thread_id, "the host panicked over what came of a session: {}", panic_message(&*panic));
@@ -183,8 +182,7 @@ pub(crate) fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
     panic.downcast_ref::<&str>().copied().or_else(|| panic.downcast_ref::<String>().map(String::as_str)).unwrap_or("no message")
 }
 
-// MUST KILL: rename: now -> unix_ms
-pub(crate) fn now() -> i64 {
+pub(crate) fn unix_ms() -> i64 {
     std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 

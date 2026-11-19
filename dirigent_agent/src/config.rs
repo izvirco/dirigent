@@ -66,7 +66,6 @@ pub struct ModelConfig {
 
 static WRITING: Mutex<()> = Mutex::new(());
 
-// MUST KILL: rename: writing -> lock_ignoring_poison, so recovering a poisoned WRITING is in the name
 fn writing() -> MutexGuard<'static, ()> {
     WRITING.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -77,7 +76,7 @@ impl Config {
     pub fn load(dirs: &Dirs) -> Result<Self> {
         let path = dirs.config_file();
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| anyhow!("{}: {}", path.display(), wrong(&e, &text))),
+            Ok(text) => toml::from_str(&text).map_err(|e| anyhow!("{}: {}", path.display(), describe_without_quoting(&e, &text))),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
         }
@@ -169,7 +168,7 @@ fn move_proxy_held(dirs: &Dirs) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     };
-    let before: Before = toml::from_str(&text).map_err(|e| anyhow!("{}: {}", path.display(), wrong(&e, &text)))?;
+    let before: Before = toml::from_str(&text).map_err(|e| anyhow!("{}: {}", path.display(), describe_without_quoting(&e, &text)))?;
     let Some(old) = before.proxy else { return Ok(false) };
     // One that can't be read has no API key: 0.0.10 used nothing of such a file.
     let held = Proxy::load(dirs).unwrap_or_default();
@@ -182,7 +181,7 @@ fn move_proxy_held(dirs: &Dirs) -> Result<bool> {
 }
 
 fn write_whole(path: &Path, text: &str) -> Result<()> {
-    let file = linked(path);
+    let file = follow_symlinks(path);
     let mut partial = file.clone().into_os_string();
     partial.push(".part");
     let written = (|| {
@@ -195,8 +194,7 @@ fn write_whole(path: &Path, text: &str) -> Result<()> {
     written.with_context(|| format!("write {}", path.display()))
 }
 
-// MUST KILL: rename: wrong -> describe_without_quoting, it must never echo the file's text
-fn wrong(error: &toml::de::Error, text: &str) -> String {
+fn describe_without_quoting(error: &toml::de::Error, text: &str) -> String {
     // "invalid type: string \"…\", expected a map": what was expected names no value.
     let message = match error.message().rsplit_once(", expected ") {
         Some((_, expected)) => format!("expected {expected}"),
@@ -207,10 +205,11 @@ fn wrong(error: &toml::de::Error, text: &str) -> String {
     format!("line {line}, column {column}: {message}")
 }
 
-// MUST KILL: rename: linked -> follow_symlinks, with its 40 as a named MAX_SYMLINK_HOPS const
-fn linked(path: &Path) -> PathBuf {
+const MAX_SYMLINK_HOPS: usize = 40;
+
+fn follow_symlinks(path: &Path) -> PathBuf {
     let mut file = path.to_owned();
-    for _ in 0..40 {
+    for _ in 0..MAX_SYMLINK_HOPS {
         let Ok(target) = std::fs::read_link(&file) else { break };
         file = file.parent().unwrap_or(Path::new("")).join(target);
     }

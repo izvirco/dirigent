@@ -108,15 +108,22 @@ impl Job {
             });
         }
         let (ended, exit) = watch::channel(None);
-        let job =
-            Arc::new(Job { id, command: command.to_owned(), log, pid: child.id(), started: crate::now(), exit, state: Mutex::default() });
+        let job = Arc::new(Job {
+            id,
+            command: command.to_owned(),
+            log,
+            pid: child.id(),
+            started: crate::unix_ms(),
+            exit,
+            state: Mutex::default(),
+        });
         let this = job.clone();
         tokio::spawn(async move {
             let code = match child.wait().await {
                 Ok(status) => exit_code(status),
                 Err(_) => 127,
             };
-            this.state.lock().unwrap().ended = Some(crate::now());
+            this.state.lock().unwrap().ended = Some(crate::unix_ms());
             let _ = ended.send(Some(code));
         });
         Ok(job)
@@ -151,7 +158,7 @@ impl Job {
     }
 
     pub fn duration_ms(&self) -> i64 {
-        self.state.lock().unwrap().ended.unwrap_or_else(crate::now) - self.started
+        self.state.lock().unwrap().ended.unwrap_or_else(crate::unix_ms) - self.started
     }
 
     pub fn kill(&self) {
