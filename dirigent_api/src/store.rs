@@ -78,20 +78,9 @@ impl Store {
         Ok(self.conn.query_row("SELECT 1 FROM users WHERE id = ?1", [id], |_| Ok(())).optional()?.is_some())
     }
 
-    // MUST KILL: extract: split into claim_service, a sane_hour filter and the keep-the-bigger upsert
     pub fn upload(&mut self, user: &str, up: &Upload, now: i64) -> Result<Uploaded> {
-        let owner: Option<String> =
-            self.conn.query_row("SELECT user FROM services WHERE id = ?1", [&up.service], |r| r.get(0)).optional()?;
-        match owner {
-            Some(owner) if owner != user => return Ok(Uploaded::Refused),
-            Some(_) => {}
-            None => {
-                let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM services WHERE user = ?1", [user], |r| r.get(0))?;
-                if n >= MAX_SERVICES {
-                    return Ok(Uploaded::Refused);
-                }
-                self.conn.execute("INSERT INTO services (id, user) VALUES (?1, ?2)", params![up.service, user])?;
-            }
+        if !self.claim_service(user, &up.service)? {
+            return Ok(Uploaded::Refused);
         }
         let joined: i64 = self.conn.query_row("SELECT joined_at FROM users WHERE id = ?1", [user], |r| r.get(0))?;
         let from = joined - joined.rem_euclid(HOUR);
@@ -126,6 +115,19 @@ impl Store {
         }
         tx.commit()?;
         Ok(Uploaded::Saved(saved))
+    }
+
+    fn claim_service(&self, user: &str, service: &str) -> Result<bool> {
+        let owner: Option<String> = self.conn.query_row("SELECT user FROM services WHERE id = ?1", [service], |r| r.get(0)).optional()?;
+        if let Some(owner) = owner {
+            return Ok(owner == user);
+        }
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM services WHERE user = ?1", [user], |r| r.get(0))?;
+        if n >= MAX_SERVICES {
+            return Ok(false);
+        }
+        self.conn.execute("INSERT INTO services (id, user) VALUES (?1, ?2)", params![service, user])?;
+        Ok(true)
     }
 
     pub fn leave(&mut self, user: &str) -> Result<()> {
@@ -176,7 +178,6 @@ impl Store {
     }
 }
 
-// MUST KILL: type: return a Window { since, until, slot } instead of a bare tuple
 fn window(range: Range, now: i64, first: Option<i64>) -> (i64, i64, i64) {
     let (span, slot) = match range {
         Range::Day => (DAY, HOUR),

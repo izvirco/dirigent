@@ -39,11 +39,11 @@ impl Args {
     }
 }
 
-// MUST KILL: extract: separate upload-files and point-channel steps, so the channel-last order is structural
 pub fn run(bucket: &Bucket, args: Args) -> Result<()> {
     let creds = Bucket::credentials()?;
     let data = std::fs::read(&args.file).with_context(|| format!("read {}", args.file.display()))?;
     let signature = sign(&data, &args.version, &args.platform)?;
+    verify_trusted(&data, &signature)?;
     let name = args.file.file_name().and_then(|n| n.to_str()).context("the file needs a name")?;
     let path = bucket::release_path(&args.channel, &args.version, name);
     if bucket.exists(&creds, &path)? {
@@ -70,20 +70,22 @@ pub fn keygen(path: &Path) -> Result<()> {
     Ok(())
 }
 
-// MUST KILL: extract: move the release::KEYS trust check out of sign into its own verify_trusted
 fn sign(data: &[u8], version: &str, platform: &str) -> Result<String> {
     let key = std::env::var("DIRIGENT_SIGNING_KEY").context("DIRIGENT_SIGNING_KEY is not set")?;
     let key = minisign::SecretKeyBox::from_string(&key)
         .and_then(|b| b.into_unencrypted_secret_key())
         .context("DIRIGENT_SIGNING_KEY is not an unencrypted minisign secret key")?;
     let comment = release::trusted_comment(version, platform);
-    let signature = minisign::sign(None, &key, data, Some(&comment), None)?;
+    Ok(minisign::sign(None, &key, data, Some(&comment), None)?.to_string())
+}
+
+fn verify_trusted(data: &[u8], signature: &str) -> Result<()> {
     let trusted = release::KEYS.iter().filter_map(|k| minisign::PublicKey::from_base64(k).ok()).any(|pk| {
-        let sig = minisign::SignatureBox::from_string(&signature.to_string());
+        let sig = minisign::SignatureBox::from_string(signature);
         sig.is_ok_and(|sig| minisign::verify(&pk, &sig, std::io::Cursor::new(data), true, false, false).is_ok())
     });
     if !trusted {
         bail!("DIRIGENT_SIGNING_KEY doesn't match a key in dirigent_protocol::release::KEYS");
     }
-    Ok(signature.to_string())
+    Ok(())
 }
