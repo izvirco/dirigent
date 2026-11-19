@@ -3,7 +3,7 @@ use crate::theme::{self, text, u};
 use crate::view::Item;
 use gpui::{
     Anchor, AnyElement, Bounds, Context, Hsla, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
-    anchored, canvas, deferred, div, fill, point, prelude::*, px, rgba, size,
+    WeakEntity, Window, anchored, canvas, deferred, div, fill, point, prelude::*, px, rgba, size,
 };
 use std::cell::RefCell;
 use std::ops::Range;
@@ -66,21 +66,23 @@ pub struct Ruler {
     grid: Grid,
     layout: Layout,
     last_frame: Option<Instant>,
-    // MUST KILL: type: hover doubles as the scrubbed-to mark while dragging → a field of its own
     hover: Option<Hover>,
-    dragging: bool,
+    scrub: Option<usize>,
 }
 
 impl Ruler {
     fn hit(&self, p: Point<Pixels>) -> Option<Hover> {
         self.grid.bounds.contains(&p).then(|| self.layout.hit(f32::from(p.y - self.grid.bounds.top()))).flatten()
     }
+
+    fn shown(&self) -> Option<Hover> {
+        self.scrub.map(Hover::Mark).or(self.hover)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum Hover {
     Mark(usize),
-    // MUST KILL: type: Gap(usize)'s 0 / 1 → an enum of the band's two sides
     Gap(usize),
 }
 
@@ -164,7 +166,6 @@ struct Placed {
     stuck: bool,
 }
 
-// MUST KILL: extract: layout's two push-outward loops → a named fn stacking sticky marks against one band end
 fn layout(f: &Frame, n: usize, sticky: &[usize], scroll: f32) -> Layout {
     let (m, band) = (f.m, f.band);
     let natural = |i: usize| f.origin + (i as f32 - scroll) * m.pitch;
@@ -304,7 +305,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
     let state = t.ruler.clone();
     let card = {
         let s = state.borrow();
-        match s.hover {
+        match s.shown() {
             Some(Hover::Mark(i)) if i < n => s.layout.y(i).map(|y| mark_card(&marks[i], t, &s.grid, y)),
             Some(Hover::Gap(side)) => gap_card(&s, side),
             _ => None,
@@ -330,7 +331,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             let last = paint_marks.partition_point(|m| m.item < visible.end).saturating_sub(1).max(first);
             let pointer = f32::from(window.mouse_position().y - bounds.top());
             let (top, bottom) = s.layout.band;
-            let past = if !s.dragging {
+            let past = if s.scrub.is_none() {
                 0.
             } else if pointer < top {
                 pointer - top
@@ -338,7 +339,8 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 (pointer - bottom).max(0.)
             };
             let hold = bounds.contains(&window.mouse_position());
-            let target = if s.dragging { s.target + past / f.m.pitch * SCRUB * dt } else { keep_in_view(&f, s.target, hold, first, last) };
+            let target =
+                if s.scrub.is_some() { s.target + past / f.m.pitch * SCRUB * dt } else { keep_in_view(&f, s.target, hold, first, last) };
             s.target = target.clamp(0., f.max_scroll);
             let scroll = s.scroll.map_or(s.target, |v| v + (s.target - v) * k);
             let scroll = if (s.target - scroll).abs() < 0.01 { s.target } else { scroll };
@@ -352,9 +354,10 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
             }
             let z = theme::zoom();
             let x = px(grid.snap(f32::from(bounds.left()) + INSET * z));
+            let shown = s.shown();
             for p in &lay.marks {
                 let (mark, tw) = (paint_marks[p.mark], s.tweens[p.mark]);
-                let hovered = s.hover == Some(Hover::Mark(p.mark));
+                let hovered = shown == Some(Hover::Mark(p.mark));
                 let w = LENGTH * z * (1. - SHRINK * tw.on) * tw.grow;
                 let color: Hsla = rgba(if mark.pinned { theme::t().warn } else { mark.kind.color() }).into();
                 let lit = if mark.pinned { tw.on.max(f.inside(p.y)) } else { tw.on };
@@ -371,11 +374,11 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                     window.paint_quad(fill(Bounds::new(point(x, y), size(px(w), h)), color));
                 }
             }
-            if s.dragging
+            if let Some(scrubbed) = s.scrub
                 && let Some(i) = lay.scrub_target(pointer)
-                && s.hover != Some(Hover::Mark(i))
+                && i != scrubbed
             {
-                s.hover = Some(Hover::Mark(i));
+                s.scrub = Some(i);
                 let (this, item) = (this.clone(), paint_marks[i].item);
                 cx.defer(move |cx| {
                     this.update(cx, |this, cx| this.jump_to(item, cx)).ok();
@@ -386,26 +389,7 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 window.request_animation_frame();
             }
             drop(s);
-            // MUST KILL: extract: the always-registered window-wide drag listener in render's paint into a named fn
-            window.on_mouse_event({
-                let state = paint_state.clone();
-                move |ev: &MouseMoveEvent, phase, window, _| {
-                    let mut s = state.borrow_mut();
-                    if phase.bubble() && s.dragging {
-                        s.dragging = ev.pressed_button == Some(MouseButton::Left);
-                        window.refresh();
-                    }
-                }
-            });
-            window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
-                let mut s = paint_state.borrow_mut();
-                if phase.bubble() && ev.button == MouseButton::Left && s.dragging {
-                    s.dragging = false;
-                    s.hover = s.hit(ev.position);
-                    drop(s);
-                    this.update(cx, |_, cx| cx.notify()).ok();
-                }
-            });
+            scrub_across_window(window, paint_state, this);
         },
     )
     .size_full();
@@ -423,14 +407,14 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .on_mouse_move(cx.listener(move |_, ev: &MouseMoveEvent, _, cx| {
             let mut s = hover_state.borrow_mut();
             let hit = s.hit(ev.position);
-            if !s.dragging && s.hover != hit {
+            if s.scrub.is_none() && s.hover != hit {
                 s.hover = hit;
                 cx.notify();
             }
         }))
         .on_hover(cx.listener(move |_, hovered, _, cx| {
             let mut s = state.borrow_mut();
-            if !*hovered && !s.dragging {
+            if !*hovered && s.scrub.is_none() {
                 s.hover = None;
                 cx.notify();
             }
@@ -443,13 +427,12 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
                 let mut s = down_state.borrow_mut();
                 match s.hit(ev.position) {
                     Some(Hover::Mark(i)) => {
-                        s.dragging = s.layout.marks.iter().any(|p| p.mark == i && s.layout.in_band(p));
+                        s.scrub = s.layout.marks.iter().any(|p| p.mark == i && s.layout.in_band(p)).then_some(i);
                         drop(s);
                         this.jump_to(marks[i].item, cx);
                     }
                     Some(Hover::Gap(_)) => {
-                        s.hover = s.layout.scrub_target(f32::from(ev.position.y - s.grid.bounds.top())).map(Hover::Mark);
-                        s.dragging = true;
+                        s.scrub = s.layout.scrub_target(f32::from(ev.position.y - s.grid.bounds.top()));
                         cx.notify();
                     }
                     None => {}
@@ -459,6 +442,30 @@ pub fn render(this: &mut Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
         .child(strip)
         .children(card)
         .into_any()
+}
+
+fn scrub_across_window(window: &mut Window, state: State, this: WeakEntity<Dirigent>) {
+    window.on_mouse_event({
+        let state = state.clone();
+        move |ev: &MouseMoveEvent, phase, window, _| {
+            let mut s = state.borrow_mut();
+            if phase.bubble() && s.scrub.is_some() {
+                if ev.pressed_button != Some(MouseButton::Left) {
+                    s.hover = s.scrub.take().map(Hover::Mark);
+                }
+                window.refresh();
+            }
+        }
+    });
+    window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
+        let mut s = state.borrow_mut();
+        if phase.bubble() && ev.button == MouseButton::Left && s.scrub.is_some() {
+            s.scrub = None;
+            s.hover = s.hit(ev.position);
+            drop(s);
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }
+    });
 }
 
 fn mark_card(m: &Mark, t: &OpenThread, grid: &Grid, y: f32) -> AnyElement {

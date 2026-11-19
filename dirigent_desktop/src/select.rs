@@ -22,7 +22,6 @@ pub enum Doc {
     Changelog,
 }
 
-// MUST KILL: type: Key's document order rides on derive(Ord)'s field order → a hand-written Ord
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Key {
     pub doc: Doc,
@@ -38,8 +37,7 @@ pub struct Pos {
 
 #[derive(Default)]
 struct State {
-    // MUST KILL: type: anchor's (Pos, Pos) → a named span the press picked (point, word or block)
-    anchor: Option<(Pos, Pos)>,
+    anchor: Option<Range<Pos>>,
     head: Option<Pos>,
     dragging: bool,
     laid: Vec<(Key, TextLayout)>,
@@ -72,28 +70,26 @@ impl Selection {
         had
     }
 
-    // MUST KILL: type: range's ordered (Pos, Pos) → a Range<Pos>
-    pub fn range(&self) -> Option<(Pos, Pos)> {
+    pub fn range(&self) -> Option<Range<Pos>> {
         let s = self.0.borrow();
-        let ((a0, a1), h) = s.anchor.zip(s.head)?;
-        let (start, end) = (a0.min(h), a1.max(h));
-        (start < end).then_some((start, end))
+        let (anchor, head) = s.anchor.clone().zip(s.head)?;
+        Some(anchor.start.min(head)..anchor.end.max(head)).filter(|r| !r.is_empty())
     }
 
     pub fn doc(&self) -> Option<Doc> {
-        self.0.borrow().anchor.map(|(a, _)| a.key.doc)
+        self.0.borrow().anchor.as_ref().map(|a| a.start.key.doc)
     }
 
     fn press(&self, key: Key, text: &str, offset: usize, clicks: usize, shift: bool) {
         let mut s = self.0.borrow_mut();
         let pos = Pos { key, offset };
-        if !(shift && s.anchor.is_some_and(|(a, _)| a.key.doc == key.doc)) {
+        if !(shift && s.anchor.as_ref().is_some_and(|a| a.start.key.doc == key.doc)) {
             let range = match clicks {
                 1 => offset..offset,
                 2 => word_at(text, offset),
                 _ => 0..text.len(),
             };
-            s.anchor = Some((Pos { key, offset: range.start }, Pos { key, offset: range.end }));
+            s.anchor = Some(Pos { key, offset: range.start }..Pos { key, offset: range.end });
         }
         s.head = Some(pos);
         s.dragging = true;
@@ -101,7 +97,7 @@ impl Selection {
 
     pub fn drag_to(&self, p: Point<Pixels>) -> bool {
         let mut s = self.0.borrow_mut();
-        let Some(doc) = s.anchor.map(|(a, _)| a.key.doc) else { return false };
+        let Some(doc) = s.anchor.as_ref().map(|a| a.start.key.doc) else { return false };
         let mut blocks: Vec<_> = s.laid.iter().filter(|(k, _)| k.doc == doc).collect();
         blocks.sort_by_key(|(k, _)| *k);
         let Some((last, _)) = blocks.last() else { return false };
@@ -123,12 +119,12 @@ impl Selection {
     }
 
     fn block_range(&self, key: Key, len: usize) -> Option<Range<usize>> {
-        let (start, end) = self.range()?;
-        if key < start.key || key > end.key {
+        let range = self.range()?;
+        if key < range.start.key || key > range.end.key {
             return None;
         }
-        let a = if key == start.key { start.offset } else { 0 };
-        let b = if key == end.key { end.offset } else { len };
+        let a = if key == range.start.key { range.start.offset } else { 0 };
+        let b = if key == range.end.key { range.end.offset } else { len };
         (a < b).then_some(a..b)
     }
 
@@ -137,18 +133,15 @@ impl Selection {
         self.0.borrow().texts.values().map(|t| t.to_string()).collect()
     }
 
-    // MUST KILL: rearchitect: collect, then construct, then text → one fn that takes the construction as a closure
-    pub fn collect(&self) {
+    pub fn text(&self, construct: impl FnOnce(&Range<Pos>)) -> String {
+        let Some(range) = self.range() else { return String::new() };
         self.0.borrow_mut().texts.clear();
-    }
-
-    pub fn text(&self) -> String {
-        let Some((start, end)) = self.range() else { return String::new() };
+        construct(&range);
         let s = self.0.borrow();
         let mut out = vec![];
-        for (key, text) in s.texts.range(start.key..=end.key) {
-            let a = if *key == start.key { start.offset } else { 0 };
-            let b = if *key == end.key { end.offset } else { text.len() };
+        for (key, text) in s.texts.range(range.start.key..=range.end.key) {
+            let a = if *key == range.start.key { range.start.offset } else { 0 };
+            let b = if *key == range.end.key { range.end.offset } else { text.len() };
             out.push(text.get(a.min(b)..b).unwrap_or(""));
         }
         out.join("\n")
@@ -400,8 +393,8 @@ fn pieces(rows: &[Row]) -> Vec<&[Row]> {
 
 fn outline(rows: &[Row], lh: Pixels) -> Vec<(f32, f32)> {
     let lh = f32::from(lh);
-    let left = merge(rows.iter().map(|r| f32::from(r.x0)).collect(), f32::min);
-    let right = merge(rows.iter().map(right).collect(), f32::max);
+    let left = snap_near_edges_outward(rows.iter().map(|r| f32::from(r.x0)).collect(), f32::min);
+    let right = snap_near_edges_outward(rows.iter().map(right).collect(), f32::max);
     let mut pts = vec![];
     for (r, &x1) in rows.iter().zip(&right) {
         pts.push((x1, f32::from(r.y)));
@@ -424,8 +417,7 @@ fn outline(rows: &[Row], lh: Pixels) -> Vec<(f32, f32)> {
         .collect()
 }
 
-// MUST KILL: rename: merge → snap_near_edges_outward (chained, to the outermost)
-fn merge(mut xs: Vec<f32>, outer: fn(f32, f32) -> f32) -> Vec<f32> {
+fn snap_near_edges_outward(mut xs: Vec<f32>, outer: fn(f32, f32) -> f32) -> Vec<f32> {
     let mut i = 0;
     while i < xs.len() {
         let mut j = i;
@@ -484,8 +476,8 @@ mod tests {
         assert_eq!(pieces(&[row(0., 60., 870.), row(20., 0., 65.)]).len(), 2);
         assert_eq!(pieces(&[row(0., 55., 870.), row(20., 0., 65.)]).len(), 1);
         assert_eq!(outline(&[row(0., 10., 100.), row(20., 10., 104.), row(40., 10., 108.)], px(20.)).len(), 4);
-        assert_eq!(merge(vec![100., 104., 108., 150.], f32::max), vec![108., 108., 108., 150.]);
-        assert_eq!(merge(vec![20., 14., 60.], f32::min), vec![14., 14., 60.]);
+        assert_eq!(snap_near_edges_outward(vec![100., 104., 108., 150.], f32::max), vec![108., 108., 108., 150.]);
+        assert_eq!(snap_near_edges_outward(vec![20., 14., 60.], f32::min), vec![14., 14., 60.]);
         assert!(rounded_path(&outline(&[], px(20.))).is_none());
     }
 
@@ -504,17 +496,20 @@ mod tests {
     #[test]
     fn text_spans_blocks_in_order() {
         let sel = Selection::default();
-        let mut keys = Keys::new(&sel, Doc::Thread, 1);
-        keys.plain("first block");
-        keys.plain("second");
-        Keys::new(&sel, Doc::Thread, 2).plain("third block");
-        Keys::new(&sel, Doc::Log, 1).plain("log");
+        let construct = |_: &Range<Pos>| {
+            let mut keys = Keys::new(&sel, Doc::Thread, 1);
+            keys.plain("first block");
+            keys.plain("second");
+            Keys::new(&sel, Doc::Thread, 2).plain("third block");
+            Keys::new(&sel, Doc::Log, 1).plain("log");
+        };
         sel.press(key(1, 0), "first block", 6, 1, false);
         sel.0.borrow_mut().head = Some(Pos { key: key(2, 0), offset: 5 });
-        assert_eq!(sel.text(), "block\nsecond\nthird");
-        sel.0.borrow_mut().anchor = Some((Pos { key: key(2, 0), offset: 5 }, Pos { key: key(2, 0), offset: 5 }));
+        assert_eq!(sel.text(construct), "block\nsecond\nthird");
+        let end = Pos { key: key(2, 0), offset: 5 };
+        sel.0.borrow_mut().anchor = Some(end..end);
         sel.0.borrow_mut().head = Some(Pos { key: key(1, 0), offset: 6 });
-        assert_eq!(sel.text(), "block\nsecond\nthird");
+        assert_eq!(sel.text(construct), "block\nsecond\nthird");
         assert_eq!(sel.block_range(key(1, 1), 6), Some(0..6));
         assert_eq!(sel.block_range(key(0, 0), 6), None);
     }
@@ -522,12 +517,14 @@ mod tests {
     #[test]
     fn double_click_selects_word_and_shift_extends() {
         let sel = Selection::default();
-        Keys::new(&sel, Doc::Thread, 0).plain("one two three");
+        let construct = |_: &Range<Pos>| {
+            Keys::new(&sel, Doc::Thread, 0).plain("one two three");
+        };
         sel.press(key(0, 0), "one two three", 5, 2, false);
-        assert_eq!(sel.text(), "two");
+        assert_eq!(sel.text(construct), "two");
         sel.end_drag();
         sel.press(key(0, 0), "one two three", 13, 1, true);
-        assert_eq!(sel.text(), "two three");
+        assert_eq!(sel.text(construct), "two three");
         assert!(sel.clear());
         assert!(sel.range().is_none());
     }

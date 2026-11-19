@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-// MUST KILL: type: a WorkKey enum (Item(usize) | Tail) instead of the usize::MAX sentinel
 pub const TAIL: usize = usize::MAX;
 const MAX_RESULT_CHARS: usize = 20_000;
 const ROW_H: f32 = 22.;
@@ -150,7 +149,6 @@ pub fn render(this: &mut Dirigent, window: &Window, cx: &mut Context<Dirigent>) 
         .flex_col()
         .child(list(list_state, cx.processor(|this, ix, _window, cx| this.render_with_visuals(ix, cx))).flex_1().min_h_0().w_full())
         .child(
-            // MUST KILL: extract: an ask_layer() for the zero-height stack that grows upward and pads the tail via set_ask_height
             div()
                 .relative()
                 .w_full()
@@ -160,26 +158,7 @@ pub fn render(this: &mut Dirigent, window: &Window, cx: &mut Context<Dirigent>) 
                 .px_6()
                 .pb_5()
                 .pt_2()
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h_0()
-                        .px_6()
-                        .flex()
-                        .flex_col()
-                        .items_center()
-                        .justify_end()
-                        .on_children_prepainted(cx.processor(|this, cards: Vec<Bounds<Pixels>>, window, cx| {
-                            let top = cards.iter().map(|b| b.top()).min();
-                            let bottom = cards.iter().map(|b| b.bottom()).max();
-                            let h = top.zip(bottom).map_or(px(0.), |(top, bottom)| bottom - top);
-                            this.set_ask_height(h, window, cx);
-                        }))
-                        .children(ask),
-                )
+                .child(ask_layer(ask, cx))
                 .children(jump)
                 .children(banner)
                 .child(composer(this, window, cx)),
@@ -227,14 +206,34 @@ pub fn render(this: &mut Dirigent, window: &Window, cx: &mut Context<Dirigent>) 
     pane.child(div().flex_1().min_h_0().flex().flex_row().child(main).children(panel))
 }
 
+fn ask_layer(ask: Option<Div>, cx: &mut Context<Dirigent>) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .right_0()
+        .h_0()
+        .px_6()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_end()
+        .on_children_prepainted(cx.processor(|this, cards: Vec<Bounds<Pixels>>, window, cx| {
+            let top = cards.iter().map(|b| b.top()).min();
+            let bottom = cards.iter().map(|b| b.bottom()).max();
+            let h = top.zip(bottom).map_or(px(0.), |(top, bottom)| bottom - top);
+            this.set_ask_height(h, window, cx);
+        }))
+        .children(ask)
+}
+
 fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
     if t.list.is_following_tail() {
         return None;
     }
     let th = theme::t();
     let list = t.list.clone();
-    // MUST KILL: extract: a named element that re-renders once the list follows its tail again
-    let recheck = canvas(
+    let rerender_when_following_tail = canvas(
         move |_, window, _| {
             if list.is_following_tail() {
                 window.request_animation_frame();
@@ -267,7 +266,7 @@ fn jump_button(t: &OpenThread, cx: &mut Context<Dirigent>) -> Option<Div> {
         .on_click(cx.listener(|this, _, _, cx| this.jump_to_end(cx)))
         .child(icon("arrow-down", color).size(u(12.)))
         .child(label)
-        .child(recheck.absolute().size_0())
+        .child(rerender_when_following_tail.absolute().size_0())
         .with_animation("jump-latest-in", Animation::new(Duration::from_millis(150)), |d, v| d.opacity(v));
     let lift = if t.ask_h > px(0.) { t.ask_h + u(8.) } else { u(8.) };
     Some(div().absolute().top(-lift).left_0().right_0().h_0().flex().flex_col().items_center().justify_end().child(button))
@@ -876,7 +875,6 @@ fn composer(this: &Dirigent, window: &Window, cx: &mut Context<Dirigent>) -> Div
                     div()
                         .flex_1()
                         .min_w_0()
-                        // MUST KILL: rearchitect: hide `usage` when it doesn't fit instead of wrapping it onto this clipped second line
                         .h(u(24.))
                         .overflow_hidden()
                         .flex()
@@ -1440,8 +1438,7 @@ fn reply_block(
         Some(&copy_code(t.copied.as_ref(), cx)),
         &[],
     );
-    // MUST KILL: extract: a named const for the corner-button row reserved above a leading code block
-    let top = if markdown::starts_with_code(text) { 30. } else { 4. };
+    let top = if markdown::starts_with_code(text) { 4. + CORNER_BUTTONS_H } else { 4. };
     div()
         .group("msg")
         .relative()
@@ -1457,6 +1454,7 @@ fn reply_block(
 }
 
 const PIN_GAP: f32 = 6.;
+const CORNER_BUTTONS_H: f32 = 26.;
 
 fn pin_bar(ix: usize, t: &OpenThread, left: f32) -> Option<Div> {
     t.is_pinned(ix).then(|| div().absolute().left(u(-left)).top_1().bottom_1().w(u(2.)).rounded_full().bg(rgba(theme::t().warn)))
@@ -1790,7 +1788,6 @@ pub fn shown_work(this: &Dirigent) -> Option<(Work, bool)> {
     }
 }
 
-// MUST KILL: rearchitect: keep log_list's item count in step where the steps change, not on every render
 fn log_body(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
     let Pane::Thread(t) = &this.pane else { return None };
     t.log?;
