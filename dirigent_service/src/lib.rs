@@ -93,7 +93,8 @@ impl Service {
         let starting = self.starting.lock().unwrap();
         for t in &mut threads {
             t.running_since = self.live.running_since(&t.id).or(t.prompted_at.filter(|_| starting.contains_key(&t.id)));
-            (t.jobs, t.free_jobs) = self.live.jobs(&t.id);
+            let jobs = self.live.jobs(&t.id);
+            (t.jobs, t.free_jobs) = (jobs.waited_on, jobs.left_running);
             t.workspace_missing = missing.contains(&t.id);
             t.setup = match starting.get(&t.id) {
                 Some(Starting::MakingWorkspace) => Some(Setup::Workspace),
@@ -109,7 +110,10 @@ impl Service {
         self.screens.clear(thread_id);
         let loaded = self.agent.session(thread_id).is_some();
         self.agent.unload(thread_id);
-        self.live.unloaded(thread_id, loaded);
+        if loaded {
+            self.live.settle(thread_id);
+        }
+        self.live.unloaded(thread_id);
     }
 
     pub(crate) fn thread_tools(&self, thread_id: &str) -> Result<Vec<String>> {
@@ -499,10 +503,10 @@ impl Service {
                 {
                     let storage = self.storage.lock().unwrap();
                     let family = if archived { storage.family(&thread_id)? } else { vec![] };
-                    let busy = family.iter().any(|t| self.live.running_since(t).is_some() || self.live.jobs(t).0 > 0);
+                    let busy = family.iter().any(|t| self.live.running_since(t).is_some() || self.live.jobs(t).waited_on > 0);
                     anyhow::ensure!(!busy, "the thread or one of its sub-agents is still working; archive it once they are done");
                     storage.set_archived(&thread_id, archived, now())?;
-                    for t in family.iter().filter(|t| self.live.jobs(t).1 > 0) {
+                    for t in family.iter().filter(|t| self.live.jobs(t).left_running > 0) {
                         info!(thread = %t, "archived: stopping the jobs it left running");
                         self.unload(t);
                     }
@@ -565,7 +569,8 @@ impl Service {
         let idle = self.agent.unload_idle(max_idle);
         for id in &idle {
             self.screens.clear(id);
-            self.live.unloaded(id, true);
+            self.live.settle(id);
+            self.live.unloaded(id);
         }
         idle
     }

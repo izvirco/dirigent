@@ -9,9 +9,15 @@ pub struct Live {
 #[derive(Default)]
 struct Inner {
     running: HashMap<String, i64>,
-    jobs: HashMap<String, (u32, u32)>,
+    jobs: HashMap<String, Jobs>,
     nix_shells: HashSet<String>,
     compacting: HashMap<String, i64>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct Jobs {
+    pub waited_on: u32,
+    pub left_running: u32,
 }
 
 impl Live {
@@ -29,16 +35,15 @@ impl Live {
         inner.running.remove(thread_id).map(|since| crate::now() - since)
     }
 
-    // MUST KILL: type: the bare (u32, u32) is (waited-on, left-running) jobs; return a named struct
-    pub fn jobs(&self, thread_id: &str) -> (u32, u32) {
+    pub fn jobs(&self, thread_id: &str) -> Jobs {
         self.inner.lock().unwrap().jobs.get(thread_id).copied().unwrap_or_default()
     }
 
-    pub fn set_jobs(&self, thread_id: &str, running: u32, free: u32) {
+    pub fn set_jobs(&self, thread_id: &str, waited_on: u32, left_running: u32) {
         let mut inner = self.inner.lock().unwrap();
-        match (running, free) {
+        match (waited_on, left_running) {
             (0, 0) => inner.jobs.remove(thread_id),
-            jobs => inner.jobs.insert(thread_id.to_owned(), jobs),
+            _ => inner.jobs.insert(thread_id.to_owned(), Jobs { waited_on, left_running }),
         };
     }
 
@@ -66,12 +71,8 @@ impl Live {
         };
     }
 
-    // MUST KILL: type: the loaded bool decides whether a run begun before its session loaded survives; use an enum
-    pub fn unloaded(&self, thread_id: &str, loaded: bool) {
+    pub fn unloaded(&self, thread_id: &str) {
         let mut inner = self.inner.lock().unwrap();
-        if loaded {
-            inner.running.remove(thread_id);
-        }
         inner.jobs.remove(thread_id);
         inner.nix_shells.remove(thread_id);
         inner.compacting.remove(thread_id);

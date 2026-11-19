@@ -102,9 +102,9 @@ struct Child {
 }
 
 impl Tunnel {
-    // MUST KILL: extract: a thread_alive() for has_changed().is_ok(), which only says the tunnel thread has not died
     fn alive(&self) -> bool {
-        !matches!(*self.state.borrow(), State::Exited(_)) && self.state.has_changed().is_ok()
+        let thread_alive = self.state.has_changed().is_ok();
+        !matches!(*self.state.borrow(), State::Exited(_)) && thread_alive
     }
 
     fn stop(&self) {

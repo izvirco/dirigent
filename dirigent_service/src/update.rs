@@ -34,7 +34,6 @@ impl Updater {
         Self::new("updates-service", "; service")
     }
 
-    // MUST KILL: rename: endpoint's two env vars → a baked BUILD_UPDATE_URL const and a run-time override fn
     fn new(dir: &str, who: &str) -> Option<Self> {
         let url = std::env::var("DIRIGENT_UPDATE_URL").ok().or_else(|| option_env!("DIRIGENT_BUILD_UPDATE_URL").map(str::to_owned));
         let endpoint = url.filter(|u| !u.is_empty())?.trim_end_matches('/').to_owned();

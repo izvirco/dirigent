@@ -44,7 +44,6 @@ pub struct Piece {
 }
 
 impl Screens {
-    // MUST KILL: type: the (u64, bool) return is (frame on show, screen just created); return a named struct
     pub fn update(&self, thread_id: &str, png: Option<Vec<u8>>) -> (u64, bool) {
         let mut threads = self.threads.lock().unwrap();
         let new = !threads.contains_key(thread_id);

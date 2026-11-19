@@ -1,6 +1,6 @@
 use crate::Service;
 use crate::server::Conn;
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
 use dirigent_agent::tool::{Call, Tool, ToolOutput, ToolSpec};
 use dirigent_protocol::transcript::{Body, Stop, branch, text_of};
@@ -381,9 +381,20 @@ impl Remote {
             }
             bail!("connection closed")
         };
-        tokio::time::timeout(REQUEST, reply).await.map_err(|_| anyhow!("no reply in {}s", REQUEST.as_secs()))?
+        tokio::time::timeout(REQUEST, reply).await.map_err(|_| NoReply)?
     }
 }
+
+#[derive(Debug)]
+struct NoReply;
+
+impl std::fmt::Display for NoReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no reply in {}s", REQUEST.as_secs())
+    }
+}
+
+impl std::error::Error for NoReply {}
 
 fn reply_to(message: &ServerMessage) -> Option<u64> {
     serde_json::to_value(message).ok()?.get("reply_to")?.as_u64()
@@ -410,7 +421,7 @@ impl Hosts {
         let reply = if host.name == LOCAL {
             self.local(request(id)).await
         } else {
-            self.remote(host).await?.request(request(id), id).await.map_err(|e| anyhow!("{}: {e:#}", host.name))?
+            self.remote(host).await?.request(request(id), id).await.with_context(|| host.name.clone())?
         };
         match reply {
             ServerMessage::Error { message, .. } => bail!("{message}"),
@@ -418,14 +429,13 @@ impl Hosts {
         }
     }
 
-    // MUST KILL: rearchitect: make Service::handle's CreateThread cancel-safe, so local awaits it inline
     async fn local(&self, request: ClientMessage) -> ServerMessage {
         let svc = self.svc.clone();
-        let handled = tokio::spawn(async move {
+        let detached = tokio::spawn(async move {
             let conn = Conn { id: u64::MAX, out: tokio::sync::mpsc::unbounded_channel().0, reading: Default::default() };
             svc.handle(request, &conn).await
         });
-        handled.await.unwrap_or_else(|e| ServerMessage::Error { reply_to: None, message: format!("the request was not finished: {e}") })
+        detached.await.unwrap_or_else(|e| ServerMessage::Error { reply_to: None, message: format!("the request was not finished: {e}") })
     }
 
     async fn remote(&mut self, host: &HostInfo) -> Result<Arc<Remote>> {
@@ -744,7 +754,6 @@ impl Hosts {
     }
 }
 
-// MUST KILL: type: may_have string-matches "no reply in"; make the request timeout a typed error
 fn may_have(e: anyhow::Error, maybe: &str) -> anyhow::Error {
-    if format!("{e:#}").contains("no reply in") { anyhow!("{e:#}; {maybe}") } else { e }
+    if e.is::<NoReply>() { anyhow!("{e:#}; {maybe}") } else { e }
 }
