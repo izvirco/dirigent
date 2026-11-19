@@ -114,7 +114,7 @@ fn main() {
 
 fn start(open: Option<String>, launches: Option<futures::channel::mpsc::UnboundedReceiver<instance::Launch>>, cx: &mut App) {
     let cache = Cache::open(&dirigent_service::data_dir().join("desktop.db")).expect("open cache");
-    let config = config::load().unwrap_or_else(|e| {
+    let config = config::load_or_write().unwrap_or_else(|e| {
         tracing::warn!("{e:#}");
         config::Config::default()
     });

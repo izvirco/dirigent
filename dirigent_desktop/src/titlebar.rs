@@ -10,21 +10,22 @@
 
 use crate::app::Dirigent;
 use crate::icons::icon;
+use crate::sidebar;
 use crate::theme::{self, u};
 use gpui::{Context, Div, MouseButton, Stateful, Window, WindowControlArea, div, prelude::*, rgba};
 
 pub const CUSTOM: bool = cfg!(windows);
 pub const HEIGHT: f32 = 40.;
 const BUTTON: f32 = 26.;
-// MUST KILL: extract: name CONTROLS_WIDTH's terms (button gaps, title padding, header break)
-pub const CONTROLS_WIDTH: f32 = 3. * BUTTON + 2. * 4. + 8. + 12.;
+const BUTTON_GAP: f32 = 4.;
+const EDGE_PADDING: f32 = 8.;
+const HEADER_BREAK: f32 = 12.;
+pub const CONTROLS_WIDTH: f32 = HEADER_BREAK + 3. * BUTTON + 2. * BUTTON_GAP + EDGE_PADDING;
 
-// MUST KILL: extract: name strip's left(u(3.)) as the sidebar resize handle's overlap
 pub fn strip(cx: &mut Context<Dirigent>) -> Div {
-    grab(div().absolute().top_0().left(u(3.)).right_0().h(u(HEIGHT)), cx)
+    grab(div().absolute().top_0().left(u(sidebar::HANDLE_OVERLAP)).right_0().h(u(HEIGHT)), cx)
 }
 
-// MUST KILL: rearchitect: grab defuses the root's mouse_down via caption_press; let the root skip drag areas itself
 pub fn grab(d: Div, cx: &mut Context<Dirigent>) -> Div {
     d.window_control_area(WindowControlArea::Drag)
         .on_any_mouse_down(|_, window, _| window.prevent_default())
@@ -38,11 +39,11 @@ pub fn controls(window: &Window) -> Div {
         .top_0()
         .right_0()
         .h(u(HEIGHT))
-        .pr_2()
+        .pr(u(EDGE_PADDING))
         .flex()
         .flex_row()
         .items_center()
-        .gap_1()
+        .gap(u(BUTTON_GAP))
         .child(button("caption-min", "minus", WindowControlArea::Min))
         .child(button("caption-max", max, WindowControlArea::Max))
         .child(button("caption-close", "x", WindowControlArea::Close))

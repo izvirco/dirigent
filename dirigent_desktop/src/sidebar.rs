@@ -18,6 +18,7 @@ use gpui::{
 };
 
 pub const DEFAULT_WIDTH: f32 = 240.;
+pub const HANDLE_OVERLAP: f32 = 3.;
 const PEEK_ZONE: f32 = ruler::INSET - 2.;
 const BORDER: f32 = 1.;
 const LIST_PAD: f32 = 8.;
@@ -69,7 +70,7 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .id("sidebar-resize")
         .absolute()
         .top_0()
-        .right(u(-3.))
+        .right(u(-HANDLE_OVERLAP))
         .w(u(6.))
         .h_full()
         .cursor_col_resize()

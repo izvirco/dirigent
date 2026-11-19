@@ -49,7 +49,7 @@ fn lilex(out: &Path) -> Result<(), String> {
         }
     }
     let faces: String = LILEX_FACES.iter().map(|name| format!("    include_bytes!({:?}),\n", face(name))).collect();
-    std::fs::write(out.join("lilex.rs"), format!("pub const LILEX: &[&[u8]] = &[\n{faces}];\n")).map_err(|e| e.to_string())
+    std::fs::write(out.join("lilex.rs"), format!("&[\n{faces}]\n")).map_err(|e| e.to_string())
 }
 
 fn windows_resources(out: &Path) {

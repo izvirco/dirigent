@@ -1,7 +1,6 @@
 use crate::app::Dirigent;
 use crate::icons::icon;
 use anyhow::{Context as _, Result, bail};
-use dirigent_protocol::ThreadSummary;
 use gpui::{
     Animation, AnimationExt, AnyElement, AnyView, App, Context, Div, ElementId, FontWeight, Hsla, Pixels, Render, Rgba, SharedString,
     Stateful, Svg, Window, WindowBackgroundAppearance, div, prelude::*, pulsating_between, px, rgba,
@@ -11,9 +10,11 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-// MUST KILL: extract: BUILTIN[0] as the default theme → a named DEFAULT const
+pub const DEFAULT: &str = "vir-dark";
+const DEFAULT_TOML: &str = include_str!("../assets/themes/vir-dark.toml");
+
 pub const BUILTIN: &[(&str, &str)] = &[
-    ("vir-dark", include_str!("../assets/themes/vir-dark.toml")),
+    (DEFAULT, DEFAULT_TOML),
     #[cfg(target_os = "linux")]
     ("vir-dark-transparent", include_str!("../assets/themes/vir-dark-transparent.toml")),
     ("vir-soft-dark", include_str!("../assets/themes/vir-soft-dark.toml")),
@@ -27,10 +28,8 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("rose-pine-dawn", include_str!("../assets/themes/rose-pine-dawn.toml")),
 ];
 
-// MUST KILL: rename: LINUX_ONLY → DEFAULTED_OFF_LINUX
-const LINUX_ONLY: &[&str] = if cfg!(target_os = "linux") { &[] } else { &["vir-dark-transparent"] };
+const LINUX_ONLY: &[&str] = &["vir-dark-transparent"];
 
-// MUST KILL: type: Theme's u32 colours → an Rgba newtype (0xRRGGBBAA) that deserializes "#rrggbb" / "#rrggbbaa"
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Theme {
@@ -114,7 +113,7 @@ static THEME: RwLock<Option<Theme>> = RwLock::new(None);
 pub fn t() -> Theme {
     match *THEME.read().unwrap() {
         Some(t) => t,
-        None => parse(BUILTIN[0].1).expect("default theme parses"),
+        None => parse(DEFAULT_TOML).expect("default theme parses"),
     }
 }
 
@@ -136,7 +135,7 @@ pub fn write_example() -> Result<()> {
     let dir = dir();
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{EXAMPLE}.toml"));
-    let text = format!("# Reference copy of the built-in default theme, rewritten on every start: edit a copy.\n{}", BUILTIN[0].1);
+    let text = format!("# Reference copy of the built-in default theme, rewritten on every start: edit a copy.\n{DEFAULT_TOML}");
     std::fs::write(&path, text).with_context(|| format!("write {}", path.display()))
 }
 
@@ -163,7 +162,7 @@ pub fn load(name: &str) -> Result<Theme> {
         Ok(text) => parse(&text).with_context(|| format!("theme {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => match BUILTIN.iter().find(|(n, _)| *n == name) {
             Some((_, text)) => parse(text),
-            None if LINUX_ONLY.contains(&name) => parse(BUILTIN[0].1),
+            None if LINUX_ONLY.contains(&name) => parse(DEFAULT_TOML),
             None => bail!("no theme named `{name}` (built-in or in {})", dir().display()),
         },
         Err(e) => Err(e).with_context(|| format!("read {}", path.display())),
@@ -221,7 +220,6 @@ pub struct Fonts {
     pub mono: SharedString,
 }
 
-// MUST KILL: rearchitect: Status' derived Ord is the Inbox and project pages' row order → an explicit sort rank
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Status {
     Working,
@@ -234,21 +232,6 @@ pub enum Status {
 
 impl Status {
     pub const GLYPH_W: f32 = 16.;
-
-    // MUST KILL: rename: Status::of → own_status, it never says Waiting (Dirigent::status adds it)
-    pub fn of(t: &ThreadSummary) -> Self {
-        if t.asking() && !t.archived {
-            Status::Asking
-        } else if t.running() {
-            Status::Working
-        } else if t.archived {
-            Status::Archived
-        } else if t.snoozed {
-            Status::Snoozed
-        } else {
-            Status::Done
-        }
-    }
 
     pub fn finished(self) -> bool {
         matches!(self, Status::Asking | Status::Done | Status::Snoozed)
@@ -292,7 +275,6 @@ pub fn mix(a: u32, b: u32, k: f32) -> Hsla {
     Rgba { r: l(a.r, b.r), g: l(a.g, b.g), b: l(a.b, b.b), a: l(a.a, b.a) }.into()
 }
 
-// MUST KILL: rename: stack → full_width_column, its w_full a layout-cost fix rather than looks
 pub fn stack() -> Div {
     div().w_full().flex().flex_col()
 }
@@ -492,11 +474,11 @@ mod tests {
         for (name, text) in BUILTIN {
             parse(text).unwrap_or_else(|e| panic!("{name}: {e:#}"));
         }
-        assert_eq!(parse(BUILTIN[0].1).unwrap().canvas, 0x060709ff);
-        assert_eq!(parse(BUILTIN[0].1).unwrap().pattern, 0x2c32424d);
+        assert_eq!(parse(DEFAULT_TOML).unwrap().canvas, 0x060709ff);
+        assert_eq!(parse(DEFAULT_TOML).unwrap().pattern, 0x2c32424d);
         let transparent = parse(include_str!("../assets/themes/vir-dark-transparent.toml")).unwrap();
         assert_eq!(transparent.canvas, 0x000000f2);
-        assert_eq!(background(&parse(BUILTIN[0].1).unwrap()), WindowBackgroundAppearance::Opaque);
+        assert_eq!(background(&parse(DEFAULT_TOML).unwrap()), WindowBackgroundAppearance::Opaque);
         assert_eq!(background(&transparent), WindowBackgroundAppearance::Blurred);
         assert_eq!(alpha(0x11223344, 0x80), 0x11223380);
         assert!(parse("canvas = \"#123\"").is_err());
