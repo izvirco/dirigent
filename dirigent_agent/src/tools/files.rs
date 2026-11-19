@@ -6,6 +6,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::io::{BufRead, Read as _};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use unicode_normalization::UnicodeNormalization;
@@ -56,8 +57,7 @@ fn resolve_existing(path: &str, cwd: &Path) -> PathBuf {
     variants.into_iter().map(PathBuf::from).find(|p| p.exists()).unwrap_or(resolved)
 }
 
-// MUST KILL: rename: `turn` → `lock_canonical_file` (one change at a time per file, across threads and path spellings)
-async fn turn(path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+async fn lock_canonical_file(path: &Path) -> tokio::sync::OwnedMutexGuard<()> {
     static TURNS: Mutex<BTreeMap<PathBuf, Weak<tokio::sync::Mutex<()>>>> = Mutex::new(BTreeMap::new());
     let file = match tokio::fs::canonicalize(path).await {
         Ok(file) => file,
@@ -154,8 +154,8 @@ fn read(input: &ReadInput, cwd: &Path) -> Result<ToolOutput> {
     let start = input.offset.map_or(0, |o| (o.max(1.) as usize) - 1);
     let limit = input.limit.map(|l| l.max(0.) as usize);
     let lines = Lines::select(&path, start, limit)?;
-    if start >= lines.total {
-        bail!("Offset {} is beyond end of file ({} lines total)", start + 1, lines.total);
+    if start >= lines.editor_line_count {
+        bail!("Offset {} is beyond end of file ({} lines total)", start + 1, lines.editor_line_count);
     }
     let cut = truncate::head(&lines.kept.join("\n"));
     let limit_bytes = truncate::size(truncate::MAX_BYTES);
@@ -169,12 +169,14 @@ fn read(input: &ReadInput, cwd: &Path) -> Result<ToolOutput> {
             truncate::MAX_BYTES
         )
     } else if let Some(by) = cut.by {
-        let (last, total) = (start + cut.lines, lines.total);
+        let (last, total) = (start + cut.lines, lines.editor_line_count);
         let limit = if by == truncate::By::Bytes { format!(" ({limit_bytes} limit)") } else { String::new() };
         format!("{}\n\n[Showing lines {}-{last} of {total}{limit}. Use offset={} to continue.]", cut.text, start + 1, last + 1)
     } else {
-        match limit.map(|l| start + l).filter(|end| *end < lines.total) {
-            Some(end) => format!("{}\n\n[{} more lines in file. Use offset={} to continue.]", cut.text, lines.total - end, end + 1),
+        match limit.map(|l| start + l).filter(|end| *end < lines.editor_line_count) {
+            Some(end) => {
+                format!("{}\n\n[{} more lines in file. Use offset={} to continue.]", cut.text, lines.editor_line_count - end, end + 1)
+            }
             None => cut.text,
         }
     };
@@ -182,8 +184,7 @@ fn read(input: &ReadInput, cwd: &Path) -> Result<ToolOutput> {
 }
 
 struct Lines {
-    // MUST KILL: rename: `total` → `editor_line_count` (a trailing newline counts a last, empty line, unlike truncate::lines)
-    total: usize,
+    editor_line_count: usize,
     kept: Vec<String>,
     first_bytes: usize,
 }
@@ -192,7 +193,7 @@ impl Lines {
     fn select(path: &Path, start: usize, limit: Option<usize>) -> Result<Self> {
         let end = limit.map_or(usize::MAX, |l| start.saturating_add(l));
         let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
-        let mut out = Lines { total: 0, kept: vec![], first_bytes: 0 };
+        let mut out = Lines { editor_line_count: 0, kept: vec![], first_bytes: 0 };
         let (mut line, mut current, mut current_bytes, mut kept_bytes) = (0usize, vec![], 0usize, 0usize);
         let mut finish = |line: usize, current: &mut Vec<u8>, current_bytes: &mut usize, out: &mut Lines| {
             if line >= start && line < end {
@@ -230,7 +231,7 @@ impl Lines {
             reader.consume(len);
         }
         finish(line, &mut current, &mut current_bytes, &mut out);
-        out.total = line + 1;
+        out.editor_line_count = line + 1;
         Ok(out)
     }
 }
@@ -278,7 +279,7 @@ impl Tool for Write {
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
-        let _one_at_a_time = turn(&path).await;
+        let _one_at_a_time = lock_canonical_file(&path).await;
         tokio::fs::write(&path, input.content).await.with_context(|| format!("{}", path.display()))?;
         Ok(ToolOutput::text(format!("Successfully wrote to {}", input.path)))
     }
@@ -358,7 +359,7 @@ impl Tool for Edit {
             bail!("Edit tool input is invalid. edits must contain at least one replacement.");
         }
         let path = resolve(&input.path, &self.env.cwd);
-        let _one_at_a_time = turn(&path).await;
+        let _one_at_a_time = lock_canonical_file(&path).await;
         let raw = tokio::fs::read(&path).await.map_err(|e| anyhow!("Could not edit file: {}. {e}.", input.path))?;
         let Ok(raw) = String::from_utf8(raw) else {
             bail!("Could not edit file: {}. It is not UTF-8 text: use bash to change it.", input.path);
@@ -510,26 +511,25 @@ fn widen(original: &str, loose: &str, replacements: &[Replacement]) -> Result<Ve
     if original_lines.len() != loose_lines.len() {
         bail!("Cannot preserve unchanged lines because the base content has a different line count.");
     }
-    // MUST KILL: type: a LineGroup struct (first line, end line, replacements) instead of this tuple
-    let mut groups: Vec<(usize, usize, Vec<Replacement>)> = vec![];
+    let mut groups: Vec<(Range<usize>, Vec<Replacement>)> = vec![];
     for r in replacements {
         let outside = || anyhow!("Replacement range is outside the base content.");
         let first = loose_lines.iter().position(|(start, end)| r.at >= *start && r.at < *end).ok_or_else(outside)?;
         let last = (first..loose_lines.len()).find(|i| loose_lines[*i].1 >= r.at + r.len).ok_or_else(outside)?;
         match groups.last_mut() {
-            Some((_, end, group)) if first < *end => {
-                *end = (*end).max(last + 1);
+            Some((lines, group)) if first < lines.end => {
+                lines.end = lines.end.max(last + 1);
                 group.push(r.clone());
             }
-            _ => groups.push((first, last + 1, vec![r.clone()])),
+            _ => groups.push((first..last + 1, vec![r.clone()])),
         }
     }
     Ok(groups
         .into_iter()
-        .map(|(first, end, group)| {
-            let (from, to) = (loose_lines[first].0, loose_lines[end - 1].1);
-            let at = original_lines[first].0;
-            Replacement { at, len: original_lines[end - 1].1 - at, new: replace(&loose[from..to], &group, from) }
+        .map(|(lines, group)| {
+            let (from, to) = (loose_lines[lines.start].0, loose_lines[lines.end - 1].1);
+            let at = original_lines[lines.start].0;
+            Replacement { at, len: original_lines[lines.end - 1].1 - at, new: replace(&loose[from..to], &group, from) }
         })
         .collect())
 }
@@ -538,8 +538,7 @@ fn splice(original: &str, replacements: &[Replacement]) -> String {
     let crlfs: Vec<usize> = original.match_indices("\r\n").map(|(i, _)| i).collect();
     let to_original = |offset: usize| offset + crlfs.iter().enumerate().take_while(|(n, at)| **at - n < offset).count();
     let mut out = String::with_capacity(original.len());
-    // MUST KILL: extract: a join fn named for keeping a CR before a seam and an LF after it two line breaks
-    let mut push = |part: &str| {
+    let mut push_keeping_breaks = |part: &str| {
         if out.ends_with('\r') && part.starts_with('\n') {
             out.push('\n');
         }
@@ -548,14 +547,14 @@ fn splice(original: &str, replacements: &[Replacement]) -> String {
     let mut from = 0;
     for r in replacements {
         let start = to_original(r.at);
-        push(&original[from..start]);
+        push_keeping_breaks(&original[from..start]);
         match line_ending(original, start) {
-            "\n" => push(&r.new),
-            ending => push(&r.new.replace('\n', ending)),
+            "\n" => push_keeping_breaks(&r.new),
+            ending => push_keeping_breaks(&r.new.replace('\n', ending)),
         }
         from = to_original(r.at + r.len);
     }
-    push(&original[from..]);
+    push_keeping_breaks(&original[from..]);
     out
 }
 

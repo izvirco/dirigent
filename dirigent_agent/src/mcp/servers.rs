@@ -59,13 +59,12 @@ impl Drop for Watched<'_> {
     }
 }
 
-// MUST KILL: rename: `Adding` → `ForgetUnlessAdded` (drops the server again if `Servers::add` is dropped half-way)
-struct Adding<'a> {
+struct ForgetUnlessAdded<'a> {
     servers: &'a Mutex<BTreeMap<String, Entry>>,
     name: Option<&'a str>,
 }
 
-impl Drop for Adding<'_> {
+impl Drop for ForgetUnlessAdded<'_> {
     fn drop(&mut self) {
         if let Some(entry) = self.name.and_then(|name| self.servers.lock().unwrap().remove(name)) {
             entry.connection.shutdown.cancel();
@@ -197,11 +196,10 @@ impl Servers {
         for connection in connections {
             let server = &connection.name;
             let offered = connection.tools();
-            // MUST KILL: extract: a fn that hashes every colliding tool name, so the result visibly doesn't depend on the server's order
             let plain: Vec<String> = offered.iter().map(|tool| tool_name(server, &tool.name, |_| false)).collect();
+            let shared_by_several = |name: &str| plain.iter().filter(|plain| *plain == name).count() > 1;
             for tool in offered {
-                let name =
-                    tool_name(server, &tool.name, |name| taken.contains(name) || plain.iter().filter(|plain| *plain == name).count() > 1);
+                let name = tool_name(server, &tool.name, |name| taken.contains(name) || shared_by_several(name));
                 if !taken.insert(name.clone()) {
                     continue;
                 }
@@ -246,9 +244,9 @@ impl Servers {
             servers.insert(name.to_owned(), entry);
             connection
         };
-        let mut adding = Adding { servers: &self.inner.servers, name: Some(name) };
+        let mut forget = ForgetUnlessAdded { servers: &self.inner.servers, name: Some(name) };
         let connected = connection.client().await;
-        adding.name = None;
+        forget.name = None;
         if let Err(e) = connected {
             self.remove(name).await;
             return Err(e.to_string());

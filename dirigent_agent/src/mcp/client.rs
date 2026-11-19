@@ -63,7 +63,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-// MUST KILL: type: put the incoming channel in the Transport trait, so "it closes when the connection does" is in the signature
 #[async_trait]
 pub(crate) trait Transport: Send + Sync + 'static {
     async fn send(&self, message: &Value) -> Result<(), Error>;

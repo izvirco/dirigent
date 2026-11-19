@@ -80,12 +80,16 @@ impl Stdio {
                     _ => tracing::debug!("mcp: not a message: {}", String::from_utf8_lossy(&line[..line.len().min(200)])),
                 }
             }
-            // MUST KILL: extract: a named step that waits for stderr to drain before `messages` drops and the connection counts as closed
-            let _ = tokio::time::timeout(EXIT_GRACE, read.cancelled()).await;
+            wait_for_last_words(&read).await;
+            drop(messages);
         });
         let pid = child.id();
         Ok((Self { stdin: tokio::sync::Mutex::new(stdin), child: Mutex::new(Some(child)), pid, group, stderr, stderr_read }, incoming))
     }
+}
+
+async fn wait_for_last_words(stderr_read: &CancellationToken) {
+    let _ = tokio::time::timeout(EXIT_GRACE, stderr_read.cancelled()).await;
 }
 
 async fn read_line(from: &mut (impl AsyncBufRead + Unpin)) -> Option<Vec<u8>> {
@@ -140,7 +144,7 @@ impl Transport for Stdio {
         }
         let Some(mut child) = self.child.lock().unwrap().take() else { return };
         // Named after the child, so let go of before it: its pid is its own until then.
-        let mut closing = Closing { pid: self.pid, group: self.group };
+        let mut closing = KillIfCloseDropped { pid: self.pid, group: self.group };
         if tokio::time::timeout(EXIT_GRACE, child.wait()).await.is_err() {
             signal(self.pid, false, self.group);
             if tokio::time::timeout(KILL_GRACE, child.wait()).await.is_err() {
@@ -152,17 +156,16 @@ impl Transport for Stdio {
             signal(self.pid, false, true);
         }
         closing.pid = None;
-        let _ = tokio::time::timeout(EXIT_GRACE, self.stderr_read.cancelled()).await;
+        wait_for_last_words(&self.stderr_read).await;
     }
 }
 
-// MUST KILL: rename: `Closing` → `KillIfCloseDropped` (kills the command if `close` is dropped midway)
-struct Closing {
+struct KillIfCloseDropped {
     pid: Option<u32>,
     group: bool,
 }
 
-impl Drop for Closing {
+impl Drop for KillIfCloseDropped {
     fn drop(&mut self) {
         signal(self.pid, true, self.group);
     }

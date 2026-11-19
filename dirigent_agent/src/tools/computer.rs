@@ -129,8 +129,8 @@ async fn driver() -> Result<PathBuf> {
     FOUND.get_or_try_init(find).await.cloned()
 }
 
-// MUST KILL: extract: HOLD into a named script file, so "ends the compositor and removes its directory on EOF or a signal" is its name
-const HOLD: &str = r#"trap : TERM INT HUP; "$@" & screen=$!; read -r _; kill "$screen" 2>/dev/null; wait "$screen"; rm -rf "$0""#;
+const RUN_UNTIL_EOF_OR_SIGNAL_THEN_REMOVE_DIR: &str =
+    r#"trap : TERM INT HUP; "$@" & screen=$!; read -r _; kill "$screen" 2>/dev/null; wait "$screen"; rm -rf "$0""#;
 const LISTENS: Duration = Duration::from_millis(20);
 
 struct Display {
@@ -162,7 +162,7 @@ impl Display {
         );
         let mut hold = Command::new("sh");
         // sway up to 1.9 exits where the NVIDIA module is loaded, whatever it draws with.
-        hold.args(["-c", HOLD]).arg(&dir).arg(sway).args(["--unsupported-gpu", "-c"]).arg(&config);
+        hold.args(["-c", RUN_UNTIL_EOF_OR_SIGNAL_THEN_REMOVE_DIR]).arg(&dir).arg(sway).args(["--unsupported-gpu", "-c"]).arg(&config);
         hold.env("XDG_RUNTIME_DIR", &dir).env("SWAYSOCK", dir.join(IPC)).env_remove("WAYLAND_DISPLAY").env_remove("DISPLAY");
         hold.envs([("WLR_BACKENDS", "headless"), ("WLR_RENDERER", "pixman"), ("WLR_LIBINPUT_NO_DEVICES", "1")]);
         hold.stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -215,14 +215,13 @@ fn path_led_by(dir: &Path, path: Option<&OsStr>) -> Option<OsString> {
     std::env::join_paths(std::iter::once(dir.to_owned()).chain(dirs)).ok()
 }
 
-// MUST KILL: rename: `literal` → `escape_for_resolve` (keeps `mcp::config::resolve` from expanding `$` in it)
-fn literal(value: &str) -> String {
+fn escape_for_resolve(value: &str) -> String {
     value.replace('$', "$$")
 }
 
 fn entry(command: &Path, place: Where, home: &Path, display: Option<&Path>, cursor: bool) -> Server {
     let mut env = vec![("CUA_TELEMETRY_ENABLED", "0".to_owned()), ("CUA_DRIVER_RS_UPDATE_CHECK", "0".to_owned())];
-    let path = |path: &Path| literal(&path.to_string_lossy());
+    let path = |path: &Path| escape_for_resolve(&path.to_string_lossy());
     if !cfg!(target_os = "macos") {
         env.push(("CUA_DRIVER_RS_HOME", path(home)));
     }
@@ -473,7 +472,6 @@ pub fn forget_screens(dirs: &crate::config::Dirs) {
 
 struct Recorder {
     recording: Arc<Recording>,
-    // MUST KILL: extract: a SettleGate type owning `acted` and SETTLE, so pictures waiting for the last action to draw is one named rule
     acted: Mutex<Option<Instant>>,
 }
 

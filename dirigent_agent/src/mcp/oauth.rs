@@ -263,7 +263,7 @@ impl Auth {
                         *login = Login::default();
                     }
                 };
-                return if self.settle(tokens, gone)? { Err(Error::AuthRequired) } else { Ok(()) };
+                return if self.update_unless_replaced(tokens, gone)? { Err(Error::AuthRequired) } else { Ok(()) };
             }
             Err(e) => return Err(failed(Error::Other(e.to_string()))),
         };
@@ -273,11 +273,10 @@ impl Auth {
             scope: fresh.scope.or(tokens.scope.clone()),
             ..fresh
         };
-        self.settle(tokens, |login| login.tokens = Some(fresh)).map(drop)
+        self.update_unless_replaced(tokens, |login| login.tokens = Some(fresh)).map(drop)
     }
 
-    // MUST KILL: rename: `settle` → `store_if_still` returning a named outcome instead of a bare bool (false: the user signed in or out meanwhile)
-    fn settle(&self, refreshed: &Tokens, change: impl FnOnce(&mut Login)) -> Result<bool, Error> {
+    fn update_unless_replaced(&self, refreshed: &Tokens, change: impl FnOnce(&mut Login)) -> Result<bool, Error> {
         let mut still = false;
         let stored = self.store.update(&self.key, |login| {
             still = login.tokens.as_ref() == Some(refreshed);
