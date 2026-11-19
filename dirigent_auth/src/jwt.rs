@@ -6,6 +6,7 @@
 
 use base64::Engine;
 use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+use ring::signature::RsaPublicKeyComponents;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -99,8 +100,7 @@ pub struct Keys {
     state: Mutex<KeyState>,
 }
 
-// MUST KILL: type: keep ring's RsaPublicKeyComponents<Vec<u8>> instead of a bare (n, e) tuple
-type RsaKey = (Vec<u8>, Vec<u8>);
+type RsaKey = RsaPublicKeyComponents<Vec<u8>>;
 
 #[derive(Default)]
 struct KeyState {
@@ -147,12 +147,10 @@ impl Keys {
         if typ != "at+jwt" && typ != "application/at+jwt" {
             return Err(Rejected::Type);
         }
-        let (n, e) = self.key(&header.kid)?;
+        let key = self.state.lock().unwrap().key(&header.kid, &self.fetch)?;
         let signature = BASE64_URL_SAFE_NO_PAD.decode(signature).map_err(|_| Rejected::Malformed)?;
-        let signed = &token[..header_len(token)];
-        ring::signature::RsaPublicKeyComponents { n: &n, e: &e }
-            .verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, signed.as_bytes(), &signature)
-            .map_err(|_| Rejected::Signature)?;
+        let signing_input = &token[..token.rfind('.').unwrap_or(0)];
+        key.verify(&ring::signature::RSA_PKCS1_2048_8192_SHA256, signing_input.as_bytes(), &signature).map_err(|_| Rejected::Signature)?;
         let claims: Claims = decode_json(payload)?;
         if claims.iss.trim_end_matches('/') != expect.issuer.trim_end_matches('/') {
             return Err(Rejected::Issuer);
@@ -171,32 +169,32 @@ impl Keys {
         }
         Ok(claims)
     }
+}
 
-    fn key(&self, kid: &str) -> Result<RsaKey, Rejected> {
-        let mut state = self.state.lock().unwrap();
-        if let Some(key) = state.keys.get(kid) {
+impl KeyState {
+    fn key(&mut self, kid: &str, fetch: impl Fn() -> anyhow::Result<String>) -> Result<RsaKey, Rejected> {
+        if let Some(key) = self.keys.get(kid) {
             return Ok(key.clone());
         }
-        if let Some((at, why)) = &state.failed
+        if let Some((at, why)) = &self.failed
             && at.elapsed() < RETRY_FAILED
         {
             return Err(Rejected::Keys(why.clone()));
         }
-        if state.fetched.is_some_and(|at| at.elapsed() < REFETCH_EVERY) {
+        if self.fetched.is_some_and(|at| at.elapsed() < REFETCH_EVERY) {
             return Err(Rejected::UnknownKey);
         }
-        // MUST KILL: extract: a fetch_locked(&mut KeyState), so fetching while holding the lock is explicit
-        let fetched = (self.fetch)().and_then(|jwks| parse_jwks(&jwks));
+        let fetched = fetch().and_then(|jwks| parse_jwks(&jwks));
         match fetched {
             Ok(keys) => {
-                state.keys = keys;
-                state.fetched = Some(Instant::now());
-                state.failed = None;
-                state.keys.get(kid).cloned().ok_or(Rejected::UnknownKey)
+                self.keys = keys;
+                self.fetched = Some(Instant::now());
+                self.failed = None;
+                self.keys.get(kid).cloned().ok_or(Rejected::UnknownKey)
             }
             Err(e) => {
                 let why = format!("{e:#}");
-                state.failed = Some((Instant::now(), why.clone()));
+                self.failed = Some((Instant::now(), why.clone()));
                 Err(Rejected::Keys(why))
             }
         }
@@ -207,11 +205,6 @@ impl Keys {
 /// forge token from its own kinds before checking it.
 pub fn looks_like_jwt(token: &str) -> bool {
     token.split('.').count() == 3
-}
-
-// MUST KILL: rename: header_len to signing_input_len, the JWS part it measures
-fn header_len(token: &str) -> usize {
-    token.rfind('.').unwrap_or(0)
 }
 
 fn decode_json<T: serde::de::DeserializeOwned>(part: &str) -> Result<T, Rejected> {
@@ -242,7 +235,7 @@ fn parse_jwks(text: &str) -> anyhow::Result<HashMap<String, RsaKey>> {
         .keys
         .into_iter()
         .filter(|k| k.kty == "RSA" && k.usage.as_deref().is_none_or(|u| u == "sig"))
-        .filter_map(|k| Some((k.kid, (b64(&k.n).ok()?, b64(&k.e).ok()?))))
+        .filter_map(|k| Some((k.kid, RsaKey { n: b64(&k.n).ok()?, e: b64(&k.e).ok()? })))
         .collect())
 }
 
