@@ -118,7 +118,6 @@ fn start(open: Option<String>, launches: Option<futures::channel::mpsc::Unbounde
         tracing::warn!("{e:#}");
         config::Config::default()
     });
-    // MUST KILL: rearchitect: theme::write_example must run before config::Watch::new stamps; let Watch skip our own writes
     if let Err(e) = theme::write_example() {
         tracing::warn!("{e:#}");
     }

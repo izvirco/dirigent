@@ -16,7 +16,7 @@ mod storage;
 mod title;
 pub mod tunnel;
 pub mod update;
-mod vcs;
+pub mod vcs;
 
 use anyhow::{Result, anyhow};
 use dirigent_agent::config::Dirs as AgentDirs;

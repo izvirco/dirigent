@@ -68,6 +68,17 @@ pub enum PanelPart {
     Log,
 }
 
+pub enum Panel {
+    Auto,
+    Open,
+    Closed,
+}
+
+struct Fetch {
+    request: u64,
+    last_held: Option<u64>,
+}
+
 pub struct OpenThread {
     pub host: String,
     pub id: String,
@@ -86,10 +97,8 @@ pub struct OpenThread {
     pub new_output: bool,
     pub asks: Vec<AskForm>,
     pub ask_h: Pixels,
-    // MUST KILL: type: an enum (Auto | Open | Closed) instead of Option<bool>
-    pub panel: Option<bool>,
-    // MUST KILL: type: a named struct (request id, last seq held) for fetch_open's stale cut
-    fetching: Option<(u64, Option<u64>)>,
+    pub panel: Panel,
+    fetching: Option<Fetch>,
     pub editing: Option<Editing>,
     pub rewound: Option<Rewound>,
     jump_entry: Option<String>,
@@ -144,7 +153,7 @@ impl OpenThread {
             new_output: false,
             asks: vec![],
             ask_h: px(0.),
-            panel: None,
+            panel: Panel::Auto,
             fetching: None,
             editing: None,
             rewound: None,
@@ -154,8 +163,7 @@ impl OpenThread {
         }
     }
 
-    // MUST KILL: rename: reset_keeping_scroll, unlike ListState::reset it keeps a scrolled-up position
-    fn relist(&mut self) {
+    fn reset_keeping_scroll(&mut self) {
         let top = (!self.list.is_following_tail()).then(|| self.list.logical_scroll_top());
         self.list.reset(self.timeline.items.len() + 1);
         if let Some(top) = top {
@@ -167,27 +175,24 @@ impl OpenThread {
         self.timeline.entry_id(ix).is_some_and(|id| self.pins.contains(id))
     }
 
-    // MUST KILL: type: a named result (items before, first changed) instead of (usize, Option<usize>)
-    fn fold(&mut self, entry: Entry) -> (usize, Option<usize>) {
+    fn fold(&mut self, entry: Entry) -> Option<usize> {
         match &entry.body {
             Body::Assistant(_) => self.streaming.steps.clear(),
             Body::User { content } if self.timeline.open_work().is_none() => self.streaming.confirm_prompt(&text_of(content)),
             Body::Notice(Notice::Answer { ask_id, .. }) => self.streaming.confirm_answer(ask_id),
             _ => {}
         }
-        let n = self.timeline.items.len();
         let branched = self.entries.last().is_some_and(|last| entry.parent_id.as_deref() != Some(last.id.as_str()));
         self.entries.push(entry);
         if branched {
             self.rewound = None;
             self.timeline = timeline_of(&self.entries);
-            return (n, Some(0));
+            return Some(0);
         }
         if self.rewound.is_some() {
-            return (n, None);
+            return None;
         }
-        let changed = self.timeline.push(&self.entries[self.entries.len() - 1]);
-        (n, changed)
+        self.timeline.push(&self.entries[self.entries.len() - 1])
     }
 
     pub fn typed_message(&self, ix: usize) -> Option<&Entry> {
@@ -251,14 +256,6 @@ pub struct VcsInfo {
     pub dirty: bool,
     pub branch: Option<String>,
     pub refs: Vec<String>,
-}
-
-// MUST KILL: rearchitect: one default base in dirigent_protocol, shared with dirigent_service::vcs
-pub fn default_base(vcs: Vcs) -> &'static str {
-    match vcs {
-        Vcs::Git => "HEAD",
-        Vcs::Jj => "@-",
-    }
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1159,8 +1156,8 @@ impl Dirigent {
                     let end = entries.last().map(|e| e.seq);
                     let stale = t
                         .fetching
-                        .take_if(|(rid, _)| *rid == reply_to)
-                        .and_then(|(_, held)| held)
+                        .take_if(|f| f.request == reply_to)
+                        .and_then(|f| f.last_held)
                         .filter(|held| end.is_none_or(|end| *held > end));
                     if let Some(to) = stale
                         && let Err(e) = self.cache.lock().unwrap().remove_entries(&host, &thread_id, end, to)
@@ -1173,7 +1170,7 @@ impl Dirigent {
                     for e in fresh {
                         t.fold(e);
                     }
-                    t.relist();
+                    t.reset_keeping_scroll();
                     self.end_stale_edit(cx);
                     let Pane::Thread(t) = &mut self.pane else { return };
                     if let Some(ix) = t.jump_entry.take().and_then(|e| t.item_at(&e)) {
@@ -1337,8 +1334,8 @@ impl Dirigent {
                     && t.host == host
                     && t.id == thread_id
                 {
-                    // MUST KILL: extract: an OpenThread method for a push a snapshot already folded in
-                    if t.entries.last().is_some_and(|e| entry.seq <= e.seq) {
+                    let folded_by_snapshot = t.entries.last().is_some_and(|e| entry.seq <= e.seq);
+                    if folded_by_snapshot {
                         if matches!(entry.body, Body::Assistant(_)) && !t.streaming.steps.is_empty() {
                             t.streaming.steps.clear();
                             let tail = t.timeline.items.len();
@@ -1349,7 +1346,8 @@ impl Dirigent {
                         }
                         return;
                     }
-                    let (n, changed) = t.fold(entry);
+                    let n = t.timeline.items.len();
+                    let changed = t.fold(entry);
                     let m = t.timeline.items.len();
                     if t.log == Some(thread::TAIL) {
                         t.log = Some(t.timeline.open_work().unwrap_or(thread::TAIL));
@@ -1533,7 +1531,7 @@ impl Dirigent {
         }
         let rid = self.next_id();
         let Pane::Thread(t) = &mut self.pane else { return };
-        t.fetching = Some((rid, t.entries.last().map(|e| e.seq)));
+        t.fetching = Some(Fetch { request: rid, last_held: t.entries.last().map(|e| e.seq) });
         self.net.send(&host, ClientMessage::GetThread { id: rid, thread_id: t.id.clone() });
     }
 
@@ -2301,9 +2299,13 @@ impl Dirigent {
 
     pub fn panel_open(&self) -> bool {
         let Some(t) = self.open() else { return false };
-        t.panel.unwrap_or_else(|| {
-            t.screen.is_some() || t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && !self.lineage(&t.host, &t.id).is_empty())
-        })
+        match t.panel {
+            Panel::Open => true,
+            Panel::Closed => false,
+            Panel::Auto => {
+                t.screen.is_some() || t.log.is_some() || (self.panel_shows(PanelPart::Lineage) && !self.lineage(&t.host, &t.id).is_empty())
+            }
+        }
     }
 
     pub fn panel_shows(&self, part: PanelPart) -> bool {
@@ -2317,7 +2319,7 @@ impl Dirigent {
             None => Some(part),
         };
         if let Pane::Thread(t) = &mut self.pane {
-            t.panel = Some(true);
+            t.panel = Panel::Open;
         }
         self.set_panel_hidden(hidden);
         self.focus_composer(cx);
@@ -2344,7 +2346,7 @@ impl Dirigent {
         if self.panel_open() {
             self.close_panel();
         } else if let Pane::Thread(t) = &mut self.pane {
-            t.panel = Some(true);
+            t.panel = Panel::Open;
             self.log_on = true;
             self.show_latest_log();
         }
@@ -2354,13 +2356,12 @@ impl Dirigent {
     fn close_panel(&mut self) {
         self.stash_log();
         if let Pane::Thread(t) = &mut self.pane {
-            t.panel = Some(false);
+            t.panel = Panel::Closed;
             t.log = None;
             self.log_on = false;
         }
     }
 
-    // MUST KILL: rearchitect: point the log at the latest work where the panel opens, not by a per-frame fix-up
     fn settle_panel(&mut self) {
         if self.panel_open() && self.open().is_some_and(|t| t.log.is_none()) {
             self.show_latest_log();
@@ -2698,9 +2699,8 @@ impl Dirigent {
         let Some(group) = groups.iter().find(|g| g.key == group_key) else {
             return;
         };
-        let cache = self.cache.lock().unwrap();
         for m in group.members.iter().filter(|m| only.is_none_or(|(h, id)| m.host == h && m.project.id == id)) {
-            let _ = cache.set_link(&m.host, &m.project.id, target_key);
+            let _ = self.cache.lock().unwrap().set_link(&m.host, &m.project.id, target_key);
             let k = (m.host.clone(), m.project.id.clone());
             match target_key {
                 Some(t) => {
@@ -2711,8 +2711,6 @@ impl Dirigent {
                 }
             }
         }
-        // MUST KILL: rearchitect: let save_pins take the held cache lock instead of an early drop
-        drop(cache);
         let mut new: Vec<String> = group.members.iter().map(|m| projects::group_key(&m.host, &m.project, &self.links)).collect();
         new.sort_by_key(|k| k != group_key);
         self.pinned_projects = projects::rekey(&self.pinned_projects, group_key, &new);
@@ -3615,7 +3613,6 @@ impl Dirigent {
         }
     }
 
-    // MUST KILL: rearchitect: read the selected text from the timeline, not by re-rendering items to harvest their blocks
     fn selected_text(&mut self, cx: &mut Context<Self>) -> Option<String> {
         let (start, end) = self.selection.range()?;
         self.selection.collect();
@@ -3800,7 +3797,7 @@ impl Dirigent {
             Timeline::from_entries(branch.into_iter().take_while(|x| x.id != e.entry_id))
         };
         t.timeline = timeline;
-        t.relist();
+        t.reset_keeping_scroll();
         t.list.set_follow_mode(FollowMode::Tail);
         t.rewound = Some(Rewound { request: id, entry_id: e.entry_id.clone(), text: text.clone(), images: images.clone() });
         let (host, thread_id) = (t.host.clone(), t.id.clone());
@@ -3832,7 +3829,7 @@ impl Dirigent {
         let Some(r) = t.rewound.take() else { return };
         t.timeline = timeline_of(&t.entries);
         t.streaming.echo.retain(|(text, mode)| !(*mode == PromptMode::Prompt && *text == r.text));
-        t.relist();
+        t.reset_keeping_scroll();
         t.editing = Some(Editing { entry_id: r.entry_id, stash, images: stash_images });
         self.attachments = r.images;
         self.set_composer(input::Content { selection: r.text.len()..r.text.len(), text: r.text, reversed: false }, cx);
@@ -3942,7 +3939,7 @@ impl Dirigent {
         if t.log == Some(key) {
             self.close_panel();
         } else {
-            t.panel = None;
+            t.panel = Panel::Auto;
             self.log_on = true;
             if !self.panel_shows(PanelPart::Log) {
                 self.set_panel_hidden(None);
@@ -4051,7 +4048,6 @@ fn rejoin(back: Draft, typed: Draft) -> Draft {
         return (text, images);
     }
     let shift = typed_images.iter().map(|a| a.n).max().unwrap_or(0);
-    // MUST KILL: rearchitect: renumber tokens in one pass so no descending order is needed to avoid collisions
     images.sort_by_key(|a| std::cmp::Reverse(a.n));
     for a in images.iter_mut().filter(|_| shift > 0) {
         text = text.replace(&image_token(a.n), &image_token(a.n + shift));
@@ -4125,7 +4121,7 @@ fn decode_blob(mime: &str, data: &str) -> Option<Blob> {
 
 /// The root's left presses, mouse moves and left releases (dropping the selection, saving a
 /// rename; resizing, dragging a selection or a project), at window level for the reason
-/// `reset_menu_dismissed` is: a root listener only fires while the root is hovered, and an
+/// `reset_press_flags` is: a root listener only fires while the root is hovered, and an
 /// occluder under the mouse (a header's actions, the open sidebar peek, the image preview,
 /// a modal's dim) would keep a press from saving a rename, or leave a drag running after
 /// the release. Bubble phase, painted first, so they run last, as the root's did: after a
@@ -4164,8 +4160,7 @@ fn track_mouse(cx: &mut Context<Dirigent>) -> impl IntoElement {
 /// listener rather than the root's `capture_any_mouse_down`: that one only fires while the
 /// root is hovered, and an occluding overlay (the Add project modal) unhovers it, which
 /// left the flag stuck and swallowed every later menu-trigger click.
-// MUST KILL: rename: reset_press_flags, it clears caption_press too
-fn reset_menu_dismissed(cx: &mut Context<Dirigent>) -> impl IntoElement {
+fn reset_press_flags(cx: &mut Context<Dirigent>) -> impl IntoElement {
     let this = cx.entity().downgrade();
     gpui::canvas(
         |_, _, _| {},
@@ -4265,7 +4260,7 @@ impl Render for Dirigent {
             .on_action(cx.listener(Self::copy_selection))
             .on_action(cx.listener(Self::open_app_link))
             .on_action(cx.listener(Self::onboarding_continue))
-            .child(reset_menu_dismissed(cx))
+            .child(reset_press_flags(cx))
             .child(track_mouse(cx))
             .relative()
             .size_full()
@@ -4375,7 +4370,7 @@ mod tests {
         assert_eq!(texts(&t), ["hi", "hello"]);
         assert_eq!(t.typed_message(0).map(|e| e.id.as_str()), Some("u1"));
         assert!(t.typed_message(1).is_none());
-        assert_eq!(t.fold(user(2, "u2", None, "hey")), (2, Some(0)));
+        assert_eq!(t.fold(user(2, "u2", None, "hey")), Some(0));
         assert_eq!(texts(&t), ["hey"]);
         t.fold(reply(3, "r2", Some("u2"), "howdy"));
         assert_eq!(texts(&t), ["hey", "howdy"]);
@@ -4383,7 +4378,7 @@ mod tests {
         assert_eq!(t.item_at("r1"), None);
         t.timeline = Timeline::default();
         t.rewound = Some(Rewound { request: 1, entry_id: "u2".into(), text: "yo".into(), images: vec![] });
-        assert_eq!(t.fold(reply(4, "r3", Some("r2"), "still here")), (0, None));
+        assert_eq!(t.fold(reply(4, "r3", Some("r2"), "still here")), None);
         assert!(texts(&t).is_empty());
         t.fold(user(5, "u3", None, "yo"));
         assert!(t.rewound.is_none());
@@ -4402,7 +4397,7 @@ mod tests {
     }
 
     #[test]
-    fn relisting_keeps_the_scroll_position() {
+    fn a_reset_keeps_the_scroll_position() {
         let entries = vec![
             user(0, "u1", None, "hi"),
             reply(1, "r1", Some("u1"), "hello"),
@@ -4414,17 +4409,17 @@ mod tests {
             let top = t.list.logical_scroll_top();
             (top.item_ix, top.offset_in_item)
         };
-        t.relist();
+        t.reset_keeping_scroll();
         assert!(t.list.is_following_tail());
         t.list.scroll_to(ListOffset { item_ix: 1, offset_in_item: px(12.) });
         t.timeline = timeline_of(&entries);
-        t.relist();
+        t.reset_keeping_scroll();
         assert_eq!(t.list.item_count(), 5);
         assert!(!t.list.is_following_tail());
         assert_eq!(top(&t), (1, px(12.)));
         t.list.scroll_to(ListOffset { item_ix: 3, offset_in_item: px(12.) });
         t.timeline = timeline_of(&entries[..1]);
-        t.relist();
+        t.reset_keeping_scroll();
         assert_eq!(top(&t), (2, px(0.)));
     }
 }
