@@ -11,12 +11,10 @@ use tracing::{error, info, warn};
 
 const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
 pub const HOST_CHECK_SECS: u64 = 5 * 60;
-// MUST KILL: rename: IDLE_FOR → SUB_AGENT_HANDOFF_GRACE
-const IDLE_FOR: Duration = Duration::from_secs(3);
+const SUB_AGENT_HANDOFF_GRACE: Duration = Duration::from_secs(3);
 
-// MUST KILL: rename: Ready → VerifiedInstaller, apply_update runs it unchecked
 #[derive(Clone)]
-pub struct Ready {
+pub struct VerifiedInstaller {
     pub version: String,
     pub installer: PathBuf,
 }
@@ -28,12 +26,12 @@ pub struct Download {
 
 enum Report {
     Progress(Option<Download>),
-    Ready(Ready),
+    Ready(VerifiedInstaller),
 }
 
 #[derive(Default)]
 pub struct State {
-    pub ready: Option<Ready>,
+    pub ready: Option<VerifiedInstaller>,
     pub downloading: Option<Download>,
     pub when_idle: bool,
     idle_since: Option<Instant>,
@@ -118,7 +116,7 @@ pub fn start(cx: &mut Context<Dirigent>) {
     .detach();
 }
 
-fn check(updater: &Updater, offered: Option<&str>, progress: impl Fn(Download)) -> Result<Option<Ready>> {
+fn check(updater: &Updater, offered: Option<&str>, progress: impl Fn(Download)) -> Result<Option<VerifiedInstaller>> {
     let Some(release) = updater.newer()? else { return Ok(None) };
     if offered == Some(&release.version) && updater.installer(&release)?.exists() {
         return Ok(None);
@@ -126,7 +124,7 @@ fn check(updater: &Updater, offered: Option<&str>, progress: impl Fn(Download)) 
     let report = |transfer| progress(Download { version: release.version.clone(), transfer });
     report(None);
     let installer = updater.download(&release, |transfer| report(Some(transfer)))?;
-    Ok(Some(Ready { version: release.version, installer }))
+    Ok(Some(VerifiedInstaller { version: release.version, installer }))
 }
 
 #[cfg(windows)]
@@ -164,7 +162,7 @@ fn settled(busy: bool, idle_since: &mut Option<Instant>) -> bool {
         *idle_since = None;
         return false;
     }
-    idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_FOR
+    idle_since.get_or_insert_with(Instant::now).elapsed() >= SUB_AGENT_HANDOFF_GRACE
 }
 
 impl HostState {
@@ -174,7 +172,6 @@ impl HostState {
 }
 
 impl Dirigent {
-    // MUST KILL: rename: local_busy → threads_a_restart_would_cut_off (jobs and setup count, asks don't)
     pub fn local_busy(&self) -> usize {
         self.host(dirigent_service::hosts::LOCAL).map_or(0, HostState::threads_a_restart_would_cut_off)
     }
@@ -183,7 +180,6 @@ impl Dirigent {
         self.updater.ready.is_some() || self.updater.downloading.is_some() || self.hosts.iter().any(|h| h.update.offer.is_some())
     }
 
-    // MUST KILL: rearchitecture: close_spent_update_menu → a Menu::Update that cannot outlive its button
     pub(crate) fn close_spent_update_menu(&mut self) {
         if self.menu == Some(Menu::Update) && !self.has_updates() {
             self.menu = None;
@@ -305,7 +301,6 @@ impl Dirigent {
         }
     }
 
-    // MUST KILL: type: apply_update takes updater.ready as its in-flight guard → an explicit Installing state
     fn apply_update(&mut self, cx: &mut Context<Self>) {
         let Some(ready) = self.updater.ready.take() else { return };
         info!(version = %ready.version, "restarting to update");

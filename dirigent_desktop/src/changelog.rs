@@ -13,11 +13,10 @@ const LAST_VERSION_KEY: &str = "last_version";
 const WIDTH: f32 = 620.;
 
 pub fn after_update(cache: &Cache) -> bool {
-    updated(cache, &Version::parse(dirigent_protocol::release::VERSION).expect("the version is semver"))
+    record_version(cache, &Version::parse(dirigent_protocol::release::VERSION).expect("the version is semver"))
 }
 
-// MUST KILL: rename: updated -> record_version, it keeps current as the last version while it checks
-fn updated(cache: &Cache, current: &Version) -> bool {
+fn record_version(cache: &Cache, current: &Version) -> bool {
     let last = cache.get(LAST_VERSION_KEY).and_then(|v| Version::parse(&v).ok());
     if last.is_some_and(|l| l >= *current) {
         return false;
@@ -47,18 +46,18 @@ mod tests {
 
         let cache = Cache::in_memory().unwrap();
         cache.set(LAST_VERSION_KEY, "0.1.0").unwrap();
-        assert!(updated(&cache, &v("0.3.0")));
+        assert!(record_version(&cache, &v("0.3.0")));
         assert_eq!(kept(&cache).as_deref(), Some("0.3.0"));
-        assert!(!updated(&cache, &v("0.3.0")));
-        assert!(!updated(&cache, &v("0.2.0")));
+        assert!(!record_version(&cache, &v("0.3.0")));
+        assert!(!record_version(&cache, &v("0.2.0")));
         assert_eq!(kept(&cache).as_deref(), Some("0.3.0"));
 
         let cache = Cache::in_memory().unwrap();
         cache.set("pane", "inbox").unwrap();
-        assert!(updated(&cache, &v("0.1.0")));
+        assert!(record_version(&cache, &v("0.1.0")));
 
         let cache = Cache::in_memory().unwrap();
-        assert!(!updated(&cache, &v("0.3.0")));
+        assert!(!record_version(&cache, &v("0.3.0")));
         assert_eq!(kept(&cache).as_deref(), Some("0.3.0"));
     }
 }
