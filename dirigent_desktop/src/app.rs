@@ -3614,17 +3614,15 @@ impl Dirigent {
     }
 
     fn selected_text(&mut self, cx: &mut Context<Self>) -> Option<String> {
-        let (start, end) = self.selection.range()?;
-        self.selection.collect();
-        match start.key.doc {
+        let text = self.selection.clone().text(|range| match range.start.key.doc {
             Doc::Thread => {
-                for ix in start.key.item..=end.key.item {
+                for ix in range.start.key.item..=range.end.key.item {
                     thread::render_item(self, ix, cx);
                 }
             }
             Doc::Log => {
                 if let Some((work, live)) = thread::shown_work(self) {
-                    for six in start.key.item..=end.key.item {
+                    for six in range.start.key.item..=range.end.key.item {
                         thread::render_step(self, &work, live, six, cx);
                     }
                 }
@@ -3634,8 +3632,8 @@ impl Dirigent {
                     changelog::render(self, cx);
                 }
             }
-        }
-        Some(self.selection.text()).filter(|t| !t.is_empty())
+        });
+        Some(text).filter(|t| !t.is_empty())
     }
 
     fn copy_selection(&mut self, _: &input::Copy, _: &mut Window, cx: &mut Context<Self>) {
