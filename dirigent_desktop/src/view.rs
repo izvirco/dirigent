@@ -41,8 +41,7 @@ pub struct ToolCall {
     pub name: String,
     pub primary: String,
     pub args: String,
-    // MUST KILL: rename: timeout → timeout_secs
-    pub timeout: Option<f64>,
+    pub timeout_secs: Option<f64>,
     pub spawned: Option<String>,
     pub started: Option<i64>,
     pub ended: Option<i64>,
@@ -69,16 +68,7 @@ impl Work {
             .find_map(|s| if let Step::Text(t) = s { Some(t.as_str()) } else { None })
     }
 
-    // MUST KILL: type: steers' (step index, text, images, queued) tuple → a struct
-    pub fn steers(&self) -> impl Iterator<Item = (usize, &str, &[String], bool)> {
-        self.steps.iter().enumerate().filter_map(|(i, s)| match s {
-            Step::Steer { text, images, queued } => Some((i, text.as_str(), images.as_slice(), *queued)),
-            _ => None,
-        })
-    }
-
-    // MUST KILL: rename: duration → duration_ms
-    pub fn duration(&self) -> i64 {
+    pub fn duration_ms(&self) -> i64 {
         let end =
             self.ended.or_else(|| self.steps.iter().rev().find_map(|s| if let Step::Tool(t) = s { t.ended.or(t.started) } else { None }));
         (end.unwrap_or(self.started) - self.started).max(0)
@@ -87,8 +77,7 @@ impl Work {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Stats {
-    // MUST KILL: rename: Stats.input → prompt (fresh input + cache read + cache write)
-    pub input: u64,
+    pub prompt: u64,
     pub output: u64,
     pub cached: u64,
     pub cost: f64,
@@ -116,7 +105,7 @@ impl Stats {
                 }
                 _ => continue,
             };
-            s.input += usage.prompt();
+            s.prompt += usage.prompt();
             s.cached += usage.cache_read;
             s.output += usage.output;
             s.cost += usage.cost.total();
@@ -125,7 +114,7 @@ impl Stats {
     }
 
     pub fn cached_pct(&self) -> u64 {
-        if self.input == 0 { 0 } else { (self.cached as f64 / self.input as f64 * 100.).round() as u64 }
+        if self.prompt == 0 { 0 } else { (self.cached as f64 / self.prompt as f64 * 100.).round() as u64 }
     }
 }
 
@@ -144,8 +133,7 @@ struct Request {
     tokens: u64,
     model: String,
     at: i64,
-    // MUST KILL: rename: reported → cache_seen (no miss counts before a thread showed cache activity)
-    reported: bool,
+    cache_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -172,7 +160,7 @@ impl CacheBaseline {
         if read > 0 {
             self.read_rate.insert(a.model.clone(), u.cost.cache_read / read as f64);
         }
-        let miss = self.prev.as_ref().filter(|p| tokens > 0 && (read + write > 0 || p.reported)).and_then(|p| {
+        let miss = self.prev.as_ref().filter(|p| tokens > 0 && (read + write > 0 || p.cache_seen)).and_then(|p| {
             let missed = p.tokens.min(tokens) as i64 - read as i64;
             (missed > MISS_FLOOR).then(|| {
                 let paid = input + write;
@@ -187,8 +175,8 @@ impl CacheBaseline {
             })
         });
         if tokens > 0 {
-            let reported = read + write > 0 || self.prev.as_ref().is_some_and(|p| p.reported);
-            self.prev = Some(Request { tokens, model: a.model.clone(), at, reported });
+            let cache_seen = read + write > 0 || self.prev.as_ref().is_some_and(|p| p.cache_seen);
+            self.prev = Some(Request { tokens, model: a.model.clone(), at, cache_seen });
         }
         miss
     }
@@ -228,7 +216,6 @@ impl Timeline {
         t
     }
 
-    // MUST KILL: type: push's Option<usize> → a named first_changed index the list remeasures from
     pub fn push(&mut self, entry: &Entry) -> Option<usize> {
         self.current = entry.id.clone();
         let miss = self.cache.observe(entry).and_then(|m| m.notice());
@@ -424,7 +411,7 @@ fn tool_call(id: &str, name: &str, input: &Value) -> ToolCall {
         name: name.to_owned(),
         primary,
         args: args_multiline(Some(input)),
-        timeout: input.get("timeout").and_then(Value::as_f64),
+        timeout_secs: input.get("timeout").and_then(Value::as_f64),
         spawned: (name == "dirigent" && arg("action") == Some("spawn")).then(|| arg("name").unwrap_or("untitled").to_owned()),
         ..Default::default()
     }
@@ -446,7 +433,6 @@ fn answer_markdown<'a>(questions: impl Iterator<Item = &'a str>, answers: Option
         .join("\n\n")
 }
 
-// MUST KILL: type: draft_reply's (String, usize) → a struct with the text and the cursor
 pub fn draft_reply(questions: &[dirigent_protocol::Question], answers: &[Vec<String>]) -> (String, usize) {
     let mut text = String::new();
     let mut cursor = None;
@@ -499,24 +485,16 @@ fn images_of(content: &[Block]) -> Vec<String> {
     blobs.collect()
 }
 
-pub fn blob_links(text: &str) -> impl Iterator<Item = &str> {
-    text.match_indices("](blob:").filter_map(|(i, m)| {
-        let rest = &text[i + m.len()..];
-        let n = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
-        (n == 64).then(|| &rest[..n])
-    })
-}
-
 pub fn blobs_shown(items: &[Item], expanded: &HashSet<(usize, usize)>) -> Vec<String> {
     let mut out = vec![];
     for (i, item) in items.iter().enumerate() {
         match item {
             Item::User { images, .. } => out.extend(images.iter().cloned()),
-            Item::Assistant(text) => out.extend(blob_links(text).map(str::to_owned)),
+            Item::Assistant(text) => out.extend(markdown::blob_links(text).map(str::to_owned)),
             Item::Work(w) => {
                 for (j, step) in w.steps.iter().enumerate() {
                     match step {
-                        Step::Text(text) => out.extend(blob_links(text).map(str::to_owned)),
+                        Step::Text(text) => out.extend(markdown::blob_links(text).map(str::to_owned)),
                         Step::Tool(t) if expanded.contains(&(i, j)) => out.extend(t.result.iter().flat_map(|r| r.images.iter().cloned())),
                         Step::Steer { images, .. } => out.extend(images.iter().cloned()),
                         _ => {}
@@ -549,14 +527,11 @@ fn args_multiline(args: Option<&Value>) -> String {
         .join("\n")
 }
 
-// MUST KILL: rearchitect: Streaming's three echo lifecycles (prompt, queued steer / follow-up, answer) → one typed echo with its own confirm rule
 #[derive(Debug, Default, Clone)]
 pub struct Streaming {
     pub steps: Vec<Step>,
-    // MUST KILL: type: running_tools' (tool call id, started unix ms) tuple → a struct
-    pub running_tools: Vec<(String, i64)>,
+    pub running_tools: std::collections::HashMap<String, i64>,
     pub echo: Vec<(String, PromptMode)>,
-    // MUST KILL: type: answers' (ask id, answer markdown) tuple → a struct
     pub answers: Vec<(String, String)>,
 }
 
@@ -595,15 +570,18 @@ impl Streaming {
         streamed.chain(queued.map(|text| Step::Steer { text: text.to_owned(), images: vec![], queued: true }))
     }
 
-    // MUST KILL: type: apply's bool → a named Redraw enum, returned when what shows changed
     pub fn apply(&mut self, event: &Event, now: i64) -> bool {
         match event {
             Event::MessageStart => self.steps.clear(),
             Event::Text { index, delta } => return self.append(*index, delta, Step::Text),
             Event::Thinking { index, delta } => return self.append(*index, delta, Step::Thinking),
             Event::ToolCall { index, id, name, input } => self.set(*index, Step::Tool(tool_call(id, name, input))),
-            Event::ToolStart { id } => self.running_tools.push((id.clone(), now)),
-            Event::ToolEnd { id } => self.running_tools.retain(|(i, _)| i != id),
+            Event::ToolStart { id } => {
+                self.running_tools.insert(id.clone(), now);
+            }
+            Event::ToolEnd { id } => {
+                self.running_tools.remove(id);
+            }
             Event::Queue { steering, follow_up } => {
                 self.echo.retain(|(t, m)| *m == PromptMode::Prompt && !follow_up.iter().any(|f| split_image_refs(f).0 == t));
                 self.echo.extend(steering.iter().map(|t| (t.clone(), PromptMode::Steer)));
@@ -623,7 +601,7 @@ impl Streaming {
     }
 
     pub fn running_since(&self, id: &str) -> Option<i64> {
-        self.running_tools.iter().find(|(i, _)| i == id).map(|(_, t)| *t)
+        self.running_tools.get(id).copied()
     }
 
     fn append(&mut self, idx: usize, delta: &str, make: impl FnOnce(String) -> Step) -> bool {
@@ -708,9 +686,9 @@ mod tests {
         let tool = |started, ended| Step::Tool(ToolCall { started, ended, ..Default::default() });
         let w =
             Work { started: 1000, ended: None, steps: vec![tool(Some(1500), Some(2000)), tool(Some(4000), None)], ..Default::default() };
-        assert_eq!(w.duration(), 3000);
-        assert_eq!(Work { started: 1000, ..Default::default() }.duration(), 0);
-        assert_eq!(Work { started: 1000, ended: Some(9000), steps: w.steps.clone(), ..Default::default() }.duration(), 8000);
+        assert_eq!(w.duration_ms(), 3000);
+        assert_eq!(Work { started: 1000, ..Default::default() }.duration_ms(), 0);
+        assert_eq!(Work { started: 1000, ended: Some(9000), steps: w.steps.clone(), ..Default::default() }.duration_ms(), 8000);
     }
 
     #[test]
@@ -743,7 +721,7 @@ mod tests {
         assert_eq!(w.steps[0], Step::Thinking("hmm".into()));
         assert_eq!(w.steps[1], Step::Text("looking".into()));
         let Step::Tool(c) = &w.steps[2] else { panic!() };
-        assert_eq!((c.primary.as_str(), c.timeout, c.started, c.ended), ("ls -la…", Some(60.), Some(1700), Some(2000)));
+        assert_eq!((c.primary.as_str(), c.timeout_secs, c.started, c.ended), ("ls -la…", Some(60.), Some(1700), Some(2000)));
         assert_eq!(c.result.as_ref().map(|r| r.text.as_str()), Some("a\nb"));
         assert_eq!(t.items[2], Item::Assistant("done".into()));
     }
@@ -786,7 +764,7 @@ mod tests {
         let changed: Vec<_> = entries.iter().map(|e| t.push(e)).collect();
         assert_eq!(changed[3], Some(1));
         let Item::Work(w) = &t.items[1] else { panic!() };
-        assert_eq!(w.steers().collect::<Vec<_>>(), vec![(2, "no, other way", &["abc".to_owned()][..], false)]);
+        assert_eq!(w.steps[2], Step::Steer { text: "no, other way".into(), images: vec!["abc".into()], queued: false });
         assert_eq!(blobs_shown(&t.items, &HashSet::new()), ["abc"]);
         assert_eq!(w.tool_count(), 2);
         assert_eq!(t.items[2], Item::Assistant("done".into()));
@@ -963,7 +941,7 @@ mod tests {
         let entries =
             [user(0, "hi"), reply(2, 90, 8, 10, 0.5), result(0, "c", vec![], false), reply(0, 95, 5, 20, 0.25), summary, user(0, "more")];
         let s = Stats::of(&entries);
-        assert_eq!((s.input, s.output, s.cached, s.cost), (300, 35, 185, 1.));
+        assert_eq!((s.prompt, s.output, s.cached, s.cost), (300, 35, 185, 1.));
         assert_eq!((s.user_messages, s.assistant_messages, s.compactions), (2, 2, 1));
         assert_eq!(s.cached_pct(), 62);
     }

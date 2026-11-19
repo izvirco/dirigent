@@ -1272,7 +1272,7 @@ fn stats_card(t: &OpenThread) -> AnyElement {
         .text_size(text::sm())
         .line_height(u(18.))
         .text_color(rgba(theme::t().fg))
-        .child(format!("{} in / {} out", kilo(s.input), kilo(s.output)))
+        .child(format!("{} in / {} out", kilo(s.prompt), kilo(s.output)))
         .child(dim(format!("{} cached ({}%)", kilo(s.cached), s.cached_pct())))
         .child(dim(count(s.user_messages, "user message")))
         .child(dim(count(s.assistant_messages, "assistant message")))
@@ -1320,8 +1320,10 @@ pub fn render_item(this: &mut Dirigent, ix: usize, cx: &mut Context<Dirigent>) -
             if let Some(text) = work.latest_text().filter(|r| !r.trim().is_empty()) {
                 col = col.child(reply_block(text, TAIL, t, blobs, &fonts, keys, cx));
             }
-            for (six, text, images, _) in work.steers().filter(|(.., queued)| *queued) {
-                col = col.child(steer_bubble(text, images, (key, six), true, t, bubble, blobs, &fonts, keys, cx));
+            for (six, step) in work.steps.iter().enumerate() {
+                if let Step::Steer { text, images, queued: true } = step {
+                    col = col.child(steer_bubble(text, images, (key, six), true, t, bubble, blobs, &fonts, keys, cx));
+                }
             }
         }
         for text in echo(PromptMode::FollowUp) {
@@ -1636,9 +1638,15 @@ fn work_block(
     cx: &mut Context<Dirigent>,
 ) -> Div {
     let taken: Vec<_> = w
-        .steers()
-        .filter(|(.., queued)| !queued)
-        .map(|(six, text, images, _)| steer_bubble(text, images, (key, six), false, t, bubble, blobs, fonts, keys, cx))
+        .steps
+        .iter()
+        .enumerate()
+        .filter_map(|(six, s)| match s {
+            Step::Steer { text, images, queued: false } => {
+                Some(steer_bubble(text, images, (key, six), false, t, bubble, blobs, fonts, keys, cx))
+            }
+            _ => None,
+        })
         .collect();
     let children: Vec<_> = w
         .steps
@@ -1754,7 +1762,7 @@ fn work_line(w: &Work, key: usize, live: bool, busy: Option<String>, t: &OpenThr
     let status = match (live, busy) {
         (true, Some(busy)) => vec![busy],
         (true, None) => vec![format!("Working for {}", elapsed(now - w.started)), "·".into(), tools],
-        (false, _) => vec![duration(w.duration()), "·".into(), tools],
+        (false, _) => vec![duration(w.duration_ms()), "·".into(), tools],
     };
     let parts: Vec<String> = [Some(model), w.effort.clone(), Some("·".into())].into_iter().flatten().chain(status).collect();
     let row = row(step_id(key, usize::MAX))
@@ -1883,7 +1891,7 @@ fn render_tool(
     let (time, color) = match (t.streaming.running_since(&call.id), call.started.zip(call.ended)) {
         (Some(since), _) => {
             let so_far = elapsed(now - since);
-            (Some(call.timeout.map(|s| format!("{so_far} / {}", duration((s * 1000.) as i64))).unwrap_or(so_far)), theme::t().working)
+            (Some(call.timeout_secs.map(|s| format!("{so_far} / {}", duration((s * 1000.) as i64))).unwrap_or(so_far)), theme::t().working)
         }
         (None, Some((s, e))) => (Some(duration(e - s)), if failed { theme::t().error } else { theme::t().fg_2 }),
         (None, None) => (failed.then(|| "failed".to_owned()), theme::t().error),
