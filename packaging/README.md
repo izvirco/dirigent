@@ -161,7 +161,7 @@ machine without one that starts (`cua-driver --version`) has no computer use, an
 why. On macOS that is the user's own install
 (`/bin/bash -c "$(curl -fsSL https://cua.ai/driver/install.sh)"`): its `CuaDriver.app` holds the permissions.
 Untested by us, like the rest of the macOS build. Windows is untested too: the driver is what its release ships.
-Its telemetry and update check are off, and it keeps its state under `<data dir>/screens/`,
+Its telemetry, update check and on-screen cursor are off, and it keeps its state under `<data dir>/screens/`,
 which a service wipes as it starts. On Linux it needs `libX11`, `libXi` and `libxkbcommon`, which a desktop has.
 
 In a Wayland session (`WAYLAND_DISPLAY` set) the driver is started with its Wayland backend on
@@ -176,14 +176,13 @@ that variable brings the X11 windows back. We ran it on sway alone: the driver's
 (`concepts/platform-support`) say what it does on GNOME, KDE and Hyprland. In an X11 session it drives X11
 windows, as before.
 
-The driver draws a cursor of its own on the screen, over the window it acts on, and leaves the user's pointer
-where it is. On the desktop it shows unless Settings › Agent tools turns it off (`computer_cursor` in
-`config.toml`, an option in a prompt's `tools`); on a private screen it never does (`--no-overlay`): the thread's
-panel draws its own there. The switch is read when a screen opens, so a desktop that is open keeps what it had.
-A click waits for the cursor to get there, about a second. On an X11 desktop without a compositor the cursor
-covers the window, and the pictures the agent and the panel get of it are black where the cursor rests. In a
-Wayland session the compositor draws the cursor into the output, so those pictures have it in them (seen on
-sway). On macOS `mcp` is a client of the user's own driver, whose settings decide, not the switch.
+The driver can draw a cursor of its own on the screen, over the window it acts on. We start it without
+(`--no-overlay`), and the thread's panel draws one on its picture of the screen instead. With the driver's cursor, a
+click waits about a second for the cursor to get there, and the cursor is in the pictures the agent takes of the
+screen: on sway the compositor draws it into the output, and on an X11 desktop without a compositor
+those pictures are black where it rests. On macOS `mcp` is a client of the user's own driver, whose settings
+decide, not the flag. 0.0.11's nightlies had the driver's cursor on the desktop, behind a `computer_cursor`
+switch: a `config.toml` or a thread's `tools` may still name it, and nothing reads it.
 
 `sway` makes a thread's private screen: a headless Wayland display of the thread's own, with one output of the
 size asked for, which nobody sees but in the thread. Linux only. It runs on a config of ours (windows tile and

@@ -20,7 +20,6 @@ use tokio::process::{Child, Command};
 use tokio_util::sync::CancellationToken;
 
 pub const COMPUTER: &str = "computer";
-const CURSOR: &str = "computer_cursor";
 const WAYLAND_BACKEND: &str = "CUA_DRIVER_RS_ENABLE_WAYLAND";
 const IPC: &str = "sway.sock";
 
@@ -219,7 +218,7 @@ fn escape_for_resolve(value: &str) -> String {
     value.replace('$', "$$")
 }
 
-fn entry(command: &Path, place: Where, home: &Path, display: Option<&Path>, cursor: bool) -> Server {
+fn entry(command: &Path, place: Where, home: &Path, display: Option<&Path>) -> Server {
     let mut env = vec![("CUA_TELEMETRY_ENABLED", "0".to_owned()), ("CUA_DRIVER_RS_UPDATE_CHECK", "0".to_owned())];
     let path = |path: &Path| escape_for_resolve(&path.to_string_lossy());
     if !cfg!(target_os = "macos") {
@@ -247,13 +246,9 @@ fn entry(command: &Path, place: Where, home: &Path, display: Option<&Path>, curs
             "Operate the apps on the user's desktop: list and launch apps, read a window's accessibility tree and screenshot, click, type, scroll and press keys, in the background where the app allows."
         }
     };
-    let mut args = vec!["mcp".to_owned()];
-    if !(cursor && place == Where::Desktop) {
-        args.push("--no-overlay".into());
-    }
     Server {
         command: Some(command.to_string_lossy().into_owned()),
-        args,
+        args: vec!["mcp".into(), "--no-overlay".into()],
         env: env.into_iter().map(|(name, value)| (name.to_owned(), value)).collect(),
         description: Some(description.into()),
         ..Server::default()
@@ -365,8 +360,7 @@ impl Computer {
         };
         let server = place.server();
         let socket = private.as_ref().map(|(socket, _)| socket.as_path());
-        let driver = entry(&command, place, &dir.join("driver"), socket, session.is_on(CURSOR));
-        if let Err(e) = session.mcp.add(server, driver, with).await {
+        if let Err(e) = session.mcp.add(server, entry(&command, place, &dir.join("driver"), socket), with).await {
             recording.stop();
             if let Some(display) = display {
                 display.end().await;
@@ -751,16 +745,8 @@ mod tests {
     }
 
     #[test]
-    fn the_driver_draws_its_cursor_on_the_desktop_alone_and_only_when_asked() {
-        let args = |place, display, cursor| entry(Path::new("cua-driver"), place, Path::new("/driver"), display, cursor).args;
-        assert_eq!(args(Where::Desktop, None, true), ["mcp"]);
-        assert_eq!(args(Where::Desktop, None, false), ["mcp", "--no-overlay"]);
-        assert_eq!(args(Where::Private, Some(Path::new("/screen/wayland-1")), true), ["mcp", "--no-overlay"]);
-    }
-
-    #[test]
     fn a_private_screens_driver_gets_its_own_wayland_display_and_nothing_of_the_users() {
-        let env = entry(Path::new("cua-driver"), Where::Private, Path::new("/driver"), Some(Path::new("/screen/wayland-1")), false).env;
+        let env = entry(Path::new("cua-driver"), Where::Private, Path::new("/driver"), Some(Path::new("/screen/wayland-1"))).env;
         let got = |name: &str| env.get(name).map(String::as_str);
         assert_eq!(
             (got("WAYLAND_DISPLAY"), got("SWAYSOCK"), got(WAYLAND_BACKEND)),
@@ -896,7 +882,7 @@ mod tests {
         let socket = |display: &str| Path::new(display).exists();
         let display_of = |opened: &str| opened.split_once("`WAYLAND_DISPLAY=").unwrap().1.split_once('`').unwrap().0.to_owned();
 
-        session.prompt(Prompt { tools: Some(vec![COMPUTER.into(), CURSOR.into()]), ..prompt("open a screen") }).await.unwrap();
+        session.prompt(Prompt { tools: Some(vec![COMPUTER.into()]), ..prompt("open a screen") }).await.unwrap();
         host.settled(1).await;
         let transcript = host.transcript();
         assert_eq!(transcript.len(), 12, "{transcript:#?}");
