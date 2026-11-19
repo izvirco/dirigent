@@ -21,10 +21,9 @@ pub enum Line<'a> {
     Archived { parent: &'a str, count: usize, open: bool },
 }
 
-// MUST KILL: type: lineage's empty Vec for a thread with no relations → an Option
-pub fn lineage<'a>(threads: &'a [ThreadSummary], id: &str, unfolded: &HashSet<String>) -> Vec<LineageNode<'a>> {
+pub fn lineage<'a>(threads: &'a [ThreadSummary], id: &str, unfolded: &HashSet<String>) -> Option<Vec<LineageNode<'a>>> {
     let find = |id: &str| threads.iter().find(|t| t.id == id);
-    let Some(mut root) = find(id) else { return vec![] };
+    let mut root = find(id)?;
     let mut path = HashSet::new();
     while path.insert(root.id.as_str()) {
         match root.parent_id.as_deref().and_then(find) {
@@ -33,8 +32,8 @@ pub fn lineage<'a>(threads: &'a [ThreadSummary], id: &str, unfolded: &HashSet<St
         }
     }
     let mut out = vec![];
-    Family { threads, path, unfolded }.descend(root, 0, true, &mut out);
-    if out.len() == 1 { vec![] } else { out }
+    Family { threads, path, unfolded }.descend(root, 0, false, &mut out);
+    (out.len() > 1).then_some(out)
 }
 
 struct Family<'a, 'b> {
@@ -48,26 +47,24 @@ impl<'a> Family<'a, '_> {
         self.threads.iter().filter(|k| k.parent_id.as_deref() == Some(id)).collect()
     }
 
-    // MUST KILL: rename: archived → archived_with_all_below (it checks the whole branch)
-    fn archived(&self, t: &ThreadSummary) -> bool {
-        t.archived && self.kids(&t.id).into_iter().all(|k| self.archived(k))
+    fn branch_archived(&self, t: &ThreadSummary) -> bool {
+        t.archived && self.kids(&t.id).into_iter().all(|k| self.branch_archived(k))
     }
 
-    // MUST KILL: type: descend's `fold` bool → an enum telling a closed tree from an open fold's archived-only branch
-    fn descend(&self, node: &'a ThreadSummary, depth: usize, fold: bool, out: &mut Vec<LineageNode<'a>>) {
+    fn descend(&self, node: &'a ThreadSummary, depth: usize, in_fold: bool, out: &mut Vec<LineageNode<'a>>) {
         out.push(LineageNode { line: Line::Thread(node), depth });
         let mut kids = self.kids(&node.id);
         kids.sort_by_key(|k| (k.prompted_at.unwrap_or(k.created_at), k.created_at, k.id.as_str()));
         let open = self.unfolded.contains(&node.id);
         let (folded, live): (Vec<_>, Vec<_>) =
-            kids.into_iter().partition(|k| fold && self.archived(k) && (open || !self.path.contains(k.id.as_str())));
+            kids.into_iter().partition(|k| !in_fold && self.branch_archived(k) && (open || !self.path.contains(k.id.as_str())));
         for kid in live {
-            self.descend(kid, depth + 1, fold, out);
+            self.descend(kid, depth + 1, in_fold, out);
         }
         if !folded.is_empty() {
             out.push(LineageNode { line: Line::Archived { parent: &node.id, count: folded.len(), open }, depth: depth + 1 });
             for kid in folded.into_iter().filter(|_| open) {
-                self.descend(kid, depth + 1, false, out);
+                self.descend(kid, depth + 1, true, out);
             }
         }
     }
@@ -77,8 +74,8 @@ pub fn tree(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<Div> {
     let open = this.open()?;
     let (host, id) = (open.host.clone(), open.id.clone());
     let (host, id) = (host.as_str(), id.as_str());
-    let nodes = this.lineage(host, id);
-    let Some(Line::Thread(root)) = nodes.first().map(|n| &n.line) else { return None };
+    let nodes = this.lineage(host, id)?;
+    let Line::Thread(root) = nodes[0].line else { return None };
     let total = this.host(host).map(|h| spend(&h.threads, root)).unwrap_or_default();
     let rows: Vec<AnyElement> = nodes
         .iter()
@@ -254,6 +251,7 @@ mod tests {
     fn rows(threads: &[ThreadSummary], id: &str, unfolded: &[&str]) -> Vec<String> {
         let unfolded = unfolded.iter().map(|s| s.to_string()).collect();
         lineage(threads, id, &unfolded)
+            .unwrap_or_default()
             .iter()
             .map(|n| {
                 let line = match n.line {

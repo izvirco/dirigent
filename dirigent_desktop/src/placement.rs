@@ -3,12 +3,10 @@ use crate::cache::Cache;
 use gpui::{App, Bounds, Context, Pixels, Task, Window, WindowBounds, point, px, size};
 use std::time::Duration;
 
-// MUST KILL: type: KEY's hand-rolled `<state> x y w h` string → a typed record of state and restore bounds
 const KEY: &str = "window";
 const DEFAULT_SIZE: (f32, f32) = (1100., 720.);
 const TITLE_BAR_MIDDLE: Pixels = px(16.);
-// MUST KILL: rename: SETTLE → SAVE_DEBOUNCE (a quit inside it drops the last change)
-const SETTLE: Duration = Duration::from_millis(500);
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(500);
 
 pub fn initial(cache: &Cache, cx: &App) -> WindowBounds {
     let saved = cache.get(KEY);
@@ -26,7 +24,7 @@ pub fn remember(window: &mut Window, cx: &mut Context<Dirigent>) {
     let mut pending = Task::ready(());
     cx.observe_window_bounds(window, move |_, window, cx| {
         let save = cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor().timer(SETTLE).await;
+            cx.background_executor().timer(SAVE_DEBOUNCE).await;
             this.update_in(cx, |this, window, _| {
                 // Minimized (or covered): Windows then reports a maximized window as windowed,
                 // X11 as not maximized. What was saved before stays.
@@ -77,10 +75,11 @@ fn restore(saved: Option<&str>, displays: Option<&[Bounds<Pixels>]>, default: Bo
     }
 }
 
-// MUST KILL: extract: fits → title bar on some display && no bigger than some display, as two named checks
 fn fits(b: Bounds<Pixels>, displays: &[Bounds<Pixels>]) -> bool {
-    let grip = point(b.center().x, b.origin.y + TITLE_BAR_MIDDLE);
-    displays.iter().any(|d| d.contains(&grip)) && displays.iter().any(|d| b.size.width <= d.size.width && b.size.height <= d.size.height)
+    let title_bar = point(b.center().x, b.origin.y + TITLE_BAR_MIDDLE);
+    let grabbable = displays.iter().any(|d| d.contains(&title_bar));
+    let small_enough = displays.iter().any(|d| b.size.width <= d.size.width && b.size.height <= d.size.height);
+    grabbable && small_enough
 }
 
 #[cfg(test)]

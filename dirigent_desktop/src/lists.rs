@@ -470,7 +470,7 @@ fn project_page(this: &Dirigent, group_key: &str, pane: Div, cx: &mut Context<Di
                 .child(header(div().child("Project"), None))
                 .child(theme::empty("This project is gone", "It was removed on its host."));
         };
-        (g.name.clone(), g.threads.iter().map(|(h, t)| (h.as_str(), t)).collect(), Some(g.member_for(None).into()))
+        (g.name.clone(), g.threads_newest_first.iter().map(|(h, t)| (h.as_str(), t)).collect(), Some(g.member_for(None).into()))
     };
     this.sort_as_queue(&mut threads);
     let (active, archived): (Vec<_>, Vec<_>) = threads.into_iter().partition(|(_, t)| !t.archived);
