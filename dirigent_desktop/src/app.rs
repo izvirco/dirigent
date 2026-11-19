@@ -2208,7 +2208,7 @@ impl Dirigent {
         } else {
             u(self.sidebar_width + 2. * theme::GUTTER).min(view.width)
         };
-        Some(ambient::Spec::new(bg.pattern, f32::from(width), f32::from(view.height), window.scale_factor(), theme::t().pattern))
+        Some(ambient::Spec::rounded(bg.pattern, f32::from(width), f32::from(view.height), window.scale_factor(), theme::t().pattern))
     }
 
     fn redraw_field(&mut self, tick: bool, cx: &mut Context<Self>) {
@@ -4198,7 +4198,7 @@ impl Render for Dirigent {
         let bg = self.config.background;
         let mut fill = theme::t().panel;
         if bg.pattern != Pattern::Off && bg.reach == Reach::Full {
-            fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE).round() as u32);
+            fill = theme::alpha(fill, ((fill & 0xff) as f32 * ambient::PANE_FILL_ALPHA).round() as u32);
         }
         let opacity = self.app_opacity();
         if self.onboarding.as_ref().is_some_and(|s| s.leaving.is_some()) {
