@@ -15,7 +15,6 @@ pub type ImageFn<'a> = Option<&'a mut (dyn FnMut(&str) -> AnyElement + 'a)>;
 
 pub type VisualFn<'a> = Option<&'a mut (dyn FnMut(&str) -> Option<AnyElement> + 'a)>;
 
-// MUST KILL: type: CopyFn's button hides itself under CODE_GROUP; let code_block apply the hover reveal
 pub type CopyFn<'a> = Option<&'a dyn Fn(ElementId, SharedString) -> AnyElement>;
 
 pub const CODE_GROUP: &str = "code";
@@ -48,11 +47,9 @@ pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
         // The image's source is its `![alt](target)`.
         let Some(target) = image_targets(&text[source.clone()]).into_iter().next() else { continue };
         let target = source.start + target.start..source.start + target.end;
-        // MUST KILL: extract: the target.start >= done guard in link_blobs into a named already_replaced check
-        if let Some(id) = blobs.get(&text[target.clone()])
-            && target.start >= done
-        {
-            // MUST KILL: rearchitect: link_blobs' trim_end serves view::blob_links matching "](blob:"; share one blob link format
+        let already_replaced = target.start < done;
+        if !already_replaced && let Some(id) = blobs.get(&text[target.clone()]) {
+            // MUST KILL: rearchitect: link_blobs' trim_end serves blob_links matching "](blob:"; share one blob link format
             out.push_str(text[done..target.start].trim_end());
             out.push_str("blob:");
             out.push_str(id);
@@ -61,6 +58,14 @@ pub fn link_blobs(text: &str, blobs: &BTreeMap<String, String>) -> String {
     }
     out.push_str(&text[done..]);
     out
+}
+
+pub fn blob_links(text: &str) -> impl Iterator<Item = &str> {
+    text.match_indices("](blob:").filter_map(|(i, m)| {
+        let rest = &text[i + m.len()..];
+        let n = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        (n == 64).then(|| &rest[..n])
+    })
 }
 
 fn open_fence(text: &str) -> Option<usize> {
@@ -306,8 +311,7 @@ struct Inline<'t> {
     token: bool,
     show_images: bool,
     images: Vec<String>,
-    // MUST KILL: rename: hidden -> in_collected_image_alt
-    hidden: u32,
+    in_collected_image_alt: u32,
 }
 
 impl<'t> Inline<'t> {
@@ -319,9 +323,9 @@ impl<'t> Inline<'t> {
         match e {
             Event::Start(Tag::Image { dest_url, .. }) if self.show_images && dest_url.starts_with("blob:") => {
                 self.images.push(dest_url["blob:".len()..].to_owned());
-                self.hidden += 1;
+                self.in_collected_image_alt += 1;
             }
-            Event::End(TagEnd::Image) if self.hidden > 0 => self.hidden -= 1,
+            Event::End(TagEnd::Image) if self.in_collected_image_alt > 0 => self.in_collected_image_alt -= 1,
             Event::Text(t) if self.link == 0 => self.text_with_links(&t),
             Event::Text(t) | Event::InlineHtml(t) | Event::Html(t) => self.push(&t, None),
             Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => self.push(&t, Some(mono)),
@@ -376,7 +380,7 @@ impl<'t> Inline<'t> {
     }
 
     fn push(&mut self, s: &str, code: Option<&SharedString>) {
-        if s.is_empty() || self.hidden > 0 {
+        if s.is_empty() || self.in_collected_image_alt > 0 {
             return;
         }
         let range = self.text.len()..self.text.len() + s.len();
@@ -473,6 +477,7 @@ mod tests {
             link_blobs(text, &blobs),
             "![a](blob:aa) ![b](blob:bb \"t\") ![c](other.png)\n\n```\n![a](shot.png)\n```\n\n`![a](shot.png)`"
         );
+        assert_eq!(link_blobs("![![a](shot.png)](other.png)", &blobs), "![![a](blob:aa)](other.png)");
     }
 
     #[test]
