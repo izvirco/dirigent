@@ -96,8 +96,7 @@ fn normalize_name(name: &str) -> String {
 struct Indexed<'a> {
     name: &'a str,
     name_terms: HashSet<String>,
-    // MUST KILL: rename: `local_terms` → `own_name_terms` (the terms after the name's last `__`)
-    local_terms: Vec<String>,
+    own_name_terms: Vec<String>,
     text_counts: HashMap<String, usize>,
     text_length: usize,
     namespace_terms: HashSet<String>,
@@ -111,11 +110,18 @@ fn index<'a>(document: &Document<'a>) -> Indexed<'a> {
     Indexed {
         name: document.name,
         name_terms: tokenize(document.name).into_iter().collect(),
-        local_terms: tokenize(document.name.rsplit("__").next().unwrap_or_default()),
+        own_name_terms: tokenize(document.name.rsplit("__").next().unwrap_or_default()),
         text_length: text_counts.values().sum(),
         text_counts,
         namespace_terms: tokenize(&document.namespace).into_iter().collect(),
     }
+}
+
+struct Match<'a> {
+    exact: bool,
+    covered: usize,
+    score: f64,
+    name: &'a str,
 }
 
 pub fn rank<'a>(query: &str, documents: &[Document<'a>], limit: usize) -> Vec<&'a str> {
@@ -142,8 +148,7 @@ pub fn rank<'a>(query: &str, documents: &[Document<'a>], limit: usize) -> Vec<&'
     let full_name_bonus: f64 = idf.iter().sum();
     let exact_query = normalize_name(query);
 
-    // MUST KILL: type: a named Match struct (exact, covered, score, name) with its own ordering instead of a tuple
-    let mut matches: Vec<(bool, usize, f64, &str)> = vec![];
+    let mut matches: Vec<Match> = vec![];
     for document in &indexed {
         let norm = K1 * (1.0 - B + B * document.text_length as f64 / average_length);
         let (mut score, mut covered) = (0.0, 0);
@@ -160,15 +165,15 @@ pub fn rank<'a>(query: &str, documents: &[Document<'a>], limit: usize) -> Vec<&'
         if score == 0.0 {
             continue;
         }
-        if !document.local_terms.is_empty() && document.local_terms.iter().all(|term| terms.contains(term)) {
+        if !document.own_name_terms.is_empty() && document.own_name_terms.iter().all(|term| terms.contains(term)) {
             score += full_name_bonus;
         }
         let name = normalize_name(document.name);
         let exact = name == exact_query || name.ends_with(&format!("__{exact_query}"));
-        matches.push((exact, covered, score, document.name));
+        matches.push(Match { exact, covered, score, name: document.name });
     }
-    matches.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.total_cmp(&a.2)));
-    matches.into_iter().take(limit).map(|(.., name)| name).collect()
+    matches.sort_by(|a, b| b.exact.cmp(&a.exact).then(b.covered.cmp(&a.covered)).then(b.score.total_cmp(&a.score)));
+    matches.into_iter().take(limit).map(|found| found.name).collect()
 }
 
 #[cfg(test)]

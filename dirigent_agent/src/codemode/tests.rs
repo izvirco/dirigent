@@ -297,6 +297,13 @@ async fn what_crosses_to_the_host_is_json_it_reads() {
         "{console}"
     );
     assert_eq!(fixture.host.stored().into_keys().collect::<Vec<_>>(), [cut, "fine"]);
+
+    let code = r#"// @options: {"timeout_ms": 2000}
+        try { await tools.echo({ a: JSON.rawJSON('"\ud800"') }) } catch {}
+        await new Promise(() => {})
+    "#;
+    let stalled = fixture.failure(code).await;
+    assert!(stalled.starts_with("Script error:\nError: The script is waiting on a promise that can never settle"), "{stalled}");
 }
 
 #[test]
@@ -472,9 +479,12 @@ fn the_spec_lists_the_tools_declared_to_the_model() {
 
 #[test]
 fn the_first_line_may_set_options() {
-    assert_eq!(Source::parse("return 1").unwrap(), Source { code: "return 1", max_output_tokens: 10_000, timeout: None });
+    assert_eq!(
+        Source::parse("return 1").unwrap(),
+        Source { code_keeping_line_numbers: "return 1", max_output_tokens: 10_000, timeout: None }
+    );
     let source = Source::parse("  // @options: {\"max_output_tokens\": 5, \"timeout_ms\": 1e3}\r\nreturn 1").unwrap();
-    assert_eq!(source, Source { code: "\nreturn 1", max_output_tokens: 5, timeout: Some(Duration::from_secs(1)) });
+    assert_eq!(source, Source { code_keeping_line_numbers: "\nreturn 1", max_output_tokens: 5, timeout: Some(Duration::from_secs(1)) });
     for (input, error) in [
         ("  \n", "Expected JavaScript source text"),
         ("return 1\n// @options: {}", "must be the first line of the input; found one on line 2"),
