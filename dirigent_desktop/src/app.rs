@@ -540,12 +540,16 @@ impl Dirigent {
 
         let composer = cx.new(|cx| TextInput::new(cx, "Makoto - Golden Girl feat. MC Conrad (Lenzman VIP)", false));
         let path_input = cx.new(|cx| TextInput::new(cx, "~/path/to/project", true));
-        cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(s.queued, window, cx)).detach();
-        cx.subscribe(&composer, |this, _, p: &ImagePasted, cx| this.attach(p.0.clone(), cx)).detach();
-        cx.subscribe(&composer, |this, _, _: &input::Changed, cx| this.save_draft(cx)).detach();
-        cx.subscribe(&path_input, |this, _, s: &Submitted, cx| if s.ctrl { this.confirm_add_project(cx) } else { this.enter_dir(cx) })
+        cx.subscribe_in(&composer, window, |this, _, s: &Submitted, window, cx| this.send(*s == Submitted::ShiftEnter, window, cx))
             .detach();
-        cx.subscribe(&path_input, |this, _, _: &input::Changed, cx| this.project_path_changed(cx)).detach();
+        cx.subscribe(&composer, |this, _, p: &ImagePasted, cx| this.attach(p.0.clone(), cx)).detach();
+        cx.subscribe(&composer, |this, _, _: &input::UserEdited, cx| this.save_draft(cx)).detach();
+        cx.subscribe(&path_input, |this, _, s: &Submitted, cx| match s {
+            Submitted::CtrlEnter => this.confirm_add_project(cx),
+            Submitted::Enter | Submitted::ShiftEnter => this.enter_dir(cx),
+        })
+        .detach();
+        cx.subscribe(&path_input, |this, _, _: &input::UserEdited, cx| this.project_path_changed(cx)).detach();
         cx.subscribe(&path_input, |this, _, a: &Arrow, cx| this.move_dir_selection(a.0, cx)).detach();
         let rename_input = cx.new(|cx| TextInput::new(cx, "name", true));
         cx.subscribe(&rename_input, |this, _, _: &Submitted, cx| this.finish_rename(true, cx)).detach();
@@ -555,7 +559,7 @@ impl Dirigent {
         let target_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
         let link_search = cx.new(|cx| TextInput::new(cx, "Search projects", true));
         for input in [&model_search, &base_search, &target_search, &link_search] {
-            cx.subscribe(input, |_, _, _: &input::Changed, cx| menu::Nav::restart(cx)).detach();
+            cx.subscribe(input, |_, _, _: &input::UserEdited, cx| menu::Nav::restart(cx)).detach();
         }
         let usage_from = cx.new(|cx| TextInput::new(cx, "2026-01-01", true));
         let usage_to = cx.new(|cx| TextInput::new(cx, "2026-01-31", true));
@@ -564,7 +568,7 @@ impl Dirigent {
         }
         let mut settings = settings::State::new(cx);
         for input in [&settings.font_ui, &settings.font_prose, &settings.font_code, &settings.prompt] {
-            cx.subscribe(input, |this, _, _: &input::Changed, cx| this.schedule_apply(cx)).detach();
+            cx.subscribe(input, |this, _, _: &input::UserEdited, cx| this.schedule_apply(cx)).detach();
         }
         cx.subscribe(&settings.sample, |this, _, _: &Submitted, cx| this.run_title_test(cx)).detach();
         let login = crate::login::State::new(cx);
@@ -2411,7 +2415,7 @@ impl Dirigent {
                         })
                         .detach();
                         if !q.multi {
-                            cx.subscribe(&input, move |this, input, _: &input::Changed, cx| {
+                            cx.subscribe(&input, move |this, input, _: &input::UserEdited, cx| {
                                 if !input.read(cx).text().trim().is_empty() {
                                     this.with_ask(&ask_id, cx, |f| f.picked[qi].clear());
                                 }

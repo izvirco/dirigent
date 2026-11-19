@@ -32,7 +32,6 @@ pub fn key_bindings() -> Vec<KeyBinding> {
 
 type Action = Rc<dyn Fn(&mut Dirigent, &mut Window, &mut Context<Dirigent>)>;
 
-// MUST KILL: rearchitect: Nav's stops rely on build order matching display order; key them by position instead
 #[derive(Default)]
 pub struct Nav {
     menu: Option<Menu>,
@@ -95,10 +94,9 @@ impl Nav {
         true
     }
 
-    // MUST KILL: extract: reveal's 4px popup padding as a const shared with popup's p_1
     fn reveal(&self, i: usize) {
         let Stop { scroll, span: Some((top, bottom)), .. } = &self.stops[i] else { return };
-        let (top, bottom) = (*top - u(4.), *bottom + u(4.));
+        let (top, bottom) = (*top - u(PAD), *bottom + u(PAD));
         let height = scroll.bounds().size.height;
         let mut offset = scroll.offset();
         // `offset.y` is minus the distance scrolled: the stop shows while -y <= top and
@@ -219,29 +217,19 @@ pub fn results(
 
 const GAP: f32 = 6.;
 const MARGIN: f32 = 8.;
+const PAD: f32 = 4.;
 const MAX_H: f32 = 400.;
 pub const ROW_H: f32 = 26.;
 
 pub enum Side {
     Above,
-    // MUST KILL: type: Below's and BelowRight's f32 as a named trigger_height field
-    Below(f32),
-    BelowRight(f32),
+    Below { trigger_h: f32 },
+    BelowRight { trigger_h: f32 },
     Right,
     At(Point<Pixels>),
 }
 
-// MUST KILL: rearchitect: popup must be a child of a relative() trigger; have popup wrap its trigger instead
 pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> AnyElement {
-    let beside = matches!(side, Side::Right | Side::At(_));
-    // MUST KILL: type: the (anchor, dx, dy, right, at) tuple in popup as a Placement struct made from Side
-    let (anchor, dx, dy, right, at) = match side {
-        Side::Above => (Anchor::BottomLeft, 0., -GAP, false, None),
-        Side::Below(h) => (Anchor::TopLeft, 0., h + GAP, false, None),
-        Side::BelowRight(h) => (Anchor::TopRight, 0., h + GAP, true, None),
-        Side::Right => (Anchor::TopLeft, GAP, 0., true, None),
-        Side::At(p) => (Anchor::TopLeft, 0., 0., false, Some(p)),
-    };
     let dismiss = cx.listener(|this, _, _, cx| this.dismiss_menu(cx));
     let nav = cx.default_global::<Nav>();
     let scroll = (nav.stops.len() > nav.claimed).then(|| nav.popup_scroll.clone());
@@ -253,45 +241,50 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
             cx.notify();
         }
     });
-    // MUST KILL: extract: the zero-size anchor canvas in popup into a named fn that caps the height and defers the draw
+    let menu = div()
+        .id("menu")
+        .occlude()
+        .flex()
+        .flex_col()
+        .max_w(u(520.))
+        .overflow_y_scroll()
+        .when_some(scroll, |d, s| d.track_scroll(&s))
+        .p(u(PAD))
+        .rounded_lg()
+        .bg(rgba(theme::t().popup))
+        .border_1()
+        .border_color(rgba(theme::t().line))
+        .shadow_lg()
+        .text_color(rgba(theme::t().fg))
+        .on_mouse_down_out(dismiss)
+        .on_hover(leave)
+        .children(items);
+    float(side, menu)
+}
+
+fn float(side: Side, menu: Stateful<Div>) -> AnyElement {
+    let (anchor, dx, dy) = match side {
+        Side::Above => (Anchor::BottomLeft, 0., -GAP),
+        Side::Below { trigger_h } => (Anchor::TopLeft, 0., trigger_h + GAP),
+        Side::BelowRight { trigger_h } => (Anchor::TopRight, 0., trigger_h + GAP),
+        Side::Right => (Anchor::TopLeft, GAP, 0.),
+        Side::At(_) => (Anchor::TopLeft, 0., 0.),
+    };
+    let pin_right = matches!(side, Side::BelowRight { .. } | Side::Right);
     canvas(
         move |bounds, window, cx| {
             let height = window.viewport_size().height;
             let y = bounds.origin.y + u(dy);
-            let room = if beside {
-                height - u(MARGIN) * 2.
-            } else if dy < 0. {
-                y - u(MARGIN)
-            } else {
-                height - y - u(MARGIN)
+            let room = match side {
+                Side::Above => y - u(MARGIN),
+                Side::Below { .. } | Side::BelowRight { .. } => height - y - u(MARGIN),
+                Side::Right | Side::At(_) => height - u(MARGIN) * 2.,
             };
-            let anchored = anchored().anchor(anchor).offset(point(u(dx), u(dy))).snap_to_window_with_margin(u(MARGIN));
-            let mut popup = match at {
-                Some(p) => anchored.position(p),
-                None => anchored,
+            let mut anchored = anchored().anchor(anchor).offset(point(u(dx), u(dy))).snap_to_window_with_margin(u(MARGIN));
+            if let Side::At(p) = side {
+                anchored = anchored.position(p);
             }
-            .child(
-                div()
-                    .id("menu")
-                    .occlude()
-                    .flex()
-                    .flex_col()
-                    .max_w(u(520.))
-                    .max_h(room.clamp(u(60.), u(MAX_H)))
-                    .overflow_y_scroll()
-                    .when_some(scroll, |d, s| d.track_scroll(&s))
-                    .p_1()
-                    .rounded_lg()
-                    .bg(rgba(theme::t().popup))
-                    .border_1()
-                    .border_color(rgba(theme::t().line))
-                    .shadow_lg()
-                    .text_color(rgba(theme::t().fg))
-                    .on_mouse_down_out(dismiss)
-                    .on_hover(leave)
-                    .children(items),
-            )
-            .into_any();
+            let mut popup = anchored.child(menu.max_h(room.clamp(u(60.), u(MAX_H)))).into_any();
             popup.layout_as_root(size(AvailableSpace::MaxContent, AvailableSpace::MaxContent), window, cx);
             window.defer_draw(popup, bounds.origin, 1, None);
         },
@@ -299,8 +292,8 @@ pub fn popup(side: Side, items: Vec<AnyElement>, cx: &mut Context<Dirigent>) -> 
     )
     .absolute()
     .top_0()
-    .when(right, |d| d.right_0())
-    .when(!right, |d| d.left_0())
+    .when(pin_right, |d| d.right_0())
+    .when(!pin_right, |d| d.left_0())
     .size_0()
     .into_any()
 }

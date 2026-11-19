@@ -447,7 +447,7 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         server.into_iter().chain(t.model.as_deref().map(|m| icon(lab_logo(m), theme::t().fg_2).size(u(12.))))
     };
     let small = |text: String, color: u32| div().min_w_0().truncate().text_size(text::xs()).text_color(rgba(color)).child(text);
-    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Sidebar, Side::Below(20.), this, cx);
+    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::Sidebar, Side::Below { trigger_h: 20. }, this, cx);
     let asking = archive_confirm.is_some();
     type Action = Box<dyn Fn(&mut Dirigent, &mut Context<Dirigent>)>;
     let button = |id: String, name: &'static str, on_click: Action| {

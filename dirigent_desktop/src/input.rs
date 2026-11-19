@@ -34,26 +34,25 @@ enum To {
 
 pub const KEY_CONTEXT: &str = "Input";
 const MAX_HEIGHT_FRACTION: f32 = 0.7;
-// MUST KILL: rearchitect: CARD_CHROME couples the input to the composer card; let the composer cap its own height
-const CARD_CHROME: f32 = 90.;
+const COMPOSER_CHROME: f32 = 90.;
 const BAR_GUTTER: f32 = 12.;
+const CURSOR_WIDTH: Pixels = px(2.);
 const MASK: char = '\u{2022}';
 const UNDO_GROUP: Duration = Duration::from_secs(1);
 const UNDO_DEPTH: usize = 200;
 
-// MUST KILL: type: Submitted as an enum (Ctrl / Queued / SingleLineEnter), not two bools
-pub struct Submitted {
-    pub queued: bool,
-    pub ctrl: bool,
+#[derive(PartialEq)]
+pub enum Submitted {
+    Enter,
+    ShiftEnter,
+    CtrlEnter,
 }
 
-// MUST KILL: type: Arrow as an enum Up / Down, not +1 / -1
 pub struct Arrow(pub i32);
 
 pub struct ImagePasted(pub gpui::Image);
 
-// MUST KILL: rename: Changed -> UserEdited, set_text does not emit it
-pub struct Changed;
+pub struct UserEdited;
 
 pub fn image_token(n: u32) -> String {
     format!("[image-{n}]")
@@ -311,7 +310,6 @@ impl TextInput {
     }
 
     fn record(&mut self, kind: Edit) {
-        // MUST KILL: extract: the secret check in record() into a keeps_history() that says secrets keep no undo
         if self.secret {
             return;
         }
@@ -339,7 +337,7 @@ impl TextInput {
         self.follow_cursor = true;
         self.last_edit = None;
         window.notify_text_input_changed(&self.focus_handle);
-        cx.emit(Changed);
+        cx.emit(UserEdited);
         cx.notify();
     }
 
@@ -371,16 +369,16 @@ impl TextInput {
     }
 
     fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(Submitted { queued: false, ctrl: true });
+        cx.emit(Submitted::CtrlEnter);
     }
 
     fn submit_queued(&mut self, _: &SubmitQueued, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(Submitted { queued: true, ctrl: false });
+        cx.emit(Submitted::ShiftEnter);
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
         if self.single_line {
-            cx.emit(Submitted { queued: false, ctrl: false });
+            cx.emit(Submitted::Enter);
         } else {
             self.replace_text_in_range(None, "\n", window, cx);
         }
@@ -444,7 +442,6 @@ impl TextInput {
             if c == to {
                 return;
             }
-            // MUST KILL: extract: the last_edit reset out of select_to so delete_to can select without ending the undo group
             self.selected_range = c.min(to)..c.max(to);
         }
         self.replace_text_in_range(None, "", window, cx)
@@ -621,7 +618,6 @@ fn line_end(text: &str, at: usize) -> usize {
     text[at..].find('\n').map_or(text.len(), |i| at + i)
 }
 
-// MUST KILL: type: word_boundary's graphemes items as a struct (reach, grapheme), not a tuple
 fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: usize) -> usize {
     #[derive(PartialEq, Clone, Copy)]
     enum Class {
@@ -638,7 +634,7 @@ fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: us
     };
     let mut to = from;
     let mut run = None;
-    for (at, g) in graphemes {
+    for (reach, g) in graphemes {
         let k = class(g);
         match run {
             None if k == Class::Space => {}
@@ -647,7 +643,7 @@ fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: us
             Some(r) if r == k && k != Class::Break => {}
             _ => break,
         }
-        to = at;
+        to = reach;
     }
     to
 }
@@ -655,7 +651,7 @@ fn word_boundary<'a>(graphemes: impl Iterator<Item = (usize, &'a str)>, from: us
 impl EventEmitter<Submitted> for TextInput {}
 impl EventEmitter<Arrow> for TextInput {}
 impl EventEmitter<ImagePasted> for TextInput {}
-impl EventEmitter<Changed> for TextInput {}
+impl EventEmitter<UserEdited> for TextInput {}
 
 impl EntityInputHandler for TextInput {
     fn text_for_range(
@@ -707,7 +703,7 @@ impl EntityInputHandler for TextInput {
         self.marked_range.take();
         self.follow_cursor = true;
         window.notify_text_input_changed(&self.focus_handle);
-        cx.emit(Changed);
+        cx.emit(UserEdited);
         cx.notify();
     }
 
@@ -829,7 +825,7 @@ impl Element for TextElement {
                 Some(w) if w > px(0.) => Layout::shape(&text, placeholder, wrap_width(w, single_line), &font, window).height(),
                 _ => line_height,
             };
-            let max = if single_line { line_height } else { window.viewport_size().height * MAX_HEIGHT_FRACTION - u(CARD_CHROME) };
+            let max = if single_line { line_height } else { window.viewport_size().height * MAX_HEIGHT_FRACTION - u(COMPOSER_CHROME) };
             size(width.unwrap_or(px(0.)), height.clamp(line_height, max.max(line_height)))
         });
         (id, ())
@@ -848,8 +844,7 @@ impl Element for TextElement {
         let font = Font::capture(window);
         let layout = Layout::shape(&text, placeholder, wrap_width(bounds.size.width, self.input.read(cx).single_line), &font, window);
         let lh = layout.line_height;
-        // MUST KILL: extract: the 2px cursor width as a named const
-        let width = layout.lines.iter().map(|l| l.width()).fold(px(0.), Pixels::max) + px(2.);
+        let width = layout.lines.iter().map(|l| l.width()).fold(px(0.), Pixels::max) + CURSOR_WIDTH;
         let scroll = self.input.update(cx, |input, _| {
             let max = point((width - bounds.size.width).max(px(0.)), (layout.height() - bounds.size.height).max(px(0.)));
             if input.follow_cursor && !placeholder {
@@ -862,8 +857,8 @@ impl Element for TextElement {
                 }
                 if p.x < input.scroll_x {
                     input.scroll_x = p.x;
-                } else if p.x + px(2.) > input.scroll_x + bounds.size.width {
-                    input.scroll_x = p.x + px(2.) - bounds.size.width;
+                } else if p.x + CURSOR_WIDTH > input.scroll_x + bounds.size.width {
+                    input.scroll_x = p.x + CURSOR_WIDTH - bounds.size.width;
                 }
             }
             input.scroll_y = input.scroll_y.clamp(px(0.), max.y);
@@ -873,10 +868,10 @@ impl Element for TextElement {
         let input = self.input.read(cx);
         let o = bounds.origin - scroll;
         let (cursor, selection) = if placeholder {
-            (Some(Bounds::new(bounds.origin, size(px(2.), lh))), vec![])
+            (Some(Bounds::new(bounds.origin, size(CURSOR_WIDTH, lh))), vec![])
         } else if input.selected_range.is_empty() {
             let p = layout.position(input.shown_offset(input.cursor_offset()));
-            (Some(Bounds::new(o + p, size(px(2.), lh))), vec![])
+            (Some(Bounds::new(o + p, size(CURSOR_WIDTH, lh))), vec![])
         } else {
             let lines = layout.lines.iter().map(|l| &***l);
             let range = input.shown_offset(input.selected_range.start)..input.shown_offset(input.selected_range.end);
@@ -897,7 +892,6 @@ impl Element for TextElement {
     ) {
         let focus_handle = self.input.read(cx).focus_handle.clone();
         window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.input.clone()), cx);
-        // MUST KILL: extract: the always-registered window-wide drag listener in paint() into a named fn
         let input = self.input.clone();
         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
             if phase.bubble() && input.read(cx).drag_anchor.is_some() {

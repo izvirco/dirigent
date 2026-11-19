@@ -78,12 +78,12 @@ pub fn render(this: &mut Dirigent, window: &Window, cx: &mut Context<Dirigent>) 
             "This removes the thread and its history."
         };
         menu::popup(
-            Side::BelowRight(26.),
+            Side::BelowRight { trigger_h: 26. },
             vec![menu::header(note), menu::danger("del", "Delete thread", move |this, cx| this.delete_thread(&h, &i, cx), cx)],
             cx,
         )
     });
-    let archive_confirm = archive_confirm(&host, &id, ArchiveAt::Header, Side::BelowRight(26.), this, cx);
+    let archive_confirm = archive_confirm(&host, &id, ArchiveAt::Header, Side::BelowRight { trigger_h: 26. }, this, cx);
     let archive_open = archive_confirm.is_some();
     let fork_source = summary.as_ref().and_then(|s| s.forked_from.clone()).and_then(|from| {
         let name = this.summary(&host, &from.thread_id)?.name.clone().unwrap_or_else(|| "Untitled".into());
@@ -422,7 +422,11 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, window: &Windo
     let target_open = this.menu == Some(Menu::Target);
     let target_menu = target_open.then(|| {
         if groups.is_empty() {
-            return menu::popup(Side::Below(26.), vec![menu::header("No projects yet. Add one with the folder in the sidebar.")], cx);
+            return menu::popup(
+                Side::Below { trigger_h: 26. },
+                vec![menu::header("No projects yet. Add one with the folder in the sidebar.")],
+                cx,
+            );
         }
         let search = menu::search(this.target_search.clone());
         let multi_host = this.hosts.len() > 1;
@@ -450,7 +454,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, window: &Windo
             items
         });
         let body = div().w(u(360.)).flex().flex_col().child(search).child(menu::separator()).child(list).into_any();
-        menu::popup(Side::Below(26.), vec![body], cx)
+        menu::popup(Side::Below { trigger_h: 26. }, vec![body], cx)
     });
     let host_chip = target.as_ref().filter(|_| this.hosts.len() > 1).map(|t| {
         let members = group.map(|g| g.members.as_slice()).unwrap_or_default();
@@ -471,7 +475,7 @@ fn draft_page(pane: Div, target: Option<Target>, this: &Dirigent, window: &Windo
                     )
                 })
                 .collect();
-            menu::popup(Side::Below(26.), items, cx)
+            menu::popup(Side::Below { trigger_h: 26. }, items, cx)
         });
         if members.len() > 1 {
             theme::labeled_chip("host-chip", "on", this.host_label(&t.host), false, host_open)
@@ -723,7 +727,7 @@ fn base_picker(this: &Dirigent, vcs: dirigent_protocol::Vcs, cx: &mut Context<Di
 }
 
 fn model_chips(this: &Dirigent, below: bool, cx: &mut Context<Dirigent>) -> (Stateful<Div>, Stateful<Div>) {
-    let side = || if below { Side::Below(24.) } else { Side::Above };
+    let side = || if below { Side::Below { trigger_h: 24. } } else { Side::Above };
     let no_target = matches!(this.pane, Pane::Draft { target: None });
     let model_label = this.model.as_deref().map(|m| theme::short_model(m).to_owned()).unwrap_or_else(|| "Model".into());
     let model_open = matches!(this.menu, Some(Menu::Model | Menu::AllModels));
@@ -765,7 +769,7 @@ fn send_button(id: &'static str, ready: bool, cx: &mut Context<Dirigent>) -> Sta
         .bg(rgba(if ready { theme::t().accent } else { theme::t().hover }))
         .hover(|d| d.bg(rgba(if ready { theme::t().accent_active } else { theme::t().line })))
         .on_click(cx.listener(|this, _, window, cx| {
-            this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted { queued: false, ctrl: true }));
+            this.composer.update(cx, |_, cx| cx.emit(crate::input::Submitted::CtrlEnter));
             window.focus(&this.composer.focus_handle(cx), cx);
         }))
         .child(icon("arrow-up", if ready { 0x9fb6e8ff } else { theme::t().fg_2 }))

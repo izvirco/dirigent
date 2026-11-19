@@ -65,7 +65,7 @@ impl State {
         let description = cx.new(|cx| TextInput::new(cx, "What it offers, in a sentence (optional)", true));
         for input in [&name, &run, &pairs, &client, &description] {
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.save_mcp_form(cx)).detach();
-            cx.subscribe(input, |this, _, _: &input::Changed, cx| {
+            cx.subscribe(input, |this, _, _: &input::UserEdited, cx| {
                 if let Some(form) = this.mcp.form.as_mut().filter(|f| f.error.is_some()) {
                     form.error = None;
                     cx.notify();
@@ -73,7 +73,7 @@ impl State {
             })
             .detach();
         }
-        cx.subscribe(&run, |this, run, _: &input::Changed, cx| {
+        cx.subscribe(&run, |this, run, _: &input::UserEdited, cx| {
             let url = is_url(run.read(cx).text());
             if let Some(form) = this.mcp.form.as_mut().filter(|f| f.url != url) {
                 form.url = url;
@@ -777,7 +777,7 @@ fn exposure_chip(this: &Dirigent, s: &McpServer, cx: &mut Context<Dirigent>) -> 
                 menu::item(format!("mcp-exposure/{e}"), e, what, e == current, move |this, cx| this.set_mcp_exposure(&server, e, cx), cx)
             })
             .collect();
-        menu::popup(Side::Below(26.), items, cx)
+        menu::popup(Side::Below { trigger_h: 26. }, items, cx)
     });
     theme::labeled_chip(format!("mcp-exposure/{}", s.name), "Tools", current.clone(), false, open)
         .tooltip(theme::tooltip("How the server's tools reach the model"))

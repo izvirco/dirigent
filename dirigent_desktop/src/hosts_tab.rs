@@ -86,7 +86,7 @@ impl State {
         });
         for input in [&name, &url, &key] {
             cx.subscribe(input, |this, _, _: &Submitted, cx| this.save_host_form(cx)).detach();
-            cx.subscribe(input, |this, _, _: &input::Changed, cx| {
+            cx.subscribe(input, |this, _, _: &input::UserEdited, cx| {
                 if let Some(form) = this.hosts_tab.form.as_mut().filter(|f| f.error.is_some()) {
                     form.error = None;
                     cx.notify();
@@ -353,7 +353,7 @@ fn add_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
         items.extend(HostAuth::ALL.into_iter().map(|a| {
             menu::item(format!("add-host/{}", a.label()), a.label(), a.hint(), false, move |this, cx| this.add_host_form(a, cx), cx)
         }));
-        menu::popup(Side::Below(26.), items, cx)
+        menu::popup(Side::Below { trigger_h: 26. }, items, cx)
     });
     theme::button("add-host", "plus", "Add host")
         .when(open, |d| d.bg(rgba(theme::t().hover)))
@@ -454,7 +454,7 @@ fn auth_chip(this: &Dirigent, f: &Form, cx: &mut Context<Dirigent>) -> Stateful<
                 )
             })
             .collect();
-        menu::popup(Side::BelowRight(26.), items, cx)
+        menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
     theme::labeled_chip("host-auth", "Auth", f.auth.label(), f.auth == HostAuth::None, open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::HostAuth, cx)))

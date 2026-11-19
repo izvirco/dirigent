@@ -33,7 +33,6 @@ pub fn frame(card: Div, cx: &mut Context<Dirigent>) -> AnyElement {
 
 pub fn large(body: Div) -> Div {
     let t = theme::t();
-    // MUST KILL: extract: base in large() as a named opaque_canvas() under the panel
     let base = theme::stack().flex_1().min_h_0().rounded_lg().bg(rgba(theme::alpha(t.canvas, 0xff)));
     div()
         .w_full()

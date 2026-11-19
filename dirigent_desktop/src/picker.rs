@@ -72,7 +72,6 @@ fn set_up(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<AnyElement> {
 }
 
 fn all_models(this: &Dirigent, no_target: bool, cx: &mut Context<Dirigent>) -> Vec<AnyElement> {
-    // MUST KILL: extract: back → a mouse-only header button, not menu::header_stop (Left / Right belong to the search)
     let back = div()
         .id("models-back")
         .size(u(ROW_H))

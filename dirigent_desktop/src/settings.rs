@@ -211,7 +211,7 @@ fn appearance(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 menu::item(format!("theme/{name}"), name, "", selected, move |this, cx| this.set_theme(pick.clone(), cx), cx)
             })
             .collect();
-        menu::popup(Side::BelowRight(26.), items, cx)
+        menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
     let theme_chip = theme::labeled_chip("theme-chip", "Theme", this.config.theme.clone(), false, theme_open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Theme, cx)))
@@ -243,7 +243,7 @@ fn background_chip(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div>
             .into_iter()
             .map(|p| menu::item(format!("bg/{}", p.name()), p.name(), "", p == current, move |this, cx| this.set_background(p, cx), cx))
             .collect();
-        menu::popup(Side::BelowRight(26.), items, cx)
+        menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
     theme::labeled_chip("bg-chip", "Pattern", current.name(), current == Pattern::Off, open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::Background, cx)))
@@ -287,7 +287,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 "No models yet: the local host is still connecting"
             }));
         }
-        menu::popup(Side::BelowRight(26.), items, cx)
+        menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
     let model_chip =
         theme::labeled_chip("title-model", "Model", theme::short_model(&this.config.title.model).to_owned(), false, model_open)
@@ -310,7 +310,7 @@ fn titles(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
                 menu::item(format!("te/{l}"), l, "", selected, move |this, cx| this.set_title_reasoning(pick.clone(), cx), cx)
             })
             .collect();
-        menu::popup(Side::BelowRight(26.), items, cx)
+        menu::popup(Side::BelowRight { trigger_h: 26. }, items, cx)
     });
     let effort_chip = theme::labeled_chip("title-effort", "Reasoning", this.config.title.reasoning.clone(), false, effort_open)
         .on_click(cx.listener(|this, _, _, cx| this.toggle_menu(Menu::TitleEffort, cx)))

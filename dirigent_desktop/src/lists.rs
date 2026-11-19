@@ -199,7 +199,7 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
             this.toggle_menu(Menu::Project { group_key: k.clone() }, cx)
         }))
         .child(icon("ellipsis", theme::t().fg_1))
-        .children(open.then(|| menu::popup(Side::BelowRight(24.), actions, cx)));
+        .children(open.then(|| menu::popup(Side::BelowRight { trigger_h: 24. }, actions, cx)));
     let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
     // MUST KILL: rearchitect: hosts.dedup() relies on Group::members coming sorted by host; collect into a BTreeSet
     hosts.dedup();
@@ -561,7 +561,7 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
     let (h3, id3, snoozed) = (h.clone(), id.clone(), status == Status::Snoozed);
     let pinned = t.pinned;
     let archive_icon = if archived { "archive-restore" } else { "archive" };
-    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::List, Side::BelowRight(24.), this, cx);
+    let archive_confirm = thread::archive_confirm(host, &t.id, ArchiveAt::List, Side::BelowRight { trigger_h: 24. }, this, cx);
 
     div()
         .id(SharedString::from(format!("row/{h}/{id}")))
