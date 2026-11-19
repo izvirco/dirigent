@@ -512,7 +512,7 @@ impl Dirigent {
         let effort = cache.get(LAST_EFFORT_KEY);
         let presets: Vec<Preset> = cache.get(PRESETS_KEY).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let isolate = cache.get(LAST_ISOLATE_KEY).as_deref() == Some("1");
-        let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::WIDTH);
+        let sidebar_width = cache.get(SIDEBAR_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(sidebar::DEFAULT_WIDTH);
         let log_width = cache.get(LOG_WIDTH_KEY).and_then(|w| w.parse().ok()).unwrap_or(thread::LOG_WIDTH);
         let collapsed = Section::parse_folded(cache.get(COLLAPSED_KEY).as_deref());
         let panel_hidden = match cache.get(PANEL_HIDDEN_KEY).as_deref() {
@@ -4208,7 +4208,7 @@ impl Render for Dirigent {
         let app = (!self.onboarding_open()).then(|| {
             let main = match &self.pane {
                 Pane::Thread(_) | Pane::Draft { .. } => thread::render(self, window, cx),
-                _ => lists::render(self, cx),
+                _ => lists::render(self, window, cx),
             };
             let panel = div()
                 .relative()

@@ -6,12 +6,13 @@ use crate::theme::{self, Status, text, u};
 use crate::{projects, sidebar, thread, titlebar};
 use dirigent_protocol::ThreadSummary;
 use gpui::{
-    AnyElement, Context, Div, DragMoveEvent, ElementId, FontWeight, SharedString, Stateful, UniformList, div, prelude::*, rgba,
+    AnyElement, Context, Div, DragMoveEvent, ElementId, FontWeight, SharedString, Stateful, UniformList, Window, div, prelude::*, rgba,
     uniform_list,
 };
+use std::collections::BTreeSet;
 use std::ops::Range;
 
-pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+pub fn render(this: &Dirigent, window: &Window, cx: &mut Context<Dirigent>) -> Div {
     let pane = div().flex_1().min_w_0().h_full().flex().flex_col();
     match &this.pane {
         Pane::Inbox => {
@@ -31,15 +32,15 @@ pub fn render(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
             })
         }
         Pane::Project { group_key } => project_page(this, group_key, pane, cx),
-        Pane::Projects => projects_page(this, pane, cx),
+        Pane::Projects => projects_page(this, pane, window, cx),
         Pane::Thread(_) | Pane::Draft { .. } => pane,
     }
 }
 
-fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div {
+fn projects_page(this: &Dirigent, pane: Div, window: &Window, cx: &mut Context<Dirigent>) -> Div {
     let (groups, orphans) = this.groups();
     let dragging = this.dragging.clone().filter(|d| !d.sidebar && cx.has_active_drag()).map(|d| d.key);
-    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, dragging.as_deref() == Some(&g.key), this, cx)).collect();
+    let rows: Vec<AnyElement> = groups.iter().map(|g| project_entry(g, dragging.as_deref() == Some(&g.key), this, window, cx)).collect();
     let rows = div().flex().flex_col().gap(u(ENTRY_GAP)).children(rows).on_drag_move(cx.listener(
         |this, ev: &DragMoveEvent<DragProject>, _, cx| {
             let drag = ev.drag(cx);
@@ -62,20 +63,20 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
             format!("{} threads whose project was removed", orphans.len())
         };
         entry_row("proj/orphans", projects::ORPHANS, cx)
-            .child(div().size(u(24.)).flex_shrink_0())
+            .child(div().size(u(ENTRY_BUTTON)).flex_shrink_0())
             .child(div().w(u(160.)).flex_shrink_0().truncate().text_color(rgba(theme::t().fg_1)).child("Removed projects"))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .pr(u(CHEVRON_W))
+                    .pr(u(CHEVRON_GAP + CHEVRON + PLACES_PAD_R))
                     .truncate()
                     .text_right()
                     .text_size(text::sm())
                     .text_color(rgba(theme::t().fg_2))
                     .child(what),
             )
-            .child(div().size(u(24.)).flex_shrink_0())
+            .child(div().size(u(ENTRY_BUTTON)).flex_shrink_0())
     });
 
     let add = theme::button("add-project", "plus", "Add project").on_click(cx.listener(|this, _, _, cx| this.open_add_project(cx)));
@@ -83,19 +84,24 @@ fn projects_page(this: &Dirigent, pane: Div, cx: &mut Context<Dirigent>) -> Div 
     if groups.is_empty() && removed.is_none() {
         return pane.child(theme::empty("No projects yet", "Add a directory on one of your hosts with Add project."));
     }
-    let column = div().w_full().max_w(u(ENTRY_MAX_W)).flex().flex_col().gap(u(ENTRY_GAP)).py_6().px_6().child(rows).children(removed);
+    let column =
+        div().w_full().max_w(u(ENTRY_MAX_W)).flex().flex_col().gap(u(ENTRY_GAP)).py_6().px(u(COLUMN_PAD)).child(rows).children(removed);
     pane.child(scroll("projects", div().flex().flex_col().items_center().child(column)))
 }
 
 const ENTRY_H: f32 = 36.;
 const ENTRY_GAP: f32 = 4.;
 const ENTRY_MAX_W: f32 = 760.;
+const ENTRY_PAD: f32 = 8.;
+const ENTRY_BUTTON: f32 = 24.;
+const ENTRY_CELL_GAP: f32 = 12.;
+const COLUMN_PAD: f32 = 24.;
 const MEMBER_H: f32 = 28.;
 const MEMBERS_PAD: f32 = 6.;
-// MUST KILL: extract: CHEVRON_W's summands (gap, icon, padding) as named consts
-const CHEVRON_W: f32 = 6. + 12. + 4.;
-// MUST KILL: extract: NAME_X's summands (padding, pin, gap) as named consts
-const NAME_X: f32 = 8. + 24. + 12.;
+const CHEVRON: f32 = 12.;
+const CHEVRON_GAP: f32 = 6.;
+const PLACES_PAD_R: f32 = 4.;
+const NAME_X: f32 = ENTRY_PAD + ENTRY_BUTTON + ENTRY_CELL_GAP;
 const LINK_W: f32 = 440.;
 const LINK_LIST_H: f32 = 216.;
 
@@ -111,9 +117,9 @@ fn entry_row(id: impl Into<SharedString>, key: &str, cx: &mut Context<Dirigent>)
         .flex()
         .flex_row()
         .items_center()
-        .gap_3()
+        .gap(u(ENTRY_CELL_GAP))
         .h(u(ENTRY_H))
-        .px_2()
+        .px(u(ENTRY_PAD))
         .rounded_md()
         .cursor_pointer()
         .hover(|d| d.bg(rgba(theme::t().hover)))
@@ -125,7 +131,7 @@ fn thread_count(n: usize) -> Div {
     div().flex_shrink_0().text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(text)
 }
 
-fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirigent>) -> AnyElement {
+fn project_entry(g: &Group, dragged: bool, this: &Dirigent, window: &Window, cx: &mut Context<Dirigent>) -> AnyElement {
     let key = g.key.clone();
     let pinned = this.is_pinned_project(&key);
     let expanded = this.expanded_projects.contains(&key);
@@ -172,7 +178,7 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
         div()
             .id(SharedString::from(id))
             .relative()
-            .size(u(24.))
+            .size(u(ENTRY_BUTTON))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -200,9 +206,7 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
         }))
         .child(icon("ellipsis", theme::t().fg_1))
         .children(open.then(|| menu::popup(Side::BelowRight { trigger_h: 24. }, actions, cx)));
-    let mut hosts: Vec<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
-    // MUST KILL: rearchitect: hosts.dedup() relies on Group::members coming sorted by host; collect into a BTreeSet
-    hosts.dedup();
+    let hosts: BTreeSet<&str> = g.members.iter().map(|m| m.host.as_str()).collect();
     let hosts = hosts.into_iter().map(|h| this.host_label(h)).collect::<Vec<_>>().join(", ");
     let k = key.clone();
     let places = div()
@@ -212,9 +216,9 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
         .flex()
         .flex_row()
         .items_center()
-        .gap_1p5()
+        .gap(u(CHEVRON_GAP))
         .pl_1p5()
-        .pr_1()
+        .pr(u(PLACES_PAD_R))
         .rounded_md()
         .text_size(text::sm())
         .text_color(rgba(theme::t().fg_2))
@@ -224,14 +228,14 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
             this.toggle_project_expanded(&k, cx)
         }))
         .child(div().min_w_0().truncate().child(hosts))
-        .child(icon(if expanded { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(u(12.)));
+        .child(icon(if expanded { "chevron-down" } else { "chevron-right" }, theme::t().fg_2).size(u(CHEVRON)));
     let members = (expanded && !dragged).then(|| member_lines(g, this, cx));
     let name = if this.renaming == Some(Renaming::Project(key.clone())) {
-        // MUST KILL: extract: the -7 / 7 margins as a const from the rename field's padding and border
+        let pad = 6.;
         div()
-            .ml(u(-7.))
-            .mr(u(7.))
-            .px_1p5()
+            .ml(u(-pad - 1.))
+            .mr(u(pad + 1.))
+            .px(u(pad))
             .py_0p5()
             .rounded_md()
             .border_1()
@@ -241,28 +245,24 @@ fn project_entry(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dir
     } else {
         div().truncate().child(g.name.clone())
     };
-    // MUST KILL: extract: the ghost width in project_entry from a shared pane_width() and the list padding const
-    let sidebar_w = if this.sidebar_hidden { 0. } else { this.sidebar_width };
-    let (ghost_name, font) = (g.name.clone(), this.fonts.ui.clone());
+    let ghost = sidebar::Ghost {
+        name: g.name.clone(),
+        width: pane_width(this, window).min(ENTRY_MAX_W) - 2. * COLUMN_PAD,
+        height: ENTRY_H,
+        indent: NAME_X,
+        weight: FontWeight::MEDIUM,
+        font: this.fonts.ui.clone(),
+    };
     let entity = cx.weak_entity();
     let row = entry_row(format!("proj/{key}"), &key, cx)
         .when(dragged, |d| d.opacity(0.))
-        .on_drag(DragProject { key: key.clone(), sidebar: false }, move |drag, _, window, cx| {
+        .on_drag(DragProject { key: key.clone(), sidebar: false }, move |drag, _, _, cx| {
             let drag = drag.clone();
             let _ = entity.update(cx, |this, cx| {
                 this.dragging = Some(drag);
                 cx.notify();
             });
-            let pane = f32::from(window.viewport_size().width) / theme::zoom() - sidebar_w;
-            let width = pane.min(ENTRY_MAX_W) - 2. * 24.;
-            cx.new(|_| sidebar::Ghost {
-                name: ghost_name.clone(),
-                width,
-                height: ENTRY_H,
-                indent: NAME_X,
-                weight: FontWeight::MEDIUM,
-                font: font.clone(),
-            })
+            cx.new(|_| ghost.clone())
         })
         .child(pin)
         .child(name.w(u(160.)).flex_shrink_0().font_weight(FontWeight::MEDIUM))
@@ -511,6 +511,11 @@ pub fn scroll(id: &'static str, content: Div) -> Stateful<Div> {
     theme::stack().id(id).flex_1().overflow_y_scroll().child(content)
 }
 
+fn pane_width(this: &Dirigent, window: &Window) -> f32 {
+    let docked_sidebar = if this.sidebar_hidden { 0. } else { this.sidebar_width };
+    f32::from(window.viewport_size().width) / theme::zoom() - docked_sidebar
+}
+
 const ROW_H: f32 = 38.;
 
 enum Item {
@@ -531,16 +536,13 @@ fn thread_list(id: impl Into<ElementId>, items: Vec<Item>, show_project: bool, c
         count,
         cx.processor(move |this, range: Range<usize>, window, cx| {
             let now = std::time::UNIX_EPOCH.elapsed().map(|d| d.as_millis() as i64).unwrap_or(0);
-            // MUST KILL: extract: the pane width (viewport over zoom minus the docked sidebar) into a Dirigent::pane_width()
-            let width = f32::from(window.viewport_size().width) / theme::zoom() - if this.sidebar_hidden { 0. } else { this.sidebar_width };
-            let cols = Columns::fit(width, this.hosts.len() > 1, show_project);
+            let cols = Columns::fit(pane_width(this, window), this.hosts.len() > 1, show_project);
             items[range]
                 .iter()
                 .map(|item| match item {
                     Item::Label(text) => section_label(text.clone()).into_any_element(),
                     Item::Row { host, id } => match this.summary(host, id) {
                         Some(t) => thread_row(host, t, cols, now, this, cx).into_any_element(),
-                        // MUST KILL: type: Item::Row resolved to its summary up front so this None arm goes
                         None => div().h(u(ROW_H)).into_any_element(),
                     },
                 })
@@ -570,9 +572,9 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
         .flex()
         .flex_row()
         .items_center()
-        .gap_3()
+        .gap(u(GAP))
         .h(u(ROW_H))
-        .px_4()
+        .px(u(ROW_PAD))
         .border_b_1()
         .border_color(rgba(theme::t().line_soft))
         .cursor_pointer()
@@ -592,13 +594,15 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
         .when(cols.host, |d| d.child(column(HOST_W).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(host.to_owned())))
         .when(cols.project, |d| d.child(column(PROJECT_W).text_size(text::sm()).text_color(rgba(theme::t().fg_1)).child(project)))
         .when(cols.model, |d| d.child(column(MODEL_W).text_size(text::sm()).text_color(rgba(theme::t().fg_2)).child(model)))
-        .child(column(32.).text_right().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)))
+        .child(
+            column(TIME_W).text_right().text_size(text::xs()).text_color(rgba(theme::t().fg_2)).child(theme::rel_time(now - t.updated_at)),
+        )
         .child(if this.snoozable(host, t) {
             let color = if snoozed { theme::t().warn } else { theme::t().fg_1 };
             row_action(format!("snooze/{h3}/{id3}"), "moon", color, snoozed, cx, move |this, cx| this.set_snoozed(&h3, &id3, !snoozed, cx))
                 .into_any_element()
         } else {
-            div().size(u(24.)).flex_shrink_0().into_any_element()
+            div().size(u(ACTION)).flex_shrink_0().into_any_element()
         })
         .child(if archived || this.at_rest(host, t) {
             row_action(format!("arch/{h2}/{id2}"), archive_icon, theme::t().fg_1, archive_confirm.is_some(), cx, move |this, cx| {
@@ -608,17 +612,18 @@ fn thread_row(host: &str, t: &ThreadSummary, cols: Columns, now: i64, this: &Dir
             .children(archive_confirm)
             .into_any_element()
         } else {
-            div().size(u(24.)).flex_shrink_0().into_any_element()
+            div().size(u(ACTION)).flex_shrink_0().into_any_element()
         })
 }
 
 const HOST_W: f32 = 90.;
 const PROJECT_W: f32 = 140.;
 const MODEL_W: f32 = 150.;
-// MUST KILL: extract: GAP and the row's gap_3 from one const
+const TIME_W: f32 = 32.;
+const ACTION: f32 = 24.;
+const ROW_PAD: f32 = 16.;
 const GAP: f32 = 12.;
-// MUST KILL: extract: ROW_FIXED's summands as named consts
-const ROW_FIXED: f32 = 2. * 16. + 16. + GAP + 3. * GAP + 32. + 2. * 24.;
+const ROW_FIXED: f32 = 2. * ROW_PAD + Status::GLYPH_W + TIME_W + 2. * ACTION + 4. * GAP;
 const TITLE_MIN: f32 = 200.;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -658,7 +663,7 @@ fn row_action(
 ) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
-        .size(u(24.))
+        .size(u(ACTION))
         .flex_shrink_0()
         .flex()
         .items_center()

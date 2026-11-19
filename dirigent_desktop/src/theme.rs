@@ -233,6 +233,8 @@ pub enum Status {
 }
 
 impl Status {
+    pub const GLYPH_W: f32 = 16.;
+
     // MUST KILL: rename: Status::of → own_status, it never says Waiting (Dirigent::status adds it)
     pub fn of(t: &ThreadSummary) -> Self {
         if t.asking() && !t.archived {
@@ -259,7 +261,7 @@ impl Status {
     pub fn glyph(self) -> AnyElement {
         let t = t();
         match self {
-            Status::Working => div().size(u(16.)).flex().items_center().justify_center().child(dot(t.working)).into_any_element(),
+            Status::Working => div().size(u(Self::GLYPH_W)).flex().items_center().justify_center().child(dot(t.working)).into_any_element(),
             Status::Waiting => icon("hourglass", t.working).into_any_element(),
             Status::Asking => icon("circle-help", t.warn).into_any_element(),
             Status::Done => icon("circle-check", t.done).into_any_element(),
@@ -308,6 +310,8 @@ pub fn icon_button(
     tinted_icon_button(id, name, t().fg_1, cx, on_click)
 }
 
+pub const ICON_BUTTON: f32 = 26.;
+
 pub fn tinted_icon_button(
     id: impl Into<ElementId>,
     name: &'static str,
@@ -318,7 +322,7 @@ pub fn tinted_icon_button(
     div()
         .id(id)
         .relative()
-        .size(u(26.))
+        .size(u(ICON_BUTTON))
         .flex()
         .items_center()
         .justify_center()

@@ -5,6 +5,7 @@ use crate::icons::icon;
 use crate::menu::{self, Side};
 use crate::projects::{self, Group};
 use crate::proxy;
+use crate::ruler;
 use crate::theme::{self, Status, text, u};
 use crate::thread::{self, duration, elapsed};
 use crate::titlebar;
@@ -12,20 +13,24 @@ use crate::toasts;
 use crate::update::{Offer, Stage};
 use dirigent_protocol::{ThreadSummary, release};
 use gpui::{
-    AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Render, SharedString,
-    Stateful, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
+    AnyElement, App, Bounds, Context, Div, DragMoveEvent, FontWeight, Hsla, MouseButton, MouseDownEvent, Pixels, Render, ScrollHandle,
+    SharedString, Stateful, Window, canvas, div, fill, linear_color_stop, linear_gradient, point, prelude::*, px, rgba, size,
 };
 
-// MUST KILL: rename: WIDTH → DEFAULT_WIDTH, the user drags it between app::SIDEBAR_MIN and the window minus app::PANE_MIN
-pub const WIDTH: f32 = 240.;
-// MUST KILL: extract: PEEK_ZONE → derived from ruler::INSET, so it stays narrower than the ruler's marks
-const PEEK_ZONE: f32 = 6.;
+pub const DEFAULT_WIDTH: f32 = 240.;
+const PEEK_ZONE: f32 = ruler::INSET - 2.;
+const BORDER: f32 = 1.;
+const LIST_PAD: f32 = 8.;
 const ROW: f32 = 28.;
 const GAP: f32 = 4.;
-// MUST KILL: extract: card_height's numbers → constants thread_card lays its lines out with
+const CARD_PAD_Y: f32 = 6.;
+const CARD_LINE_GAP: f32 = 2.;
+const SMALL_LINE: f32 = 18.;
+const TITLE_LINE: f32 = 21.;
+
 fn card_height(vcs: &str) -> f32 {
-    let two_lines = 18. + 21. + 2. + 2. * 6.;
-    if vcs.is_empty() { two_lines } else { two_lines + 2. + 18. }
+    let two_lines = SMALL_LINE + CARD_LINE_GAP + TITLE_LINE + 2. * CARD_PAD_Y;
+    if vcs.is_empty() { two_lines } else { two_lines + CARD_LINE_GAP + SMALL_LINE }
 }
 
 #[derive(Clone)]
@@ -75,7 +80,7 @@ pub fn docked(this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
         .w(u(this.sidebar_width))
         .min_w_0()
         .h_full()
-        .border_r_1()
+        .border_r(px(BORDER))
         .border_color(rgba(theme::t().line_soft))
         .when(this.config.background.reach == Reach::Edge, |d| d.children(this.field.layer(px(0.))))
         .child(content(this, cx))
@@ -184,28 +189,8 @@ fn content(this: &Dirigent, cx: &mut Context<Dirigent>) -> Stateful<Div> {
     let (n_inbox, n_working) = (inbox.len(), working.len());
     let show_inbox = !this.inbox_all().is_empty();
     let n_snoozed = this.inbox_all().len() - n_inbox;
-    let inbox_header = header(
-        "inbox",
-        "Inbox",
-        Section::Inbox,
-        || Pane::Inbox,
-        theme::t().warn,
-        (n_inbox, n_snoozed),
-        ["chevron-right", "chevron-down"],
-        this,
-        cx,
-    );
-    let working_header = header(
-        "workpool",
-        "Workpool",
-        Section::Workpool,
-        || Pane::Workpool,
-        theme::t().working,
-        (n_working, 0),
-        ["chevron-right", "chevron-up"],
-        this,
-        cx,
-    );
+    let inbox_header = header(Section::Inbox, n_inbox, n_snoozed, this, cx);
+    let working_header = header(Section::Workpool, n_working, 0, this, cx);
     let both = !this.collapsed.contains(&Section::Inbox) && !this.collapsed.contains(&Section::Workpool) && n_inbox > 0 && n_working > 0;
     let inbox_cards = cards("inbox-cards", Section::Inbox, inbox, true, this, cx).track_scroll(&this.inbox_scroll);
     let working_cards = cards("workpool-cards", Section::Workpool, working, false, this, cx).track_scroll(&this.workpool_scroll).mt_auto();
@@ -317,7 +302,6 @@ fn proxy_update_button(this: &Dirigent, cx: &mut Context<Dirigent>) -> Option<An
     Some(button.tooltip(theme::tooltip(tip)).into_any_element())
 }
 
-// MUST KILL: rearchitect: row leaves its right padding to the trailing box → a row that takes its trailing control
 fn row(
     id: impl Into<SharedString>,
     selected: bool,
@@ -340,19 +324,15 @@ fn row(
         .on_click(cx.listener(move |this, _, _, cx| on_click(this, cx)))
 }
 
-// MUST KILL: type: header's (n, snoozed) and chevrons [folded, open] → named fields of a section spec
-#[allow(clippy::too_many_arguments)]
-fn header(
-    id: &'static str,
-    label: &'static str,
-    section: Section,
-    pane: fn() -> Pane,
-    color: u32,
-    (n, snoozed): (usize, usize),
-    chevrons: [&'static str; 2],
-    this: &Dirigent,
-    cx: &mut Context<Dirigent>,
-) -> Div {
+fn header(section: Section, n_cards: usize, n_snoozed: usize, this: &Dirigent, cx: &mut Context<Dirigent>) -> Div {
+    let (id, label, color, open_chevron) = match section {
+        Section::Inbox => ("inbox", "Inbox", theme::t().warn, "chevron-down"),
+        Section::Workpool => ("workpool", "Workpool", theme::t().working, "chevron-up"),
+    };
+    let pane = move || match section {
+        Section::Inbox => Pane::Inbox,
+        Section::Workpool => Pane::Workpool,
+    };
     let open = !this.collapsed.contains(&section);
     let selected = std::mem::discriminant(&this.pane) == std::mem::discriminant(&pane());
     let small = |color: u32| div().flex().flex_row().items_center().gap_0p5().text_size(text::xs()).text_color(rgba(color));
@@ -361,16 +341,16 @@ fn header(
         .flex_row()
         .items_center()
         .gap_1p5()
-        .when(n > 0, |d| d.child(small(color).child(n.to_string())))
-        .when(snoozed > 0, |d| {
-            d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(u(11.))).child(snoozed.to_string()))
+        .when(n_cards > 0, |d| d.child(small(color).child(n_cards.to_string())))
+        .when(n_snoozed > 0, |d| {
+            d.child(small(theme::t().fg_2).child(icon("moon", theme::t().fg_2).size(u(11.))).child(n_snoozed.to_string()))
         });
     let fold = trailing(SharedString::from(format!("fold/{id}")))
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.stop_propagation();
             this.toggle_section(section, cx)
         }))
-        .child(icon(chevrons[open as usize], theme::t().fg_2).size(u(14.)));
+        .child(icon(if open { open_chevron } else { "chevron-right" }, theme::t().fg_2).size(u(14.)));
     div().flex_shrink_0().px_2().child(
         row(id, selected, cx, move |this, cx| this.show(pane(), cx))
             .child(div().flex_1().text_color(rgba(color)).when(selected, |d| d.font_weight(FontWeight::MEDIUM)).child(label))
@@ -383,12 +363,13 @@ fn share(id: &'static str, natural: f32) -> Stateful<Div> {
     div().id(id).flex_1().min_h_0().max_h(u(natural)).overflow_y_scroll()
 }
 
-// MUST KILL: extract: seam's px(1.) threshold → a named slack for sub-pixel rounding
 fn seam(this: &Dirigent) -> impl IntoElement {
     const FADE: f32 = 48.;
+    const ROUNDING_SLACK: Pixels = px(1.);
     let (inbox, workpool) = (this.inbox_scroll.clone(), this.workpool_scroll.clone());
+    let clipped = |list: &ScrollHandle| list.max_offset().y >= ROUNDING_SLACK;
     let paint = move |b: Bounds<Pixels>, _: (), window: &mut Window, _: &mut App| {
-        if inbox.max_offset().y < px(1.) && workpool.max_offset().y < px(1.) {
+        if !clipped(&inbox) && !clipped(&workpool) {
             return;
         }
         let line: Hsla = rgba(theme::t().line).into();
@@ -528,9 +509,9 @@ fn thread_card(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this
         .flex_shrink_0()
         .flex()
         .flex_col()
-        .gap_0p5()
+        .gap(u(CARD_LINE_GAP))
         .px_2()
-        .py_1p5()
+        .py(u(CARD_PAD_Y))
         .rounded_md()
         .cursor_pointer()
         .when(selected, |d| d.bg(rgba(theme::t().hover)))
@@ -632,13 +613,13 @@ fn specs(host: &str, t: &ThreadSummary, vcs: String, elapsed: String, this: &Dir
     rows
 }
 
-// MUST KILL: extract: trailing's mr(u(3.)) → derived from the title's 26px button around this 20px box
 fn trailing(id: SharedString) -> Stateful<Div> {
+    let size = 20.;
     div()
         .id(id)
         .relative()
-        .size(u(20.))
-        .mr(u(3.))
+        .size(u(size))
+        .mr(u((theme::ICON_BUTTON - size) / 2.))
         .flex()
         .items_center()
         .justify_center()
@@ -661,10 +642,9 @@ fn project_row(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirig
             this.new_draft(Some(target.clone()), cx)
         }))
         .child(icon("plus", theme::t().fg_1));
-    // MUST KILL: extract: the ghost's `- 1. - 16.` → the sidebar's named border and list padding
     let ghost = Ghost {
         name: g.name.clone(),
-        width: this.sidebar_width - 1. - 16.,
+        width: this.sidebar_width - BORDER - 2. * LIST_PAD,
         height: ROW,
         indent: 8.,
         weight: FontWeight::NORMAL,
@@ -672,7 +652,7 @@ fn project_row(g: &Group, dragged: bool, this: &Dirigent, cx: &mut Context<Dirig
     };
     let entity = cx.weak_entity();
     div()
-        .px_2()
+        .px(u(LIST_PAD))
         .when(dragged, |d| d.opacity(0.))
         .child(
             row(SharedString::from(format!("p/{key}")), selected, cx, move |this, cx| {

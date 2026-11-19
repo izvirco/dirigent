@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 pub const WIDTH: f32 = 28.;
-const INSET: f32 = 8.;
+pub const INSET: f32 = 8.;
 const LENGTH: f32 = 14.;
 const PAD: f32 = 14.;
 const THICK: f32 = 2.;
