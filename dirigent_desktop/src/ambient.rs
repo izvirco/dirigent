@@ -36,8 +36,7 @@ pub enum Reach {
     Full,
 }
 
-// MUST KILL: rename: PANE -> PANE_FILL_ALPHA, the factor on the main pane fill's alpha over the pattern
-pub const PANE: f32 = 0.7;
+pub const PANE_FILL_ALPHA: f32 = 0.7;
 
 pub const CLOCK_SECS: u64 = 2;
 
@@ -51,8 +50,7 @@ pub struct Spec {
 }
 
 impl Spec {
-    // MUST KILL: rename: Spec::new -> Spec::rounded, it rounds the area up to STEP
-    pub fn new(pattern: Pattern, width: f32, height: f32, scale: f32, color: u32) -> Self {
+    pub fn rounded(pattern: Pattern, width: f32, height: f32, scale: f32, color: u32) -> Self {
         const STEP: f32 = 64.;
         let round = |n: f32| ((n / STEP).ceil() * STEP) as u32;
         Self { pattern, width: round(width), height: round(height), scale, color }
@@ -63,8 +61,7 @@ impl Spec {
 pub struct Field {
     pub want: Option<Spec>,
     current: Option<(Spec, Arc<RenderImage>)>,
-    // MUST KILL: rename: previous -> on_last_frame, the picture kept in the atlas until the frame showing it is replaced
-    previous: Option<Arc<RenderImage>>,
+    on_last_frame: Option<Arc<RenderImage>>,
     busy: bool,
 }
 
@@ -78,12 +75,11 @@ impl Field {
         })
     }
 
-    // MUST KILL: type: show returns a StaleImage newtype the caller must drop from the atlas
     pub fn show(&mut self, spec: Spec, image: Option<Arc<RenderImage>>) -> Option<Arc<RenderImage>> {
         self.busy = false;
         let image = image?;
         let replaced = self.current.replace((spec, image)).map(|(_, image)| image);
-        std::mem::replace(&mut self.previous, replaced)
+        std::mem::replace(&mut self.on_last_frame, replaced)
     }
 
     pub fn layer(&self, radius: Pixels) -> Option<impl IntoElement + use<>> {
@@ -164,19 +160,34 @@ impl Mask {
     }
 }
 
-// MUST KILL: type: WAVES entries as a Wave struct (len_px, heading, pace_minutes, amp), not a tuple
-const WAVES: [(f32, f32, f64, f32); 4] = [(900., 0.3, 160., 1.), (620., 2.1, 120., 0.8), (410., 4.0, 90., 0.6), (280., 1.2, 60., 0.4)];
+struct Wave {
+    len_px: f32,
+    heading: f32,
+    pace_minutes: f64,
+    amp: f32,
+}
+
+const WAVES: [Wave; 4] = [
+    Wave { len_px: 900., heading: 0.3, pace_minutes: 160., amp: 1. },
+    Wave { len_px: 620., heading: 2.1, pace_minutes: 120., amp: 0.8 },
+    Wave { len_px: 410., heading: 4.0, pace_minutes: 90., amp: 0.6 },
+    Wave { len_px: 280., heading: 1.2, pace_minutes: 60., amp: 0.4 },
+];
 
 struct Scalar {
     k: f32,
-    // MUST KILL: type: Scalar::extra's (x, y, height) args as a named struct
-    extra: Option<fn(f32, f32, f32) -> f32>,
+    extra: Option<fn(x: f32, y: f32, height: f32) -> f32>,
 }
 
 const TERRAIN: Scalar = Scalar { k: 1., extra: None };
 
-// MUST KILL: extract: SPRING's ring spacing and source offset as named consts
-const SPRING: Scalar = Scalar { k: 0.5, extra: Some(|x, y, h| (x + 0.1 * h).hypot(y - 1.1 * h) / 56.) };
+const SPRING: Scalar = Scalar { k: 0.5, extra: Some(rings) };
+
+fn rings(x: f32, y: f32, height: f32) -> f32 {
+    const SPACING_PX: f32 = 56.;
+    let source = (-0.1 * height, 1.1 * height);
+    (x - source.0).hypot(y - source.1) / SPACING_PX
+}
 
 struct Grid {
     cols: usize,
@@ -196,19 +207,18 @@ impl Grid {
     }
 }
 
-// MUST KILL: extract: the per-column and per-row sin-cos split of each plane wave in sample() into a named helper
 fn sample(s: &Scalar, g: &Grid, h: f32, now: f64) -> Vec<f32> {
     let mut v = vec![0f32; g.cols * g.rows];
-    for (len, dir, pace, amp) in WAVES {
-        let (kx, ky) = (dir.cos() * std::f32::consts::TAU / len, dir.sin() * std::f32::consts::TAU / len);
+    for Wave { len_px, heading, pace_minutes, amp } in WAVES {
+        let (kx, ky) = (heading.cos() * std::f32::consts::TAU / len_px, heading.sin() * std::f32::consts::TAU / len_px);
         let amp = s.k * amp / 2.8;
-        // MUST KILL: extract: the f64 phase computation in sample() into a phase(pace, now) helper
-        let phase = (TAU / (pace * 60_000.) * now).rem_euclid(TAU) as f32;
-        let (sx, cx): (Vec<f32>, Vec<f32>) = (0..g.cols).map(|x| kx * x as f32 * g.cell).map(|a| (amp * a.sin(), amp * a.cos())).unzip();
+        let phase = (TAU / (pace_minutes * 60_000.) * now).rem_euclid(TAU) as f32;
+        let (sin_x, cos_x): (Vec<f32>, Vec<f32>) =
+            (0..g.cols).map(|x| kx * x as f32 * g.cell).map(|a| (amp * a.sin(), amp * a.cos())).unzip();
         for y in 0..g.rows {
-            let (sy, cy) = (ky * y as f32 * g.cell + phase).sin_cos();
+            let (sin_y, cos_y) = (ky * y as f32 * g.cell + phase).sin_cos();
             for x in 0..g.cols {
-                v[y * g.cols + x] += sx[x] * cy + cx[x] * sy;
+                v[y * g.cols + x] += sin_x[x] * cos_y + cos_x[x] * sin_y;
             }
         }
     }
@@ -222,25 +232,35 @@ fn sample(s: &Scalar, g: &Grid, h: f32, now: f64) -> Vec<f32> {
     v
 }
 
-// MUST KILL: type: CASES' corner bits and edge numbers as named enums
-const CASES: [&[(u8, u8)]; 16] = [
-    &[],
-    &[(3, 2)],
-    &[(2, 1)],
-    &[(3, 1)],
-    &[(0, 1)],
-    &[(0, 1), (2, 3)],
-    &[(0, 2)],
-    &[(0, 3)],
-    &[(0, 3)],
-    &[(0, 2)],
-    &[(0, 3), (1, 2)],
-    &[(0, 1)],
-    &[(3, 1)],
-    &[(1, 2)],
-    &[(2, 3)],
-    &[],
-];
+#[derive(Clone, Copy)]
+enum Edge {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+const CASES: [&[(Edge, Edge)]; 16] = {
+    use Edge::*;
+    [
+        &[],
+        &[(Left, Bottom)],
+        &[(Bottom, Right)],
+        &[(Left, Right)],
+        &[(Top, Right)],
+        &[(Top, Right), (Bottom, Left)],
+        &[(Top, Bottom)],
+        &[(Top, Left)],
+        &[(Top, Left)],
+        &[(Top, Bottom)],
+        &[(Top, Left), (Right, Bottom)],
+        &[(Top, Right)],
+        &[(Left, Right)],
+        &[(Right, Bottom)],
+        &[(Bottom, Left)],
+        &[],
+    ]
+};
 
 fn isolines(mask: &mut Mask, s: &Scalar, step: f32, w: f32, h: f32, now: f64) {
     let g = Grid::new(w, h, 6.);
@@ -256,11 +276,11 @@ fn isolines(mask: &mut Mask, s: &Scalar, step: f32, w: f32, h: f32, now: f64) {
                 let d = v[(y + 1) * g.cols + x];
                 let idx = ((a > iso) as usize) << 3 | ((b > iso) as usize) << 2 | ((c > iso) as usize) << 1 | (d > iso) as usize;
                 let (px, py, cell) = (x as f32 * g.cell, y as f32 * g.cell, g.cell);
-                let point = |e: u8| match e {
-                    0 => (px + cell * (iso - a) / (b - a), py),
-                    1 => (px + cell, py + cell * (iso - b) / (c - b)),
-                    2 => (px + cell * (iso - d) / (c - d), py + cell),
-                    _ => (px, py + cell * (iso - a) / (d - a)),
+                let point = |e: Edge| match e {
+                    Edge::Top => (px + cell * (iso - a) / (b - a), py),
+                    Edge::Right => (px + cell, py + cell * (iso - b) / (c - b)),
+                    Edge::Bottom => (px + cell * (iso - d) / (c - d), py + cell),
+                    Edge::Left => (px, py + cell * (iso - a) / (d - a)),
                 };
                 for &(e1, e2) in CASES[idx] {
                     mask.line(point(e1), point(e2));
@@ -308,7 +328,7 @@ mod tests {
     #[test]
     fn draws_every_pattern() {
         for pattern in Pattern::ALL {
-            let spec = Spec::new(pattern, 200., 150., 2., 0x25272d66);
+            let spec = Spec::rounded(pattern, 200., 150., 2., 0x25272d66);
             assert_eq!((spec.width, spec.height), (256, 192));
             let image = draw(spec, 1.7e12);
             assert_eq!(image.is_some(), pattern != Pattern::Off, "{pattern:?}");
@@ -337,7 +357,7 @@ mod tests {
     fn redraws_one_at_a_time() {
         let mut field = Field::default();
         assert_eq!(field.due(true), None);
-        let spec = Spec::new(Pattern::Hatching, 100., 100., 1., 0xffffffff);
+        let spec = Spec::rounded(Pattern::Hatching, 100., 100., 1., 0xffffffff);
         field.want = Some(spec);
         assert_eq!(field.due(false), Some(spec));
         assert_eq!(field.due(true), None, "one is running");

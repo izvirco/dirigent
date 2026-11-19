@@ -22,7 +22,6 @@ const MAX_REST: Duration = Duration::from_secs(3);
 
 type Picture = (Arc<RenderImage>, (f32, f32));
 
-// MUST KILL: rename: Piece's offset / total → base64_offset / base64_len, into the frame's base64 text
 pub struct Piece<'a> {
     pub frame: u64,
     pub total: usize,
@@ -30,13 +29,17 @@ pub struct Piece<'a> {
     pub data: &'a str,
 }
 
+#[derive(Debug, PartialEq)]
+enum Ask {
+    Latest,
+    Continue { frame: u64, offset: u64 },
+}
+
 pub struct Screen {
     picture: Option<(u64, Picture)>,
-    // MUST KILL: rename: previous → on_last_frame
-    previous: Option<Arc<RenderImage>>,
+    on_last_frame: Option<Arc<RenderImage>>,
     latest: u64,
-    // MUST KILL: rename: fresh → never_asked
-    fresh: bool,
+    never_asked: bool,
     request: Option<(u64, Instant)>,
     reading: Option<(u64, String, usize)>,
     rest_until: Option<Instant>,
@@ -53,9 +56,9 @@ impl Screen {
     fn new() -> Self {
         Self {
             picture: None,
-            previous: None,
+            on_last_frame: None,
             latest: 0,
-            fresh: true,
+            never_asked: true,
             request: None,
             reading: None,
             rest_until: None,
@@ -88,14 +91,13 @@ impl Screen {
         }
     }
 
-    // MUST KILL: type: next's (0, 0) for "the host's latest picture" → an enum (Latest, Piece { frame, offset })
-    fn next(&self) -> Option<(u64, u64)> {
+    fn next(&self) -> Option<Ask> {
         if self.request.is_some() {
             return None;
         }
         match &self.reading {
-            Some((frame, text, _)) => Some((*frame, text.len() as u64)),
-            None => (self.fresh || self.latest > self.shown()).then_some((0, 0)),
+            Some((frame, text, _)) => Some(Ask::Continue { frame: *frame, offset: text.len() as u64 }),
+            None => (self.never_asked || self.latest > self.shown()).then_some(Ask::Latest),
         }
     }
 
@@ -105,7 +107,7 @@ impl Screen {
 
     fn asked(&mut self, request: u64, now: Instant) {
         self.request = Some((request, now));
-        self.fresh = false;
+        self.never_asked = false;
     }
 
     fn piece(&mut self, piece: &Piece, now: Instant) -> Option<(u64, String)> {
@@ -131,7 +133,7 @@ impl Screen {
             self.behind = None;
         }
         let replaced = self.picture.replace((frame, picture)).map(|(_, (image, _))| image);
-        std::mem::replace(&mut self.previous, replaced)
+        std::mem::replace(&mut self.on_last_frame, replaced)
     }
 
     fn failed(&mut self) {
@@ -142,7 +144,7 @@ impl Screen {
     }
 
     fn images(self) -> impl Iterator<Item = Arc<RenderImage>> {
-        self.picture.map(|(_, (image, _))| image).into_iter().chain(self.previous)
+        self.picture.map(|(_, (image, _))| image).into_iter().chain(self.on_last_frame)
     }
 }
 
@@ -158,7 +160,6 @@ fn decode(text: &str) -> Option<Picture> {
 }
 
 impl Dirigent {
-    // MUST KILL: rearchitect: sync_screen polls every frame → ask from the events that change what to ask
     pub fn sync_screen(&mut self, cx: &mut Context<Self>) {
         let Pane::Thread(t) = &self.pane else { return };
         let (host, id) = (t.host.clone(), t.id.clone());
@@ -174,7 +175,11 @@ impl Dirigent {
         }
         let Pane::Thread(t) = &mut self.pane else { return };
         let Some(screen) = &mut t.screen else { return };
-        let Some((frame, offset)) = screen.next().filter(|(_, offset)| live || *offset > 0) else { return };
+        let Some(ask) = screen.next().filter(|ask| live || matches!(ask, Ask::Continue { .. })) else { return };
+        let (frame, offset) = match ask {
+            Ask::Latest => (0, 0),
+            Ask::Continue { frame, offset } => (frame, offset),
+        };
         let now = Instant::now();
         if let Some(rest) = screen.rest(now) {
             if !std::mem::replace(&mut screen.timer, true) {
@@ -352,7 +357,7 @@ mod tests {
     fn a_picture_is_read_a_piece_at_a_time() {
         let now = Instant::now();
         let mut s = Screen::new();
-        assert_eq!(s.next(), Some((0, 0)));
+        assert_eq!(s.next(), Some(Ask::Latest));
         s.asked(1, now);
         s.step(3, None, None, false);
         s.step(4, Some("click"), Some([0.25, 0.5]), false);
@@ -360,12 +365,12 @@ mod tests {
         assert_eq!((s.action.as_deref(), s.cursor, s.clicks), (Some("click"), Some((0.25, 0.5)), 1));
         assert!(!s.desktop);
         assert_eq!(s.piece(&Piece { frame: 3, total: 6, offset: 0, data: "abcd" }, now), None);
-        assert_eq!(s.next(), Some((3, 4)));
+        assert_eq!(s.next(), Some(Ask::Continue { frame: 3, offset: 4 }));
         s.asked(2, now);
         assert_eq!(s.piece(&Piece { frame: 3, total: 6, offset: 4, data: "ef" }, now), Some((3, "abcdef".into())));
         s.show(3, picture());
         assert!(s.behind.is_some());
-        assert_eq!(s.next(), Some((0, 0)));
+        assert_eq!(s.next(), Some(Ask::Latest));
         s.asked(3, now);
         assert_eq!(s.piece(&Piece { frame: 4, total: 2, offset: 0, data: "gh" }, now), Some((4, "gh".into())));
         s.show(4, picture());
